@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(feature = "cuda")]
+use burn::backend::candle::CandleDevice;
 use burn::{
     backend::{wgpu::WgpuDevice, Candle},
     module::{Module, Param},
@@ -124,6 +126,17 @@ fn default_config_uses_a_supported_backend() {
         config.execution_backend,
         ComputeBackend::CpuCandle
     ));
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn cuda_backend_respects_current_platform_support_contract() {
+    let backend = ComputeBackend::cuda_default();
+
+    #[cfg(target_os = "macos")]
+    assert!(!backend.is_supported_on_current_platform());
+    #[cfg(not(target_os = "macos"))]
+    assert!(backend.is_supported_on_current_platform());
 }
 
 #[test]
@@ -356,15 +369,29 @@ fn test_species_registry() -> Vec<SpeciesDefinition> {
     SpeciesId::ALL
         .iter()
         .copied()
-        .map(|id| {
-            SpeciesDefinition::new(
-                id,
-                stub_species_runner,
-                stub_species_runner_metal,
-                stub_species_runner_mlx,
-            )
-        })
+        .map(|id| test_species_definition(id))
         .collect()
+}
+
+#[cfg(not(feature = "cuda"))]
+fn test_species_definition(id: SpeciesId) -> SpeciesDefinition {
+    SpeciesDefinition::new(
+        id,
+        stub_species_runner,
+        stub_species_runner_metal,
+        stub_species_runner_mlx,
+    )
+}
+
+#[cfg(feature = "cuda")]
+fn test_species_definition(id: SpeciesId) -> SpeciesDefinition {
+    SpeciesDefinition::new(
+        id,
+        stub_species_runner,
+        stub_species_runner_metal,
+        stub_species_runner_mlx,
+        stub_species_runner_cuda,
+    )
 }
 
 fn stub_species_runner(_context: SpeciesRunContext) -> Result<SpeciesRawMetrics, FractalError> {
@@ -387,6 +414,14 @@ fn stub_species_runner_metal(
 fn stub_species_runner_mlx(
     context: SpeciesRunContext,
     _device: MlxDevice,
+) -> Result<SpeciesRawMetrics, FractalError> {
+    stub_species_runner(context)
+}
+
+#[cfg(feature = "cuda")]
+fn stub_species_runner_cuda(
+    context: SpeciesRunContext,
+    _device: CandleDevice,
 ) -> Result<SpeciesRawMetrics, FractalError> {
     stub_species_runner(context)
 }

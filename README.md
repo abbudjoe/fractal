@@ -19,7 +19,28 @@ cargo run --example tournament
 cargo run --example tournament -- --preset fast-test
 cargo run --release --example tournament -- --preset research-medium
 cargo run --release --example tournament -- --sequence first-run
+cargo run --release --features cuda --example tournament -- --backend cuda --preset research-medium
+scripts/runpod-tournament.sh --gpu-id "NVIDIA GeForce RTX 4090" -- --preset research-medium
 ```
+
+## Runpod
+
+`scripts/runpod-tournament.sh` creates or reuses a Runpod pod, syncs the current worktree snapshot, bootstraps the Rust toolchain if needed, and runs the CUDA tournament remotely.
+
+Example:
+
+```bash
+scripts/runpod-tournament.sh \
+  --gpu-id "NVIDIA GeForce RTX 4090" \
+  -- --preset research-medium
+```
+
+Behavior:
+
+- Uses `runpodctl` and your registered SSH key to reach the pod over exposed TCP port `22`.
+- Defaults to the official `runpod-torch-v240` template and syncs a clean copy of the repo without `.git` or `target`.
+- Persists remote build artifacts under `<volumeMountPath>/.fractal-runpod/target` so repeated runs avoid full rebuilds.
+- Stops pods it created after the run by default; use `--keep-pod` to leave them running.
 
 ## Goal
 

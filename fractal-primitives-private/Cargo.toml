@@ -4,6 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 publish = false
 
+[features]
+default = []
+cuda = ["fractal-core/cuda"]
+
 [lib]
 name = "fractal_primitives_private"
 path = "src/lib.rs"

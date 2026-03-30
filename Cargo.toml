@@ -4,6 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 publish = false
 
+[features]
+default = []
+cuda = ["fractal-core/cuda", "fractal-primitives-private/cuda"]
+
 [workspace]
 members = ["fractal-core", "fractal-primitives-private", "fractal-eval-private"]
 default-members = [".", "fractal-core", "fractal-primitives-private", "fractal-eval-private"]
