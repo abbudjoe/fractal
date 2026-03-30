@@ -16,6 +16,7 @@ use crate::{
         p1_contractive::P1Contractive, p2_mandelbrot::P2Mandelbrot,
         p3_hierarchical::P3Hierarchical,
     },
+    registry::{species_registry, ExecutionMode, SpeciesId},
     router::EarlyExitRouter,
     rule_trait::FractalRule,
     state::{FractalState, StateLayout},
@@ -100,6 +101,27 @@ fn router_never_mutates_readout_shape() {
 #[test]
 fn tournament_returns_exactly_seven_results() {
     let tournament = Tournament::new(TournamentConfig::fast_test()).unwrap();
+    let results = tournament.run_generation().unwrap();
+
+    assert_eq!(results.len(), 7);
+    assert_eq!(results[0].rank, 1);
+}
+
+#[test]
+fn species_registry_lists_every_species_once() {
+    let ids = species_registry()
+        .iter()
+        .map(|species| species.id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, SpeciesId::ALL.to_vec());
+}
+
+#[test]
+fn tournament_parallel_mode_returns_exactly_seven_results() {
+    let tournament =
+        Tournament::new(TournamentConfig::fast_test().with_execution_mode(ExecutionMode::Parallel))
+            .unwrap();
     let results = tournament.run_generation().unwrap();
 
     assert_eq!(results.len(), 7);

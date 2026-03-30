@@ -24,6 +24,8 @@ Keep the harness small, deterministic, extensible, and useful for comparative ex
 
 ## Notes
 
-- `cargo run --example tournament` uses CPU-friendly defaults so a full generation completes quickly.
+- `cargo run --example tournament` now defaults to sequential Burn Metal execution on Apple Silicon.
+- Fast tests use CPU Candle execution for deterministic, low-overhead validation.
+- Parallel execution remains available through `TournamentConfig::with_execution_mode(ExecutionMode::Parallel)`.
 - The heavier spec-aligned configuration is available as `TournamentConfig::pressure_test()`.
 - All recurrent state transitions in the model go through `rule.apply(...)`.

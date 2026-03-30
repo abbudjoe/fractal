@@ -4,14 +4,19 @@ pub mod fitness;
 pub mod lifecycle;
 pub mod model;
 pub mod primitives;
+pub mod registry;
 pub mod router;
 pub mod rule_trait;
 pub mod state;
 
 pub use data_generator::{SimpleHierarchicalGenerator, TaskFamily, TokenBatch, PAD_TOKEN};
 pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
-pub use lifecycle::{CandleBackend, Tournament, TournamentConfig, TrainBackend};
+pub use lifecycle::{Tournament, TournamentConfig};
 pub use model::FractalModel;
+pub use registry::{
+    species_registry, ComputeBackend, CpuBackend, CpuTrainBackend, ExecutionMode, MetalBackend,
+    MetalTrainBackend, SpeciesDefinition, SpeciesId,
+};
 pub use router::EarlyExitRouter;
 pub use state::{FractalState, StateLayout};
 

@@ -13,7 +13,7 @@ resolver = "2"
 edition = "2021"
 
 [workspace.dependencies]
-burn = { version = "=0.20.1", default-features = false, features = ["std", "autodiff", "candle"] }
+burn = { version = "=0.20.1", default-features = false, features = ["std", "autodiff", "candle", "metal"] }
 burn-candle = "=0.20.1"
 rand = "0.8"
 
