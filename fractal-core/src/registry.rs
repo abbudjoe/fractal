@@ -46,9 +46,24 @@ pub enum ComputeBackend {
 }
 
 impl ComputeBackend {
+    pub fn default_for_current_platform() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::metal_default()
+        } else {
+            Self::CpuCandle
+        }
+    }
+
     pub fn metal_default() -> Self {
         Self::MetalWgpu {
             device: WgpuDevice::DefaultDevice,
+        }
+    }
+
+    pub fn is_supported_on_current_platform(&self) -> bool {
+        match self {
+            Self::CpuCandle => true,
+            Self::MetalWgpu { .. } => cfg!(target_os = "macos"),
         }
     }
 }
@@ -296,7 +311,7 @@ where
             step,
             config.batch_size,
             &device,
-        );
+        )?;
         let loss = model.loss(&batch, &criterion, None, true)?;
         let grads = GradientsParams::from_grads(loss.backward(), &model);
         model = optimizer.step(config.learning_rate, model, grads);
@@ -308,7 +323,7 @@ where
         0,
         config.batch_size,
         &device,
-    );
+    )?;
     let stability_loss = model.loss(&stability_batch, &criterion, Some(20), false)?;
     let stability_grads = GradientsParams::from_grads(stability_loss.backward(), &model);
     let grad_norm_depth_20 = gradient_l2_norm(&model, &stability_grads);
@@ -318,13 +333,13 @@ where
         config.batch_size,
         config.eval_batches_per_family,
         &device,
-    );
+    )?;
     let arc_batches = generator.eval_batches_for::<B>(
         TaskFamily::ArcGrid,
         config.batch_size,
         config.eval_batches_per_family,
         &device,
-    );
+    )?;
 
     let long_context_perplexity = evaluate_perplexity(&model, &criterion, &sentence_batches)?;
     let (arc_accuracy, tokens_per_sec) = evaluate_accuracy_and_speed(&model, &arc_batches)?;

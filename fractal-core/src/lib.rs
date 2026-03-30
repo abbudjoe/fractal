@@ -11,7 +11,7 @@ pub mod state;
 
 pub use data_generator::{SimpleHierarchicalGenerator, TaskFamily, TokenBatch, PAD_TOKEN};
 pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
-pub use lifecycle::{Tournament, TournamentConfig};
+pub use lifecycle::{Tournament, TournamentConfig, TournamentPreset, TournamentSequence};
 pub use model::FractalModel;
 pub use registry::{
     species_registry, ComputeBackend, CpuBackend, CpuTrainBackend, ExecutionMode, MetalBackend,

@@ -1,13 +1,68 @@
 use std::{sync::Arc, thread};
 
 use crate::{
-    data_generator::{GeneratorConfig, SimpleHierarchicalGenerator, MIN_VOCAB_SIZE},
+    data_generator::{
+        GeneratorConfig, SimpleHierarchicalGenerator, MIN_SEQUENCE_LEN, MIN_VOCAB_SIZE,
+    },
     error::FractalError,
     fitness::{aggregate_results, RankedSpeciesResult, SpeciesRawMetrics},
     registry::{
         species_registry, ComputeBackend, ExecutionMode, SpeciesDefinition, SpeciesRunContext,
     },
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TournamentPreset {
+    Default,
+    FastTest,
+    ResearchMedium,
+    PressureTest,
+}
+
+impl TournamentPreset {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::FastTest => "fast-test",
+            Self::ResearchMedium => "research-medium",
+            Self::PressureTest => "pressure-test",
+        }
+    }
+
+    pub fn config(self) -> TournamentConfig {
+        match self {
+            Self::Default => TournamentConfig::default(),
+            Self::FastTest => TournamentConfig::fast_test(),
+            Self::ResearchMedium => TournamentConfig::research_medium(),
+            Self::PressureTest => TournamentConfig::pressure_test(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TournamentSequence {
+    FirstRun,
+}
+
+const FIRST_RUN_SEQUENCE: [TournamentPreset; 3] = [
+    TournamentPreset::FastTest,
+    TournamentPreset::ResearchMedium,
+    TournamentPreset::PressureTest,
+];
+
+impl TournamentSequence {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::FirstRun => "first-run",
+        }
+    }
+
+    pub fn stages(self) -> &'static [TournamentPreset] {
+        match self {
+            Self::FirstRun => &FIRST_RUN_SEQUENCE,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct TournamentConfig {
@@ -32,7 +87,7 @@ impl Default for TournamentConfig {
             dim: 4,
             levels: 2,
             vocab_size: 64,
-            max_seq_len: 8,
+            max_seq_len: 16,
             max_recursion_depth: 1,
             router_threshold: 1.1,
             batch_size: 1,
@@ -40,7 +95,7 @@ impl Default for TournamentConfig {
             eval_batches_per_family: 1,
             learning_rate: 1e-3,
             seed: 42,
-            execution_backend: ComputeBackend::metal_default(),
+            execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
         }
     }
@@ -64,9 +119,11 @@ impl TournamentConfig {
                 MIN_VOC_SIZE = MIN_VOCAB_SIZE
             )));
         }
-        if self.max_seq_len == 0 {
+        if self.max_seq_len < MIN_SEQUENCE_LEN {
             return Err(FractalError::InvalidConfig(
-                "max_seq_len must be greater than zero".into(),
+                format!(
+                    "max_seq_len must be at least {MIN_SEQUENCE_LEN} to encode the smallest recursive task"
+                ),
             ));
         }
         if self.max_recursion_depth == 0 {
@@ -89,9 +146,7 @@ impl TournamentConfig {
                 "learning_rate must be greater than zero".into(),
             ));
         }
-        if matches!(&self.execution_backend, ComputeBackend::MetalWgpu { .. })
-            && !cfg!(target_os = "macos")
-        {
+        if !self.execution_backend.is_supported_on_current_platform() {
             return Err(FractalError::InvalidConfig(
                 "Metal execution is only supported on macOS".into(),
             ));
@@ -113,7 +168,25 @@ impl TournamentConfig {
             eval_batches_per_family: 8,
             learning_rate: 1e-3,
             seed: 42,
-            execution_backend: ComputeBackend::metal_default(),
+            execution_backend: ComputeBackend::default_for_current_platform(),
+            execution_mode: ExecutionMode::Sequential,
+        }
+    }
+
+    pub fn research_medium() -> Self {
+        Self {
+            dim: 16,
+            levels: 3,
+            vocab_size: 64,
+            max_seq_len: 32,
+            max_recursion_depth: 4,
+            router_threshold: 0.95,
+            batch_size: 2,
+            train_steps_per_species: 5,
+            eval_batches_per_family: 2,
+            learning_rate: 1e-3,
+            seed: 42,
+            execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
         }
     }
@@ -123,7 +196,7 @@ impl TournamentConfig {
             dim: 4,
             levels: 2,
             vocab_size: 64,
-            max_seq_len: 8,
+            max_seq_len: 16,
             max_recursion_depth: 1,
             router_threshold: 1.1,
             batch_size: 1,

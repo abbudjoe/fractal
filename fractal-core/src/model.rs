@@ -1,7 +1,7 @@
 use burn::{
     module::Module,
     nn::{loss::CrossEntropyLoss, Embedding, EmbeddingConfig, Linear, LinearConfig},
-    tensor::{backend::Backend, Int, Tensor},
+    tensor::{backend::Backend, Bool, ElementConversion, Int, Tensor},
 };
 
 use crate::{
@@ -111,14 +111,31 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
         use_router: bool,
     ) -> Result<FractalState<B>, FractalError> {
         let depth_limit = force_depth.unwrap_or(self.max_recursion_depth);
+        if !use_router {
+            for _ in 0..depth_limit {
+                state = self.rule.apply(&state, &x)?;
+            }
+            return Ok(state);
+        }
+
+        let batch_size = state.batch_size();
+        let device = x.device();
+        let mut active_mask = Tensor::<B, 1, Bool>::ones([batch_size], &device);
 
         for _ in 0..depth_limit {
-            state = self.rule.apply(&state, &x)?;
-            if use_router && self.router.should_exit(state.readout()) {
+            let next_state = self.rule.apply(&state, &x)?;
+            state = state.batch_mask_where(active_mask.clone(), next_state)?;
+            let exit_mask = self.router.exit_mask(state.readout());
+            active_mask = active_mask.clone().bool_and(exit_mask.bool_not());
+            if !mask_has_true(active_mask.clone())? {
                 break;
             }
         }
 
         Ok(state)
     }
+}
+
+fn mask_has_true<B: Backend>(mask: Tensor<B, 1, Bool>) -> Result<bool, FractalError> {
+    Ok(mask.any().int().sum().into_scalar().elem::<i64>() > 0)
 }

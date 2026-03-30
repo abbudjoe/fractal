@@ -1,7 +1,7 @@
 use burn::{
     module::Module,
     nn::{Linear, LinearConfig},
-    tensor::{activation::sigmoid, backend::Backend, ElementConversion, Tensor},
+    tensor::{activation::sigmoid, backend::Backend, Bool, Tensor},
 };
 
 #[derive(Module, Debug)]
@@ -23,15 +23,8 @@ impl<B: Backend> EarlyExitRouter<B> {
         sigmoid(self.projection.forward(readout)).reshape([batch])
     }
 
-    pub fn should_exit(&self, readout: Tensor<B, 2>) -> bool {
-        let scores = self.scores(readout);
-        let [batch] = scores.dims();
-        let mean_score = scores
-            .sum()
-            .div_scalar(batch as f32)
-            .into_scalar()
-            .elem::<f32>();
-        mean_score >= self.threshold
+    pub fn exit_mask(&self, readout: Tensor<B, 2>) -> Tensor<B, 1, Bool> {
+        self.scores(readout).greater_equal_elem(self.threshold)
     }
 
     pub fn threshold(&self) -> f32 {

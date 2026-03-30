@@ -1,4 +1,4 @@
-use burn::tensor::{backend::Backend, Tensor};
+use burn::tensor::{backend::Backend, Bool, Tensor};
 
 use crate::error::FractalError;
 
@@ -105,6 +105,48 @@ impl<B: Backend> FractalState<B> {
                     .narrow(1, levels - 1, 1)
                     .reshape([batch, width])
             }
+        }
+    }
+
+    pub fn batch_mask_where(
+        self,
+        mask: Tensor<B, 1, Bool>,
+        value: Self,
+    ) -> Result<Self, FractalError> {
+        if self.layout() != value.layout() {
+            return Err(FractalError::InvalidState(format!(
+                "cannot blend states with different layouts: {:?} vs {:?}",
+                self.layout(),
+                value.layout()
+            )));
+        }
+
+        let batch_size = self.batch_size();
+        let [mask_batch] = mask.dims();
+        if mask_batch != batch_size {
+            return Err(FractalError::Shape(format!(
+                "expected batch mask with {batch_size} entries, got {mask_batch}"
+            )));
+        }
+
+        match (self, value) {
+            (Self::Flat(current), Self::Flat(next)) => Ok(Self::Flat(
+                current.mask_where(mask.reshape([batch_size, 1]), next),
+            )),
+            (Self::Complex(current), Self::Complex(next)) => Ok(Self::Complex(
+                current.mask_where(mask.reshape([batch_size, 1]), next),
+            )),
+            (Self::Hierarchical(current), Self::Hierarchical(next)) => Ok(Self::Hierarchical(
+                current.mask_where(mask.reshape([batch_size, 1, 1]), next),
+            )),
+            (Self::HierarchicalComplex(current), Self::HierarchicalComplex(next)) => {
+                Ok(Self::HierarchicalComplex(
+                    current.mask_where(mask.reshape([batch_size, 1, 1]), next),
+                ))
+            }
+            _ => Err(FractalError::InvalidState(
+                "state layout changed after validation".into(),
+            )),
         }
     }
 

@@ -29,14 +29,30 @@ pub fn stability_score(grad_norm_depth_20: f64) -> f64 {
 }
 
 pub fn perplexity_score(perplexity: f64) -> f64 {
-    1.0 / perplexity.max(1.0)
+    if !perplexity.is_finite() || perplexity <= 0.0 {
+        0.0
+    } else {
+        1.0 / perplexity.max(1.0)
+    }
+}
+
+pub fn accuracy_score(accuracy: f64) -> f64 {
+    if !accuracy.is_finite() {
+        0.0
+    } else {
+        accuracy.clamp(0.0, 1.0)
+    }
 }
 
 pub fn speed_score(tokens_per_sec: f64, best_tokens_per_sec: f64) -> f64 {
-    if best_tokens_per_sec <= f64::EPSILON {
+    if !tokens_per_sec.is_finite()
+        || tokens_per_sec <= 0.0
+        || !best_tokens_per_sec.is_finite()
+        || best_tokens_per_sec <= f64::EPSILON
+    {
         0.0
     } else {
-        tokens_per_sec / best_tokens_per_sec
+        (tokens_per_sec / best_tokens_per_sec).clamp(0.0, 1.0)
     }
 }
 
@@ -44,6 +60,7 @@ pub fn aggregate_results(mut metrics: Vec<SpeciesRawMetrics>) -> Vec<RankedSpeci
     let best_tokens = metrics
         .iter()
         .map(|metric| metric.tokens_per_sec)
+        .filter(|tokens_per_sec| tokens_per_sec.is_finite() && *tokens_per_sec > 0.0)
         .fold(0.0f64, f64::max);
 
     let mut ranked = metrics
@@ -51,11 +68,10 @@ pub fn aggregate_results(mut metrics: Vec<SpeciesRawMetrics>) -> Vec<RankedSpeci
         .map(|metric| {
             let stability = stability_score(metric.grad_norm_depth_20);
             let perplexity_component = perplexity_score(metric.long_context_perplexity);
+            let accuracy = accuracy_score(metric.arc_accuracy);
             let speed = speed_score(metric.tokens_per_sec, best_tokens);
-            let fitness = 0.35 * stability
-                + 0.30 * perplexity_component
-                + 0.25 * metric.arc_accuracy
-                + 0.10 * speed;
+            let fitness =
+                0.35 * stability + 0.30 * perplexity_component + 0.25 * accuracy + 0.10 * speed;
 
             RankedSpeciesResult {
                 rank: 0,
