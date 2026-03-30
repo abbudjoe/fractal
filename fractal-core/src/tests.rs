@@ -5,6 +5,7 @@ use burn::{
     module::{Module, Param},
     tensor::{backend::Backend, Int, Tensor, TensorData},
 };
+use burn_mlx::MlxDevice;
 
 use crate::{
     data_generator::{
@@ -108,7 +109,12 @@ fn default_config_uses_a_supported_backend() {
 
     assert!(config.execution_backend.is_supported_on_current_platform());
     Tournament::new(config.clone()).unwrap();
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    assert!(matches!(
+        config.execution_backend,
+        ComputeBackend::Mlx { .. }
+    ));
+    #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
     assert!(matches!(
         config.execution_backend,
         ComputeBackend::MetalWgpu { .. }
@@ -178,6 +184,30 @@ fn generator_rejects_sequence_lengths_that_clip_recursive_tasks() {
     .unwrap_err();
 
     assert!(matches!(error, FractalError::InvalidConfig(_)));
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn generator_builds_backend_native_int_batches_for_mlx() {
+    let generator = SimpleHierarchicalGenerator::new(GeneratorConfig::default()).unwrap();
+    let batch = generator
+        .batch_for::<burn_mlx::Mlx>(
+            TaskFamily::RecursiveSentence,
+            DatasetSplit::Train,
+            0,
+            1,
+            &MlxDevice::Cpu,
+        )
+        .unwrap();
+
+    assert_eq!(
+        batch.input_ids.dims(),
+        [1, GeneratorConfig::default().max_seq_len]
+    );
+    assert_eq!(
+        batch.target_ids.dims(),
+        [1, GeneratorConfig::default().max_seq_len]
+    );
 }
 
 #[derive(Module, Debug)]
@@ -300,11 +330,40 @@ fn recurrent_model_routes_recursion_per_sample() {
     assert!((values[3] - 0.9).abs() < 1e-5);
 }
 
+#[test]
+fn state_batch_mask_where_expands_sample_mask_across_hidden_width() {
+    let device = Default::default();
+    let current = FractalState::Flat(Tensor::<TestBackend, 2>::from_data(
+        TensorData::new(vec![1.0f32, 1.0, 1.0, 1.0], [2, 2]),
+        &device,
+    ));
+    let next = FractalState::Flat(Tensor::<TestBackend, 2>::from_data(
+        TensorData::new(vec![9.0f32, 9.0, 8.0, 8.0], [2, 2]),
+        &device,
+    ));
+    let mask = Tensor::<TestBackend, 1, burn::tensor::Bool>::from_bool(
+        TensorData::new(vec![true, false], [2]),
+        &device,
+    );
+
+    let merged = current.batch_mask_where(mask, next).unwrap();
+    let values = merged.flat().unwrap().into_data().to_vec::<f32>().unwrap();
+
+    assert_eq!(values, vec![9.0, 9.0, 1.0, 1.0]);
+}
+
 fn test_species_registry() -> Vec<SpeciesDefinition> {
     SpeciesId::ALL
         .iter()
         .copied()
-        .map(|id| SpeciesDefinition::new(id, stub_species_runner, stub_species_runner_metal))
+        .map(|id| {
+            SpeciesDefinition::new(
+                id,
+                stub_species_runner,
+                stub_species_runner_metal,
+                stub_species_runner_mlx,
+            )
+        })
         .collect()
 }
 
@@ -321,6 +380,13 @@ fn stub_species_runner(_context: SpeciesRunContext) -> Result<SpeciesRawMetrics,
 fn stub_species_runner_metal(
     context: SpeciesRunContext,
     _device: WgpuDevice,
+) -> Result<SpeciesRawMetrics, FractalError> {
+    stub_species_runner(context)
+}
+
+fn stub_species_runner_mlx(
+    context: SpeciesRunContext,
+    _device: MlxDevice,
 ) -> Result<SpeciesRawMetrics, FractalError> {
     stub_species_runner(context)
 }

@@ -32,6 +32,7 @@ enum RunSelection {
 enum BackendOverride {
     Cpu,
     Metal,
+    Mlx,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,6 +89,7 @@ impl From<BackendOverride> for ComputeBackend {
         match value {
             BackendOverride::Cpu => ComputeBackend::CpuCandle,
             BackendOverride::Metal => ComputeBackend::metal_default(),
+            BackendOverride::Mlx => ComputeBackend::mlx_default(),
         }
     }
 }
@@ -184,6 +186,7 @@ fn parse_backend(value: &str) -> Result<BackendOverride, FractalError> {
     match value {
         "cpu" => Ok(BackendOverride::Cpu),
         "metal" => Ok(BackendOverride::Metal),
+        "mlx" => Ok(BackendOverride::Mlx),
         _ => Err(invalid_argument(format!("unknown backend: {value}"))),
     }
 }
@@ -251,6 +254,7 @@ fn backend_name(backend: &ComputeBackend) -> &'static str {
     match backend {
         ComputeBackend::CpuCandle => "cpu",
         ComputeBackend::MetalWgpu { .. } => "metal",
+        ComputeBackend::Mlx { .. } => "mlx",
     }
 }
 
@@ -273,7 +277,7 @@ fn print_usage() {
     println!("  --sequence <first-run>");
     println!("  --seed <u64>");
     println!("  --mode <sequential|parallel>");
-    println!("  --backend <cpu|metal>");
+    println!("  --backend <cpu|metal|mlx>");
     println!("  --help");
     println!();
     println!("Examples:");
@@ -314,6 +318,27 @@ mod tests {
                 seed: Some(43),
                 execution_mode: Some(ExecutionMode::Parallel),
                 backend: Some(BackendOverride::Cpu),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_mlx_backend_override() {
+        let command = parse_command(vec![
+            "--preset".to_owned(),
+            "fast-test".to_owned(),
+            "--backend".to_owned(),
+            "mlx".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::FastTest)),
+                seed: None,
+                execution_mode: None,
+                backend: Some(BackendOverride::Mlx),
             })
         );
     }

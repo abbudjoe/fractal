@@ -9,13 +9,15 @@ use burn::{
     backend::{
         candle::CandleDevice,
         wgpu::{self, WgpuDevice},
-        Autodiff, Candle, Metal as BurnMetal,
+        Autodiff, Candle, Wgpu as BurnWgpu,
     },
-    module::{AutodiffModule, Module, ModuleDisplay, ModuleVisitor, Param},
+    module::{AutodiffModule, Module, ModuleDisplay, ModuleVisitor, ParamId},
     nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig},
     optim::{AdamConfig, GradientsParams, Optimizer},
     tensor::{backend::AutodiffBackend, Bool, Element, ElementConversion, Int, Tensor, TensorData},
 };
+use burn_mlx::Mlx;
+pub use burn_mlx::MlxDevice;
 
 use crate::{
     data_generator::{
@@ -30,18 +32,23 @@ use crate::{
 
 pub type CpuBackend = Candle<f32, i64>;
 pub type CpuTrainBackend = Autodiff<CpuBackend>;
-pub type MetalBackend = BurnMetal<f32, i64>;
+pub type MetalBackend = BurnWgpu<f32, i32>;
 pub type MetalTrainBackend = Autodiff<MetalBackend>;
+pub type MlxBackend = Mlx;
+pub type MlxTrainBackend = Autodiff<MlxBackend>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComputeBackend {
     CpuCandle,
     MetalWgpu { device: WgpuDevice },
+    Mlx { device: MlxDevice },
 }
 
 impl ComputeBackend {
     pub fn default_for_current_platform() -> Self {
-        if cfg!(target_os = "macos") {
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            Self::mlx_default()
+        } else if cfg!(target_os = "macos") {
             Self::metal_default()
         } else {
             Self::CpuCandle
@@ -54,10 +61,17 @@ impl ComputeBackend {
         }
     }
 
+    pub fn mlx_default() -> Self {
+        Self::Mlx {
+            device: MlxDevice::Gpu,
+        }
+    }
+
     pub fn is_supported_on_current_platform(&self) -> bool {
         match self {
             Self::CpuCandle => true,
             Self::MetalWgpu { .. } => cfg!(target_os = "macos"),
+            Self::Mlx { .. } => cfg!(all(target_os = "macos", target_arch = "aarch64")),
         }
     }
 }
@@ -118,20 +132,28 @@ pub struct SpeciesRunContext {
 
 type CpuRunner = fn(SpeciesRunContext) -> Result<SpeciesRawMetrics, FractalError>;
 type MetalRunner = fn(SpeciesRunContext, WgpuDevice) -> Result<SpeciesRawMetrics, FractalError>;
+type MlxRunner = fn(SpeciesRunContext, MlxDevice) -> Result<SpeciesRawMetrics, FractalError>;
 
 #[derive(Clone, Copy)]
 pub struct SpeciesDefinition {
     pub id: SpeciesId,
     cpu_runner: CpuRunner,
     metal_runner: MetalRunner,
+    mlx_runner: MlxRunner,
 }
 
 impl SpeciesDefinition {
-    pub const fn new(id: SpeciesId, cpu_runner: CpuRunner, metal_runner: MetalRunner) -> Self {
+    pub const fn new(
+        id: SpeciesId,
+        cpu_runner: CpuRunner,
+        metal_runner: MetalRunner,
+        mlx_runner: MlxRunner,
+    ) -> Self {
         Self {
             id,
             cpu_runner,
             metal_runner,
+            mlx_runner,
         }
     }
 
@@ -143,6 +165,7 @@ impl SpeciesDefinition {
         match backend {
             ComputeBackend::CpuCandle => (self.cpu_runner)(context),
             ComputeBackend::MetalWgpu { device } => (self.metal_runner)(context, device.clone()),
+            ComputeBackend::Mlx { device } => (self.mlx_runner)(context, *device),
         }
     }
 }
@@ -169,10 +192,7 @@ where
     <R as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend> + ModuleDisplay,
     F: FnOnce(&TournamentConfig, &B::Device) -> R,
 {
-    B::seed(
-        &device,
-        context.config.seed.wrapping_add(context.index as u64 * 101),
-    );
+    B::seed(context.config.seed.wrapping_add(context.index as u64 * 101));
 
     let rule = factory(&context.config, &device);
     run_species(species, context, device, rule)
@@ -190,7 +210,7 @@ pub fn initialize_metal_runtime(device: &WgpuDevice) {
         return;
     }
 
-    wgpu::init_setup::<wgpu::graphics::Metal>(device, Default::default());
+    wgpu::init_setup::<wgpu::Metal>(device, Default::default());
     initialized.insert(device.clone());
 }
 
@@ -318,10 +338,11 @@ where
         let flat_targets = batch.target_ids.clone().reshape([batch_size * seq_len]);
 
         let logits_data = tensor_data_to_vec::<f32>(flat_logits.into_data(), "logits")?;
-        let targets_data = tensor_data_to_vec::<i64>(flat_targets.into_data(), "targets")?;
+        let targets_data = tensor_data_to_vec::<B::IntElem>(flat_targets.into_data(), "targets")?;
 
         for (row_index, target) in targets_data.iter().enumerate() {
-            if *target == PAD_TOKEN as i64 {
+            let target = (*target).elem::<i64>();
+            if target == PAD_TOKEN as i64 {
                 continue;
             }
             let row_start = row_index * vocab_size;
@@ -337,7 +358,7 @@ where
                 .map(|(index, _)| index as i64)
                 .unwrap_or_default();
 
-            if prediction == *target {
+            if prediction == target {
                 correct += 1;
             }
             total += 1;
@@ -360,7 +381,7 @@ fn tensor_data_to_vec<E: Element>(
     label: &'static str,
 ) -> Result<Vec<E>, FractalError> {
     data.to_vec::<E>()
-        .map_err(|err| FractalError::InvalidState(format!("failed to extract {label}: {err}")))
+        .map_err(|err| FractalError::InvalidState(format!("failed to extract {label}: {err:?}")))
 }
 
 fn gradient_l2_norm<M, B>(module: &M, grads: &GradientsParams) -> f64
@@ -375,16 +396,16 @@ where
     }
 
     impl<'a, B: AutodiffBackend> ModuleVisitor<B> for Collector<'a, B> {
-        fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
-            if let Some(grad) = self.grads.get::<B::InnerBackend, D>(param.id) {
-                let value = grad.square().sum().into_scalar().elem::<f64>();
+        fn visit_float<const D: usize>(&mut self, id: ParamId, _tensor: &Tensor<B, D>) {
+            if let Some(grad) = self.grads.get::<B::InnerBackend, D>(id) {
+                let value = (grad.clone() * grad).sum().into_scalar().elem::<f64>();
                 self.sum_sq += value;
             }
         }
 
-        fn visit_int<const D: usize>(&mut self, _param: &Param<Tensor<B, D, Int>>) {}
+        fn visit_int<const D: usize>(&mut self, _id: ParamId, _tensor: &Tensor<B, D, Int>) {}
 
-        fn visit_bool<const D: usize>(&mut self, _param: &Param<Tensor<B, D, Bool>>) {}
+        fn visit_bool<const D: usize>(&mut self, _id: ParamId, _tensor: &Tensor<B, D, Bool>) {}
     }
 
     let mut collector = Collector::<B> {

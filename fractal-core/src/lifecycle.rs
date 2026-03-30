@@ -146,7 +146,7 @@ impl TournamentConfig {
         }
         if !self.execution_backend.is_supported_on_current_platform() {
             return Err(FractalError::InvalidConfig(
-                "Metal execution is only supported on macOS".into(),
+                "selected execution backend is not supported on this platform".into(),
             ));
         }
 
