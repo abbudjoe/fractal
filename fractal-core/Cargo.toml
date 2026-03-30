@@ -1,0 +1,13 @@
+[package]
+name = "fractal-core"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "fractal_core"
+path = "src/lib.rs"
+
+[dependencies]
+burn.workspace = true
+burn-candle.workspace = true
+rand.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "fractal-eval-private"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[lib]
+name = "fractal_eval_private"
+path = "src/lib.rs"
+
+[dependencies]
+fractal-core = { path = "../fractal-core" }

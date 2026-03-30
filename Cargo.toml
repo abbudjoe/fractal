@@ -1,0 +1,26 @@
+[package]
+name = "fractal"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[workspace]
+members = ["fractal-core", "fractal-primitives-private", "fractal-eval-private"]
+default-members = [".", "fractal-core", "fractal-primitives-private", "fractal-eval-private"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+
+[workspace.dependencies]
+burn = { version = "=0.20.1", default-features = false, features = ["std", "autodiff", "candle", "metal"] }
+burn-candle = "=0.20.1"
+rand = "0.8"
+
+[dependencies]
+fractal-core = { path = "fractal-core" }
+fractal-primitives-private = { path = "fractal-primitives-private" }
+fractal-eval-private = { path = "fractal-eval-private" }
+
+[patch.crates-io]
+burn-candle = { path = "vendor/burn-candle" }
