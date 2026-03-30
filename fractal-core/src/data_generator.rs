@@ -153,7 +153,9 @@ impl GeneratorConfig {
 
 #[derive(Clone, Debug)]
 pub struct RawExample {
-    pub tokens: Vec<i64>,
+    pub token_len: usize,
+    pub input_tokens: Vec<i64>,
+    pub target_tokens: Vec<i64>,
 }
 
 #[derive(Debug)]
@@ -161,6 +163,16 @@ pub struct TokenBatch<B: Backend> {
     pub input_ids: Tensor<B, 2, Int>,
     pub target_ids: Tensor<B, 2, Int>,
     pub family: TaskFamily,
+}
+
+impl<B: Backend> TokenBatch<B> {
+    pub fn to_device(self, device: &B::Device) -> Self {
+        Self {
+            input_ids: self.input_ids.to_device(device),
+            target_ids: self.target_ids.to_device(device),
+            family: self.family,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -205,24 +217,28 @@ impl SimpleHierarchicalGenerator {
             &mut train_rng,
             config.train_examples_per_family,
             sentence_train_schedule,
+            config.max_seq_len,
             build_sentence_tokens,
         );
         let train_grids = build_examples(
             &mut train_rng,
             config.train_examples_per_family,
             grid_train_schedule,
+            config.max_seq_len,
             build_grid_tokens,
         );
         let eval_sentences = build_examples(
             &mut eval_rng,
             config.eval_examples_per_family,
             sentence_eval_schedule,
+            config.max_seq_len,
             build_sentence_tokens,
         );
         let eval_grids = build_examples(
             &mut eval_rng,
             config.eval_examples_per_family,
             grid_eval_schedule,
+            config.max_seq_len,
             build_grid_tokens,
         );
 
@@ -265,12 +281,28 @@ impl SimpleHierarchicalGenerator {
             .collect()
     }
 
+    pub fn train_batches_for<B: Backend>(
+        &self,
+        family: TaskFamily,
+        batch_size: usize,
+        device: &B::Device,
+    ) -> Result<Vec<TokenBatch<B>>, FractalError> {
+        let total = self.batch_count(family, DatasetSplit::Train, batch_size);
+        (0..total)
+            .map(|index| self.batch_for(family, DatasetSplit::Train, index, batch_size, device))
+            .collect()
+    }
+
     pub fn max_tokens_for(&self, family: TaskFamily, split: DatasetSplit) -> usize {
         self.dataset(family, split)
             .iter()
-            .map(|example| example.tokens.len())
+            .map(|example| example.token_len)
             .max()
             .unwrap_or_default()
+    }
+
+    pub fn batch_count(&self, family: TaskFamily, split: DatasetSplit, batch_size: usize) -> usize {
+        self.dataset(family, split).len().div_ceil(batch_size)
     }
 
     fn dataset(&self, family: TaskFamily, split: DatasetSplit) -> &[RawExample] {
@@ -296,32 +328,22 @@ impl SimpleHierarchicalGenerator {
 
         for offset in 0..batch_size {
             let example = &dataset[(start + offset) % dataset.len()];
-            if example.tokens.len() > seq_len {
+            if example.token_len > seq_len {
                 return Err(FractalError::InvalidState(format!(
                     "example length {} exceeds configured max_seq_len {}",
-                    example.tokens.len(),
-                    seq_len
+                    example.token_len, seq_len
                 )));
             }
-            let mut padded = vec![PAD_TOKEN as i64; seq_len];
-            for (index, token) in example.tokens.iter().enumerate() {
-                padded[index] = *token;
-            }
-
-            let mut shifted = padded.clone();
-            shifted.rotate_left(1);
-            if let Some(last) = shifted.last_mut() {
-                *last = PAD_TOKEN as i64;
-            }
-
             input_flat.extend(
-                padded
+                example
+                    .input_tokens
                     .iter()
                     .copied()
                     .map(|token| token.elem::<B::IntElem>()),
             );
             target_flat.extend(
-                shifted
+                example
+                    .target_tokens
                     .iter()
                     .copied()
                     .map(|token| token.elem::<B::IntElem>()),
@@ -378,13 +400,30 @@ fn build_examples(
     rng: &mut StdRng,
     count: usize,
     schedule: DepthSchedule,
+    max_seq_len: usize,
     builder: fn(&mut StdRng, usize) -> Vec<i64>,
 ) -> Vec<RawExample> {
     (0..count)
-        .map(|index| RawExample {
-            tokens: builder(rng, schedule.depth_for(index)),
-        })
+        .map(|index| prepare_example(builder(rng, schedule.depth_for(index)), max_seq_len))
         .collect()
+}
+
+fn prepare_example(tokens: Vec<i64>, max_seq_len: usize) -> RawExample {
+    let token_len = tokens.len();
+    let mut input_tokens = vec![PAD_TOKEN as i64; max_seq_len];
+    input_tokens[..token_len].copy_from_slice(&tokens);
+
+    let mut target_tokens = input_tokens.clone();
+    target_tokens.rotate_left(1);
+    if let Some(last) = target_tokens.last_mut() {
+        *last = PAD_TOKEN as i64;
+    }
+
+    RawExample {
+        token_len,
+        input_tokens,
+        target_tokens,
+    }
 }
 
 fn validate_depth_bounds(
@@ -408,11 +447,11 @@ fn ensure_examples_fit(
 ) -> Result<(), FractalError> {
     if let Some(example) = dataset
         .iter()
-        .find(|example| example.tokens.len() > max_seq_len)
+        .find(|example| example.token_len > max_seq_len)
     {
         return Err(FractalError::InvalidConfig(format!(
             "{label} example length {} exceeds max_seq_len {max_seq_len}",
-            example.tokens.len()
+            example.token_len
         )));
     }
 

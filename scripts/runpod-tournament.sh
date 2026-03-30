@@ -24,6 +24,7 @@ Wrapper options:
   --state-dir PATH                Override remote state path. Default: <volumeMountPath>/.fractal-runpod
   --timeout-seconds N             Wait timeout for pod + SSH readiness. Default: 900
   --poll-seconds N                Poll interval while waiting. Default: 5
+  --no-compile                    Reuse a cached remote binary and fail if it is missing.
   --stop-after-run                Always stop the pod after the command finishes.
   --keep-pod                      Never stop the pod automatically.
   --dry-run                       Print the resolved actions without creating or running anything.
@@ -33,8 +34,8 @@ Notes:
   - If no existing pod matches, the wrapper creates one and requires --gpu-id.
   - Newly created pods are stopped automatically after the run unless --keep-pod is set.
   - Existing pods are left running unless --stop-after-run is set.
-  - Tournament arguments after "--" are passed to:
-      cargo run --release --features cuda --example tournament -- --backend cuda ...
+  - Tournament arguments after "--" are passed to the cached release example binary as:
+      <cached-binary> --backend cuda ...
 
 Examples:
   scripts/runpod-tournament.sh \
@@ -433,24 +434,73 @@ REMOTE
 
 run_remote_tournament() {
     local local_branch
-    local local_commit
+    local local_build_key
     local_branch="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)"
-    local_commit="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+    local_build_key="$(python3 - "$REPO_ROOT" <<'PY'
+import hashlib
+import os
+import sys
+
+root = sys.argv[1]
+paths = [
+    "Cargo.toml",
+    "Cargo.lock",
+    ".cargo",
+    "src",
+    "examples",
+    "fractal-core",
+    "fractal-primitives-private",
+    "fractal-eval-private",
+    "vendor",
+]
+
+digest = hashlib.sha256()
+for rel in paths:
+    full = os.path.join(root, rel)
+    if not os.path.exists(full):
+        continue
+    if os.path.isfile(full):
+        entries = [(rel, full)]
+    else:
+        entries = []
+        for dirpath, dirnames, filenames in os.walk(full):
+            dirnames.sort()
+            filenames.sort()
+            for filename in filenames:
+                path = os.path.join(dirpath, filename)
+                entries.append((os.path.relpath(path, root), path))
+
+    for relpath, path in entries:
+        digest.update(relpath.encode())
+        digest.update(b"\0")
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(1 << 20)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        digest.update(b"\0")
+
+print(digest.hexdigest())
+PY
+)"
 
     log "running remote CUDA tournament"
     "${SSH_BASE[@]}" bash -s -- \
         "$REMOTE_DIR" \
         "$STATE_DIR" \
         "$local_branch" \
-        "$local_commit" \
+        "$local_build_key" \
+        "$NO_COMPILE" \
         "${TOURNAMENT_ARGS[@]}" <<'REMOTE'
 set -euo pipefail
 
 remote_dir="$1"
 state_dir="$2"
 local_branch="$3"
-local_commit="$4"
-shift 4
+local_build_key="$4"
+no_compile="$5"
+shift 5
 
 if [ -f "$HOME/.cargo/env" ]; then
     # shellcheck disable=SC1090
@@ -466,16 +516,44 @@ if [ -d "${CUDA_HOME}/lib64" ]; then
 fi
 export PATH="$HOME/.cargo/bin:$PATH"
 export CARGO_TARGET_DIR="$state_dir/target"
+binary_dir="$state_dir/bin"
+binary_path="$binary_dir/tournament"
+build_key_file="$state_dir/last-build-key.txt"
 
-mkdir -p "$state_dir/logs"
-printf 'branch=%s\ncommit=%s\nrun_at=%s\n' \
+mkdir -p "$state_dir/logs" "$binary_dir"
+printf 'branch=%s\nbuild_key=%s\nrun_at=%s\n' \
     "$local_branch" \
-    "$local_commit" \
+    "$local_build_key" \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$state_dir/last-sync.txt"
 
 cd "$remote_dir"
-stdbuf -oL -eL cargo run --release --features cuda --example tournament -- --backend cuda "$@" \
-    2>&1 | tee "$state_dir/logs/latest.log"
+: > "$state_dir/logs/latest.log"
+
+needs_build=1
+if [ -x "$binary_path" ] && [ -f "$build_key_file" ] && [ "$(cat "$build_key_file")" = "$local_build_key" ]; then
+    needs_build=0
+fi
+
+if [ "$no_compile" = "1" ]; then
+    if [ ! -x "$binary_path" ]; then
+        echo "cached binary missing; run without --no-compile first" >&2
+        exit 1
+    fi
+    needs_build=0
+fi
+
+if [ "$needs_build" -eq 1 ]; then
+    echo "[runpod-wrapper] compiling release binary" | tee -a "$state_dir/logs/latest.log"
+    stdbuf -oL -eL cargo build --release --features cuda --example tournament \
+        2>&1 | tee -a "$state_dir/logs/latest.log"
+    cp "$CARGO_TARGET_DIR/release/examples/tournament" "$binary_path"
+    chmod +x "$binary_path"
+    printf '%s\n' "$local_build_key" > "$build_key_file"
+else
+    echo "[runpod-wrapper] reusing cached release binary" | tee -a "$state_dir/logs/latest.log"
+fi
+
+stdbuf -oL -eL "$binary_path" --backend cuda "$@" 2>&1 | tee -a "$state_dir/logs/latest.log"
 REMOTE
 }
 
@@ -523,6 +601,7 @@ REMOTE_DIR=""
 STATE_DIR=""
 TIMEOUT_SECONDS="900"
 POLL_SECONDS="5"
+NO_COMPILE=0
 STOP_MODE="auto"
 DRY_RUN=0
 CREATED_POD=0
@@ -596,6 +675,10 @@ while [ $# -gt 0 ]; do
             POLL_SECONDS="$2"
             shift 2
             ;;
+        --no-compile)
+            NO_COMPILE=1
+            shift
+            ;;
         --stop-after-run)
             STOP_MODE="always"
             shift
@@ -642,7 +725,11 @@ if [ "$DRY_RUN" -eq 1 ]; then
     if [ -n "$REMOTE_DIR" ]; then
         log "dry-run remote dir: $REMOTE_DIR"
     fi
-    log "dry-run tournament command: cargo run --release --features cuda --example tournament -- --backend cuda $(quote_cmd "${TOURNAMENT_ARGS[@]}")"
+    if [ "$NO_COMPILE" -eq 1 ]; then
+        log "dry-run tournament command: <cached-binary> --backend cuda $(quote_cmd "${TOURNAMENT_ARGS[@]}")"
+    else
+        log "dry-run tournament command: cargo build --release --features cuda --example tournament && <cached-binary> --backend cuda $(quote_cmd "${TOURNAMENT_ARGS[@]}")"
+    fi
     exit 0
 fi
 

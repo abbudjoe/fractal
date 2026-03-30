@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     panic::AssertUnwindSafe,
     sync::{mpsc, Arc},
     thread,
@@ -81,14 +82,57 @@ impl TournamentSequence {
 }
 
 #[derive(Clone, Debug)]
+pub struct SpeciesPresetOverride {
+    pub species: SpeciesId,
+    pub train_batch_size: Option<usize>,
+    pub eval_batch_size: Option<usize>,
+    pub train_steps_per_species: Option<usize>,
+    pub max_recursion_depth: Option<usize>,
+    pub stability_depth: Option<usize>,
+}
+
+impl SpeciesPresetOverride {
+    pub const fn for_species(species: SpeciesId) -> Self {
+        Self {
+            species,
+            train_batch_size: None,
+            eval_batch_size: None,
+            train_steps_per_species: None,
+            max_recursion_depth: None,
+            stability_depth: None,
+        }
+    }
+
+    fn apply(&self, config: &mut TournamentConfig) {
+        if let Some(train_batch_size) = self.train_batch_size {
+            config.train_batch_size = train_batch_size;
+        }
+        if let Some(eval_batch_size) = self.eval_batch_size {
+            config.eval_batch_size = eval_batch_size;
+        }
+        if let Some(train_steps_per_species) = self.train_steps_per_species {
+            config.train_steps_per_species = train_steps_per_species;
+        }
+        if let Some(max_recursion_depth) = self.max_recursion_depth {
+            config.max_recursion_depth = max_recursion_depth;
+        }
+        if let Some(stability_depth) = self.stability_depth {
+            config.stability_depth = stability_depth;
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct TournamentConfig {
     pub dim: usize,
     pub levels: usize,
     pub vocab_size: usize,
     pub max_seq_len: usize,
     pub max_recursion_depth: usize,
+    pub stability_depth: usize,
     pub router_threshold: f32,
-    pub batch_size: usize,
+    pub train_batch_size: usize,
+    pub eval_batch_size: usize,
     pub train_steps_per_species: usize,
     pub eval_batches_per_family: usize,
     pub learning_rate: f64,
@@ -97,6 +141,7 @@ pub struct TournamentConfig {
     pub execution_backend: ComputeBackend,
     pub execution_mode: ExecutionMode,
     pub parallelism: usize,
+    pub species_overrides: Vec<SpeciesPresetOverride>,
 }
 
 impl Default for TournamentConfig {
@@ -107,8 +152,10 @@ impl Default for TournamentConfig {
             vocab_size: 64,
             max_seq_len: 16,
             max_recursion_depth: 1,
+            stability_depth: 1,
             router_threshold: 1.1,
-            batch_size: 1,
+            train_batch_size: 1,
+            eval_batch_size: 1,
             train_steps_per_species: 1,
             eval_batches_per_family: 1,
             learning_rate: 1e-3,
@@ -117,6 +164,7 @@ impl Default for TournamentConfig {
             execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
+            species_overrides: Vec::new(),
         }
     }
 }
@@ -151,9 +199,19 @@ impl TournamentConfig {
                 "max_recursion_depth must be greater than zero".into(),
             ));
         }
-        if self.batch_size == 0 {
+        if self.stability_depth == 0 {
             return Err(FractalError::InvalidConfig(
-                "batch_size must be greater than zero".into(),
+                "stability_depth must be greater than zero".into(),
+            ));
+        }
+        if self.train_batch_size == 0 {
+            return Err(FractalError::InvalidConfig(
+                "train_batch_size must be greater than zero".into(),
+            ));
+        }
+        if self.eval_batch_size == 0 {
+            return Err(FractalError::InvalidConfig(
+                "eval_batch_size must be greater than zero".into(),
             ));
         }
         if self.eval_batches_per_family == 0 {
@@ -176,6 +234,40 @@ impl TournamentConfig {
                 "parallelism must be greater than zero".into(),
             ));
         }
+        let mut override_species = HashSet::new();
+        for override_config in &self.species_overrides {
+            if !override_species.insert(override_config.species) {
+                return Err(FractalError::InvalidConfig(format!(
+                    "duplicate species override for {}",
+                    override_config.species
+                )));
+            }
+            if override_config.train_batch_size == Some(0) {
+                return Err(FractalError::InvalidConfig(
+                    "species override train_batch_size must be greater than zero".into(),
+                ));
+            }
+            if override_config.eval_batch_size == Some(0) {
+                return Err(FractalError::InvalidConfig(
+                    "species override eval_batch_size must be greater than zero".into(),
+                ));
+            }
+            if override_config.train_steps_per_species == Some(0) {
+                return Err(FractalError::InvalidConfig(
+                    "species override train_steps_per_species must be greater than zero".into(),
+                ));
+            }
+            if override_config.max_recursion_depth == Some(0) {
+                return Err(FractalError::InvalidConfig(
+                    "species override max_recursion_depth must be greater than zero".into(),
+                ));
+            }
+            if override_config.stability_depth == Some(0) {
+                return Err(FractalError::InvalidConfig(
+                    "species override stability_depth must be greater than zero".into(),
+                ));
+            }
+        }
 
         Ok(())
     }
@@ -187,8 +279,10 @@ impl TournamentConfig {
             vocab_size: 64,
             max_seq_len: 128,
             max_recursion_depth: 20,
+            stability_depth: 20,
             router_threshold: 0.90,
-            batch_size: 16,
+            train_batch_size: 16,
+            eval_batch_size: 8,
             train_steps_per_species: 50,
             eval_batches_per_family: 8,
             learning_rate: 1e-3,
@@ -197,6 +291,7 @@ impl TournamentConfig {
             execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
+            species_overrides: Vec::new(),
         }
     }
 
@@ -206,37 +301,49 @@ impl TournamentConfig {
             levels: 3,
             vocab_size: 64,
             max_seq_len: 64,
-            max_recursion_depth: 8,
+            max_recursion_depth: 6,
+            stability_depth: 6,
             router_threshold: 0.92,
-            batch_size: 8,
-            train_steps_per_species: 20,
-            eval_batches_per_family: 4,
+            train_batch_size: 8,
+            eval_batch_size: 4,
+            train_steps_per_species: 12,
+            eval_batches_per_family: 2,
             learning_rate: 1e-3,
             seed: 42,
             generator_depth_config: GeneratorDepthConfig::default(),
             execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
+            species_overrides: Vec::new(),
         }
     }
 
     pub fn bullpen_polish() -> Self {
         Self {
-            dim: 192,
+            dim: 128,
             levels: 3,
             vocab_size: 64,
-            max_seq_len: 128,
-            max_recursion_depth: 12,
+            max_seq_len: 96,
+            max_recursion_depth: 8,
+            stability_depth: 8,
             router_threshold: 0.92,
-            batch_size: 8,
-            train_steps_per_species: 50,
-            eval_batches_per_family: 4,
+            train_batch_size: 16,
+            eval_batch_size: 8,
+            train_steps_per_species: 24,
+            eval_batches_per_family: 2,
             learning_rate: 1e-3,
             seed: 42,
             generator_depth_config: GeneratorDepthConfig::polish_top_candidates(),
             execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
+            species_overrides: vec![SpeciesPresetOverride {
+                // Temporary Generation 4 polish override until IFS training cost is better bounded.
+                train_batch_size: Some(8),
+                eval_batch_size: Some(4),
+                train_steps_per_species: Some(16),
+                ..SpeciesPresetOverride::for_species(SpeciesId::Ifs)
+            }],
         }
     }
 
@@ -260,8 +367,10 @@ impl TournamentConfig {
             vocab_size: 64,
             max_seq_len: 32,
             max_recursion_depth: 4,
+            stability_depth: 4,
             router_threshold: 0.95,
-            batch_size: 2,
+            train_batch_size: 2,
+            eval_batch_size: 2,
             train_steps_per_species: 5,
             eval_batches_per_family: 2,
             learning_rate: 1e-3,
@@ -270,6 +379,7 @@ impl TournamentConfig {
             execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
+            species_overrides: Vec::new(),
         }
     }
 
@@ -280,8 +390,10 @@ impl TournamentConfig {
             vocab_size: 64,
             max_seq_len: 16,
             max_recursion_depth: 1,
+            stability_depth: 1,
             router_threshold: 1.1,
-            batch_size: 1,
+            train_batch_size: 1,
+            eval_batch_size: 1,
             train_steps_per_species: 0,
             eval_batches_per_family: 1,
             learning_rate: 1e-3,
@@ -290,6 +402,7 @@ impl TournamentConfig {
             execution_backend: ComputeBackend::CpuCandle,
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
+            species_overrides: Vec::new(),
         }
     }
 
@@ -299,17 +412,20 @@ impl TournamentConfig {
             levels: 3,
             vocab_size: 64,
             max_seq_len: 128,
-            max_recursion_depth: 20,
+            max_recursion_depth: 16,
+            stability_depth: 20,
             router_threshold: 0.92,
-            batch_size: 8,
-            train_steps_per_species: 200,
-            eval_batches_per_family: 8,
+            train_batch_size: 8,
+            eval_batch_size: 4,
+            train_steps_per_species: 120,
+            eval_batches_per_family: 4,
             learning_rate: 1e-3,
             seed: 42,
             generator_depth_config: GeneratorDepthConfig::stress_top_candidates(),
             execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
+            species_overrides: Vec::new(),
         }
     }
 
@@ -326,6 +442,33 @@ impl TournamentConfig {
     pub fn with_parallelism(mut self, parallelism: usize) -> Self {
         self.parallelism = parallelism;
         self
+    }
+
+    pub fn effective_for_species(&self, species: SpeciesId) -> Self {
+        let mut config = self.clone();
+        for override_config in self
+            .species_overrides
+            .iter()
+            .filter(|override_config| override_config.species == species)
+        {
+            override_config.apply(&mut config);
+        }
+        config.species_overrides.clear();
+        config
+    }
+
+    fn max_train_batch_size(&self) -> usize {
+        self.species_overrides
+            .iter()
+            .filter_map(|override_config| override_config.train_batch_size)
+            .fold(self.train_batch_size, usize::max)
+    }
+
+    fn max_eval_batch_size(&self) -> usize {
+        self.species_overrides
+            .iter()
+            .filter_map(|override_config| override_config.eval_batch_size)
+            .fold(self.eval_batch_size, usize::max)
     }
 }
 
@@ -378,11 +521,14 @@ pub struct Tournament {
 impl Tournament {
     pub fn new(config: TournamentConfig) -> Result<Self, FractalError> {
         config.validate()?;
+        let train_examples_per_family = (config.max_train_batch_size() * 8).max(96);
+        let eval_examples_per_family =
+            (config.max_eval_batch_size() * config.eval_batches_per_family).max(32);
         let generator = SimpleHierarchicalGenerator::new(GeneratorConfig {
             vocab_size: config.vocab_size,
             max_seq_len: config.max_seq_len,
-            train_examples_per_family: 96,
-            eval_examples_per_family: 32,
+            train_examples_per_family,
+            eval_examples_per_family,
             seed: config.seed,
             depth_config: config.generator_depth_config,
         })?;
@@ -424,7 +570,10 @@ impl Tournament {
                 TournamentProgressEvent::SpeciesStarted(stage.clone()),
             );
             let started = Instant::now();
-            let result = definition.run(self.run_context(index), &self.config.execution_backend)?;
+            let result = definition.run(
+                self.run_context(index, definition.id),
+                &self.config.execution_backend,
+            )?;
             Self::emit_event(
                 reporter.as_ref(),
                 TournamentProgressEvent::SpeciesCompleted(SpeciesCompletion {
@@ -498,10 +647,10 @@ impl Tournament {
             .collect()
     }
 
-    fn run_context(&self, index: usize) -> SpeciesRunContext {
+    fn run_context(&self, index: usize, species: SpeciesId) -> SpeciesRunContext {
         SpeciesRunContext {
             index,
-            config: self.config.clone(),
+            config: self.config.effective_for_species(species),
             generator: Arc::clone(&self.generator),
         }
     }
@@ -517,7 +666,7 @@ impl Tournament {
         let stage = Self::run_stage(definition.id, index, total);
         Self::emit_event(reporter, TournamentProgressEvent::SpeciesStarted(stage));
 
-        let context = self.run_context(index);
+        let context = self.run_context(index, definition.id);
         let backend = self.config.execution_backend.clone();
         let tx = tx.clone();
         thread::spawn(move || {

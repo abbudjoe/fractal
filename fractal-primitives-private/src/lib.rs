@@ -6,8 +6,9 @@ use burn::backend::wgpu::WgpuDevice;
 use fractal_core::{
     error::FractalError,
     registry::{
-        cpu_device, initialize_metal_runtime, run_species_with_factory, CpuTrainBackend,
-        MetalTrainBackend, SpeciesDefinition, SpeciesId, SpeciesRunContext,
+        cpu_device, initialize_metal_runtime, run_species_with_factory,
+        run_species_with_factory_candle, MetalTrainBackend, SpeciesDefinition, SpeciesId,
+        SpeciesRunContext,
     },
 };
 
@@ -22,7 +23,7 @@ macro_rules! define_flat_species_runner {
         fn $cpu_fn(
             context: SpeciesRunContext,
         ) -> Result<fractal_core::SpeciesRawMetrics, FractalError> {
-            run_species_with_factory::<CpuTrainBackend, _, _>(
+            run_species_with_factory_candle::<_, _>(
                 SpeciesId::$species,
                 context,
                 cpu_device(),
@@ -48,7 +49,7 @@ macro_rules! define_flat_species_runner {
             context: SpeciesRunContext,
             device: CandleDevice,
         ) -> Result<fractal_core::SpeciesRawMetrics, FractalError> {
-            run_species_with_factory::<CpuTrainBackend, _, _>(
+            run_species_with_factory_candle::<_, _>(
                 SpeciesId::$species,
                 context,
                 device,
@@ -63,7 +64,7 @@ macro_rules! define_hierarchical_species_runner {
         fn $cpu_fn(
             context: SpeciesRunContext,
         ) -> Result<fractal_core::SpeciesRawMetrics, FractalError> {
-            run_species_with_factory::<CpuTrainBackend, _, _>(
+            run_species_with_factory_candle::<_, _>(
                 SpeciesId::$species,
                 context,
                 cpu_device(),
@@ -89,7 +90,7 @@ macro_rules! define_hierarchical_species_runner {
             context: SpeciesRunContext,
             device: CandleDevice,
         ) -> Result<fractal_core::SpeciesRawMetrics, FractalError> {
-            run_species_with_factory::<CpuTrainBackend, _, _>(
+            run_species_with_factory_candle::<_, _>(
                 SpeciesId::$species,
                 context,
                 device,

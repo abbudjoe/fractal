@@ -343,7 +343,7 @@ fn print_header(
         .map(|species| format!("species={species}"))
         .unwrap_or_else(|| format!("lane={}", lane.name()));
     println!(
-        "{} backend={} mode={} parallelism={} seed={} dim={} levels={} seq={} depth={} batch={} train_steps={} eval_batches={}",
+        "{} backend={} mode={} parallelism={} seed={} dim={} levels={} seq={} depth={} stability_depth={} train_batch={} eval_batch={} train_steps={} eval_batches={}",
         scope,
         backend_name(&config.execution_backend),
         execution_mode_name(config.execution_mode),
@@ -353,11 +353,47 @@ fn print_header(
         config.levels,
         config.max_seq_len,
         config.max_recursion_depth,
-        config.batch_size,
+        config.stability_depth,
+        config.train_batch_size,
+        config.eval_batch_size,
         config.train_steps_per_species,
         config.eval_batches_per_family,
     );
+    if !config.species_overrides.is_empty() {
+        println!(
+            "temporary_overrides={}",
+            config
+                .species_overrides
+                .iter()
+                .map(format_species_override)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     println!("rank  species                  stability  perplexity  arc_acc  tok/s   fitness");
+}
+
+fn format_species_override(
+    override_config: &fractal_core::lifecycle::SpeciesPresetOverride,
+) -> String {
+    let mut fields = Vec::new();
+    if let Some(train_batch_size) = override_config.train_batch_size {
+        fields.push(format!("train_batch={train_batch_size}"));
+    }
+    if let Some(eval_batch_size) = override_config.eval_batch_size {
+        fields.push(format!("eval_batch={eval_batch_size}"));
+    }
+    if let Some(train_steps_per_species) = override_config.train_steps_per_species {
+        fields.push(format!("train_steps={train_steps_per_species}"));
+    }
+    if let Some(max_recursion_depth) = override_config.max_recursion_depth {
+        fields.push(format!("depth={max_recursion_depth}"));
+    }
+    if let Some(stability_depth) = override_config.stability_depth {
+        fields.push(format!("stability_depth={stability_depth}"));
+    }
+
+    format!("{}({})", override_config.species, fields.join(" "))
 }
 
 struct StdoutProgressReporter;

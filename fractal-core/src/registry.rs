@@ -15,13 +15,12 @@ use burn::{
     module::{AutodiffModule, Module, ModuleDisplay, ModuleVisitor},
     nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig},
     optim::{AdamConfig, GradientsParams, Optimizer},
-    tensor::{backend::AutodiffBackend, Bool, Element, ElementConversion, Int, Tensor, TensorData},
+    prelude::Backend,
+    tensor::{backend::AutodiffBackend, Bool, ElementConversion, Int, Tensor},
 };
 
 use crate::{
-    data_generator::{
-        DatasetSplit, SimpleHierarchicalGenerator, TaskFamily, TokenBatch, PAD_TOKEN,
-    },
+    data_generator::{SimpleHierarchicalGenerator, TaskFamily, TokenBatch, PAD_TOKEN},
     error::FractalError,
     fitness::SpeciesRawMetrics,
     lifecycle::TournamentConfig,
@@ -230,8 +229,37 @@ where
         context.config.seed.wrapping_add(context.index as u64 * 101),
     );
 
+    let batches = prepare_batches_for_run::<B>(&context.generator, &context.config, &device)?;
     let rule = factory(&context.config, &device);
-    run_species(species, context, device, rule)
+    run_species_with_batches(species, context.config, device, rule, batches)
+}
+
+pub fn run_species_with_factory_candle<R, F>(
+    species: SpeciesId,
+    context: SpeciesRunContext,
+    device: CandleDevice,
+    factory: F,
+) -> Result<SpeciesRawMetrics, FractalError>
+where
+    R: FractalRule<CpuTrainBackend>
+        + Module<CpuTrainBackend>
+        + AutodiffModule<CpuTrainBackend>
+        + ModuleDisplay
+        + Clone
+        + Send
+        + std::fmt::Debug,
+    <R as AutodiffModule<CpuTrainBackend>>::InnerModule:
+        Module<<CpuTrainBackend as AutodiffBackend>::InnerBackend> + ModuleDisplay,
+    F: FnOnce(&TournamentConfig, &CandleDevice) -> R,
+{
+    CpuTrainBackend::seed(
+        &device,
+        context.config.seed.wrapping_add(context.index as u64 * 101),
+    );
+
+    let batches = prepare_candle_batches_for_run(&context.generator, &context.config, &device)?;
+    let rule = factory(&context.config, &device);
+    run_species_with_batches(species, context.config, device, rule, batches)
 }
 
 pub fn initialize_metal_runtime(device: &WgpuDevice) {
@@ -250,11 +278,19 @@ pub fn initialize_metal_runtime(device: &WgpuDevice) {
     initialized.insert(device.clone());
 }
 
-fn run_species<B, R>(
+struct RunBatches<B: AutodiffBackend> {
+    train_sentence: Vec<TokenBatch<B>>,
+    train_arc: Vec<TokenBatch<B>>,
+    eval_sentence: Vec<TokenBatch<B>>,
+    eval_arc: Vec<TokenBatch<B>>,
+}
+
+fn run_species_with_batches<B, R>(
     species: SpeciesId,
-    context: SpeciesRunContext,
+    config: TournamentConfig,
     device: B::Device,
     rule: R,
+    batches: RunBatches<B>,
 ) -> Result<SpeciesRawMetrics, FractalError>
 where
     B: AutodiffBackend,
@@ -267,8 +303,6 @@ where
         + std::fmt::Debug,
     <R as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend> + ModuleDisplay,
 {
-    let config = context.config;
-    let generator = context.generator;
     let mut model = FractalModel::new(
         config.vocab_size,
         config.dim,
@@ -284,49 +318,28 @@ where
     let mut optimizer = AdamConfig::new().init();
 
     for step in 0..config.train_steps_per_species {
-        let family = if step % 2 == 0 {
-            TaskFamily::RecursiveSentence
+        let train_batches = if step % 2 == 0 {
+            &batches.train_sentence
         } else {
-            TaskFamily::ArcGrid
+            &batches.train_arc
         };
-        let batch = generator.batch_for::<B>(
-            family,
-            DatasetSplit::Train,
-            step,
-            config.batch_size,
-            &device,
-        )?;
-        let loss = model.loss(&batch, &criterion, None, true)?;
+        let batch = &train_batches[step % train_batches.len()];
+        let loss = model.loss(batch, &criterion, None, true)?;
         let grads = GradientsParams::from_grads(loss.backward(), &model);
         model = optimizer.step(config.learning_rate, model, grads);
     }
 
-    let stability_batch = generator.batch_for::<B>(
-        TaskFamily::RecursiveSentence,
-        DatasetSplit::Eval,
-        0,
-        config.batch_size,
-        &device,
+    let stability_loss = model.loss(
+        &batches.eval_sentence[0],
+        &criterion,
+        Some(config.stability_depth),
+        false,
     )?;
-    let stability_loss = model.loss(&stability_batch, &criterion, Some(20), false)?;
     let stability_grads = GradientsParams::from_grads(stability_loss.backward(), &model);
     let grad_norm_depth_20 = gradient_l2_norm(&model, &stability_grads);
 
-    let sentence_batches = generator.eval_batches_for::<B>(
-        TaskFamily::RecursiveSentence,
-        config.batch_size,
-        config.eval_batches_per_family,
-        &device,
-    )?;
-    let arc_batches = generator.eval_batches_for::<B>(
-        TaskFamily::ArcGrid,
-        config.batch_size,
-        config.eval_batches_per_family,
-        &device,
-    )?;
-
-    let long_context_perplexity = evaluate_perplexity(&model, &criterion, &sentence_batches)?;
-    let (arc_accuracy, tokens_per_sec) = evaluate_accuracy_and_speed(&model, &arc_batches)?;
+    let long_context_perplexity = evaluate_perplexity(&model, &criterion, &batches.eval_sentence)?;
+    let (arc_accuracy, tokens_per_sec) = evaluate_accuracy_and_speed(&model, &batches.eval_arc)?;
 
     Ok(SpeciesRawMetrics {
         species,
@@ -334,6 +347,76 @@ where
         long_context_perplexity,
         arc_accuracy,
         tokens_per_sec,
+    })
+}
+
+fn prepare_batches_for_run<B: AutodiffBackend>(
+    generator: &SimpleHierarchicalGenerator,
+    config: &TournamentConfig,
+    device: &B::Device,
+) -> Result<RunBatches<B>, FractalError> {
+    Ok(RunBatches {
+        train_sentence: generator.train_batches_for::<B>(
+            TaskFamily::RecursiveSentence,
+            config.train_batch_size,
+            device,
+        )?,
+        train_arc: generator.train_batches_for::<B>(
+            TaskFamily::ArcGrid,
+            config.train_batch_size,
+            device,
+        )?,
+        eval_sentence: generator.eval_batches_for::<B>(
+            TaskFamily::RecursiveSentence,
+            config.eval_batch_size,
+            config.eval_batches_per_family,
+            device,
+        )?,
+        eval_arc: generator.eval_batches_for::<B>(
+            TaskFamily::ArcGrid,
+            config.eval_batch_size,
+            config.eval_batches_per_family,
+            device,
+        )?,
+    })
+}
+
+fn prepare_candle_batches_for_run(
+    generator: &SimpleHierarchicalGenerator,
+    config: &TournamentConfig,
+    device: &CandleDevice,
+) -> Result<RunBatches<CpuTrainBackend>, FractalError> {
+    let staging_device = CandleDevice::Cpu;
+    let move_batches = |batches: Vec<TokenBatch<CpuTrainBackend>>| {
+        batches
+            .into_iter()
+            .map(|batch| batch.to_device(device))
+            .collect::<Vec<_>>()
+    };
+
+    Ok(RunBatches {
+        train_sentence: move_batches(generator.train_batches_for::<CpuTrainBackend>(
+            TaskFamily::RecursiveSentence,
+            config.train_batch_size,
+            &staging_device,
+        )?),
+        train_arc: move_batches(generator.train_batches_for::<CpuTrainBackend>(
+            TaskFamily::ArcGrid,
+            config.train_batch_size,
+            &staging_device,
+        )?),
+        eval_sentence: move_batches(generator.eval_batches_for::<CpuTrainBackend>(
+            TaskFamily::RecursiveSentence,
+            config.eval_batch_size,
+            config.eval_batches_per_family,
+            &staging_device,
+        )?),
+        eval_arc: move_batches(generator.eval_batches_for::<CpuTrainBackend>(
+            TaskFamily::ArcGrid,
+            config.eval_batch_size,
+            config.eval_batches_per_family,
+            &staging_device,
+        )?),
     })
 }
 
@@ -372,33 +455,15 @@ where
         let [batch_size, seq_len, vocab_size] = logits.dims();
         let flat_logits = logits.reshape([batch_size * seq_len, vocab_size]);
         let flat_targets = batch.target_ids.clone().reshape([batch_size * seq_len]);
+        let predictions = flat_logits.argmax(1).reshape([batch_size * seq_len]);
+        let valid_mask = flat_targets
+            .clone()
+            .equal_elem((PAD_TOKEN as i64).elem::<B::IntElem>())
+            .bool_not();
+        let correct_mask = predictions.equal(flat_targets).bool_and(valid_mask.clone());
 
-        let logits_data = tensor_data_to_vec::<f32>(flat_logits.into_data(), "logits")?;
-        let targets_data = tensor_data_to_vec::<B::IntElem>(flat_targets.into_data(), "targets")?;
-
-        for (row_index, target) in targets_data.iter().enumerate() {
-            let target = (*target).elem::<i64>();
-            if target == PAD_TOKEN as i64 {
-                continue;
-            }
-            let row_start = row_index * vocab_size;
-            let row = &logits_data[row_start..row_start + vocab_size];
-            let prediction = row
-                .iter()
-                .enumerate()
-                .max_by(|left, right| {
-                    left.1
-                        .partial_cmp(right.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .map(|(index, _)| index as i64)
-                .unwrap_or_default();
-
-            if prediction == target {
-                correct += 1;
-            }
-            total += 1;
-        }
+        correct += correct_mask.int().sum().into_scalar().elem::<i64>() as usize;
+        total += valid_mask.int().sum().into_scalar().elem::<i64>() as usize;
     }
 
     let elapsed = start.elapsed().as_secs_f64().max(1e-6);
@@ -410,14 +475,6 @@ where
     let tokens_per_sec = total as f64 / elapsed;
 
     Ok((accuracy, tokens_per_sec))
-}
-
-fn tensor_data_to_vec<E: Element>(
-    data: TensorData,
-    label: &'static str,
-) -> Result<Vec<E>, FractalError> {
-    data.to_vec::<E>()
-        .map_err(|err| FractalError::InvalidState(format!("failed to extract {label}: {err:?}")))
 }
 
 fn gradient_l2_norm<M, B>(module: &M, grads: &GradientsParams) -> f64

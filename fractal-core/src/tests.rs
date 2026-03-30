@@ -109,7 +109,9 @@ fn research_medium_preset_targets_single_gpu_sequential_run() {
     assert_eq!(config.levels, 3);
     assert_eq!(config.max_seq_len, 32);
     assert_eq!(config.max_recursion_depth, 4);
-    assert_eq!(config.batch_size, 2);
+    assert_eq!(config.stability_depth, 4);
+    assert_eq!(config.train_batch_size, 2);
+    assert_eq!(config.eval_batch_size, 2);
     assert_eq!(config.train_steps_per_species, 5);
     assert_eq!(config.eval_batches_per_family, 2);
     assert_eq!(config.execution_mode, ExecutionMode::Sequential);
@@ -123,10 +125,12 @@ fn challenger_lane_preset_targets_midweight_single_gpu_run() {
     assert_eq!(config.dim, 96);
     assert_eq!(config.levels, 3);
     assert_eq!(config.max_seq_len, 64);
-    assert_eq!(config.max_recursion_depth, 8);
-    assert_eq!(config.batch_size, 8);
-    assert_eq!(config.train_steps_per_species, 20);
-    assert_eq!(config.eval_batches_per_family, 4);
+    assert_eq!(config.max_recursion_depth, 6);
+    assert_eq!(config.stability_depth, 6);
+    assert_eq!(config.train_batch_size, 8);
+    assert_eq!(config.eval_batch_size, 4);
+    assert_eq!(config.train_steps_per_species, 12);
+    assert_eq!(config.eval_batches_per_family, 2);
     assert_eq!(config.execution_mode, ExecutionMode::Sequential);
     assert_eq!(config.parallelism, 4);
 }
@@ -135,13 +139,15 @@ fn challenger_lane_preset_targets_midweight_single_gpu_run() {
 fn bullpen_polish_preset_targets_top_candidates_with_harder_recursion() {
     let config = TournamentPreset::BullpenPolish.config();
 
-    assert_eq!(config.dim, 192);
+    assert_eq!(config.dim, 128);
     assert_eq!(config.levels, 3);
-    assert_eq!(config.max_seq_len, 128);
-    assert_eq!(config.max_recursion_depth, 12);
-    assert_eq!(config.batch_size, 8);
-    assert_eq!(config.train_steps_per_species, 50);
-    assert_eq!(config.eval_batches_per_family, 4);
+    assert_eq!(config.max_seq_len, 96);
+    assert_eq!(config.max_recursion_depth, 8);
+    assert_eq!(config.stability_depth, 8);
+    assert_eq!(config.train_batch_size, 16);
+    assert_eq!(config.eval_batch_size, 8);
+    assert_eq!(config.train_steps_per_species, 24);
+    assert_eq!(config.eval_batches_per_family, 2);
     assert_eq!(config.generator_depth_config.sentence_eval_max_depth, 10);
 }
 
@@ -152,10 +158,12 @@ fn candidate_stress_preset_targets_single_species_full_stress_run() {
     assert_eq!(config.dim, 192);
     assert_eq!(config.levels, 3);
     assert_eq!(config.max_seq_len, 128);
-    assert_eq!(config.max_recursion_depth, 20);
-    assert_eq!(config.batch_size, 8);
-    assert_eq!(config.train_steps_per_species, 200);
-    assert_eq!(config.eval_batches_per_family, 8);
+    assert_eq!(config.max_recursion_depth, 16);
+    assert_eq!(config.stability_depth, 20);
+    assert_eq!(config.train_batch_size, 8);
+    assert_eq!(config.eval_batch_size, 4);
+    assert_eq!(config.train_steps_per_species, 120);
+    assert_eq!(config.eval_batches_per_family, 4);
     assert_eq!(config.generator_depth_config.sentence_eval_max_depth, 12);
 }
 
@@ -167,7 +175,9 @@ fn generation_four_preset_uses_pressure_test_shape() {
     assert_eq!(config.levels, 4);
     assert_eq!(config.max_seq_len, 128);
     assert_eq!(config.max_recursion_depth, 20);
-    assert_eq!(config.batch_size, 16);
+    assert_eq!(config.stability_depth, 20);
+    assert_eq!(config.train_batch_size, 16);
+    assert_eq!(config.eval_batch_size, 8);
     assert_eq!(config.train_steps_per_species, 50);
     assert_eq!(config.eval_batches_per_family, 8);
     assert_eq!(config.execution_mode, ExecutionMode::Sequential);
@@ -178,6 +188,23 @@ fn generation_four_preset_uses_pressure_test_shape() {
         config.execution_backend,
         ComputeBackend::CudaCandle { .. }
     ));
+}
+
+#[test]
+fn bullpen_polish_only_applies_documented_temporary_ifs_override() {
+    let config = TournamentPreset::BullpenPolish.config();
+    let ifs = config.effective_for_species(SpeciesId::Ifs);
+    let mobius = config.effective_for_species(SpeciesId::GeneralizedMobius);
+
+    assert_eq!(ifs.train_batch_size, 8);
+    assert_eq!(ifs.eval_batch_size, 4);
+    assert_eq!(ifs.train_steps_per_species, 16);
+    assert_eq!(mobius.train_batch_size, config.train_batch_size);
+    assert_eq!(mobius.eval_batch_size, config.eval_batch_size);
+    assert_eq!(
+        mobius.train_steps_per_species,
+        config.train_steps_per_species
+    );
 }
 
 #[test]
