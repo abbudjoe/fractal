@@ -3,6 +3,10 @@ name = "fractal-core"
 version = "0.1.0"
 edition.workspace = true
 
+[features]
+default = []
+cuda = ["burn-candle/cuda"]
+
 [lib]
 name = "fractal_core"
 path = "src/lib.rs"

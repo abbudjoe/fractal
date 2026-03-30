@@ -31,6 +31,8 @@ enum RunSelection {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BackendOverride {
     Cpu,
+    #[cfg(feature = "cuda")]
+    Cuda,
     Metal,
     Mlx,
 }
@@ -88,6 +90,8 @@ impl From<BackendOverride> for ComputeBackend {
     fn from(value: BackendOverride) -> Self {
         match value {
             BackendOverride::Cpu => ComputeBackend::CpuCandle,
+            #[cfg(feature = "cuda")]
+            BackendOverride::Cuda => ComputeBackend::cuda_default(),
             BackendOverride::Metal => ComputeBackend::metal_default(),
             BackendOverride::Mlx => ComputeBackend::mlx_default(),
         }
@@ -185,6 +189,8 @@ fn parse_execution_mode(value: &str) -> Result<ExecutionMode, FractalError> {
 fn parse_backend(value: &str) -> Result<BackendOverride, FractalError> {
     match value {
         "cpu" => Ok(BackendOverride::Cpu),
+        #[cfg(feature = "cuda")]
+        "cuda" => Ok(BackendOverride::Cuda),
         "metal" => Ok(BackendOverride::Metal),
         "mlx" => Ok(BackendOverride::Mlx),
         _ => Err(invalid_argument(format!("unknown backend: {value}"))),
@@ -253,6 +259,8 @@ fn print_results(results: Vec<fractal::RankedSpeciesResult>) {
 fn backend_name(backend: &ComputeBackend) -> &'static str {
     match backend {
         ComputeBackend::CpuCandle => "cpu",
+        #[cfg(feature = "cuda")]
+        ComputeBackend::CudaCandle { .. } => "cuda",
         ComputeBackend::MetalWgpu { .. } => "metal",
         ComputeBackend::Mlx { .. } => "mlx",
     }
@@ -277,12 +285,17 @@ fn print_usage() {
     println!("  --sequence <first-run>");
     println!("  --seed <u64>");
     println!("  --mode <sequential|parallel>");
+    #[cfg(feature = "cuda")]
+    println!("  --backend <cpu|cuda|metal|mlx>");
+    #[cfg(not(feature = "cuda"))]
     println!("  --backend <cpu|metal|mlx>");
     println!("  --help");
     println!();
     println!("Examples:");
     println!("  cargo run --example tournament -- --preset fast-test");
     println!("  cargo run --release --example tournament -- --preset research-medium");
+    #[cfg(feature = "cuda")]
+    println!("  cargo run --release --features cuda --example tournament -- --backend cuda");
     println!("  cargo run --release --example tournament -- --sequence first-run");
 }
 
@@ -341,6 +354,42 @@ mod tests {
                 backend: Some(BackendOverride::Mlx),
             })
         );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn parse_command_accepts_cuda_backend_override() {
+        let command = parse_command(vec![
+            "--preset".to_owned(),
+            "fast-test".to_owned(),
+            "--backend".to_owned(),
+            "cuda".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::FastTest)),
+                seed: None,
+                execution_mode: None,
+                backend: Some(BackendOverride::Cuda),
+            })
+        );
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    #[test]
+    fn parse_command_rejects_cuda_backend_without_feature() {
+        let error = parse_command(vec![
+            "--preset".to_owned(),
+            "fast-test".to_owned(),
+            "--backend".to_owned(),
+            "cuda".to_owned(),
+        ])
+        .unwrap_err();
+
+        assert!(matches!(error, FractalError::InvalidConfig(_)));
     }
 
     #[test]

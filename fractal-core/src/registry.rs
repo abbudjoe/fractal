@@ -40,8 +40,16 @@ pub type MlxTrainBackend = Autodiff<MlxBackend>;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComputeBackend {
     CpuCandle,
-    MetalWgpu { device: WgpuDevice },
-    Mlx { device: MlxDevice },
+    #[cfg(feature = "cuda")]
+    CudaCandle {
+        device_index: usize,
+    },
+    MetalWgpu {
+        device: WgpuDevice,
+    },
+    Mlx {
+        device: MlxDevice,
+    },
 }
 
 impl ComputeBackend {
@@ -61,6 +69,11 @@ impl ComputeBackend {
         }
     }
 
+    #[cfg(feature = "cuda")]
+    pub const fn cuda_default() -> Self {
+        Self::CudaCandle { device_index: 0 }
+    }
+
     pub fn mlx_default() -> Self {
         Self::Mlx {
             device: MlxDevice::Gpu,
@@ -70,6 +83,8 @@ impl ComputeBackend {
     pub fn is_supported_on_current_platform(&self) -> bool {
         match self {
             Self::CpuCandle => true,
+            #[cfg(feature = "cuda")]
+            Self::CudaCandle { .. } => cfg!(not(target_os = "macos")),
             Self::MetalWgpu { .. } => cfg!(target_os = "macos"),
             Self::Mlx { .. } => cfg!(all(target_os = "macos", target_arch = "aarch64")),
         }
@@ -131,6 +146,8 @@ pub struct SpeciesRunContext {
 }
 
 type CpuRunner = fn(SpeciesRunContext) -> Result<SpeciesRawMetrics, FractalError>;
+#[cfg(feature = "cuda")]
+type CudaRunner = fn(SpeciesRunContext, CandleDevice) -> Result<SpeciesRawMetrics, FractalError>;
 type MetalRunner = fn(SpeciesRunContext, WgpuDevice) -> Result<SpeciesRawMetrics, FractalError>;
 type MlxRunner = fn(SpeciesRunContext, MlxDevice) -> Result<SpeciesRawMetrics, FractalError>;
 
@@ -138,11 +155,14 @@ type MlxRunner = fn(SpeciesRunContext, MlxDevice) -> Result<SpeciesRawMetrics, F
 pub struct SpeciesDefinition {
     pub id: SpeciesId,
     cpu_runner: CpuRunner,
+    #[cfg(feature = "cuda")]
+    cuda_runner: CudaRunner,
     metal_runner: MetalRunner,
     mlx_runner: MlxRunner,
 }
 
 impl SpeciesDefinition {
+    #[cfg(not(feature = "cuda"))]
     pub const fn new(
         id: SpeciesId,
         cpu_runner: CpuRunner,
@@ -157,6 +177,23 @@ impl SpeciesDefinition {
         }
     }
 
+    #[cfg(feature = "cuda")]
+    pub const fn new(
+        id: SpeciesId,
+        cpu_runner: CpuRunner,
+        metal_runner: MetalRunner,
+        mlx_runner: MlxRunner,
+        cuda_runner: CudaRunner,
+    ) -> Self {
+        Self {
+            id,
+            cpu_runner,
+            cuda_runner,
+            metal_runner,
+            mlx_runner,
+        }
+    }
+
     pub fn run(
         &self,
         context: SpeciesRunContext,
@@ -164,6 +201,10 @@ impl SpeciesDefinition {
     ) -> Result<SpeciesRawMetrics, FractalError> {
         match backend {
             ComputeBackend::CpuCandle => (self.cpu_runner)(context),
+            #[cfg(feature = "cuda")]
+            ComputeBackend::CudaCandle { device_index } => {
+                (self.cuda_runner)(context, cuda_device(*device_index))
+            }
             ComputeBackend::MetalWgpu { device } => (self.metal_runner)(context, device.clone()),
             ComputeBackend::Mlx { device } => (self.mlx_runner)(context, *device),
         }
@@ -172,6 +213,11 @@ impl SpeciesDefinition {
 
 pub fn cpu_device() -> CandleDevice {
     CandleDevice::Cpu
+}
+
+#[cfg(feature = "cuda")]
+pub fn cuda_device(index: usize) -> CandleDevice {
+    CandleDevice::cuda(index)
 }
 
 pub fn run_species_with_factory<B, R, F>(
