@@ -4,7 +4,7 @@ use burn::{
     tensor::{backend::Backend, Tensor},
 };
 
-use crate::{
+use fractal_core::{
     error::FractalError,
     primitives::{gated_sigmoid, one_minus},
     rule_trait::FractalRule,

@@ -1690,6 +1690,8 @@ name = "fractal"
 version = "0.1.0"
 dependencies = [
  "fractal-core",
+ "fractal-eval-private",
+ "fractal-primitives-private",
 ]
 
 [[package]]
@@ -1699,6 +1701,21 @@ dependencies = [
  "burn",
  "burn-candle",
  "rand 0.8.5",
+]
+
+[[package]]
+name = "fractal-eval-private"
+version = "0.1.0"
+dependencies = [
+ "fractal-core",
+]
+
+[[package]]
+name = "fractal-primitives-private"
+version = "0.1.0"
+dependencies = [
+ "burn",
+ "fractal-core",
 ]
 
 [[package]]

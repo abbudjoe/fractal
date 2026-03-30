@@ -5,10 +5,8 @@ use crate::{
         GeneratorConfig, SimpleHierarchicalGenerator, MIN_SEQUENCE_LEN, MIN_VOCAB_SIZE,
     },
     error::FractalError,
-    fitness::{aggregate_results, RankedSpeciesResult, SpeciesRawMetrics},
-    registry::{
-        species_registry, ComputeBackend, ExecutionMode, SpeciesDefinition, SpeciesRunContext,
-    },
+    fitness::SpeciesRawMetrics,
+    registry::{ComputeBackend, ExecutionMode, SpeciesDefinition, SpeciesRunContext},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -243,14 +241,14 @@ impl Tournament {
         })
     }
 
-    pub fn run_generation(&self) -> Result<Vec<RankedSpeciesResult>, FractalError> {
-        let species = species_registry();
-        let metrics = match self.config.execution_mode {
-            ExecutionMode::Sequential => self.run_sequential(species)?,
-            ExecutionMode::Parallel => self.run_parallel(species)?,
-        };
-
-        Ok(aggregate_results(metrics))
+    pub fn run_generation(
+        &self,
+        species: &[SpeciesDefinition],
+    ) -> Result<Vec<SpeciesRawMetrics>, FractalError> {
+        match self.config.execution_mode {
+            ExecutionMode::Sequential => self.run_sequential(species),
+            ExecutionMode::Parallel => self.run_parallel(species),
+        }
     }
 
     fn run_sequential(

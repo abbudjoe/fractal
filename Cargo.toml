@@ -5,8 +5,8 @@ edition.workspace = true
 publish = false
 
 [workspace]
-members = ["fractal-core"]
-default-members = [".", "fractal-core"]
+members = ["fractal-core", "fractal-primitives-private", "fractal-eval-private"]
+default-members = [".", "fractal-core", "fractal-primitives-private", "fractal-eval-private"]
 resolver = "2"
 
 [workspace.package]
@@ -19,6 +19,8 @@ rand = "0.8"
 
 [dependencies]
 fractal-core = { path = "fractal-core" }
+fractal-primitives-private = { path = "fractal-primitives-private" }
+fractal-eval-private = { path = "fractal-eval-private" }
 
 [patch.crates-io]
 burn-candle = { path = "vendor/burn-candle" }

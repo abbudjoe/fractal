@@ -1,7 +1,9 @@
-use fractal_core::{
+use fractal::{
+    aggregate_results,
     error::FractalError,
     lifecycle::{Tournament, TournamentConfig, TournamentPreset, TournamentSequence},
     registry::{ComputeBackend, ExecutionMode},
+    species_registry,
 };
 
 fn main() -> Result<(), FractalError> {
@@ -207,7 +209,7 @@ fn run_preset(options: &RunOptions, preset: TournamentPreset) -> Result<(), Frac
     let config = options.config_for(preset);
     print_header(preset, &config);
     let tournament = Tournament::new(config)?;
-    let results = tournament.run_generation()?;
+    let results = aggregate_results(tournament.run_generation(species_registry())?);
     print_results(results);
     Ok(())
 }
@@ -230,7 +232,7 @@ fn print_header(preset: TournamentPreset, config: &TournamentConfig) {
     println!("rank  species                  stability  perplexity  arc_acc  tok/s   fitness");
 }
 
-fn print_results(results: Vec<fractal_core::fitness::RankedSpeciesResult>) {
+fn print_results(results: Vec<fractal::RankedSpeciesResult>) {
     for result in results {
         println!(
             "{:<5} {:<24} {:<10.2} {:<11.2} {:<8.2} {:<7.0} {:.2}",

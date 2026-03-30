@@ -14,8 +14,8 @@ pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
 pub use lifecycle::{Tournament, TournamentConfig, TournamentPreset, TournamentSequence};
 pub use model::FractalModel;
 pub use registry::{
-    species_registry, ComputeBackend, CpuBackend, CpuTrainBackend, ExecutionMode, MetalBackend,
-    MetalTrainBackend, SpeciesDefinition, SpeciesId,
+    ComputeBackend, CpuBackend, CpuTrainBackend, ExecutionMode, MetalBackend, MetalTrainBackend,
+    SpeciesDefinition, SpeciesId,
 };
 pub use router::EarlyExitRouter;
 pub use state::{FractalState, StateLayout};

@@ -1,0 +1,13 @@
+[package]
+name = "fractal-primitives-private"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[lib]
+name = "fractal_primitives_private"
+path = "src/lib.rs"
+
+[dependencies]
+burn.workspace = true
+fractal-core = { path = "../fractal-core" }
