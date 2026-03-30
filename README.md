@@ -1,6 +1,14 @@
 # fractal
 
-Rust workspace for a seven-species fractal primitive tournament.
+Fractal is a Rust harness for mutation-based learning experiments.
+
+This workspace currently implements a seven-species fractal primitive tournament.
+
+## Read first
+
+- `ENGINEERING.md`
+- `docs/harness-doctrine.md`
+- `SPEC_v3_1.md`
 
 ## Commands
 
@@ -9,6 +17,10 @@ cargo build --release
 cargo test
 cargo run --example tournament
 ```
+
+## Goal
+
+Keep the harness small, deterministic, extensible, and useful for comparative experiments.
 
 ## Notes
 
