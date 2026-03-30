@@ -1,4 +1,4 @@
-use burn::tensor::{backend::Backend, Int, Tensor, TensorData};
+use burn::tensor::{backend::Backend, ElementConversion, Int, Tensor, TensorData};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
 use crate::error::FractalError;
@@ -250,8 +250,18 @@ impl SimpleHierarchicalGenerator {
                 *last = PAD_TOKEN as i64;
             }
 
-            input_flat.extend_from_slice(&padded);
-            target_flat.extend_from_slice(&shifted);
+            input_flat.extend(
+                padded
+                    .iter()
+                    .copied()
+                    .map(|token| token.elem::<B::IntElem>()),
+            );
+            target_flat.extend(
+                shifted
+                    .iter()
+                    .copied()
+                    .map(|token| token.elem::<B::IntElem>()),
+            );
         }
 
         let input_ids = Tensor::<B, 2, Int>::from_data(

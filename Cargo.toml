@@ -13,14 +13,12 @@ resolver = "2"
 edition = "2021"
 
 [workspace.dependencies]
-burn = { version = "=0.20.1", default-features = false, features = ["std", "autodiff", "candle", "metal"] }
-burn-candle = "=0.20.1"
+burn = { version = "=0.16.1", default-features = false, features = ["std", "autodiff", "candle", "wgpu"] }
+burn-candle = "=0.16.1"
+burn-mlx = "=0.1.2"
 rand = "0.8"
 
 [dependencies]
 fractal-core = { path = "fractal-core" }
 fractal-primitives-private = { path = "fractal-primitives-private" }
 fractal-eval-private = { path = "fractal-eval-private" }
-
-[patch.crates-io]
-burn-candle = { path = "vendor/burn-candle" }

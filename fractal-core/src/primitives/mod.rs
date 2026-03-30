@@ -18,7 +18,7 @@ pub fn complex_square<B: Backend>(state: Tensor<B, 2>) -> Tensor<B, 2> {
     let real = state.clone().narrow(1, 0, half);
     let imag = state.narrow(1, half, half);
 
-    let next_real = real.clone().square() - imag.clone().square();
+    let next_real = real.clone() * real.clone() - imag.clone() * imag.clone();
     let next_imag = (real * imag).mul_scalar(2.0);
 
     Tensor::cat(vec![next_real, next_imag], 1).reshape([batch, width])

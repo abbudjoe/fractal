@@ -10,4 +10,5 @@ path = "src/lib.rs"
 [dependencies]
 burn.workspace = true
 burn-candle.workspace = true
+burn-mlx.workspace = true
 rand.workspace = true

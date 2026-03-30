@@ -130,20 +130,18 @@ impl<B: Backend> FractalState<B> {
         }
 
         match (self, value) {
-            (Self::Flat(current), Self::Flat(next)) => Ok(Self::Flat(
-                current.mask_where(mask.reshape([batch_size, 1]), next),
-            )),
-            (Self::Complex(current), Self::Complex(next)) => Ok(Self::Complex(
-                current.mask_where(mask.reshape([batch_size, 1]), next),
-            )),
-            (Self::Hierarchical(current), Self::Hierarchical(next)) => Ok(Self::Hierarchical(
-                current.mask_where(mask.reshape([batch_size, 1, 1]), next),
-            )),
-            (Self::HierarchicalComplex(current), Self::HierarchicalComplex(next)) => {
-                Ok(Self::HierarchicalComplex(
-                    current.mask_where(mask.reshape([batch_size, 1, 1]), next),
-                ))
+            (Self::Flat(current), Self::Flat(next)) => {
+                Ok(Self::Flat(mask_batch_tensor(current, next, mask)))
             }
+            (Self::Complex(current), Self::Complex(next)) => {
+                Ok(Self::Complex(mask_batch_tensor(current, next, mask)))
+            }
+            (Self::Hierarchical(current), Self::Hierarchical(next)) => {
+                Ok(Self::Hierarchical(mask_batch_tensor(current, next, mask)))
+            }
+            (Self::HierarchicalComplex(current), Self::HierarchicalComplex(next)) => Ok(
+                Self::HierarchicalComplex(mask_batch_tensor(current, next, mask)),
+            ),
             _ => Err(FractalError::InvalidState(
                 "state layout changed after validation".into(),
             )),
@@ -228,4 +226,28 @@ fn validate_hierarchical_shape<B: Backend>(
     }
 
     Ok(tensor)
+}
+
+fn mask_batch_tensor<B: Backend, const D: usize>(
+    current: Tensor<B, D>,
+    next: Tensor<B, D>,
+    mask: Tensor<B, 1, Bool>,
+) -> Tensor<B, D> {
+    let dims = current.dims();
+    let mut broadcast = vec![1; D];
+    for (index, dim) in dims.iter().copied().enumerate().skip(1) {
+        broadcast[index] = dim;
+    }
+    let expanded_mask = mask
+        .int()
+        .reshape(mask_shape::<D>(dims[0]))
+        .repeat(&broadcast)
+        .greater_elem(0);
+    current.mask_where(expanded_mask, next)
+}
+
+fn mask_shape<const D: usize>(batch_size: usize) -> [usize; D] {
+    let mut shape = [1; D];
+    shape[0] = batch_size;
+    shape
 }
