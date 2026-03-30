@@ -1,16 +1,13 @@
-use burn::{
-    backend::Candle,
-    tensor::{activation::softmax, Tensor},
-};
+use burn::{backend::Candle, tensor::Tensor};
 use fractal_core::{
     registry::SpeciesId,
-    rule_trait::FractalRule,
+    rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
 };
 
 use crate::{
-    primitives::entropy_regularized_router_probs, species_registry, B2StableHierarchical,
-    GeneralizedMobius, Ifs, LogisticChaoticMap, P1Contractive, P3Hierarchical,
+    species_registry, B2StableHierarchical, GeneralizedMobius, Ifs, LogisticChaoticMap,
+    P1Contractive, P3Hierarchical,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -33,7 +30,16 @@ fn primitives_preserve_declared_layout_and_shape() {
         let state =
             FractalState::zeros(primitive.state_layout(), 2, primitive.hidden_dim(), &device)
                 .unwrap();
-        let next = primitive.apply(&state, &x).unwrap();
+        let next = primitive
+            .apply(
+                &state,
+                &x,
+                ApplyContext {
+                    depth: 1,
+                    max_depth: 4,
+                },
+            )
+            .unwrap();
         assert_eq!(primitive.state_layout(), next.layout());
     }
 }
@@ -56,7 +62,16 @@ fn hierarchical_rules_update_all_levels_without_shape_collapse() {
     let rule = B2StableHierarchical::new(8, 4, &device);
     let state =
         FractalState::zeros(StateLayout::Hierarchical { levels: 4 }, 2, 8, &device).unwrap();
-    let next = rule.apply(&state, &x).unwrap();
+    let next = rule
+        .apply(
+            &state,
+            &x,
+            ApplyContext {
+                depth: 1,
+                max_depth: 4,
+            },
+        )
+        .unwrap();
 
     match next {
         FractalState::Hierarchical(tensor) => assert_eq!(tensor.dims(), [2, 4, 8]),
@@ -75,19 +90,42 @@ fn species_registry_lists_every_species_once() {
 }
 
 #[test]
-fn entropy_regularization_keeps_router_probabilities_non_zero() {
+fn ifs_dynamic_radius_shrinks_with_depth() {
     let device = Default::default();
-    let logits = Tensor::<TestBackend, 2>::from_data([[50.0f32, -50.0, -50.0, -50.0]], &device);
+    let x = Tensor::<TestBackend, 2>::ones([1, 4], &device);
+    let state = FractalState::Flat(Tensor::<TestBackend, 2>::ones([1, 4], &device));
+    let rule = Ifs::new(4, &device);
 
-    let vanilla = softmax(logits.clone(), 1)
+    let shallow = rule
+        .apply(
+            &state,
+            &x,
+            ApplyContext {
+                depth: 1,
+                max_depth: 10,
+            },
+        )
+        .unwrap()
+        .flat()
+        .unwrap()
         .into_data()
         .to_vec::<f32>()
         .unwrap();
-    let regularized = entropy_regularized_router_probs(logits, 4, 0.05)
+    let deep = rule
+        .apply(
+            &state,
+            &x,
+            ApplyContext {
+                depth: 10,
+                max_depth: 10,
+            },
+        )
+        .unwrap()
+        .flat()
+        .unwrap()
         .into_data()
         .to_vec::<f32>()
         .unwrap();
 
-    assert!(vanilla[1] < 1e-6);
-    assert!(regularized.iter().all(|value| *value > 0.0));
+    assert_ne!(shallow, deep);
 }

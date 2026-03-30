@@ -7,15 +7,14 @@ use burn::{
 use fractal_core::{
     error::FractalError,
     primitives::{gated_sigmoid, one_minus},
-    rule_trait::FractalRule,
+    rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
 };
 
-use crate::primitives::contractive_linear;
+use crate::primitives::{contractive_linear, row_l2_norm};
 
 const LOGISTIC_MIN_R: f64 = 3.6;
 const LOGISTIC_MAX_R: f64 = 3.95;
-const LOGISTIC_RESIDUAL_CONTRACTION: f64 = 0.05;
 
 #[derive(Module, Debug)]
 pub struct LogisticChaoticMap<B: Backend> {
@@ -39,6 +38,7 @@ impl<B: Backend> FractalRule<B> for LogisticChaoticMap<B> {
         &self,
         state: &FractalState<B>,
         x: &Tensor<B, 2>,
+        _context: ApplyContext,
     ) -> Result<FractalState<B>, FractalError> {
         let previous_state = state.flat()?;
         let bounded_state = gated_sigmoid(previous_state.clone());
@@ -48,8 +48,11 @@ impl<B: Backend> FractalRule<B> for LogisticChaoticMap<B> {
             .clamp(LOGISTIC_MIN_R, LOGISTIC_MAX_R);
         let g_t = gated_sigmoid(self.g_proj.forward(x.clone()));
         let next = r_t * bounded_state.clone() * one_minus(bounded_state) + g_t * x.clone();
-        let next = next.mul_scalar(1.0 - LOGISTIC_RESIDUAL_CONTRACTION)
-            + previous_state.mul_scalar(LOGISTIC_RESIDUAL_CONTRACTION);
+        let alpha = gated_sigmoid(row_l2_norm(previous_state.clone()))
+            .mul_scalar(0.08)
+            .add_scalar(0.02)
+            .repeat(&[1, self.hidden_dim]);
+        let next = alpha.clone() * next + one_minus(alpha) * previous_state;
 
         Ok(FractalState::Flat(next))
     }

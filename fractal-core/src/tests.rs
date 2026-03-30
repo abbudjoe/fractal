@@ -29,7 +29,7 @@ use crate::{
     primitives::complex_square,
     registry::{ComputeBackend, ExecutionMode, SpeciesDefinition, SpeciesId, SpeciesRunContext},
     router::EarlyExitRouter,
-    rule_trait::FractalRule,
+    rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
 };
 
@@ -402,6 +402,7 @@ impl<B: Backend> FractalRule<B> for AddInputRule<B> {
         &self,
         state: &FractalState<B>,
         x: &Tensor<B, 2>,
+        _context: ApplyContext,
     ) -> Result<FractalState<B>, FractalError> {
         Ok(FractalState::Flat(state.flat()? + x.clone()))
     }
@@ -437,6 +438,7 @@ impl<B: Backend> FractalRule<B> for CountingRule<B> {
         &self,
         state: &FractalState<B>,
         _x: &Tensor<B, 2>,
+        _context: ApplyContext,
     ) -> Result<FractalState<B>, FractalError> {
         APPLY_COUNTER.fetch_add(1, Ordering::SeqCst);
         Ok(state.clone())

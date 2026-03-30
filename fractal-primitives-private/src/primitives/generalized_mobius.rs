@@ -6,14 +6,11 @@ use burn::{
 
 use fractal_core::{
     error::FractalError,
-    rule_trait::FractalRule,
+    rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
 };
 
-use crate::primitives::{clamped_contractive, contractive_linear};
-
-const MOBIUS_JITTER: f64 = 1e-5;
-const MOBIUS_LINEAR_CONTRACTIVE_BIAS: f64 = 0.95;
+use crate::primitives::{contractive_linear, row_l2_norm};
 
 #[derive(Module, Debug)]
 pub struct GeneralizedMobius<B: Backend> {
@@ -41,22 +38,25 @@ impl<B: Backend> FractalRule<B> for GeneralizedMobius<B> {
         &self,
         state: &FractalState<B>,
         x: &Tensor<B, 2>,
+        _context: ApplyContext,
     ) -> Result<FractalState<B>, FractalError> {
         let state = state.flat()?;
-        let a = clamped_contractive(self.a_proj.forward(x.clone()), 0.98)
-            .mul_scalar(MOBIUS_LINEAR_CONTRACTIVE_BIAS);
+        let a = self.a_proj.forward(x.clone()).tanh();
         let b = self.b_proj.forward(x.clone()).tanh().mul_scalar(0.5);
-        let c = clamped_contractive(self.c_proj.forward(x.clone()), 0.25)
-            .mul_scalar(MOBIUS_LINEAR_CONTRACTIVE_BIAS);
+        let c = self.c_proj.forward(x.clone()).tanh();
         let d = self
             .d_proj
             .forward(x.clone())
             .tanh()
             .mul_scalar(0.5)
             .add_scalar(1.0);
+        let epsilon = row_l2_norm(state.clone())
+            .mul_scalar(1e-5)
+            .add_scalar(1e-6)
+            .repeat(&[1, self.hidden_dim]);
 
         let numerator = a * state.clone() + b;
-        let denominator = (c * state + d).add_scalar(MOBIUS_JITTER);
+        let denominator = c * state + d + epsilon;
         let next = numerator * denominator.recip();
 
         Ok(FractalState::Flat(next))

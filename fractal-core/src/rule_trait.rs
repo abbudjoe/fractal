@@ -5,11 +5,18 @@ use crate::{
     state::{FractalState, StateLayout},
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApplyContext {
+    pub depth: usize,
+    pub max_depth: usize,
+}
+
 pub trait FractalRule<B: Backend>: Send + 'static {
     fn apply(
         &self,
         state: &FractalState<B>,
         x: &Tensor<B, 2>,
+        context: ApplyContext,
     ) -> Result<FractalState<B>, FractalError>;
 
     fn name(&self) -> &'static str;

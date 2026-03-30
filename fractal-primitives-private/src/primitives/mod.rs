@@ -39,16 +39,13 @@ pub(crate) fn contractive_diag_param<B: Backend>(
     .init([rows, cols], device)
 }
 
-pub(crate) fn clamped_contractive<B: Backend>(tensor: Tensor<B, 2>, limit: f64) -> Tensor<B, 2> {
-    tensor.tanh().mul_scalar(limit)
+pub(crate) fn router_probs<B: Backend>(logits: Tensor<B, 2>) -> Tensor<B, 2> {
+    softmax(logits, 1)
 }
 
-pub(crate) fn entropy_regularized_router_probs<B: Backend>(
-    logits: Tensor<B, 2>,
-    num_choices: usize,
-    entropy_mix: f64,
-) -> Tensor<B, 2> {
-    softmax(logits, 1)
-        .mul_scalar(1.0 - entropy_mix)
-        .add_scalar(entropy_mix / num_choices as f64)
+pub(crate) fn row_l2_norm<B: Backend>(tensor: Tensor<B, 2>) -> Tensor<B, 2> {
+    (tensor.clone() * tensor)
+        .sum_dim(1)
+        .add_scalar(1e-12)
+        .sqrt()
 }

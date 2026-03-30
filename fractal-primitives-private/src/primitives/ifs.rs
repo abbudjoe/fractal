@@ -6,15 +6,13 @@ use burn::{
 
 use fractal_core::{
     error::FractalError,
-    rule_trait::FractalRule,
+    rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
 };
 
-use crate::primitives::{contractive_diag_param, entropy_regularized_router_probs};
+use crate::primitives::{contractive_diag_param, router_probs};
 
 const NUM_IFS_MAPS: usize = 4;
-const IFS_SPECTRAL_RADIUS_LIMIT: f64 = 0.95;
-const IFS_ROUTER_ENTROPY_MIX: f64 = 0.05;
 
 #[derive(Module, Debug)]
 pub struct Ifs<B: Backend> {
@@ -40,18 +38,13 @@ impl<B: Backend> FractalRule<B> for Ifs<B> {
         &self,
         state: &FractalState<B>,
         x: &Tensor<B, 2>,
+        context: ApplyContext,
     ) -> Result<FractalState<B>, FractalError> {
         let state = state.flat()?;
         let [batch, _] = state.dims();
-        let probs = entropy_regularized_router_probs(
-            self.router.forward(x.clone()),
-            NUM_IFS_MAPS,
-            IFS_ROUTER_ENTROPY_MIX,
-        );
-        let a_diag = self
-            .a_diag
-            .val()
-            .clamp(-IFS_SPECTRAL_RADIUS_LIMIT, IFS_SPECTRAL_RADIUS_LIMIT);
+        let probs = router_probs(self.router.forward(x.clone()));
+        let radius = 0.98 - 0.03 * (context.depth as f64 / context.max_depth as f64);
+        let a_diag = self.a_diag.val().mul_scalar(radius);
         let b_bias = self.b_bias.val();
         let mut next = Tensor::<B, 2>::zeros([batch, self.hidden_dim], &state.device());
 
