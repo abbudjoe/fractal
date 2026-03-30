@@ -1,4 +1,11 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+    time::Duration,
+};
 
 #[cfg(feature = "cuda")]
 use burn::backend::candle::CandleDevice;
@@ -7,16 +14,17 @@ use burn::{
     module::{Module, Param},
     tensor::{backend::Backend, Int, Tensor, TensorData},
 };
-use burn_mlx::MlxDevice;
 
 use crate::{
     data_generator::{
-        DatasetSplit, GeneratorConfig, SimpleHierarchicalGenerator, TaskFamily, MIN_SEQUENCE_LEN,
-        MIN_VOCAB_SIZE, PAD_TOKEN,
+        DatasetSplit, GeneratorConfig, GeneratorDepthConfig, SimpleHierarchicalGenerator,
+        TaskFamily, MIN_SEQUENCE_LEN, MIN_VOCAB_SIZE, PAD_TOKEN,
     },
     error::FractalError,
     fitness::SpeciesRawMetrics,
-    lifecycle::{Tournament, TournamentConfig, TournamentPreset, TournamentSequence},
+    lifecycle::{
+        Tournament, TournamentConfig, TournamentPreset, TournamentProgressEvent, TournamentSequence,
+    },
     model::FractalModel,
     primitives::complex_square,
     registry::{ComputeBackend, ExecutionMode, SpeciesDefinition, SpeciesId, SpeciesRunContext},
@@ -27,6 +35,8 @@ use crate::{
 
 type TestBackend = Candle<f32, i64>;
 static APPLY_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static CONCURRENT_SPECIES: AtomicUsize = AtomicUsize::new(0);
+static MAX_CONCURRENT_SPECIES: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
 fn complex_square_matches_hand_computed_values() {
@@ -62,21 +72,21 @@ fn router_exit_mask_is_per_sample() {
 }
 
 #[test]
-fn tournament_returns_exactly_seven_results() {
+fn tournament_returns_one_result_per_registered_species() {
     let tournament = Tournament::new(TournamentConfig::fast_test()).unwrap();
     let results = tournament.run_generation(&test_species_registry()).unwrap();
 
-    assert_eq!(results.len(), 7);
+    assert_eq!(results.len(), SpeciesId::ALL.len());
 }
 
 #[test]
-fn tournament_parallel_mode_returns_exactly_seven_results() {
+fn tournament_parallel_mode_returns_one_result_per_registered_species() {
     let tournament =
         Tournament::new(TournamentConfig::fast_test().with_execution_mode(ExecutionMode::Parallel))
             .unwrap();
     let results = tournament.run_generation(&test_species_registry()).unwrap();
 
-    assert_eq!(results.len(), 7);
+    assert_eq!(results.len(), SpeciesId::ALL.len());
 }
 
 #[test]
@@ -103,6 +113,71 @@ fn research_medium_preset_targets_single_gpu_sequential_run() {
     assert_eq!(config.train_steps_per_species, 5);
     assert_eq!(config.eval_batches_per_family, 2);
     assert_eq!(config.execution_mode, ExecutionMode::Sequential);
+    assert_eq!(config.parallelism, 4);
+}
+
+#[test]
+fn challenger_lane_preset_targets_midweight_single_gpu_run() {
+    let config = TournamentPreset::ChallengerLane.config();
+
+    assert_eq!(config.dim, 96);
+    assert_eq!(config.levels, 3);
+    assert_eq!(config.max_seq_len, 64);
+    assert_eq!(config.max_recursion_depth, 8);
+    assert_eq!(config.batch_size, 8);
+    assert_eq!(config.train_steps_per_species, 20);
+    assert_eq!(config.eval_batches_per_family, 4);
+    assert_eq!(config.execution_mode, ExecutionMode::Sequential);
+    assert_eq!(config.parallelism, 4);
+}
+
+#[test]
+fn bullpen_polish_preset_targets_top_candidates_with_harder_recursion() {
+    let config = TournamentPreset::BullpenPolish.config();
+
+    assert_eq!(config.dim, 192);
+    assert_eq!(config.levels, 3);
+    assert_eq!(config.max_seq_len, 128);
+    assert_eq!(config.max_recursion_depth, 12);
+    assert_eq!(config.batch_size, 8);
+    assert_eq!(config.train_steps_per_species, 50);
+    assert_eq!(config.eval_batches_per_family, 4);
+    assert_eq!(config.generator_depth_config.sentence_eval_max_depth, 10);
+}
+
+#[test]
+fn candidate_stress_preset_targets_single_species_full_stress_run() {
+    let config = TournamentPreset::CandidateStress.config();
+
+    assert_eq!(config.dim, 192);
+    assert_eq!(config.levels, 3);
+    assert_eq!(config.max_seq_len, 128);
+    assert_eq!(config.max_recursion_depth, 20);
+    assert_eq!(config.batch_size, 8);
+    assert_eq!(config.train_steps_per_species, 200);
+    assert_eq!(config.eval_batches_per_family, 8);
+    assert_eq!(config.generator_depth_config.sentence_eval_max_depth, 12);
+}
+
+#[test]
+fn generation_four_preset_uses_pressure_test_shape() {
+    let config = TournamentPreset::GenerationFour.config();
+
+    assert_eq!(config.dim, 128);
+    assert_eq!(config.levels, 4);
+    assert_eq!(config.max_seq_len, 128);
+    assert_eq!(config.max_recursion_depth, 20);
+    assert_eq!(config.batch_size, 16);
+    assert_eq!(config.train_steps_per_species, 50);
+    assert_eq!(config.eval_batches_per_family, 8);
+    assert_eq!(config.execution_mode, ExecutionMode::Sequential);
+    assert_eq!(config.parallelism, 4);
+
+    #[cfg(feature = "cuda")]
+    assert!(matches!(
+        config.execution_backend,
+        ComputeBackend::CudaCandle { .. }
+    ));
 }
 
 #[test]
@@ -111,12 +186,7 @@ fn default_config_uses_a_supported_backend() {
 
     assert!(config.execution_backend.is_supported_on_current_platform());
     Tournament::new(config.clone()).unwrap();
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    assert!(matches!(
-        config.execution_backend,
-        ComputeBackend::Mlx { .. }
-    ));
-    #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+    #[cfg(target_os = "macos")]
     assert!(matches!(
         config.execution_backend,
         ComputeBackend::MetalWgpu { .. }
@@ -144,7 +214,10 @@ fn tournament_presets_never_clip_eval_examples() {
     for preset in [
         TournamentPreset::FastTest,
         TournamentPreset::ResearchMedium,
+        TournamentPreset::ChallengerLane,
+        TournamentPreset::BullpenPolish,
         TournamentPreset::PressureTest,
+        TournamentPreset::CandidateStress,
     ] {
         let config = preset.config();
         let generator = SimpleHierarchicalGenerator::new(GeneratorConfig {
@@ -153,6 +226,7 @@ fn tournament_presets_never_clip_eval_examples() {
             train_examples_per_family: 8,
             eval_examples_per_family: 8,
             seed: config.seed,
+            depth_config: config.generator_depth_config,
         })
         .unwrap();
 
@@ -178,6 +252,66 @@ fn tournament_rejects_invalid_workspace_config() {
 }
 
 #[test]
+fn tournament_rejects_zero_parallelism() {
+    let error = Tournament::new(TournamentConfig {
+        parallelism: 0,
+        ..TournamentConfig::fast_test()
+    })
+    .unwrap_err();
+
+    assert!(matches!(error, FractalError::InvalidConfig(_)));
+}
+
+#[test]
+fn tournament_streams_species_events_in_sequential_mode() {
+    let tournament = Tournament::new(TournamentConfig::fast_test()).unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let reporter_events = Arc::clone(&events);
+    let reporter = Arc::new(move |event: TournamentProgressEvent| {
+        reporter_events.lock().unwrap().push(event);
+    });
+
+    let results = tournament
+        .run_generation_with_reporter(&test_species_registry(), Some(reporter))
+        .unwrap();
+
+    assert_eq!(results.len(), SpeciesId::ALL.len());
+
+    let events = events.lock().unwrap();
+    let started = events
+        .iter()
+        .filter(|event| matches!(event, TournamentProgressEvent::SpeciesStarted(_)))
+        .count();
+    let completed = events
+        .iter()
+        .filter(|event| matches!(event, TournamentProgressEvent::SpeciesCompleted(_)))
+        .count();
+
+    assert_eq!(started, SpeciesId::ALL.len());
+    assert_eq!(completed, SpeciesId::ALL.len());
+}
+
+#[test]
+fn tournament_parallel_mode_respects_parallelism_cap() {
+    CONCURRENT_SPECIES.store(0, Ordering::SeqCst);
+    MAX_CONCURRENT_SPECIES.store(0, Ordering::SeqCst);
+    let tournament = Tournament::new(
+        TournamentConfig::fast_test()
+            .with_execution_mode(ExecutionMode::Parallel)
+            .with_parallelism(2),
+    )
+    .unwrap();
+
+    let results = tournament
+        .run_generation(&parallelism_test_species_registry())
+        .unwrap();
+
+    assert_eq!(results.len(), SpeciesId::ALL.len());
+    assert!(MAX_CONCURRENT_SPECIES.load(Ordering::SeqCst) <= 2);
+    assert!(MAX_CONCURRENT_SPECIES.load(Ordering::SeqCst) >= 2);
+}
+
+#[test]
 fn generator_rejects_vocab_that_cannot_encode_reserved_tokens() {
     let error = SimpleHierarchicalGenerator::new(GeneratorConfig {
         vocab_size: MIN_VOCAB_SIZE - 1,
@@ -199,28 +333,20 @@ fn generator_rejects_sequence_lengths_that_clip_recursive_tasks() {
     assert!(matches!(error, FractalError::InvalidConfig(_)));
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
-fn generator_builds_backend_native_int_batches_for_mlx() {
-    let generator = SimpleHierarchicalGenerator::new(GeneratorConfig::default()).unwrap();
-    let batch = generator
-        .batch_for::<burn_mlx::Mlx>(
-            TaskFamily::RecursiveSentence,
-            DatasetSplit::Train,
-            0,
-            1,
-            &MlxDevice::Cpu,
-        )
-        .unwrap();
+fn generator_rejects_invalid_depth_ranges() {
+    let error = SimpleHierarchicalGenerator::new(GeneratorConfig {
+        depth_config: GeneratorDepthConfig {
+            sentence_train_max_depth: 4,
+            sentence_eval_min_depth: 6,
+            sentence_eval_max_depth: 5,
+            ..GeneratorDepthConfig::default()
+        },
+        ..GeneratorConfig::default()
+    })
+    .unwrap_err();
 
-    assert_eq!(
-        batch.input_ids.dims(),
-        [1, GeneratorConfig::default().max_seq_len]
-    );
-    assert_eq!(
-        batch.target_ids.dims(),
-        [1, GeneratorConfig::default().max_seq_len]
-    );
+    assert!(matches!(error, FractalError::InvalidConfig(_)));
 }
 
 #[derive(Module, Debug)]
@@ -369,34 +495,30 @@ fn test_species_registry() -> Vec<SpeciesDefinition> {
     SpeciesId::ALL
         .iter()
         .copied()
-        .map(|id| test_species_definition(id))
+        .map(test_species_definition)
         .collect()
 }
 
 #[cfg(not(feature = "cuda"))]
 fn test_species_definition(id: SpeciesId) -> SpeciesDefinition {
-    SpeciesDefinition::new(
-        id,
-        stub_species_runner,
-        stub_species_runner_metal,
-        stub_species_runner_mlx,
-    )
+    SpeciesDefinition::new(id, indexed_stub_species_runner, stub_species_runner_metal)
 }
 
 #[cfg(feature = "cuda")]
 fn test_species_definition(id: SpeciesId) -> SpeciesDefinition {
     SpeciesDefinition::new(
         id,
-        stub_species_runner,
+        indexed_stub_species_runner,
         stub_species_runner_metal,
-        stub_species_runner_mlx,
         stub_species_runner_cuda,
     )
 }
 
-fn stub_species_runner(_context: SpeciesRunContext) -> Result<SpeciesRawMetrics, FractalError> {
+fn indexed_stub_species_runner(
+    context: SpeciesRunContext,
+) -> Result<SpeciesRawMetrics, FractalError> {
     Ok(SpeciesRawMetrics {
-        species: SpeciesId::P1Contractive,
+        species: SpeciesId::ALL[context.index],
         grad_norm_depth_20: 1.0,
         long_context_perplexity: 10.0,
         arc_accuracy: 0.5,
@@ -404,18 +526,21 @@ fn stub_species_runner(_context: SpeciesRunContext) -> Result<SpeciesRawMetrics,
     })
 }
 
+fn parallelism_stub_species_runner(
+    context: SpeciesRunContext,
+) -> Result<SpeciesRawMetrics, FractalError> {
+    let current = CONCURRENT_SPECIES.fetch_add(1, Ordering::SeqCst) + 1;
+    MAX_CONCURRENT_SPECIES.fetch_max(current, Ordering::SeqCst);
+    thread::sleep(Duration::from_millis(40));
+    CONCURRENT_SPECIES.fetch_sub(1, Ordering::SeqCst);
+    indexed_stub_species_runner(context)
+}
+
 fn stub_species_runner_metal(
     context: SpeciesRunContext,
     _device: WgpuDevice,
 ) -> Result<SpeciesRawMetrics, FractalError> {
-    stub_species_runner(context)
-}
-
-fn stub_species_runner_mlx(
-    context: SpeciesRunContext,
-    _device: MlxDevice,
-) -> Result<SpeciesRawMetrics, FractalError> {
-    stub_species_runner(context)
+    indexed_stub_species_runner(context)
 }
 
 #[cfg(feature = "cuda")]
@@ -423,5 +548,47 @@ fn stub_species_runner_cuda(
     context: SpeciesRunContext,
     _device: CandleDevice,
 ) -> Result<SpeciesRawMetrics, FractalError> {
-    stub_species_runner(context)
+    indexed_stub_species_runner(context)
+}
+
+fn parallelism_stub_species_runner_metal(
+    context: SpeciesRunContext,
+    _device: WgpuDevice,
+) -> Result<SpeciesRawMetrics, FractalError> {
+    parallelism_stub_species_runner(context)
+}
+
+#[cfg(feature = "cuda")]
+fn parallelism_stub_species_runner_cuda(
+    context: SpeciesRunContext,
+    _device: CandleDevice,
+) -> Result<SpeciesRawMetrics, FractalError> {
+    parallelism_stub_species_runner(context)
+}
+
+fn parallelism_test_species_registry() -> Vec<SpeciesDefinition> {
+    SpeciesId::ALL
+        .iter()
+        .copied()
+        .map(parallelism_test_species_definition)
+        .collect()
+}
+
+#[cfg(not(feature = "cuda"))]
+fn parallelism_test_species_definition(id: SpeciesId) -> SpeciesDefinition {
+    SpeciesDefinition::new(
+        id,
+        parallelism_stub_species_runner,
+        parallelism_stub_species_runner_metal,
+    )
+}
+
+#[cfg(feature = "cuda")]
+fn parallelism_test_species_definition(id: SpeciesId) -> SpeciesDefinition {
+    SpeciesDefinition::new(
+        id,
+        parallelism_stub_species_runner,
+        parallelism_stub_species_runner_metal,
+        parallelism_stub_species_runner_cuda,
+    )
 }

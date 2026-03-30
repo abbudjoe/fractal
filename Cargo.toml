@@ -17,9 +17,8 @@ resolver = "2"
 edition = "2021"
 
 [workspace.dependencies]
-burn = { version = "=0.16.1", default-features = false, features = ["std", "autodiff", "candle", "wgpu"] }
-burn-candle = "=0.16.1"
-burn-mlx = "=0.1.2"
+burn = { version = "=0.20.1", default-features = false, features = ["std", "autodiff", "candle", "wgpu"] }
+burn-candle = "=0.20.1"
 rand = "0.8"
 
 [dependencies]

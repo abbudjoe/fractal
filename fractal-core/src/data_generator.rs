@@ -47,6 +47,7 @@ pub struct GeneratorConfig {
     pub train_examples_per_family: usize,
     pub eval_examples_per_family: usize,
     pub seed: u64,
+    pub depth_config: GeneratorDepthConfig,
 }
 
 impl Default for GeneratorConfig {
@@ -57,12 +58,72 @@ impl Default for GeneratorConfig {
             train_examples_per_family: 96,
             eval_examples_per_family: 32,
             seed: 42,
+            depth_config: GeneratorDepthConfig::default(),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GeneratorDepthConfig {
+    pub sentence_train_max_depth: usize,
+    pub sentence_eval_min_depth: usize,
+    pub sentence_eval_max_depth: usize,
+    pub grid_train_max_depth: usize,
+    pub grid_eval_min_depth: usize,
+    pub grid_eval_max_depth: usize,
+}
+
+impl Default for GeneratorDepthConfig {
+    fn default() -> Self {
+        Self {
+            sentence_train_max_depth: SENTENCE_TRAIN_MAX_DEPTH,
+            sentence_eval_min_depth: SENTENCE_EVAL_MIN_DEPTH,
+            sentence_eval_max_depth: SENTENCE_EVAL_MAX_DEPTH,
+            grid_train_max_depth: GRID_TRAIN_MAX_DEPTH,
+            grid_eval_min_depth: GRID_EVAL_MIN_DEPTH,
+            grid_eval_max_depth: GRID_EVAL_MAX_DEPTH,
+        }
+    }
+}
+
+impl GeneratorDepthConfig {
+    pub fn polish_top_candidates() -> Self {
+        Self {
+            sentence_train_max_depth: 8,
+            sentence_eval_min_depth: 9,
+            sentence_eval_max_depth: 10,
+            ..Self::default()
+        }
+    }
+
+    pub fn stress_top_candidates() -> Self {
+        Self {
+            sentence_train_max_depth: 10,
+            sentence_eval_min_depth: 11,
+            sentence_eval_max_depth: 12,
+            ..Self::default()
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        validate_depth_bounds("sentence training depth", 1, self.sentence_train_max_depth)?;
+        validate_depth_bounds(
+            "sentence eval depth",
+            self.sentence_eval_min_depth,
+            self.sentence_eval_max_depth,
+        )?;
+        validate_depth_bounds("grid training depth", 1, self.grid_train_max_depth)?;
+        validate_depth_bounds(
+            "grid eval depth",
+            self.grid_eval_min_depth,
+            self.grid_eval_max_depth,
+        )
     }
 }
 
 impl GeneratorConfig {
     pub fn validate(&self) -> Result<(), FractalError> {
+        self.depth_config.validate()?;
         if self.vocab_size < MIN_VOCAB_SIZE {
             return Err(FractalError::InvalidConfig(format!(
                 "vocab_size must be at least {MIN_VOCAB_SIZE} to encode reserved tokens"
@@ -119,21 +180,24 @@ impl SimpleHierarchicalGenerator {
 
         let sentence_train_schedule = train_depth_schedule(
             config.max_seq_len,
-            SENTENCE_TRAIN_MAX_DEPTH,
+            config.depth_config.sentence_train_max_depth,
             sentence_token_budget,
         )?;
-        let grid_train_schedule =
-            train_depth_schedule(config.max_seq_len, GRID_TRAIN_MAX_DEPTH, grid_token_budget)?;
+        let grid_train_schedule = train_depth_schedule(
+            config.max_seq_len,
+            config.depth_config.grid_train_max_depth,
+            grid_token_budget,
+        )?;
         let sentence_eval_schedule = eval_depth_schedule(
             config.max_seq_len,
-            SENTENCE_EVAL_MIN_DEPTH,
-            SENTENCE_EVAL_MAX_DEPTH,
+            config.depth_config.sentence_eval_min_depth,
+            config.depth_config.sentence_eval_max_depth,
             sentence_token_budget,
         )?;
         let grid_eval_schedule = eval_depth_schedule(
             config.max_seq_len,
-            GRID_EVAL_MIN_DEPTH,
-            GRID_EVAL_MAX_DEPTH,
+            config.depth_config.grid_eval_min_depth,
+            config.depth_config.grid_eval_max_depth,
             grid_token_budget,
         )?;
 
@@ -321,6 +385,20 @@ fn build_examples(
             tokens: builder(rng, schedule.depth_for(index)),
         })
         .collect()
+}
+
+fn validate_depth_bounds(
+    label: &'static str,
+    min_depth: usize,
+    max_depth: usize,
+) -> Result<(), FractalError> {
+    if min_depth == 0 || max_depth == 0 || min_depth > max_depth {
+        return Err(FractalError::InvalidConfig(format!(
+            "{label} must define a valid positive range, got {min_depth}..={max_depth}"
+        )));
+    }
+
+    Ok(())
 }
 
 fn ensure_examples_fit(

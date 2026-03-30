@@ -95,7 +95,7 @@ mod tests {
                 tokens_per_sec: 100.0,
             },
             SpeciesRawMetrics {
-                species: SpeciesId::P2Mandelbrot,
+                species: SpeciesId::Ifs,
                 grad_norm_depth_20: 1.0,
                 long_context_perplexity: 20.0,
                 arc_accuracy: 0.0,
@@ -103,7 +103,7 @@ mod tests {
             },
         ]);
 
-        assert_eq!(ranked[0].species, SpeciesId::P2Mandelbrot);
+        assert_eq!(ranked[0].species, SpeciesId::Ifs);
         assert_eq!(ranked[1].species, SpeciesId::P1Contractive);
     }
 }

@@ -76,7 +76,7 @@ resolve_ssh_key() {
         return 0
     fi
 
-    if detected_key="$("$RUNPODCTL_BIN" ssh list-keys | python3 -c '
+if detected_key="$("$RUNPODCTL_BIN" ssh list-keys | python3 -c '
 import glob
 import json
 import pathlib
@@ -92,11 +92,17 @@ registered = {
     for entry in payload.get("keys", [])
 }
 
-for path in sorted(glob.glob(str(pathlib.Path.home() / ".ssh" / "*.pub"))):
-    candidate = normalize_key(pathlib.Path(path).read_text())
-    if candidate in registered:
-        print(path[:-4])
-        sys.exit(0)
+search_globs = [
+    pathlib.Path.home() / ".runpod" / "ssh" / "*.pub",
+    pathlib.Path.home() / ".ssh" / "*.pub",
+]
+
+for pattern in search_globs:
+    for path in sorted(glob.glob(str(pattern))):
+        candidate = normalize_key(pathlib.Path(path).read_text())
+        if candidate in registered:
+            print(path[:-4])
+            sys.exit(0)
 
 sys.exit(1)
 ')"; then
@@ -161,6 +167,9 @@ load_pod_state() {
     POD_NAME_RESOLVED="$(printf '%s' "$pod_json" | json_value "name" || true)"
     POD_STATUS="$(printf '%s' "$pod_json" | json_value "desiredStatus" || true)"
     PUBLIC_IP="$(printf '%s' "$pod_json" | json_value "publicIp" || true)"
+    if [ -z "${PUBLIC_IP:-}" ]; then
+        PUBLIC_IP="$(printf '%s' "$pod_json" | json_value "ssh.ip" || true)"
+    fi
     SSH_PORT="$(printf '%s' "$pod_json" | python3 -c '
 import json
 import sys
@@ -170,6 +179,9 @@ port_mappings = pod.get("portMappings") or {}
 value = port_mappings.get("22")
 if value is None:
     value = port_mappings.get(22)
+if value is None:
+    ssh = pod.get("ssh") or {}
+    value = ssh.get("port")
 if value is not None:
     print(value)
 '
@@ -340,12 +352,32 @@ sync_worktree() {
     remote_dir_q="$(printf '%q' "$REMOTE_DIR")"
 
     log "syncing worktree to ${POD_NAME_RESOLVED:-$POD_ID}:${REMOTE_DIR}"
-    COPYFILE_DISABLE=1 tar \
-        --exclude=.git \
-        --exclude=target \
-        --exclude=.DS_Store \
-        -C "$REPO_ROOT" \
-        -cf - . | "${SSH_BASE[@]}" "rm -rf ${remote_dir_q} && mkdir -p ${remote_dir_q} && tar -xf - -C ${remote_dir_q}"
+    if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git -C "$REPO_ROOT" ls-files --cached --others --exclude-standard -z \
+            | while IFS= read -r -d '' path; do
+                [ -e "${REPO_ROOT}/${path}" ] || continue
+                printf '%s\0' "$path"
+            done \
+            | COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar \
+                --no-mac-metadata \
+                --no-xattrs \
+                -C "$REPO_ROOT" \
+                --null \
+                -T - \
+                -cf - \
+            | "${SSH_BASE[@]}" "rm -rf ${remote_dir_q} && mkdir -p ${remote_dir_q} && tar --no-same-owner -xf - -C ${remote_dir_q}"
+    else
+        COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar \
+            --no-mac-metadata \
+            --no-xattrs \
+            --exclude=.git \
+            --exclude=target \
+            --exclude=.cmake-venv \
+            --exclude=.DS_Store \
+            -C "$REPO_ROOT" \
+            -cf - . \
+            | "${SSH_BASE[@]}" "rm -rf ${remote_dir_q} && mkdir -p ${remote_dir_q} && tar --no-same-owner -xf - -C ${remote_dir_q}"
+    fi
 }
 
 bootstrap_remote() {
@@ -356,6 +388,17 @@ set -euo pipefail
 remote_dir="$1"
 state_dir="$2"
 export DEBIAN_FRONTEND=noninteractive
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+if [ -d "${CUDA_HOME}/bin" ]; then
+    export PATH="${CUDA_HOME}/bin:${PATH}"
+fi
+if [ -d "${CUDA_HOME}/lib64" ]; then
+    export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
+fi
+if [ -f "$HOME/.cargo/env" ]; then
+    # shellcheck disable=SC1090
+    . "$HOME/.cargo/env"
+fi
 
 need_apt=0
 for cmd in curl git cmake pkg-config g++; do
@@ -369,8 +412,14 @@ if [ "$need_apt" -eq 1 ]; then
     apt-get install -y build-essential cmake curl git pkg-config libssl-dev
 fi
 
-if ! command -v cargo >/dev/null 2>&1; then
-    curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+if ! command -v cargo >/dev/null 2>&1 || ! cargo --version >/dev/null 2>&1; then
+    curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
+    # shellcheck disable=SC1090
+    . "$HOME/.cargo/env"
+fi
+
+if command -v rustup >/dev/null 2>&1; then
+    rustup default stable >/dev/null
 fi
 
 if ! command -v nvcc >/dev/null 2>&1; then
@@ -408,6 +457,13 @@ if [ -f "$HOME/.cargo/env" ]; then
     . "$HOME/.cargo/env"
 fi
 
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+if [ -d "${CUDA_HOME}/bin" ]; then
+    export PATH="${CUDA_HOME}/bin:$PATH"
+fi
+if [ -d "${CUDA_HOME}/lib64" ]; then
+    export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
+fi
 export PATH="$HOME/.cargo/bin:$PATH"
 export CARGO_TARGET_DIR="$state_dir/target"
 
@@ -418,7 +474,7 @@ printf 'branch=%s\ncommit=%s\nrun_at=%s\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$state_dir/last-sync.txt"
 
 cd "$remote_dir"
-cargo run --release --features cuda --example tournament -- --backend cuda "$@" \
+stdbuf -oL -eL cargo run --release --features cuda --example tournament -- --backend cuda "$@" \
     2>&1 | tee "$state_dir/logs/latest.log"
 REMOTE
 }

@@ -1,9 +1,14 @@
+use std::sync::Arc;
+
 use fractal::{
     aggregate_results,
     error::FractalError,
-    lifecycle::{Tournament, TournamentConfig, TournamentPreset, TournamentSequence},
-    registry::{ComputeBackend, ExecutionMode},
-    species_registry,
+    lifecycle::{
+        SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig, TournamentPreset,
+        TournamentProgressEvent, TournamentReporter, TournamentSequence,
+    },
+    registry::{ComputeBackend, ExecutionMode, SpeciesId},
+    species_registry_for_lane, species_registry_for_species, TournamentLane,
 };
 
 fn main() -> Result<(), FractalError> {
@@ -34,14 +39,16 @@ enum BackendOverride {
     #[cfg(feature = "cuda")]
     Cuda,
     Metal,
-    Mlx,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RunOptions {
     selection: Option<RunSelection>,
+    lane: Option<TournamentLane>,
+    species: Option<SpeciesId>,
     seed: Option<u64>,
     execution_mode: Option<ExecutionMode>,
+    parallelism: Option<usize>,
     backend: Option<BackendOverride>,
 }
 
@@ -49,8 +56,11 @@ impl Default for RunOptions {
     fn default() -> Self {
         Self {
             selection: None,
+            lane: None,
+            species: None,
             seed: None,
             execution_mode: None,
+            parallelism: None,
             backend: None,
         }
     }
@@ -58,8 +68,14 @@ impl Default for RunOptions {
 
 impl RunOptions {
     fn selection(&self) -> RunSelection {
-        self.selection
-            .unwrap_or(RunSelection::Preset(TournamentPreset::Default))
+        self.selection.unwrap_or_else(|| {
+            let preset = if self.species.is_some() {
+                TournamentPreset::CandidateStress
+            } else {
+                self.lane.unwrap_or(TournamentLane::All).default_preset()
+            };
+            RunSelection::Preset(preset)
+        })
     }
 
     fn set_selection(&mut self, selection: RunSelection) -> Result<(), FractalError> {
@@ -71,6 +87,42 @@ impl RunOptions {
         Ok(())
     }
 
+    fn set_lane(&mut self, lane: TournamentLane) -> Result<(), FractalError> {
+        if self.species.is_some() {
+            return Err(invalid_argument(
+                "choose either --lane or --species, not both".to_owned(),
+            ));
+        }
+        if self.lane.replace(lane).is_some() {
+            return Err(invalid_argument(
+                "choose one --lane value for a run".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn set_species(&mut self, species: SpeciesId) -> Result<(), FractalError> {
+        if self.lane.is_some() {
+            return Err(invalid_argument(
+                "choose either --lane or --species, not both".to_owned(),
+            ));
+        }
+        if self.species.replace(species).is_some() {
+            return Err(invalid_argument(
+                "choose one --species value for a run".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn lane(&self) -> TournamentLane {
+        self.lane.unwrap_or(TournamentLane::All)
+    }
+
+    fn species(&self) -> Option<SpeciesId> {
+        self.species
+    }
+
     fn config_for(&self, preset: TournamentPreset) -> TournamentConfig {
         let mut config = preset.config();
         if let Some(seed) = self.seed {
@@ -78,6 +130,9 @@ impl RunOptions {
         }
         if let Some(execution_mode) = self.execution_mode {
             config.execution_mode = execution_mode;
+        }
+        if let Some(parallelism) = self.parallelism {
+            config.parallelism = parallelism;
         }
         if let Some(backend) = self.backend {
             config.execution_backend = backend.into();
@@ -93,7 +148,6 @@ impl From<BackendOverride> for ComputeBackend {
             #[cfg(feature = "cuda")]
             BackendOverride::Cuda => ComputeBackend::cuda_default(),
             BackendOverride::Metal => ComputeBackend::metal_default(),
-            BackendOverride::Mlx => ComputeBackend::mlx_default(),
         }
     }
 }
@@ -128,6 +182,16 @@ where
             options.set_selection(RunSelection::Sequence(parse_sequence(&value)?))?;
             Ok(())
         }
+        "--lane" => {
+            let value = next_value(args, "--lane")?;
+            options.set_lane(parse_lane(&value)?)?;
+            Ok(())
+        }
+        "--species" => {
+            let value = next_value(args, "--species")?;
+            options.set_species(parse_species(&value)?)?;
+            Ok(())
+        }
         "--seed" => {
             let value = next_value(args, "--seed")?;
             options.seed = Some(parse_seed(&value)?);
@@ -136,6 +200,11 @@ where
         "--mode" => {
             let value = next_value(args, "--mode")?;
             options.execution_mode = Some(parse_execution_mode(&value)?);
+            Ok(())
+        }
+        "--parallelism" => {
+            let value = next_value(args, "--parallelism")?;
+            options.parallelism = Some(parse_parallelism(&value)?);
             Ok(())
         }
         "--backend" => {
@@ -160,7 +229,11 @@ fn parse_preset(value: &str) -> Result<TournamentPreset, FractalError> {
         "default" => Ok(TournamentPreset::Default),
         "fast-test" => Ok(TournamentPreset::FastTest),
         "research-medium" => Ok(TournamentPreset::ResearchMedium),
+        "challenger-lane" => Ok(TournamentPreset::ChallengerLane),
+        "bullpen-polish" => Ok(TournamentPreset::BullpenPolish),
         "pressure-test" => Ok(TournamentPreset::PressureTest),
+        "candidate-stress" => Ok(TournamentPreset::CandidateStress),
+        "generation-four" => Ok(TournamentPreset::GenerationFour),
         _ => Err(invalid_argument(format!("unknown preset: {value}"))),
     }
 }
@@ -178,6 +251,22 @@ fn parse_seed(value: &str) -> Result<u64, FractalError> {
         .map_err(|_| invalid_argument(format!("invalid seed: {value}")))
 }
 
+fn parse_lane(value: &str) -> Result<TournamentLane, FractalError> {
+    match value {
+        "all" => Ok(TournamentLane::All),
+        "baseline" => Ok(TournamentLane::Baseline),
+        "challenger" | "bullpen" => Ok(TournamentLane::Challenger),
+        "leader" => Ok(TournamentLane::Leader),
+        _ => Err(invalid_argument(format!("unknown lane: {value}"))),
+    }
+}
+
+fn parse_species(value: &str) -> Result<SpeciesId, FractalError> {
+    value
+        .parse::<SpeciesId>()
+        .map_err(|_| invalid_argument(format!("unknown species: {value}")))
+}
+
 fn parse_execution_mode(value: &str) -> Result<ExecutionMode, FractalError> {
     match value {
         "sequential" => Ok(ExecutionMode::Sequential),
@@ -186,13 +275,24 @@ fn parse_execution_mode(value: &str) -> Result<ExecutionMode, FractalError> {
     }
 }
 
+fn parse_parallelism(value: &str) -> Result<usize, FractalError> {
+    let parallelism = value
+        .parse::<usize>()
+        .map_err(|_| invalid_argument(format!("invalid parallelism: {value}")))?;
+    if parallelism == 0 {
+        return Err(invalid_argument(
+            "parallelism must be greater than zero".to_owned(),
+        ));
+    }
+    Ok(parallelism)
+}
+
 fn parse_backend(value: &str) -> Result<BackendOverride, FractalError> {
     match value {
         "cpu" => Ok(BackendOverride::Cpu),
         #[cfg(feature = "cuda")]
         "cuda" => Ok(BackendOverride::Cuda),
         "metal" => Ok(BackendOverride::Metal),
-        "mlx" => Ok(BackendOverride::Mlx),
         _ => Err(invalid_argument(format!("unknown backend: {value}"))),
     }
 }
@@ -216,19 +316,38 @@ fn run_sequence(options: &RunOptions, sequence: TournamentSequence) -> Result<()
 
 fn run_preset(options: &RunOptions, preset: TournamentPreset) -> Result<(), FractalError> {
     let config = options.config_for(preset);
-    print_header(preset, &config);
+    let lane = options.lane();
+    let species = options.species();
+    print_header(preset, lane, species, &config);
     let tournament = Tournament::new(config)?;
-    let results = aggregate_results(tournament.run_generation(species_registry())?);
+    let reporter: Arc<dyn TournamentReporter> = Arc::new(StdoutProgressReporter);
+    let species = if let Some(species) = species {
+        species_registry_for_species(species)
+    } else {
+        species_registry_for_lane(lane)
+    };
+    let results =
+        aggregate_results(tournament.run_generation_with_reporter(&species, Some(reporter))?);
     print_results(results);
     Ok(())
 }
 
-fn print_header(preset: TournamentPreset, config: &TournamentConfig) {
+fn print_header(
+    preset: TournamentPreset,
+    lane: TournamentLane,
+    species: Option<SpeciesId>,
+    config: &TournamentConfig,
+) {
     println!("== {} ==", preset.name());
+    let scope = species
+        .map(|species| format!("species={species}"))
+        .unwrap_or_else(|| format!("lane={}", lane.name()));
     println!(
-        "backend={} mode={} seed={} dim={} levels={} seq={} depth={} batch={} train_steps={} eval_batches={}",
+        "{} backend={} mode={} parallelism={} seed={} dim={} levels={} seq={} depth={} batch={} train_steps={} eval_batches={}",
+        scope,
         backend_name(&config.execution_backend),
         execution_mode_name(config.execution_mode),
+        config.parallelism,
         config.seed,
         config.dim,
         config.levels,
@@ -239,6 +358,40 @@ fn print_header(preset: TournamentPreset, config: &TournamentConfig) {
         config.eval_batches_per_family,
     );
     println!("rank  species                  stability  perplexity  arc_acc  tok/s   fitness");
+}
+
+struct StdoutProgressReporter;
+
+impl TournamentReporter for StdoutProgressReporter {
+    fn on_event(&self, event: TournamentProgressEvent) {
+        match event {
+            TournamentProgressEvent::SpeciesStarted(stage) => print_species_started(&stage),
+            TournamentProgressEvent::SpeciesCompleted(completion) => {
+                print_species_completed(&completion)
+            }
+        }
+    }
+}
+
+fn print_species_started(stage: &SpeciesRunStage) {
+    println!(
+        "[start {}/{}] {}",
+        stage.ordinal, stage.total, stage.species
+    );
+}
+
+fn print_species_completed(completion: &SpeciesCompletion) {
+    println!(
+        "[done  {}/{}] {} elapsed={:.1}s stability={:.2} perplexity={:.2} arc={:.2} tok/s={:.0}",
+        completion.stage.ordinal,
+        completion.stage.total,
+        completion.stage.species,
+        completion.elapsed.as_secs_f64(),
+        completion.metrics.grad_norm_depth_20,
+        completion.metrics.long_context_perplexity,
+        completion.metrics.arc_accuracy,
+        completion.metrics.tokens_per_sec,
+    );
 }
 
 fn print_results(results: Vec<fractal::RankedSpeciesResult>) {
@@ -262,7 +415,6 @@ fn backend_name(backend: &ComputeBackend) -> &'static str {
         #[cfg(feature = "cuda")]
         ComputeBackend::CudaCandle { .. } => "cuda",
         ComputeBackend::MetalWgpu { .. } => "metal",
-        ComputeBackend::Mlx { .. } => "mlx",
     }
 }
 
@@ -281,21 +433,31 @@ fn print_usage() {
     println!("Usage: cargo run --example tournament -- [options]");
     println!();
     println!("Options:");
-    println!("  --preset <default|fast-test|research-medium|pressure-test>");
+    println!(
+        "  --preset <default|fast-test|research-medium|challenger-lane|bullpen-polish|pressure-test|candidate-stress|generation-four>"
+    );
     println!("  --sequence <first-run>");
+    println!("  --lane <all|baseline|challenger|bullpen|leader>");
+    println!("  --species <species-id>");
     println!("  --seed <u64>");
     println!("  --mode <sequential|parallel>");
+    println!("  --parallelism <usize>");
     #[cfg(feature = "cuda")]
-    println!("  --backend <cpu|cuda|metal|mlx>");
+    println!("  --backend <cpu|cuda|metal>");
     #[cfg(not(feature = "cuda"))]
-    println!("  --backend <cpu|metal|mlx>");
+    println!("  --backend <cpu|metal>");
     println!("  --help");
     println!();
     println!("Examples:");
     println!("  cargo run --example tournament -- --preset fast-test");
-    println!("  cargo run --release --example tournament -- --preset research-medium");
+    println!("  cargo run --release --example tournament -- --lane baseline");
+    println!("  cargo run --release --example tournament -- --lane bullpen");
+    println!("  cargo run --release --example tournament -- --species generalized_mobius");
+    println!("  cargo run --release --example tournament -- --preset research-medium --mode parallel --parallelism 4");
     #[cfg(feature = "cuda")]
-    println!("  cargo run --release --features cuda --example tournament -- --backend cuda");
+    println!(
+        "  cargo run --release --features cuda --example tournament -- --lane leader --mode sequential"
+    );
     println!("  cargo run --release --example tournament -- --sequence first-run");
 }
 
@@ -315,10 +477,14 @@ mod tests {
         let command = parse_command(vec![
             "--sequence".to_owned(),
             "first-run".to_owned(),
+            "--lane".to_owned(),
+            "baseline".to_owned(),
             "--seed".to_owned(),
             "43".to_owned(),
             "--mode".to_owned(),
             "parallel".to_owned(),
+            "--parallelism".to_owned(),
+            "3".to_owned(),
             "--backend".to_owned(),
             "cpu".to_owned(),
         ])
@@ -328,30 +494,12 @@ mod tests {
             command,
             CliCommand::Run(RunOptions {
                 selection: Some(RunSelection::Sequence(TournamentSequence::FirstRun)),
+                lane: Some(TournamentLane::Baseline),
+                species: None,
                 seed: Some(43),
                 execution_mode: Some(ExecutionMode::Parallel),
+                parallelism: Some(3),
                 backend: Some(BackendOverride::Cpu),
-            })
-        );
-    }
-
-    #[test]
-    fn parse_command_accepts_mlx_backend_override() {
-        let command = parse_command(vec![
-            "--preset".to_owned(),
-            "fast-test".to_owned(),
-            "--backend".to_owned(),
-            "mlx".to_owned(),
-        ])
-        .unwrap();
-
-        assert_eq!(
-            command,
-            CliCommand::Run(RunOptions {
-                selection: Some(RunSelection::Preset(TournamentPreset::FastTest)),
-                seed: None,
-                execution_mode: None,
-                backend: Some(BackendOverride::Mlx),
             })
         );
     }
@@ -371,8 +519,11 @@ mod tests {
             command,
             CliCommand::Run(RunOptions {
                 selection: Some(RunSelection::Preset(TournamentPreset::FastTest)),
+                lane: None,
+                species: None,
                 seed: None,
                 execution_mode: None,
+                parallelism: None,
                 backend: Some(BackendOverride::Cuda),
             })
         );
@@ -399,6 +550,110 @@ mod tests {
             "fast-test".to_owned(),
             "--sequence".to_owned(),
             "first-run".to_owned(),
+        ])
+        .unwrap_err();
+
+        assert!(matches!(error, FractalError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn parse_command_accepts_generation_four_preset() {
+        let command =
+            parse_command(vec!["--preset".to_owned(), "generation-four".to_owned()]).unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::GenerationFour)),
+                lane: None,
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_challenger_lane_preset() {
+        let command =
+            parse_command(vec!["--preset".to_owned(), "challenger-lane".to_owned()]).unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::ChallengerLane)),
+                lane: None,
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_lane_only_and_uses_lane_default_preset() {
+        let command = parse_command(vec!["--lane".to_owned(), "challenger".to_owned()]).unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: None,
+                lane: Some(TournamentLane::Challenger),
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_species_only_and_uses_species_default_preset() {
+        let command = parse_command(vec![
+            "--species".to_owned(),
+            "generalized_mobius".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: None,
+                lane: None,
+                species: Some(SpeciesId::GeneralizedMobius),
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_rejects_lane_and_species_together() {
+        let error = parse_command(vec![
+            "--lane".to_owned(),
+            "bullpen".to_owned(),
+            "--species".to_owned(),
+            "ifs".to_owned(),
+        ])
+        .unwrap_err();
+
+        assert!(matches!(error, FractalError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn parse_command_rejects_zero_parallelism() {
+        let error = parse_command(vec![
+            "--preset".to_owned(),
+            "fast-test".to_owned(),
+            "--parallelism".to_owned(),
+            "0".to_owned(),
         ])
         .unwrap_err();
 

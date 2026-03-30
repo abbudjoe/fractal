@@ -1,4 +1,7 @@
-use burn::{backend::Candle, tensor::Tensor};
+use burn::{
+    backend::Candle,
+    tensor::{activation::softmax, Tensor},
+};
 use fractal_core::{
     registry::SpeciesId,
     rule_trait::FractalRule,
@@ -6,8 +9,8 @@ use fractal_core::{
 };
 
 use crate::{
-    species_registry, B1FractalGated, B2StableHierarchical, B3FractalHierarchical, B4Universal,
-    P1Contractive, P2Mandelbrot, P3Hierarchical,
+    primitives::entropy_regularized_router_probs, species_registry, B2StableHierarchical,
+    GeneralizedMobius, Ifs, LogisticChaoticMap, P1Contractive, P3Hierarchical,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -19,12 +22,11 @@ fn primitives_preserve_declared_layout_and_shape() {
 
     let primitives: Vec<Box<dyn FractalRule<TestBackend>>> = vec![
         Box::new(P1Contractive::new(8, &device)),
-        Box::new(P2Mandelbrot::new(8, &device)),
         Box::new(P3Hierarchical::new(8, 3, &device)),
-        Box::new(B1FractalGated::new(8, &device)),
         Box::new(B2StableHierarchical::new(8, 3, &device)),
-        Box::new(B3FractalHierarchical::new(8, 3, &device)),
-        Box::new(B4Universal::new(8, 3, &device)),
+        Box::new(Ifs::new(8, &device)),
+        Box::new(GeneralizedMobius::new(8, &device)),
+        Box::new(LogisticChaoticMap::new(8, &device)),
     ];
 
     for primitive in primitives {
@@ -39,7 +41,7 @@ fn primitives_preserve_declared_layout_and_shape() {
 #[test]
 fn clone_box_preserves_metadata() {
     let device = Default::default();
-    let primitive: Box<dyn FractalRule<TestBackend>> = Box::new(B4Universal::new(8, 3, &device));
+    let primitive: Box<dyn FractalRule<TestBackend>> = Box::new(GeneralizedMobius::new(8, &device));
     let clone = primitive.clone_box();
 
     assert_eq!(primitive.name(), clone.name());
@@ -70,4 +72,22 @@ fn species_registry_lists_every_species_once() {
         .collect::<Vec<_>>();
 
     assert_eq!(ids, SpeciesId::ALL.to_vec());
+}
+
+#[test]
+fn entropy_regularization_keeps_router_probabilities_non_zero() {
+    let device = Default::default();
+    let logits = Tensor::<TestBackend, 2>::from_data([[50.0f32, -50.0, -50.0, -50.0]], &device);
+
+    let vanilla = softmax(logits.clone(), 1)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let regularized = entropy_regularized_router_probs(logits, 4, 0.05)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+
+    assert!(vanilla[1] < 1e-6);
+    assert!(regularized.iter().all(|value| *value > 0.0));
 }

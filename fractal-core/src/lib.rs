@@ -9,9 +9,14 @@ pub mod router;
 pub mod rule_trait;
 pub mod state;
 
-pub use data_generator::{SimpleHierarchicalGenerator, TaskFamily, TokenBatch, PAD_TOKEN};
+pub use data_generator::{
+    GeneratorDepthConfig, SimpleHierarchicalGenerator, TaskFamily, TokenBatch, PAD_TOKEN,
+};
 pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
-pub use lifecycle::{Tournament, TournamentConfig, TournamentPreset, TournamentSequence};
+pub use lifecycle::{
+    SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig, TournamentPreset,
+    TournamentProgressEvent, TournamentReporter, TournamentSequence,
+};
 pub use model::FractalModel;
 pub use registry::{
     ComputeBackend, CpuBackend, CpuTrainBackend, ExecutionMode, MetalBackend, MetalTrainBackend,

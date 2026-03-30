@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     fmt::{Display, Formatter},
+    str::FromStr,
     sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
@@ -8,16 +9,14 @@ use std::{
 use burn::{
     backend::{
         candle::CandleDevice,
-        wgpu::{self, WgpuDevice},
+        wgpu::{self, graphics::Metal, WgpuDevice},
         Autodiff, Candle, Wgpu as BurnWgpu,
     },
-    module::{AutodiffModule, Module, ModuleDisplay, ModuleVisitor, ParamId},
+    module::{AutodiffModule, Module, ModuleDisplay, ModuleVisitor},
     nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig},
     optim::{AdamConfig, GradientsParams, Optimizer},
     tensor::{backend::AutodiffBackend, Bool, Element, ElementConversion, Int, Tensor, TensorData},
 };
-use burn_mlx::Mlx;
-pub use burn_mlx::MlxDevice;
 
 use crate::{
     data_generator::{
@@ -34,8 +33,6 @@ pub type CpuBackend = Candle<f32, i64>;
 pub type CpuTrainBackend = Autodiff<CpuBackend>;
 pub type MetalBackend = BurnWgpu<f32, i32>;
 pub type MetalTrainBackend = Autodiff<MetalBackend>;
-pub type MlxBackend = Mlx;
-pub type MlxTrainBackend = Autodiff<MlxBackend>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComputeBackend {
@@ -47,16 +44,11 @@ pub enum ComputeBackend {
     MetalWgpu {
         device: WgpuDevice,
     },
-    Mlx {
-        device: MlxDevice,
-    },
 }
 
 impl ComputeBackend {
     pub fn default_for_current_platform() -> Self {
-        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-            Self::mlx_default()
-        } else if cfg!(target_os = "macos") {
+        if cfg!(target_os = "macos") {
             Self::metal_default()
         } else {
             Self::CpuCandle
@@ -74,19 +66,12 @@ impl ComputeBackend {
         Self::CudaCandle { device_index: 0 }
     }
 
-    pub fn mlx_default() -> Self {
-        Self::Mlx {
-            device: MlxDevice::Gpu,
-        }
-    }
-
     pub fn is_supported_on_current_platform(&self) -> bool {
         match self {
             Self::CpuCandle => true,
             #[cfg(feature = "cuda")]
             Self::CudaCandle { .. } => cfg!(not(target_os = "macos")),
             Self::MetalWgpu { .. } => cfg!(target_os = "macos"),
-            Self::Mlx { .. } => cfg!(all(target_os = "macos", target_arch = "aarch64")),
         }
     }
 }
@@ -100,34 +85,31 @@ pub enum ExecutionMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SpeciesId {
     P1Contractive,
-    P2Mandelbrot,
     P3Hierarchical,
-    B1FractalGated,
     B2StableHierarchical,
-    B3FractalHierarchical,
-    B4Universal,
+    Ifs,
+    GeneralizedMobius,
+    LogisticChaoticMap,
 }
 
 impl SpeciesId {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::P1Contractive,
-        Self::P2Mandelbrot,
         Self::P3Hierarchical,
-        Self::B1FractalGated,
         Self::B2StableHierarchical,
-        Self::B3FractalHierarchical,
-        Self::B4Universal,
+        Self::Ifs,
+        Self::GeneralizedMobius,
+        Self::LogisticChaoticMap,
     ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::P1Contractive => "p1_contractive",
-            Self::P2Mandelbrot => "p2_mandelbrot",
             Self::P3Hierarchical => "p3_hierarchical",
-            Self::B1FractalGated => "b1_fractal_gated",
             Self::B2StableHierarchical => "b2_stable_hierarchical",
-            Self::B3FractalHierarchical => "b3_fractal_hierarchical",
-            Self::B4Universal => "b4_universal",
+            Self::Ifs => "ifs",
+            Self::GeneralizedMobius => "generalized_mobius",
+            Self::LogisticChaoticMap => "logistic_chaotic_map",
         }
     }
 }
@@ -135,6 +117,22 @@ impl SpeciesId {
 impl Display for SpeciesId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str((*self).as_str())
+    }
+}
+
+impl FromStr for SpeciesId {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "p1_contractive" => Ok(Self::P1Contractive),
+            "p3_hierarchical" => Ok(Self::P3Hierarchical),
+            "b2_stable_hierarchical" => Ok(Self::B2StableHierarchical),
+            "ifs" => Ok(Self::Ifs),
+            "generalized_mobius" => Ok(Self::GeneralizedMobius),
+            "logistic_chaotic_map" => Ok(Self::LogisticChaoticMap),
+            _ => Err(()),
+        }
     }
 }
 
@@ -149,7 +147,6 @@ type CpuRunner = fn(SpeciesRunContext) -> Result<SpeciesRawMetrics, FractalError
 #[cfg(feature = "cuda")]
 type CudaRunner = fn(SpeciesRunContext, CandleDevice) -> Result<SpeciesRawMetrics, FractalError>;
 type MetalRunner = fn(SpeciesRunContext, WgpuDevice) -> Result<SpeciesRawMetrics, FractalError>;
-type MlxRunner = fn(SpeciesRunContext, MlxDevice) -> Result<SpeciesRawMetrics, FractalError>;
 
 #[derive(Clone, Copy)]
 pub struct SpeciesDefinition {
@@ -158,22 +155,15 @@ pub struct SpeciesDefinition {
     #[cfg(feature = "cuda")]
     cuda_runner: CudaRunner,
     metal_runner: MetalRunner,
-    mlx_runner: MlxRunner,
 }
 
 impl SpeciesDefinition {
     #[cfg(not(feature = "cuda"))]
-    pub const fn new(
-        id: SpeciesId,
-        cpu_runner: CpuRunner,
-        metal_runner: MetalRunner,
-        mlx_runner: MlxRunner,
-    ) -> Self {
+    pub const fn new(id: SpeciesId, cpu_runner: CpuRunner, metal_runner: MetalRunner) -> Self {
         Self {
             id,
             cpu_runner,
             metal_runner,
-            mlx_runner,
         }
     }
 
@@ -182,7 +172,6 @@ impl SpeciesDefinition {
         id: SpeciesId,
         cpu_runner: CpuRunner,
         metal_runner: MetalRunner,
-        mlx_runner: MlxRunner,
         cuda_runner: CudaRunner,
     ) -> Self {
         Self {
@@ -190,7 +179,6 @@ impl SpeciesDefinition {
             cpu_runner,
             cuda_runner,
             metal_runner,
-            mlx_runner,
         }
     }
 
@@ -206,7 +194,6 @@ impl SpeciesDefinition {
                 (self.cuda_runner)(context, cuda_device(*device_index))
             }
             ComputeBackend::MetalWgpu { device } => (self.metal_runner)(context, device.clone()),
-            ComputeBackend::Mlx { device } => (self.mlx_runner)(context, *device),
         }
     }
 }
@@ -238,7 +225,10 @@ where
     <R as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend> + ModuleDisplay,
     F: FnOnce(&TournamentConfig, &B::Device) -> R,
 {
-    B::seed(context.config.seed.wrapping_add(context.index as u64 * 101));
+    B::seed(
+        &device,
+        context.config.seed.wrapping_add(context.index as u64 * 101),
+    );
 
     let rule = factory(&context.config, &device);
     run_species(species, context, device, rule)
@@ -256,7 +246,7 @@ pub fn initialize_metal_runtime(device: &WgpuDevice) {
         return;
     }
 
-    wgpu::init_setup::<wgpu::Metal>(device, Default::default());
+    wgpu::init_setup::<Metal>(device, Default::default());
     initialized.insert(device.clone());
 }
 
@@ -442,16 +432,17 @@ where
     }
 
     impl<'a, B: AutodiffBackend> ModuleVisitor<B> for Collector<'a, B> {
-        fn visit_float<const D: usize>(&mut self, id: ParamId, _tensor: &Tensor<B, D>) {
-            if let Some(grad) = self.grads.get::<B::InnerBackend, D>(id) {
+        fn visit_float<const D: usize>(&mut self, param: &burn::module::Param<Tensor<B, D>>) {
+            if let Some(grad) = self.grads.get::<B::InnerBackend, D>(param.id) {
                 let value = (grad.clone() * grad).sum().into_scalar().elem::<f64>();
                 self.sum_sq += value;
             }
         }
 
-        fn visit_int<const D: usize>(&mut self, _id: ParamId, _tensor: &Tensor<B, D, Int>) {}
+        fn visit_int<const D: usize>(&mut self, _param: &burn::module::Param<Tensor<B, D, Int>>) {}
 
-        fn visit_bool<const D: usize>(&mut self, _id: ParamId, _tensor: &Tensor<B, D, Bool>) {}
+        fn visit_bool<const D: usize>(&mut self, _param: &burn::module::Param<Tensor<B, D, Bool>>) {
+        }
     }
 
     let mut collector = Collector::<B> {
