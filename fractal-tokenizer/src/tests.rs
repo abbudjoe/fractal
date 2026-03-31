@@ -1,12 +1,25 @@
 use burn::backend::Candle;
-use fractal_core::{rule_trait::FractalRule, state::FractalState};
-use std::collections::{BTreeMap, BTreeSet};
+use fractal_core::{
+    rule_trait::{ApplyContext, FractalRule},
+    state::FractalState,
+};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Instant,
+};
+use tiktoken::cl100k_base;
+use tokio::{process::Command as TokioCommand, runtime::Builder as TokioRuntimeBuilder};
 
 use crate::{
-    revived_primitive_factories, tokenizer::p1_dynamic_lever_factory, tokenizer_tracker_reminder,
+    revived_primitive_factories, tokenizer::p1_dynamic_lever_factory,
     validate_tokenizer_primitive_name, B1FractalGated, B3FractalHierarchical, B4Universal,
-    P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary, RecursiveTokenizer, TokenRecord,
-    TokenizerConfig,
+    EncodedDocument, EncodedTokenKind, FaceoffChunkLimits, FaceoffEmissionPolicy, FaceoffTokenizer,
+    FaceoffVocab, ModelFacingBatch, ModelFacingDocument, NativeCompatibilityAdapter,
+    NativeTokenizer, P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary, RecursiveTokenizer,
+    TokenRecord, TokenizerConfig,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -39,6 +52,10 @@ fn revived_primitives_preserve_declared_layout_and_shape() {
             .apply(
                 &state,
                 &burn::tensor::Tensor::<TestBackend, 2>::zeros([1, config.dim], &device),
+                ApplyContext {
+                    depth: 0,
+                    max_depth: config.max_depth,
+                },
             )
             .unwrap();
 
@@ -66,7 +83,6 @@ fn proving_ground_runs_all_revived_primitives_with_fixed_seed() {
         println!("{}", format_summary(summary));
         assert!(!summary.tokens.is_empty());
     }
-    println!("{}", tokenizer_tracker_reminder());
 
     assert_eq!(first.len(), 5);
     assert!(first.iter().all(|summary| summary.produced >= 3));
@@ -105,7 +121,6 @@ fn real_text_top_primitive_comparison() {
         println!("pattern={}", describe_pattern(summary, &unique_by_depth));
         assert!(!summary.tokens.is_empty());
     }
-    println!("{}", tokenizer_tracker_reminder());
 }
 
 #[test]
@@ -128,7 +143,6 @@ fn longer_real_text_p1_hybrid_follow_up() {
         "balanced_note={}",
         balanced_pattern_note(&summary, &unique_by_depth)
     );
-    println!("{}", tokenizer_tracker_reminder());
 
     assert!(!summary.tokens.is_empty());
     assert!(balanced_recursive_split_holds(&summary));
@@ -152,7 +166,6 @@ fn motif_reuse_p1_hybrid_follow_up() {
     println!("unique_by_depth={}", format_depth_counts(&unique_by_depth));
     println!("pattern={}", describe_pattern(&summary, &unique_by_depth));
     println!("motif_reuse={}", describe_motif_reuse(&summary));
-    println!("{}", tokenizer_tracker_reminder());
 
     assert!(!summary.tokens.is_empty());
 }
@@ -205,7 +218,6 @@ fn motif_amplification_p1_hybrid_follow_up() {
         "amplification_note={}",
         dynamic_lever_note_v2(&static_summary, &dynamic_summary)
     );
-    println!("{}", tokenizer_tracker_reminder());
 
     assert!(!static_summary.tokens.is_empty());
     assert!(!dynamic_summary.tokens.is_empty());
@@ -291,12 +303,1082 @@ fn motif_amplification_p1_hybrid_v2_stress() {
         "{}",
         format_reused_motif_spans(&dynamic_summary, &stress_input)
     );
-    println!("{}", tokenizer_tracker_reminder());
 
     assert!(!static_summary.tokens.is_empty());
     assert!(!dynamic_summary.tokens.is_empty());
     assert!(balanced_recursive_split_holds(&static_summary));
     assert!(balanced_recursive_split_holds(&dynamic_summary));
+}
+
+#[test]
+fn motif_amplification_p1_hybrid_v2_mixed_domain() {
+    let device = Default::default();
+    let config = TokenizerConfig::default();
+    let tokenizer = RecursiveTokenizer::new(config);
+    let news_paragraph = "City officials said Tuesday that transit service resumed across the river corridor after overnight storms flooded two low-lying stations, while crews continued inspecting power lines and drainage pumps before the evening commute.";
+    let code_comment_paragraph = "This cache invalidation path keeps a rolling checksum for each segment so repeated blocks can be recognized without recomputing the full buffer; if a checksum disagrees, rebuild the branch and log the span that changed for debugging.";
+    let literature_paragraph = "By the time the lamps were lit, the street had gone quiet enough for the distant train to sound like weather, and the old bookseller stood in his doorway listening as if the night itself were turning a page.";
+    let mixed_input = [
+        "=== NEWS ===",
+        news_paragraph,
+        "=== CODE COMMENT ===",
+        code_comment_paragraph,
+        "=== LITERATURE ===",
+        literature_paragraph,
+    ]
+    .join("\n");
+    let static_factory = revived_primitive_factories::<TestBackend>()
+        .into_iter()
+        .find(|factory| factory.name == "p1_fractal_hybrid_v1")
+        .unwrap();
+    let dynamic_factory = p1_dynamic_lever_factory::<TestBackend>();
+
+    let static_summary = tokenizer
+        .run_factory(&mixed_input, &device, static_factory)
+        .unwrap();
+    let dynamic_summary = tokenizer
+        .run_factory(&mixed_input, &device, dynamic_factory)
+        .unwrap();
+    let static_unique_by_depth = unique_tokens_by_depth(&static_summary);
+    let dynamic_unique_by_depth = unique_tokens_by_depth(&dynamic_summary);
+
+    println!("{}", format_summary_preview(&static_summary, 20));
+    println!(
+        "static_unique_tokens_by_depth={}",
+        format_depth_counts(&static_unique_by_depth)
+    );
+    println!(
+        "static_motif_reuse_count={}",
+        cross_depth_motif_reuse_count(&static_summary)
+    );
+    println!(
+        "static_hierarchy_note={}",
+        hierarchy_balance_note(&static_summary, &static_unique_by_depth)
+    );
+    println!("REUSED MOTIFS (cross-depth) [{}]", static_summary.primitive);
+    println!(
+        "{}",
+        format_reused_motif_spans(&static_summary, &mixed_input)
+    );
+    println!("{}", format_summary_preview(&dynamic_summary, 20));
+    println!("dynamic_lever_type=v2-self-regulating");
+    println!(
+        "dynamic_unique_tokens_by_depth={}",
+        format_depth_counts(&dynamic_unique_by_depth)
+    );
+    println!(
+        "dynamic_motif_reuse_count={}",
+        cross_depth_motif_reuse_count(&dynamic_summary)
+    );
+    println!(
+        "dynamic_hierarchy_note={}",
+        hierarchy_balance_note(&dynamic_summary, &dynamic_unique_by_depth)
+    );
+    println!(
+        "REUSED MOTIFS (cross-depth) [{}]",
+        dynamic_summary.primitive
+    );
+    println!(
+        "{}",
+        format_reused_motif_spans(&dynamic_summary, &mixed_input)
+    );
+
+    assert!(!static_summary.tokens.is_empty());
+    assert!(!dynamic_summary.tokens.is_empty());
+    assert!(balanced_recursive_split_holds(&static_summary));
+    assert!(balanced_recursive_split_holds(&dynamic_summary));
+}
+
+#[test]
+fn tokenizer_sota_sanity_check() {
+    let device = Default::default();
+    let config = TokenizerConfig::default();
+    let tokenizer = RecursiveTokenizer::new(config);
+    let tiktoken = cl100k_base().unwrap();
+    let stress_input = std::iter::repeat_n(
+        "The cat sat on the mat. The dog sat on the mat. The bird sat on the mat. The fox sat on the mat.",
+        20,
+    )
+    .collect::<Vec<_>>()
+    .join(" ")
+        + " The cat sat on the mat once more.";
+    let mixed_input = [
+        "=== NEWS ===",
+        "City officials said Tuesday that transit service resumed across the river corridor after overnight storms flooded two low-lying stations, while crews continued inspecting power lines and drainage pumps before the evening commute.",
+        "=== CODE COMMENT ===",
+        "This cache invalidation path keeps a rolling checksum for each segment so repeated blocks can be recognized without recomputing the full buffer; if a checksum disagrees, rebuild the branch and log the span that changed for debugging.",
+        "=== LITERATURE ===",
+        "By the time the lamps were lit, the street had gone quiet enough for the distant train to sound like weather, and the old bookseller stood in his doorway listening as if the night itself were turning a page.",
+    ]
+    .join("\n");
+    let static_factory = revived_primitive_factories::<TestBackend>()
+        .into_iter()
+        .find(|factory| factory.name == "p1_fractal_hybrid_v1")
+        .unwrap();
+    let dynamic_factory = p1_dynamic_lever_factory::<TestBackend>();
+
+    for (label, input) in [
+        ("stress-20x-repetition", stress_input.as_str()),
+        ("mixed-domain", mixed_input.as_str()),
+    ] {
+        let v1_summary = tokenizer
+            .run_factory(input, &device, static_factory.clone())
+            .unwrap();
+        let v2_summary = tokenizer
+            .run_factory(input, &device, dynamic_factory.clone())
+            .unwrap();
+        let tiktoken_count = tiktoken.encode_ordinary(input).len();
+
+        println!("INPUT={label}");
+        println!(
+            "v2: token_count={} avg_chars_per_token={:.2} motif_reuse_count={}",
+            v2_summary.tokens.len(),
+            avg_chars_per_token(input, v2_summary.tokens.len()),
+            cross_depth_motif_reuse_count(&v2_summary)
+        );
+        println!(
+            "tiktoken_cl100k_base: token_count={} avg_chars_per_token={:.2}",
+            tiktoken_count,
+            avg_chars_per_token(input, tiktoken_count)
+        );
+        println!("REUSED MOTIFS (cross-depth) [{}]", v2_summary.primitive);
+        println!("{}", format_reused_motif_spans(&v2_summary, input));
+        assert_roundtrip("v1", &v1_summary, input);
+        assert_roundtrip("v2", &v2_summary, input);
+
+        assert!(!v1_summary.tokens.is_empty());
+        assert!(!v2_summary.tokens.is_empty());
+        assert!(balanced_recursive_split_holds(&v1_summary));
+        assert!(balanced_recursive_split_holds(&v2_summary));
+        assert!(tiktoken_count > 0);
+    }
+}
+
+#[test]
+fn tokenizer_integration_tests() {
+    let device = Default::default();
+    let config = TokenizerConfig::default();
+    let tokenizer = RecursiveTokenizer::new(config);
+    let dynamic_factory = p1_dynamic_lever_factory::<TestBackend>();
+    let stress_input = std::iter::repeat_n(
+        "The cat sat on the mat. The dog sat on the mat. The bird sat on the mat. The fox sat on the mat.",
+        20,
+    )
+    .collect::<Vec<_>>()
+    .join(" ")
+        + " The cat sat on the mat once more.";
+    let mixed_input = [
+        "=== NEWS ===",
+        "City officials said Tuesday that transit service resumed across the river corridor after overnight storms flooded two low-lying stations, while crews continued inspecting power lines and drainage pumps before the evening commute.",
+        "=== CODE COMMENT ===",
+        "This cache invalidation path keeps a rolling checksum for each segment so repeated blocks can be recognized without recomputing the full buffer; if a checksum disagrees, rebuild the branch and log the span that changed for debugging.",
+        "=== LITERATURE ===",
+        "By the time the lamps were lit, the street had gone quiet enough for the distant train to sound like weather, and the old bookseller stood in his doorway listening as if the night itself were turning a page.",
+    ]
+    .join("\n");
+    for (label, input, print_reused) in [
+        ("stress-roundtrip", stress_input.as_str(), false),
+        ("mixed-domain-roundtrip", mixed_input.as_str(), false),
+    ] {
+        let summary = tokenizer
+            .run_factory(input, &device, dynamic_factory.clone())
+            .unwrap();
+        let unique_by_depth = unique_tokens_by_depth(&summary);
+        let motif_reuse = cross_depth_motif_reuse_count(&summary);
+
+        println!("SCENARIO={label}");
+        println!("input_length={}", input.len());
+        println!("final_token_count={}", summary.tokens.len());
+        println!(
+            "avg_chars_per_token={:.2}",
+            avg_chars_per_token(input, summary.tokens.len())
+        );
+        println!("motif_reuse_count={motif_reuse}");
+        println!(
+            "hierarchy_note={}",
+            hierarchy_balance_note(&summary, &unique_by_depth)
+        );
+        assert_roundtrip_integration(&summary, input);
+
+        assert!(!summary.tokens.is_empty());
+        assert!(balanced_recursive_split_holds(&summary));
+        assert!(
+            !print_reused,
+            "streaming scenario should be handled separately"
+        );
+    }
+
+    let stream_separator = "\n\n=== STREAM CHUNK ===\n\n";
+    let streaming_chunks = [
+        [stress_input.as_str(), stress_input.as_str()].join(stream_separator),
+        [stress_input.as_str(), mixed_input.as_str()].join(stream_separator),
+    ];
+    let streaming_input = streaming_chunks.concat();
+    let mut stream_offset = 0usize;
+    let mut streaming_chunk_summaries = Vec::new();
+    for chunk in &streaming_chunks {
+        let summary = tokenizer
+            .run_factory(chunk, &device, dynamic_factory.clone())
+            .unwrap();
+        streaming_chunk_summaries.push((stream_offset, summary));
+        stream_offset += chunk.len();
+    }
+    let streaming_summary = merge_streaming_summaries(&streaming_chunk_summaries);
+    let streaming_motif_reuse = cross_depth_motif_reuse_count(&streaming_summary);
+    let streaming_balanced = streaming_chunk_summaries
+        .iter()
+        .all(|(_, summary)| balanced_recursive_split_holds(summary));
+
+    println!("SCENARIO=streaming-corpus");
+    println!("input_length={}", streaming_input.len());
+    println!("final_token_count={}", streaming_summary.tokens.len());
+    println!(
+        "avg_chars_per_token={:.2}",
+        avg_chars_per_token(&streaming_input, streaming_summary.tokens.len())
+    );
+    println!("motif_reuse_count={streaming_motif_reuse}");
+    println!(
+        "hierarchy_note={}",
+        if streaming_balanced {
+            "hierarchy remains perfectly balanced across streaming chunks"
+        } else {
+            "hierarchy drifted across streaming chunks"
+        }
+    );
+    assert_roundtrip_integration(&streaming_summary, &streaming_input);
+    println!(
+        "REUSED MOTIFS (cross-depth) [{}]",
+        streaming_summary.primitive
+    );
+    println!(
+        "{}",
+        format_reused_motif_spans(&streaming_summary, &streaming_input)
+    );
+
+    assert!(
+        streaming_input.len() > 5_000,
+        "streaming corpus should exceed 5k chars"
+    );
+    assert!(streaming_balanced);
+    assert!(
+        (10..=15).contains(&streaming_motif_reuse),
+        "streaming motif_reuse_count should scale into the 10-15 target window, got {streaming_motif_reuse}"
+    );
+}
+
+#[test]
+fn faceoff_chunking_model_packaging() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+
+    for (name, input) in [
+        ("stress-20x-repetition", stress.as_str()),
+        ("mixed-domain", mixed.as_str()),
+    ] {
+        let encoded = faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                input,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::NoveltyAware,
+            )
+            .unwrap();
+        let packaged = encoded
+            .package(crate::faceoff::FaceoffChunkLimits::new(8, 4096))
+            .unwrap();
+        let packaged_again = encoded
+            .package(crate::faceoff::FaceoffChunkLimits::new(8, 4096))
+            .unwrap();
+        let reconstructed = packaged.reconstruct().unwrap();
+
+        assert_eq!(faceoff.decode_document(&encoded).unwrap(), input);
+        assert_eq!(packaged, packaged_again, "chunk packaging must be deterministic");
+        assert_eq!(reconstructed, input, "chunk payload concatenation must reconstruct input");
+        assert_eq!(encoded.fallback.unknown_motifs, 0);
+        assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
+        assert!(encoded.tokens.len() >= packaged.chunks.len());
+
+        println!("FACEOFF_PACKAGING_INPUT={name}");
+        println!("frontier_token_count={}", packaged.frontier_token_count);
+        println!("packaged_chunk_count={}", packaged.chunks.len());
+        println!(
+            "chunk_shape_summary={}",
+            packaged
+                .chunks
+                .iter()
+                .map(|chunk| format!("c{}:{}tok/{}b", chunk.index, chunk.token_count, chunk.byte_count))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!(
+            "fallback_stats=motif_hits:{} unknown:{} recursed:{} byte:{}",
+            encoded.fallback.motif_hits,
+            encoded.fallback.unknown_motifs,
+            encoded.fallback.recursed_to_children,
+            encoded.fallback.byte_fallback_tokens
+        );
+        println!("roundtrip_status=OK");
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct WhitespaceTokenizer;
+
+impl NativeTokenizer for WhitespaceTokenizer {
+    type Token = String;
+    type Error = std::convert::Infallible;
+
+    fn tokenize(&self, text: &str) -> Result<Vec<Self::Token>, Self::Error> {
+        Ok(text.split_whitespace().map(str::to_owned).collect())
+    }
+}
+
+#[test]
+fn model_face_document_roundtrip_on_benchmark_inputs() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+    let limits = FaceoffChunkLimits::new(8, 4096);
+
+    for (name, input) in [
+        ("stress-20x-repetition", stress.as_str()),
+        ("mixed-domain", mixed.as_str()),
+    ] {
+        let encoded = faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                input,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::NoveltyAware,
+            )
+            .unwrap();
+        let document = ModelFacingDocument::from_encoded(encoded, limits).unwrap();
+
+        assert_eq!(document.decode().unwrap(), input);
+        assert_eq!(document.reconstruct().unwrap(), input);
+        assert!(document.validate().is_ok());
+        assert_eq!(document.fallback().unknown_motifs, 0);
+        assert_eq!(document.fallback().byte_fallback_tokens, 0);
+        assert_eq!(document.frontier_token_count(), document.encoded().tokens.len());
+        assert_eq!(document.chunk_count(), document.chunked().chunks.len());
+
+        println!("MODEL_FACE_INPUT={name}");
+        println!("frontier_token_count={}", document.frontier_token_count());
+        println!("packaged_chunk_count={}", document.chunk_count());
+        println!(
+            "fallback_stats=motif_hits:{} unknown:{} recursed:{} byte:{}",
+            document.fallback().motif_hits,
+            document.fallback().unknown_motifs,
+            document.fallback().recursed_to_children,
+            document.fallback().byte_fallback_tokens
+        );
+        println!("roundtrip_status=OK");
+    }
+}
+
+#[test]
+fn model_face_native_adapter_preserves_chunk_order_and_is_deterministic() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+    let limits = FaceoffChunkLimits::new(8, 4096);
+    let adapter = NativeCompatibilityAdapter::default();
+    let tokenizer = WhitespaceTokenizer;
+
+    let documents = vec![
+        faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                &stress,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::NoveltyAware,
+            )
+            .unwrap(),
+        faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                &mixed,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::NoveltyAware,
+            )
+            .unwrap(),
+    ]
+    .into_iter()
+    .map(|encoded| ModelFacingDocument::from_encoded(encoded, limits).unwrap())
+    .collect::<Vec<_>>();
+    let batch = ModelFacingBatch::from(documents);
+    let native = adapter.retokenize_batch(&batch, &tokenizer).unwrap();
+    let native_again = adapter.retokenize_batch(&batch, &tokenizer).unwrap();
+
+    assert_eq!(native, native_again);
+    assert_eq!(native.len(), batch.len());
+
+    for (index, (document, native_document)) in batch.iter().zip(native.iter()).enumerate() {
+        assert_eq!(document.input_len(), native_document.input_len);
+        assert_eq!(
+            document.frontier_token_count(),
+            native_document.frontier_token_count
+        );
+        assert_eq!(document.chunk_count(), native_document.chunk_count());
+        assert_eq!(document.reconstruct().unwrap(), document.decode().unwrap());
+        assert!(native_document
+            .chunks
+            .iter()
+            .enumerate()
+            .all(|(chunk_index, chunk)| chunk.source.index == chunk_index));
+        assert!(native_document
+            .chunks
+            .windows(2)
+            .all(|pair| pair[0].source.index < pair[1].source.index));
+        assert_eq!(native_document.native_token_count(), native_document.chunks.iter().map(|chunk| chunk.native_tokens.len()).sum::<usize>());
+
+        println!("MODEL_FACE_BATCH_DOCUMENT_INDEX={index}");
+        println!("native_chunk_count={}", native_document.chunk_count());
+        println!("native_token_count={}", native_document.native_token_count());
+        println!("roundtrip_status=OK");
+    }
+}
+
+#[test]
+fn faceoff_vocab_induction_is_deterministic() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+
+    let first = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+    let second = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+
+    assert_eq!(first.entries(), second.entries());
+    assert!(first.motif_count() > 0);
+}
+
+#[test]
+fn faceoff_roundtrip_stress_input_is_exact() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+    let encoded = faceoff
+        .encode_text_v2::<TestBackend>(&stress, &vocab, &device)
+        .unwrap();
+    let decoded = faceoff.decode_document(&encoded).unwrap();
+
+    assert_eq!(decoded, stress);
+    assert!(
+        encoded.tokens.len() > 1,
+        "full-vocab faceoff encoding should emit a useful frontier, not a single root token"
+    );
+    assert_eq!(encoded.fallback.unknown_motifs, 0);
+    assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
+}
+
+#[test]
+fn faceoff_roundtrip_mixed_domain_input_is_exact() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+    let encoded = faceoff
+        .encode_text_v2::<TestBackend>(&mixed, &vocab, &device)
+        .unwrap();
+    let decoded = faceoff.decode_document(&encoded).unwrap();
+
+    assert_eq!(decoded, mixed);
+    assert!(
+        encoded.tokens.len() > 1,
+        "full-vocab faceoff encoding should emit a useful frontier, not a single root token"
+    );
+    assert_eq!(encoded.fallback.unknown_motifs, 0);
+    assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
+}
+
+#[test]
+fn faceoff_fallback_activates_with_partial_vocab() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let empty_records = Vec::<TokenRecord>::new();
+    let partial_vocab = FaceoffVocab::from_token_records(empty_records.iter()).unwrap();
+    let encoded = faceoff
+        .encode_text_v2::<TestBackend>(&stress, &partial_vocab, &device)
+        .unwrap();
+    let decoded = faceoff.decode_document(&encoded).unwrap();
+
+    assert_eq!(decoded, stress);
+    assert!(encoded.fallback.unknown_motifs > 0);
+    assert!(encoded.fallback.recursed_to_children > 0);
+    assert!(encoded.fallback.byte_fallback_tokens > 0);
+}
+
+#[test]
+fn faceoff_mixed_domain_false_positive_reuse_stays_near_zero() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+    let encoded = faceoff
+        .encode_text_v2::<TestBackend>(&mixed, &vocab, &device)
+        .unwrap();
+    let reuse_count = encoded_cross_depth_motif_reuse_count(&encoded);
+
+    assert_eq!(encoded.fallback.unknown_motifs, 0);
+    assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
+    assert_eq!(
+        reuse_count, 0,
+        "expected near-zero cross-depth motif reuse on mixed-domain input"
+    );
+}
+
+#[test]
+fn faceoff_tokenizer_slice_report() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+
+    for (name, input) in [
+        ("stress-20x-repetition", stress.as_str()),
+        ("mixed-domain", mixed.as_str()),
+    ] {
+        let encoded = faceoff
+            .encode_text_v2::<TestBackend>(input, &vocab, &device)
+            .unwrap();
+        let decoded = faceoff.decode_document(&encoded).unwrap();
+        assert_eq!(decoded, input);
+        assert!(
+            encoded.tokens.len() > 1,
+            "full-vocab faceoff encoding should emit a useful frontier, not a single root token"
+        );
+        assert_eq!(encoded.fallback.unknown_motifs, 0);
+        assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
+        println!("FACEOFF_INPUT={name}");
+        println!("token_count={}", encoded.tokens.len());
+        println!(
+            "avg_chars_per_token={:.2}",
+            avg_chars_per_token(input, encoded.tokens.len())
+        );
+        println!(
+            "frontier_status={}",
+            if encoded.tokens.len() > 1 {
+                "useful-frontier"
+            } else {
+                "single-root-token"
+            }
+        );
+        println!(
+            "fallback_stats=motif_hits:{} unknown_motifs:{} recursed_to_children:{} byte_fallback_tokens:{}",
+            encoded.fallback.motif_hits,
+            encoded.fallback.unknown_motifs,
+            encoded.fallback.recursed_to_children,
+            encoded.fallback.byte_fallback_tokens
+        );
+        println!("ROUNDTRIP: OK");
+    }
+}
+
+#[test]
+fn faceoff_state_aware_vs_finest_known_side_by_side() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+
+    for (name, input) in [
+        ("stress-20x-repetition", stress.as_str()),
+        ("mixed-domain", mixed.as_str()),
+    ] {
+        let finest = faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                input,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::FinestKnown,
+            )
+            .unwrap();
+        let state_aware = faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                input,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::StateAware,
+            )
+            .unwrap();
+
+        assert_eq!(faceoff.decode_document(&finest).unwrap(), input);
+        assert_eq!(faceoff.decode_document(&state_aware).unwrap(), input);
+        assert_eq!(finest.fallback.unknown_motifs, 0);
+        assert_eq!(state_aware.fallback.unknown_motifs, 0);
+        assert_eq!(finest.fallback.byte_fallback_tokens, 0);
+        assert_eq!(state_aware.fallback.byte_fallback_tokens, 0);
+
+        println!("FACEOFF_POLICY_COMPARISON_INPUT={name}");
+        println!(
+            "finest_known token_count={} avg_chars_per_token={:.2} fallback=motif_hits:{} unknown:{} recursed:{} byte:{}",
+            finest.tokens.len(),
+            avg_chars_per_token(input, finest.tokens.len()),
+            finest.fallback.motif_hits,
+            finest.fallback.unknown_motifs,
+            finest.fallback.recursed_to_children,
+            finest.fallback.byte_fallback_tokens
+        );
+        println!(
+            "state_aware token_count={} avg_chars_per_token={:.2} fallback=motif_hits:{} unknown:{} recursed:{} byte:{}",
+            state_aware.tokens.len(),
+            avg_chars_per_token(input, state_aware.tokens.len()),
+            state_aware.fallback.motif_hits,
+            state_aware.fallback.unknown_motifs,
+            state_aware.fallback.recursed_to_children,
+            state_aware.fallback.byte_fallback_tokens
+        );
+        println!(
+            "roundtrip_status=OK delta_tokens={}",
+            state_aware.tokens.len() as isize - finest.tokens.len() as isize
+        );
+    }
+}
+
+#[test]
+fn faceoff_reuse_aware_vs_finest_known_side_by_side() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+
+    for (name, input) in [
+        ("stress-20x-repetition", stress.as_str()),
+        ("mixed-domain", mixed.as_str()),
+    ] {
+        let finest = faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                input,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::FinestKnown,
+            )
+            .unwrap();
+        let reuse_aware = faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                input,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::ReuseAware,
+            )
+            .unwrap();
+
+        assert_eq!(faceoff.decode_document(&finest).unwrap(), input);
+        assert_eq!(faceoff.decode_document(&reuse_aware).unwrap(), input);
+        assert_eq!(finest.fallback.unknown_motifs, 0);
+        assert_eq!(reuse_aware.fallback.unknown_motifs, 0);
+        assert_eq!(finest.fallback.byte_fallback_tokens, 0);
+        assert_eq!(reuse_aware.fallback.byte_fallback_tokens, 0);
+
+        println!("FACEOFF_POLICY_COMPARISON_INPUT={name}");
+        println!(
+            "finest_known token_count={} avg_chars_per_token={:.2} fallback=motif_hits:{} unknown:{} recursed:{} byte:{}",
+            finest.tokens.len(),
+            avg_chars_per_token(input, finest.tokens.len()),
+            finest.fallback.motif_hits,
+            finest.fallback.unknown_motifs,
+            finest.fallback.recursed_to_children,
+            finest.fallback.byte_fallback_tokens
+        );
+        println!(
+            "reuse_aware token_count={} avg_chars_per_token={:.2} fallback=motif_hits:{} unknown:{} recursed:{} byte:{}",
+            reuse_aware.tokens.len(),
+            avg_chars_per_token(input, reuse_aware.tokens.len()),
+            reuse_aware.fallback.motif_hits,
+            reuse_aware.fallback.unknown_motifs,
+            reuse_aware.fallback.recursed_to_children,
+            reuse_aware.fallback.byte_fallback_tokens
+        );
+        println!(
+            "roundtrip_status=OK delta_tokens={}",
+            reuse_aware.tokens.len() as isize - finest.tokens.len() as isize
+        );
+    }
+}
+
+#[test]
+fn faceoff_novelty_aware_vs_finest_known_side_by_side() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+
+    for (name, input) in [
+        ("stress-20x-repetition", stress.as_str()),
+        ("mixed-domain", mixed.as_str()),
+    ] {
+        let finest = faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                input,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::FinestKnown,
+            )
+            .unwrap();
+        let novelty_aware = faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                input,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::NoveltyAware,
+            )
+            .unwrap();
+
+        assert_eq!(faceoff.decode_document(&finest).unwrap(), input);
+        assert_eq!(faceoff.decode_document(&novelty_aware).unwrap(), input);
+        assert_eq!(finest.fallback.unknown_motifs, 0);
+        assert_eq!(novelty_aware.fallback.unknown_motifs, 0);
+        assert_eq!(finest.fallback.byte_fallback_tokens, 0);
+        assert_eq!(novelty_aware.fallback.byte_fallback_tokens, 0);
+
+        println!("FACEOFF_POLICY_COMPARISON_INPUT={name}");
+        println!(
+            "finest_known token_count={} avg_chars_per_token={:.2} fallback=motif_hits:{} unknown:{} recursed:{} byte:{}",
+            finest.tokens.len(),
+            avg_chars_per_token(input, finest.tokens.len()),
+            finest.fallback.motif_hits,
+            finest.fallback.unknown_motifs,
+            finest.fallback.recursed_to_children,
+            finest.fallback.byte_fallback_tokens
+        );
+        println!(
+            "novelty_aware token_count={} avg_chars_per_token={:.2} fallback=motif_hits:{} unknown:{} recursed:{} byte:{}",
+            novelty_aware.tokens.len(),
+            avg_chars_per_token(input, novelty_aware.tokens.len()),
+            novelty_aware.fallback.motif_hits,
+            novelty_aware.fallback.unknown_motifs,
+            novelty_aware.fallback.recursed_to_children,
+            novelty_aware.fallback.byte_fallback_tokens
+        );
+        println!(
+            "roundtrip_status=OK delta_tokens={}",
+            novelty_aware.tokens.len() as isize - finest.tokens.len() as isize
+        );
+    }
+}
+
+#[test]
+fn faceoff_span_length_aware_vs_novelty_aware_side_by_side() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+
+    for (name, input) in [
+        ("stress-20x-repetition", stress.as_str()),
+        ("mixed-domain", mixed.as_str()),
+    ] {
+        let novelty_aware = faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                input,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::NoveltyAware,
+            )
+            .unwrap();
+        let span_length_aware = faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                input,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::SpanLengthAware,
+            )
+            .unwrap();
+
+        assert_eq!(faceoff.decode_document(&novelty_aware).unwrap(), input);
+        assert_eq!(faceoff.decode_document(&span_length_aware).unwrap(), input);
+        assert_eq!(novelty_aware.fallback.unknown_motifs, 0);
+        assert_eq!(span_length_aware.fallback.unknown_motifs, 0);
+        assert_eq!(novelty_aware.fallback.byte_fallback_tokens, 0);
+        assert_eq!(span_length_aware.fallback.byte_fallback_tokens, 0);
+
+        println!("FACEOFF_POLICY_COMPARISON_INPUT={name}");
+        println!(
+            "novelty_aware token_count={} avg_chars_per_token={:.2} fallback=motif_hits:{} unknown:{} recursed:{} byte:{}",
+            novelty_aware.tokens.len(),
+            avg_chars_per_token(input, novelty_aware.tokens.len()),
+            novelty_aware.fallback.motif_hits,
+            novelty_aware.fallback.unknown_motifs,
+            novelty_aware.fallback.recursed_to_children,
+            novelty_aware.fallback.byte_fallback_tokens
+        );
+        println!(
+            "span_length_aware token_count={} avg_chars_per_token={:.2} fallback=motif_hits:{} unknown:{} recursed:{} byte:{}",
+            span_length_aware.tokens.len(),
+            avg_chars_per_token(input, span_length_aware.tokens.len()),
+            span_length_aware.fallback.motif_hits,
+            span_length_aware.fallback.unknown_motifs,
+            span_length_aware.fallback.recursed_to_children,
+            span_length_aware.fallback.byte_fallback_tokens
+        );
+        println!(
+            "roundtrip_status=OK delta_tokens={}",
+            span_length_aware.tokens.len() as isize - novelty_aware.tokens.len() as isize
+        );
+    }
+}
+
+#[test]
+fn faceoff_budgeted_vs_novelty_aware_side_by_side() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+
+    for (name, input) in [
+        ("stress-20x-repetition", stress.as_str()),
+        ("mixed-domain", mixed.as_str()),
+    ] {
+        let novelty_aware = faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                input,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::NoveltyAware,
+            )
+            .unwrap();
+        let budgeted = faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                input,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::Budgeted,
+            )
+            .unwrap();
+
+        assert_eq!(faceoff.decode_document(&novelty_aware).unwrap(), input);
+        assert_eq!(faceoff.decode_document(&budgeted).unwrap(), input);
+        assert_eq!(novelty_aware.fallback.unknown_motifs, 0);
+        assert_eq!(budgeted.fallback.unknown_motifs, 0);
+        assert_eq!(novelty_aware.fallback.byte_fallback_tokens, 0);
+        assert_eq!(budgeted.fallback.byte_fallback_tokens, 0);
+
+        println!("FACEOFF_POLICY_COMPARISON_INPUT={name}");
+        println!(
+            "novelty_aware token_count={} avg_chars_per_token={:.2} fallback=motif_hits:{} unknown:{} recursed:{} byte:{}",
+            novelty_aware.tokens.len(),
+            avg_chars_per_token(input, novelty_aware.tokens.len()),
+            novelty_aware.fallback.motif_hits,
+            novelty_aware.fallback.unknown_motifs,
+            novelty_aware.fallback.recursed_to_children,
+            novelty_aware.fallback.byte_fallback_tokens
+        );
+        println!(
+            "budgeted token_count={} avg_chars_per_token={:.2} fallback=motif_hits:{} unknown:{} recursed:{} byte:{}",
+            budgeted.tokens.len(),
+            avg_chars_per_token(input, budgeted.tokens.len()),
+            budgeted.fallback.motif_hits,
+            budgeted.fallback.unknown_motifs,
+            budgeted.fallback.recursed_to_children,
+            budgeted.fallback.byte_fallback_tokens
+        );
+        println!(
+            "roundtrip_status=OK delta_tokens={}",
+            budgeted.tokens.len() as isize - novelty_aware.tokens.len() as isize
+        );
+    }
+}
+
+#[test]
+fn faceoff_hybrid_structural_vs_novelty_aware_side_by_side() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+
+    for (name, input) in [
+        ("stress-20x-repetition", stress.as_str()),
+        ("mixed-domain", mixed.as_str()),
+    ] {
+        let novelty_aware = faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                input,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::NoveltyAware,
+            )
+            .unwrap();
+        let hybrid_structural = faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                input,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::HybridStructural,
+            )
+            .unwrap();
+
+        assert_eq!(faceoff.decode_document(&novelty_aware).unwrap(), input);
+        assert_eq!(faceoff.decode_document(&hybrid_structural).unwrap(), input);
+        assert_eq!(novelty_aware.fallback.unknown_motifs, 0);
+        assert_eq!(hybrid_structural.fallback.unknown_motifs, 0);
+        assert_eq!(novelty_aware.fallback.byte_fallback_tokens, 0);
+        assert_eq!(hybrid_structural.fallback.byte_fallback_tokens, 0);
+
+        println!("FACEOFF_POLICY_COMPARISON_INPUT={name}");
+        println!(
+            "novelty_aware token_count={} avg_chars_per_token={:.2} fallback=motif_hits:{} unknown:{} recursed:{} byte:{}",
+            novelty_aware.tokens.len(),
+            avg_chars_per_token(input, novelty_aware.tokens.len()),
+            novelty_aware.fallback.motif_hits,
+            novelty_aware.fallback.unknown_motifs,
+            novelty_aware.fallback.recursed_to_children,
+            novelty_aware.fallback.byte_fallback_tokens
+        );
+        println!(
+            "hybrid_structural token_count={} avg_chars_per_token={:.2} fallback=motif_hits:{} unknown:{} recursed:{} byte:{}",
+            hybrid_structural.tokens.len(),
+            avg_chars_per_token(input, hybrid_structural.tokens.len()),
+            hybrid_structural.fallback.motif_hits,
+            hybrid_structural.fallback.unknown_motifs,
+            hybrid_structural.fallback.recursed_to_children,
+            hybrid_structural.fallback.byte_fallback_tokens
+        );
+        println!(
+            "roundtrip_status=OK delta_tokens={}",
+            hybrid_structural.tokens.len() as isize - novelty_aware.tokens.len() as isize
+        );
+    }
+}
+
+#[test]
+fn tokenizer_oss_benchmark() {
+    let device = Default::default();
+    let config = TokenizerConfig::default();
+    let tokenizer = RecursiveTokenizer::new(config);
+    let dynamic_factory = p1_dynamic_lever_factory::<TestBackend>();
+    let corpus = oss_benchmark_corpus();
+
+    assert!(
+        corpus.len() >= 10_000,
+        "OSS benchmark corpus should be at least 10k chars, got {}",
+        corpus.len()
+    );
+
+    for (model_name, env_var) in [
+        ("Llama 3.1 8B", "LLAMA31_8B_GGUF_PATH"),
+        ("Mistral 7B", "MISTRAL_7B_GGUF_PATH"),
+    ] {
+        let v2_started = Instant::now();
+        let v2_summary = tokenizer
+            .run_factory(&corpus, &device, dynamic_factory.clone())
+            .unwrap();
+        let v2_elapsed_ms = v2_started.elapsed().as_millis();
+        let v2_unique_by_depth = unique_tokens_by_depth(&v2_summary);
+
+        println!("model_name={model_name}");
+        println!("tokenizer_type=v2");
+        println!("token_count={}", v2_summary.tokens.len());
+        println!(
+            "avg_chars_per_token={:.2}",
+            avg_chars_per_token(&corpus, v2_summary.tokens.len())
+        );
+        println!(
+            "motif_reuse_count={}",
+            cross_depth_motif_reuse_count(&v2_summary)
+        );
+        println!("rough_perplexity=N/A");
+        println!("wall_time_ms={v2_elapsed_ms}");
+        println!(
+            "hierarchy_note={}",
+            hierarchy_balance_note(&v2_summary, &v2_unique_by_depth)
+        );
+        println!("REUSED MOTIFS (cross-depth) [{}]", v2_summary.primitive);
+        println!("{}", format_reused_motif_spans(&v2_summary, &corpus));
+
+        assert!(!v2_summary.tokens.is_empty());
+        assert!(balanced_recursive_split_holds(&v2_summary));
+
+        let native_started = Instant::now();
+        match maybe_native_llama_token_count(env_var, &corpus) {
+            Ok(native_count) => {
+                let native_elapsed_ms = native_started.elapsed().as_millis();
+                println!("model_name={model_name}");
+                println!("tokenizer_type=native");
+                println!("token_count={native_count}");
+                println!(
+                    "avg_chars_per_token={:.2}",
+                    avg_chars_per_token(&corpus, native_count)
+                );
+                println!("motif_reuse_count=N/A");
+                println!("rough_perplexity=N/A");
+                println!("wall_time_ms={native_elapsed_ms}");
+            }
+            Err(status) => {
+                println!("model_name={model_name}");
+                println!("tokenizer_type=native");
+                println!("token_count=N/A");
+                println!("avg_chars_per_token=N/A");
+                println!("motif_reuse_count=N/A");
+                println!("rough_perplexity=N/A");
+                println!("wall_time_ms=N/A");
+                println!("status={status}");
+            }
+        }
+    }
 }
 
 fn collect_summaries(
@@ -446,6 +1528,265 @@ fn format_depth_counts(counts: &BTreeMap<usize, usize>) -> String {
         .map(|(depth, count)| format!("d{depth}:{count}"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn avg_chars_per_token(text: &str, token_count: usize) -> f64 {
+    text.chars().count() as f64 / token_count.max(1) as f64
+}
+
+fn assert_roundtrip(label: &str, summary: &PrimitiveRunSummary, input: &str) {
+    let reconstructed = reconstruct_from_final_token_spans(summary, input);
+    assert_eq!(
+        reconstructed, input,
+        "ROUNDTRIP CHECK [{label}] failed for {}",
+        summary.primitive
+    );
+    println!("ROUNDTRIP CHECK [{label}]: OK");
+}
+
+fn reconstruct_from_final_token_spans(summary: &PrimitiveRunSummary, input: &str) -> String {
+    let final_depth = summary
+        .tokens
+        .iter()
+        .map(|token| token.depth)
+        .max()
+        .unwrap_or_default();
+    let mut final_tokens = summary
+        .tokens
+        .iter()
+        .filter(|token| token.depth == final_depth)
+        .collect::<Vec<_>>();
+    final_tokens.sort_by_key(|token| token.start);
+
+    final_tokens
+        .into_iter()
+        .map(|token| {
+            input
+                .get(token.start..token.end)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "invalid final token span {}..{} for {}",
+                        token.start, token.end, summary.primitive
+                    )
+                })
+                .to_string()
+        })
+        .collect()
+}
+
+fn assert_roundtrip_integration(summary: &PrimitiveRunSummary, input: &str) {
+    let reconstructed = reconstruct_from_final_token_spans(summary, input);
+    assert_eq!(
+        reconstructed, input,
+        "ROUNDTRIP failed for {}",
+        summary.primitive
+    );
+    println!("ROUNDTRIP: OK");
+}
+
+fn merge_streaming_summaries(
+    streaming_chunk_summaries: &[(usize, PrimitiveRunSummary)],
+) -> PrimitiveRunSummary {
+    let primitive = streaming_chunk_summaries
+        .first()
+        .map(|(_, summary)| summary.primitive)
+        .unwrap_or("p1_fractal_hybrid_dyn-state-norm_v2");
+    let produced = streaming_chunk_summaries
+        .iter()
+        .map(|(_, summary)| summary.produced)
+        .sum();
+    let tokens = streaming_chunk_summaries
+        .iter()
+        .flat_map(|(offset, summary)| {
+            summary.tokens.iter().map(move |token| TokenRecord {
+                depth: token.depth,
+                start: token.start + offset,
+                end: token.end + offset,
+                text: token.text.clone(),
+                token: token.token.clone(),
+            })
+        })
+        .collect();
+
+    PrimitiveRunSummary {
+        primitive,
+        produced,
+        tokens,
+    }
+}
+
+fn stress_input() -> String {
+    std::iter::repeat_n(
+        "The cat sat on the mat. The dog sat on the mat. The bird sat on the mat. The fox sat on the mat.",
+        20,
+    )
+    .collect::<Vec<_>>()
+    .join(" ")
+        + " The cat sat on the mat once more."
+}
+
+fn mixed_domain_input() -> String {
+    [
+        "=== NEWS ===",
+        "City officials said Tuesday that transit service resumed across the river corridor after overnight storms flooded two low-lying stations, while crews continued inspecting power lines and drainage pumps before the evening commute.",
+        "=== CODE COMMENT ===",
+        "This cache invalidation path keeps a rolling checksum for each segment so repeated blocks can be recognized without recomputing the full buffer; if a checksum disagrees, rebuild the branch and log the span that changed for debugging.",
+        "=== LITERATURE ===",
+        "By the time the lamps were lit, the street had gone quiet enough for the distant train to sound like weather, and the old bookseller stood in his doorway listening as if the night itself were turning a page.",
+    ]
+    .join("\n")
+}
+
+fn oss_benchmark_corpus() -> String {
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let code_block = r#"fn stitch_token_spans(tokens: &[TokenRecord], input: &str) -> String {
+    tokens
+        .iter()
+        .filter(|token| token.depth == 5)
+        .map(|token| &input[token.start..token.end])
+        .collect::<String>()
+}
+
+fn grouped_reuse(digests: &[String]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for digest in digests {
+        *counts.entry(digest.clone()).or_insert(0) += 1;
+    }
+    counts
+}"#;
+
+    [
+        stress.as_str(),
+        stress.as_str(),
+        stress.as_str(),
+        stress.as_str(),
+        mixed.as_str(),
+        code_block,
+        mixed.as_str(),
+        code_block,
+        code_block,
+    ]
+    .join("\n\n=== OSS BENCHMARK CHUNK ===\n\n")
+}
+
+fn maybe_native_llama_token_count(env_var: &str, input: &str) -> Result<usize, String> {
+    let Some(model_path) = native_model_path(env_var) else {
+        return Err(format!("MODEL NOT FOUND — SKIPPED (set {env_var})"));
+    };
+
+    native_llama_token_count(&model_path, input)
+        .map_err(|err| format!("MODEL NOT FOUND — SKIPPED ({err})"))
+}
+
+fn native_model_path(env_var: &str) -> Option<PathBuf> {
+    std::env::var_os(env_var)
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+}
+
+fn native_llama_token_count(model_path: &Path, input: &str) -> Result<usize, String> {
+    let Some(tokenizer_bin) = native_tokenizer_bin() else {
+        return Err(
+            "native tokenizer binary not configured (set LLAMA_CPP_TOKENIZE_BIN or install llama-tokenize)"
+                .to_string(),
+        );
+    };
+    let temp_path = std::env::temp_dir().join(format!(
+        "fractal-tokenizer-oss-benchmark-{}.txt",
+        std::process::id()
+    ));
+    fs::write(&temp_path, input).map_err(|err| format!("failed to write temp corpus: {err}"))?;
+
+    let runtime = TokioRuntimeBuilder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("failed to build tokio runtime: {err}"))?;
+    let output = runtime
+        .block_on(async {
+            TokioCommand::new(&tokenizer_bin)
+                .arg("-m")
+                .arg(model_path)
+                .arg("-f")
+                .arg(&temp_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .await
+        })
+        .map_err(|err| format!("failed to run {}: {err}", tokenizer_bin.display()));
+    let _ = fs::remove_file(&temp_path);
+    let output = output?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "{} exited with status {}: {}",
+            tokenizer_bin.display(),
+            output
+                .status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "signal".to_string()),
+            stderr.trim()
+        ));
+    }
+
+    parse_native_token_count(
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    )
+}
+
+fn native_tokenizer_bin() -> Option<PathBuf> {
+    std::env::var_os("LLAMA_CPP_TOKENIZE_BIN")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| command_on_path("llama-tokenize"))
+}
+
+fn command_on_path(command: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|entry| entry.join(command))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+fn parse_native_token_count(stdout: &str, stderr: &str) -> Result<usize, String> {
+    let combined = format!("{stdout}\n{stderr}");
+    for line in combined.lines() {
+        if !line.to_ascii_lowercase().contains("token") {
+            continue;
+        }
+        if let Some(number) = line
+            .split(|ch: char| !ch.is_ascii_digit())
+            .find(|part| !part.is_empty())
+        {
+            return number
+                .parse::<usize>()
+                .map_err(|err| format!("failed to parse token count from `{line}`: {err}"));
+        }
+    }
+
+    Err("native tokenizer output did not include a parseable token count".to_string())
+}
+
+fn encoded_cross_depth_motif_reuse_count(document: &EncodedDocument) -> usize {
+    let mut motif_hits = BTreeMap::<String, BTreeSet<usize>>::new();
+    for token in &document.tokens {
+        if let EncodedTokenKind::Motif { digest } = &token.kind {
+            motif_hits
+                .entry(digest.clone())
+                .or_default()
+                .insert(token.depth);
+        }
+    }
+
+    motif_hits
+        .into_iter()
+        .filter(|(_, depths)| depths.len() > 1)
+        .count()
 }
 
 fn describe_pattern(

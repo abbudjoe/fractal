@@ -1,9 +1,21 @@
 // Naming Convention for tokenizer primitives:
 // [base]_[lever-description]_v[version]
 // Examples: p1_fractal_hybrid_v1, b1_fractal_gated_dyn-residual-norm_v1
+mod faceoff;
+mod model_face;
 mod primitives;
 mod tokenizer;
 
+pub use faceoff::{
+    EncodedDocument, EncodedToken, EncodedTokenKind, FaceoffChunk, FaceoffChunkLimits,
+    FaceoffChunkedDocument, FaceoffEmissionPolicy, FaceoffFallbackStats, FaceoffTokenId,
+    FaceoffTokenizer, FaceoffVocab, VocabEntry,
+};
+pub use model_face::{
+    ModelAdapter, ModelBatch, ModelFacingBatch, ModelFacingDocument, NativeCompatibilityAdapter,
+    NativeCompatibilityBatch, NativeCompatibilityError, NativeTokenizer, NativeTokenizedChunk,
+    NativeTokenizedBatch, NativeTokenizedDocument,
+};
 pub use primitives::{
     B1FractalGated, B3FractalHierarchical, B4Universal, P1FractalHybrid, P2Mandelbrot,
 };

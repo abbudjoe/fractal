@@ -6,7 +6,7 @@ use burn::{
 use fractal_core::{
     error::FractalError,
     primitives::{complex_square, gated_sigmoid, one_minus},
-    rule_trait::FractalRule,
+    rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
 };
 
@@ -39,6 +39,7 @@ impl<B: Backend> FractalRule<B> for B4Universal<B> {
         &self,
         state: &FractalState<B>,
         x: &Tensor<B, 2>,
+        _context: ApplyContext,
     ) -> Result<FractalState<B>, FractalError> {
         let state = state.hierarchical_complex_checked(self.levels, self.hidden_dim)?;
         let [batch, levels, width] = state.dims();

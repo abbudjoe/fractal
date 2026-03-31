@@ -6,7 +6,7 @@ use burn::{
 use fractal_core::{
     error::FractalError,
     primitives::{gated_sigmoid, one_minus},
-    rule_trait::FractalRule,
+    rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
 };
 
@@ -50,6 +50,7 @@ impl<B: Backend> FractalRule<B> for P1FractalHybrid<B> {
         &self,
         state: &FractalState<B>,
         x: &Tensor<B, 2>,
+        _context: ApplyContext,
     ) -> Result<FractalState<B>, FractalError> {
         let previous_state = state.flat()?;
         let g = gated_sigmoid(self.g_proj.forward(x.clone()));

@@ -6,7 +6,7 @@ use burn::{
 use fractal_core::{
     error::FractalError,
     primitives::{complex_square, gated_sigmoid, gated_sigmoid_clamped},
-    rule_trait::FractalRule,
+    rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
 };
 
@@ -39,6 +39,7 @@ impl<B: Backend> FractalRule<B> for B3FractalHierarchical<B> {
         &self,
         state: &FractalState<B>,
         x: &Tensor<B, 2>,
+        context: ApplyContext,
     ) -> Result<FractalState<B>, FractalError> {
         let state = state.hierarchical_complex_checked(self.levels, self.hidden_dim)?;
         let [batch, levels, width] = state.dims();
@@ -46,11 +47,12 @@ impl<B: Backend> FractalRule<B> for B3FractalHierarchical<B> {
         let g = gated_sigmoid_clamped(self.g_proj.forward(x.clone()));
         let c = self.c_proj.forward(x.clone());
         let gamma = gated_sigmoid(self.gamma_proj.forward(x.clone()));
+        let radius = 0.98 - 0.03 * depth_fraction(context);
 
         let mut next_levels: Vec<Tensor<B, 2>> = Vec::with_capacity(levels);
         for level in 0..levels {
             let prev = state.clone().narrow(1, level, 1).reshape([batch, width]);
-            let mut next = g.clone() * complex_square(prev) + c.clone();
+            let mut next = g.clone() * complex_square(prev).mul_scalar(radius) + c.clone();
             if level > 0 {
                 next =
                     next + gamma.clone() * self.compressor.forward(next_levels[level - 1].clone());
@@ -81,4 +83,11 @@ impl<B: Backend> FractalRule<B> for B3FractalHierarchical<B> {
     fn clone_box(&self) -> Box<dyn FractalRule<B>> {
         Box::new(self.clone())
     }
+}
+
+fn depth_fraction(context: ApplyContext) -> f64 {
+    if context.max_depth <= 1 {
+        return 0.0;
+    }
+    context.depth.min(context.max_depth - 1) as f64 / (context.max_depth - 1) as f64
 }

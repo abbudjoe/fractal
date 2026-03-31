@@ -1,0 +1,73 @@
+use fractal_core::error::FractalError;
+
+mod decode;
+mod encode;
+mod fallback;
+mod packaging;
+mod vocab;
+
+pub use encode::FaceoffTokenizer;
+pub use fallback::FaceoffFallbackStats;
+pub use packaging::{FaceoffChunk, FaceoffChunkLimits, FaceoffChunkedDocument};
+pub use vocab::{FaceoffVocab, VocabEntry};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaceoffEmissionPolicy {
+    GreedyKnown,
+    FinestKnown,
+    StateAware,
+    ReuseAware,
+    NoveltyAware,
+    HybridStructural,
+    SpanLengthAware,
+    Budgeted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FaceoffTokenId(u32);
+
+impl FaceoffTokenId {
+    pub fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    pub(crate) fn new(id: u32) -> Self {
+        Self(id)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EncodedTokenKind {
+    Motif { digest: String },
+    Byte { value: u8 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EncodedToken {
+    pub id: FaceoffTokenId,
+    pub kind: EncodedTokenKind,
+    pub depth: usize,
+    pub start: usize,
+    pub end: usize,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EncodedDocument {
+    pub input_len: usize,
+    pub tokens: Vec<EncodedToken>,
+    pub fallback: FaceoffFallbackStats,
+}
+
+impl EncodedDocument {
+    pub fn decode(&self) -> Result<String, FractalError> {
+        decode::decode_document(self)
+    }
+
+    pub fn package(
+        &self,
+        limits: FaceoffChunkLimits,
+    ) -> Result<FaceoffChunkedDocument, FractalError> {
+        packaging::package_document(self, limits)
+    }
+}

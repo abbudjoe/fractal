@@ -7,3 +7,10 @@ publish = false
 [dependencies]
 burn = { workspace = true }
 fractal-core = { path = "../fractal-core" }
+
+[dev-dependencies]
+tiktoken = { package = "tiktoken-rs", version = "^0.5" }
+tokio = { version = "1.50", features = ["process", "rt"] }
+
+[target.'cfg(not(target_os = "macos"))'.dev-dependencies]
+llama-cpp-rs = { package = "llama_cpp_rs", version = "0.3.0" }

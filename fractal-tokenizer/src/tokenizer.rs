@@ -8,7 +8,7 @@ use burn::{
 };
 use fractal_core::{
     error::FractalError,
-    rule_trait::FractalRule,
+    rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -182,7 +182,14 @@ impl RecursiveTokenizer {
         }
 
         let features = segment_features::<B>(segment.bytes, self.config.dim, device);
-        let next_state = rule.apply(&state, &features)?;
+        let next_state = rule.apply(
+            &state,
+            &features,
+            ApplyContext {
+                depth: segment.depth,
+                max_depth: self.config.max_depth,
+            },
+        )?;
         let summary = summarize_readout(
             &next_state.readout(),
             segment.bytes,
@@ -615,6 +622,7 @@ fn summarize_readout<B: Backend>(
     let values = tensor_data_to_vec::<f32>(readout.clone().into_data(), "token readout")?;
     let prefix = values.iter().take(8).copied().collect::<Vec<_>>();
     let rolling_norm = normalized_l2(&values);
+    let state_bin = quantize_state_signal(rolling_norm, &values);
     let mut digest = 1469598103934665603u64;
     for value in prefix {
         let quantized = (value * 1000.0).round() as i64;
@@ -623,7 +631,7 @@ fn summarize_readout<B: Backend>(
     }
     let digest = format!("{digest:016x}");
     let motif = motifs.resolve(depth, digest, &values, rolling_norm, motif_reuse);
-    Ok(format!("d{depth}-n{}-{motif}", bytes.len()))
+    Ok(format!("d{depth}-n{}-q{state_bin}-{motif}", bytes.len()))
 }
 
 fn tensor_data_to_vec<E: Element>(
@@ -774,4 +782,10 @@ fn harmonic_mean(left: f32, right: f32) -> f32 {
     } else {
         (left * right / sum) + (left * right / sum)
     }
+}
+
+fn quantize_state_signal(rolling_norm: f32, values: &[f32]) -> u16 {
+    let score = rolling_norm * (1.0 + mean_absolute_value(values));
+    let scaled = (score * 4096.0).round();
+    scaled.clamp(0.0, u16::MAX as f32) as u16
 }

@@ -6,7 +6,7 @@ use burn::{
 use fractal_core::{
     error::FractalError,
     primitives::{complex_square, gated_sigmoid_clamped},
-    rule_trait::FractalRule,
+    rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
 };
 
@@ -33,6 +33,7 @@ impl<B: Backend> FractalRule<B> for P2Mandelbrot<B> {
         &self,
         state: &FractalState<B>,
         x: &Tensor<B, 2>,
+        _context: ApplyContext,
     ) -> Result<FractalState<B>, FractalError> {
         let state = state.complex()?;
         let g = gated_sigmoid_clamped(self.g_proj.forward(x.clone()));
