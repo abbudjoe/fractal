@@ -164,6 +164,7 @@ The adapter layer should be validated with the following checks:
 - no fallback corruption
 - model-facing batch shape stability
 - compatibility adapter output for existing LMs
+- file-backed native-tokenizer smoke coverage through `HuggingFaceNativeTokenizer::from_file`
 
 The first adapter validation should use the existing benchmark inputs:
 
@@ -212,6 +213,16 @@ That means:
 - packaging owns chunking
 - adapters own translation
 - runtimes own execution
+
+## Implementation Status
+
+The first slice is landed and validated:
+
+- the combined wrapper contract is implemented
+- the native compatibility adapter retokenizes chunk payloads deterministically
+- HF-backed smoke coverage exists for `HuggingFaceNativeTokenizer::from_file`
+- `FaceoffVocab` persistence/versioning is implemented as a versioned JSON contract
+- the embedding bridge and fractal-native runtime remain later phases
 
 ## Implementation Status
 

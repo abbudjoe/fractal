@@ -19,6 +19,10 @@ The current codebase already establishes the important tokenizer-side primitives
 
 This contract formalizes those pieces as a model-facing ABI.
 
+The current implementation now also includes file-backed HF tokenizer smoke
+coverage and a versioned JSON persistence contract for `FaceoffVocab`, so the
+contract is no longer purely in-memory.
+
 For this phase, the canonical adapter input should be treated as a combined
 wrapper concept:
 
@@ -52,8 +56,9 @@ Required properties:
 - stable token identities within the current experiment run
 
 The tokenizer contract is responsible for producing structural truth, not model inputs.
-Vocabulary serialization, versioning, and train/val/test ownership are deferred
-to later phases once we have a model-facing storage contract.
+Vocabulary serialization, versioning, and train/val/test ownership are still
+deferred as training-system concerns, but the codebase now has a versioned JSON
+vocab persistence format for the current experiment phase.
 
 ### 2. Packaging Contract
 
@@ -262,6 +267,12 @@ The following belong in prose only:
 - which model families are supported
 - the order in which adapters should be implemented
 
+Implementation status:
+
+- file-backed HF tokenizer smoke tests exercise `HuggingFaceNativeTokenizer::from_file`
+- `FaceoffVocab` persistence/versioning is implemented as a versioned JSON contract
+- the remaining adapter phases still use the same abstract surface
+
 ## Practical Summary
 
 The tokenizer track now has enough surface area to define a stable model-facing ABI:
@@ -286,3 +297,4 @@ The first model-facing slice is now implemented and validated in the codebase:
 - `ModelFacingBatch` is the canonical batch wrapper for those documents
 - the native compatibility adapter retokenizes chunk payloads deterministically
 - focused tests cover exact reconstruction and benchmark-input batch order
+- `FaceoffVocab` has a versioned JSON persistence contract for the current phase

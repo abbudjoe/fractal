@@ -1920,6 +1920,8 @@ dependencies = [
  "burn",
  "fractal-core",
  "llama_cpp_rs",
+ "serde",
+ "serde_json",
  "tiktoken-rs",
  "tokenizers",
  "tokio",

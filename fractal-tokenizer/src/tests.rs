@@ -8,8 +8,9 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Stdio,
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
+use serde_json::Value;
 use tiktoken::cl100k_base;
 use tokio::{process::Command as TokioCommand, runtime::Builder as TokioRuntimeBuilder};
 use tokenizers::{models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace, Tokenizer};
@@ -18,9 +19,9 @@ use crate::{
     revived_primitive_factories, tokenizer::p1_dynamic_lever_factory,
     validate_tokenizer_primitive_name, B1FractalGated, B3FractalHierarchical, B4Universal,
     EncodedDocument, EncodedTokenKind, FaceoffChunkLimits, FaceoffEmissionPolicy, FaceoffTokenizer,
-    FaceoffVocab, HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument,
-    NativeCompatibilityAdapter, NativeTokenizer, P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary,
-    RecursiveTokenizer, TokenRecord, TokenizerConfig,
+    FaceoffVocab, FACEOFF_VOCAB_FORMAT_VERSION, HuggingFaceNativeTokenizer, ModelFacingBatch,
+    ModelFacingDocument, NativeCompatibilityAdapter, NativeTokenizer, P1FractalHybrid,
+    P2Mandelbrot, PrimitiveRunSummary, RecursiveTokenizer, TokenRecord, TokenizerConfig,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -665,6 +666,34 @@ fn build_hf_native_tokenizer(inputs: &[&str]) -> HuggingFaceNativeTokenizer {
     HuggingFaceNativeTokenizer::new(tokenizer)
 }
 
+fn unique_temp_path(prefix: &str, suffix: &str) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "fractal-tokenizer-{prefix}-{}-{stamp}{suffix}",
+        std::process::id()
+    ))
+}
+
+fn save_hf_tokenizer_to_temp_file(
+    tokenizer: &HuggingFaceNativeTokenizer,
+    prefix: &str,
+) -> PathBuf {
+    let path = unique_temp_path(prefix, ".json");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    tokenizer.tokenizer().save(&path, false).unwrap();
+    assert!(path.exists(), "expected tokenizer.json to be written to disk");
+    path
+}
+
+fn write_json_value(path: &Path, value: &Value) {
+    fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap();
+}
+
 #[test]
 fn model_face_document_roundtrip_on_benchmark_inputs() {
     let device = Default::default();
@@ -870,6 +899,87 @@ fn model_face_hf_native_adapter_preserves_chunk_order_and_is_deterministic() {
 }
 
 #[test]
+fn model_face_file_backed_hf_native_adapter_preserves_chunk_order_and_is_deterministic() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+    let limits = FaceoffChunkLimits::new(8, 4096);
+    let adapter = NativeCompatibilityAdapter::default();
+    let in_memory_tokenizer = build_hf_native_tokenizer(&corpus);
+    let tokenizer_path = save_hf_tokenizer_to_temp_file(&in_memory_tokenizer, "hf-file-backed");
+    let file_backed_tokenizer = HuggingFaceNativeTokenizer::from_file(&tokenizer_path).unwrap();
+
+    let documents = vec![
+        faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                &stress,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::NoveltyAware,
+            )
+            .unwrap(),
+        faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                &mixed,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::NoveltyAware,
+            )
+            .unwrap(),
+    ]
+    .into_iter()
+    .map(|encoded| ModelFacingDocument::from_encoded(encoded, limits).unwrap())
+    .collect::<Vec<_>>();
+    let batch = ModelFacingBatch::from(documents);
+
+    let file_backed_native = adapter
+        .retokenize_batch(&batch, &file_backed_tokenizer)
+        .unwrap();
+    let file_backed_again = adapter
+        .retokenize_batch(&batch, &file_backed_tokenizer)
+        .unwrap();
+    let in_memory_native = adapter
+        .retokenize_batch(&batch, &in_memory_tokenizer)
+        .unwrap();
+
+    assert_eq!(file_backed_native, file_backed_again);
+    assert_eq!(file_backed_native, in_memory_native);
+    assert_eq!(file_backed_native.len(), batch.len());
+
+    for (index, (document, native_document)) in
+        batch.iter().zip(file_backed_native.iter()).enumerate()
+    {
+        assert_eq!(document.input_len(), native_document.input_len);
+        assert_eq!(
+            document.frontier_token_count(),
+            native_document.frontier_token_count
+        );
+        assert_eq!(document.chunk_count(), native_document.chunk_count());
+        assert_eq!(document.reconstruct().unwrap(), document.decode().unwrap());
+        assert!(native_document
+            .chunks
+            .iter()
+            .enumerate()
+            .all(|(chunk_index, chunk)| chunk.source.index == chunk_index));
+        assert!(native_document
+            .chunks
+            .windows(2)
+            .all(|pair| pair[0].source.index < pair[1].source.index));
+
+        println!("MODEL_FACE_HF_FILE_INPUT_INDEX={index}");
+        println!("tokenizer_json_path={}", tokenizer_path.display());
+        println!("native_chunk_count={}", native_document.chunk_count());
+        println!("native_token_count={}", native_document.native_token_count());
+        println!("roundtrip_status=OK");
+    }
+}
+
+#[test]
 fn faceoff_vocab_induction_is_deterministic() {
     let device = Default::default();
     let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
@@ -886,6 +996,77 @@ fn faceoff_vocab_induction_is_deterministic() {
 
     assert_eq!(first.entries(), second.entries());
     assert!(first.motif_count() > 0);
+}
+
+#[test]
+fn faceoff_vocab_persistence_round_trip_is_exact() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+    let vocab_path = unique_temp_path("faceoff-vocab", ".json");
+    if let Some(parent) = vocab_path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+
+    vocab.save_to_file(&vocab_path).unwrap();
+    let loaded = FaceoffVocab::load_from_file(&vocab_path).unwrap();
+
+    assert_eq!(vocab, loaded);
+    assert_eq!(vocab.entries(), loaded.entries());
+    assert_eq!(vocab.motif_count(), loaded.motif_count());
+    assert_eq!(vocab.byte_fallback_base(), loaded.byte_fallback_base());
+    assert_eq!(
+        vocab.decode_byte_id(vocab.byte_id(0)),
+        loaded.decode_byte_id(loaded.byte_id(0))
+    );
+    assert_eq!(FaceoffVocab::FORMAT_VERSION, FACEOFF_VOCAB_FORMAT_VERSION);
+}
+
+#[test]
+fn faceoff_vocab_persistence_rejects_invalid_version_and_duplicate_motifs() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+    let vocab_path = unique_temp_path("faceoff-vocab-invalid", ".json");
+    if let Some(parent) = vocab_path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+
+    vocab.save_to_file(&vocab_path).unwrap();
+    let persisted: Value = serde_json::from_str(&fs::read_to_string(&vocab_path).unwrap()).unwrap();
+
+    let mut invalid_version = persisted.clone();
+    invalid_version["version"] = Value::from(FaceoffVocab::FORMAT_VERSION + 1);
+    let invalid_version_path = unique_temp_path("faceoff-vocab-invalid-version", ".json");
+    write_json_value(&invalid_version_path, &invalid_version);
+    let err = FaceoffVocab::load_from_file(&invalid_version_path).unwrap_err();
+    assert!(
+        format!("{err}").contains("unsupported faceoff vocab version"),
+        "expected invalid version to be rejected"
+    );
+
+    let mut duplicate_motifs = persisted;
+    let motifs = duplicate_motifs["motifs"].as_array_mut().unwrap();
+    let first_motif = motifs[0].clone();
+    motifs.push(first_motif);
+    duplicate_motifs["byte_fallback_base"] = Value::from(motifs.len() as u64);
+    let duplicate_path = unique_temp_path("faceoff-vocab-duplicate", ".json");
+    write_json_value(&duplicate_path, &duplicate_motifs);
+    let err = FaceoffVocab::load_from_file(&duplicate_path).unwrap_err();
+    assert!(
+        format!("{err}").contains("sorted and unique"),
+        "expected duplicate motifs to be rejected"
+    );
 }
 
 #[test]

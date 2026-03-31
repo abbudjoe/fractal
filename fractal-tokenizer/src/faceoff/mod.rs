@@ -9,7 +9,7 @@ mod vocab;
 pub use encode::FaceoffTokenizer;
 pub use fallback::FaceoffFallbackStats;
 pub use packaging::{FaceoffChunk, FaceoffChunkLimits, FaceoffChunkedDocument};
-pub use vocab::{FaceoffVocab, VocabEntry};
+pub use vocab::{FaceoffVocab, VocabEntry, FACEOFF_VOCAB_FORMAT_VERSION};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FaceoffEmissionPolicy {

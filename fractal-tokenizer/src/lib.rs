@@ -8,8 +8,9 @@ mod tokenizer;
 
 pub use faceoff::{
     EncodedDocument, EncodedToken, EncodedTokenKind, FaceoffChunk, FaceoffChunkLimits,
-    FaceoffChunkedDocument, FaceoffEmissionPolicy, FaceoffFallbackStats, FaceoffTokenId,
-    FaceoffTokenizer, FaceoffVocab, VocabEntry,
+    FaceoffChunkedDocument, FaceoffEmissionPolicy, FaceoffFallbackStats,
+    FaceoffTokenId, FaceoffTokenizer, FaceoffVocab, VocabEntry,
+    FACEOFF_VOCAB_FORMAT_VERSION,
 };
 pub use model_face::{
     HuggingFaceNativeTokenizer, HuggingFaceNativeTokenizerError, ModelAdapter, ModelBatch,
