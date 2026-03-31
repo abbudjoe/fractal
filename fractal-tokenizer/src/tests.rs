@@ -1548,6 +1548,184 @@ fn faceoff_mixed_domain_false_positive_reuse_stays_near_zero() {
 }
 
 #[test]
+fn faceoff_unicode_heavy_roundtrip_is_exact() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let unicode = unicode_heavy_input();
+    let json_code_log = json_code_log_input();
+    let near_repetition = near_repetition_input();
+    let corpus = vec![
+        unicode.as_str(),
+        json_code_log.as_str(),
+        near_repetition.as_str(),
+    ];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+    let encoded = faceoff
+        .encode_text_v2::<TestBackend>(&unicode, &vocab, &device)
+        .unwrap();
+    let decoded = faceoff.decode_document(&encoded).unwrap();
+
+    assert_eq!(decoded, unicode);
+    assert!(encoded.tokens.len() > 1);
+    assert_eq!(encoded.fallback.unknown_motifs, 0);
+    assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
+}
+
+#[test]
+fn faceoff_json_code_log_blend_avoids_false_reuse() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let unicode = unicode_heavy_input();
+    let json_code_log = json_code_log_input();
+    let near_repetition = near_repetition_input();
+    let corpus = vec![
+        unicode.as_str(),
+        json_code_log.as_str(),
+        near_repetition.as_str(),
+    ];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+    let encoded = faceoff
+        .encode_text_v2::<TestBackend>(&json_code_log, &vocab, &device)
+        .unwrap();
+    let decoded = faceoff.decode_document(&encoded).unwrap();
+    let reuse_count = encoded_cross_depth_motif_reuse_count(&encoded);
+
+    assert_eq!(decoded, json_code_log);
+    assert!(encoded.tokens.len() > 1);
+    assert_eq!(encoded.fallback.unknown_motifs, 0);
+    assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
+    assert!(
+        reuse_count <= 1,
+        "json/code/log blend should not create excessive false-positive reuse"
+    );
+}
+
+#[test]
+fn faceoff_near_repetition_does_not_overcollapse() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let unicode = unicode_heavy_input();
+    let json_code_log = json_code_log_input();
+    let near_repetition = near_repetition_input();
+    let corpus = vec![
+        unicode.as_str(),
+        json_code_log.as_str(),
+        near_repetition.as_str(),
+    ];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+    let encoded = faceoff
+        .encode_text_v2::<TestBackend>(&near_repetition, &vocab, &device)
+        .unwrap();
+    let decoded = faceoff.decode_document(&encoded).unwrap();
+    let reuse_count = encoded_cross_depth_motif_reuse_count(&encoded);
+
+    assert_eq!(decoded, near_repetition);
+    assert!(
+        encoded.tokens.len() > 1,
+        "near repetition should preserve multiple frontier tokens"
+    );
+    assert_eq!(encoded.fallback.unknown_motifs, 0);
+    assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
+    assert!(
+        reuse_count <= 2,
+        "near repetition should not overcollapse into excessive cross-depth reuse"
+    );
+}
+
+#[test]
+fn model_face_pretrained_adapter_handles_edge_case_documents_deterministically() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let unicode = unicode_heavy_input();
+    let json_code_log = json_code_log_input();
+    let near_repetition = near_repetition_input();
+    let hard_edge_input = [
+        "=== JSON CODE LOG MIX ===",
+        json_code_log.as_str(),
+        "=== NEAR REPETITION MIX ===",
+        near_repetition.as_str(),
+    ]
+    .join("\n");
+    let corpus = vec![
+        unicode.as_str(),
+        json_code_log.as_str(),
+        near_repetition.as_str(),
+    ];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+    let limits = FaceoffChunkLimits::new(8, 4096);
+    let adapter = NativeCompatibilityAdapter;
+    let tokenizer_paths = pretrained_hf_tokenizer_json_paths();
+
+    if tokenizer_paths.is_empty() {
+        println!("MODEL_FACE_EDGE_SKIP=no local pretrained tokenizer.json configured/found");
+        return;
+    }
+
+    let document = faceoff
+        .encode_text_v2_with_policy::<TestBackend>(
+            &hard_edge_input,
+            &vocab,
+            &device,
+            FaceoffEmissionPolicy::NoveltyAware,
+        )
+        .unwrap();
+    let document = ModelFacingDocument::from_encoded(document, limits).unwrap();
+    let batch = ModelFacingBatch::from(vec![document]);
+
+    for (label, tokenizer_path) in tokenizer_paths {
+        let tokenizer =
+            HuggingFaceNativeTokenizer::from_file(&tokenizer_path).unwrap_or_else(|error| {
+                panic!(
+                    "failed to load pretrained tokenizer.json for {label} at {}: {error}",
+                    tokenizer_path.display()
+                )
+            });
+        let native = adapter.retokenize_batch(&batch, &tokenizer).unwrap();
+        let native_again = adapter.retokenize_batch(&batch, &tokenizer).unwrap();
+
+        assert_eq!(native, native_again);
+        assert_eq!(native.len(), batch.len());
+
+        for (index, (document, native_document)) in batch.iter().zip(native.iter()).enumerate() {
+            assert_eq!(document.input_len(), native_document.input_len);
+            assert_eq!(
+                document.frontier_token_count(),
+                native_document.frontier_token_count
+            );
+            assert_eq!(document.chunk_count(), native_document.chunk_count());
+            assert_eq!(document.reconstruct().unwrap(), document.decode().unwrap());
+            assert!(native_document
+                .chunks
+                .iter()
+                .enumerate()
+                .all(|(chunk_index, chunk)| chunk.source.index == chunk_index));
+            assert!(native_document
+                .chunks
+                .windows(2)
+                .all(|pair| pair[0].source.index < pair[1].source.index));
+
+            println!("MODEL_FACE_EDGE_LABEL={label}");
+            println!("MODEL_FACE_EDGE_INPUT_INDEX={index}");
+            println!("tokenizer_json_path={}", tokenizer_path.display());
+            println!("native_chunk_count={}", native_document.chunk_count());
+            println!(
+                "native_token_count={}",
+                native_document.native_token_count()
+            );
+            println!("roundtrip_status=OK");
+        }
+    }
+}
+
+#[test]
 fn faceoff_tokenizer_slice_report() {
     let device = Default::default();
     let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
@@ -2317,6 +2495,36 @@ fn mixed_domain_input() -> String {
         "This cache invalidation path keeps a rolling checksum for each segment so repeated blocks can be recognized without recomputing the full buffer; if a checksum disagrees, rebuild the branch and log the span that changed for debugging.",
         "=== LITERATURE ===",
         "By the time the lamps were lit, the street had gone quiet enough for the distant train to sound like weather, and the old bookseller stood in his doorway listening as if the night itself were turning a page.",
+    ]
+    .join("\n")
+}
+
+fn unicode_heavy_input() -> String {
+    [
+        "日本語の段落です。🙂 “Quoted text” keeps its punctuation, and café remains café.",
+        "العربية هنا أيضًا، مع أرقام ١٢٣ وبعض الرموز — plus English mix.",
+        "Emoji burst: 🧪🚀✨ and family sequence 👨‍👩‍👧‍👦 with zero-width joiners intact.",
+    ]
+    .join("\n")
+}
+
+fn json_code_log_input() -> String {
+    [
+        r#"{"ts":"2026-03-31T12:00:00Z","level":"info","event":"cache_hit","request_id":"abc123"}"#,
+        r#"fn refresh_cache(key: &str, value: &str) -> Result<(), CacheError> { if key.is_empty() { return Err(CacheError::EmptyKey); } Ok(()) }"#,
+        "log=warn request_id=abc123 action=refresh_cache status=retrying checksum=1a2b3c4d",
+        r#"{"ts":"2026-03-31T12:00:01Z","level":"info","event":"cache_hit","request_id":"abc123","count":3}"#,
+    ]
+    .join("\n")
+}
+
+fn near_repetition_input() -> String {
+    [
+        "record id=1001 user=alice status=ok region=us-west shard=alpha timestamp=2026-03-31T12:00:00Z",
+        "record id=1002 user=alice status=ok region=us-west shard=alpha timestamp=2026-03-31T12:00:01Z",
+        "record id=1003 user=bob status=ok region=us-west shard=alpha timestamp=2026-03-31T12:00:02Z",
+        "record id=1004 user=bob status=ok region=us-west shard=beta timestamp=2026-03-31T12:00:03Z",
+        "record id=1005 user=carol status=ok region=us-west shard=beta timestamp=2026-03-31T12:00:04Z",
     ]
     .join("\n")
 }
