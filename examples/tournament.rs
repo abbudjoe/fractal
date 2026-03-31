@@ -4,12 +4,13 @@ use fractal::{
     aggregate_results,
     error::FractalError,
     lifecycle::{
-        SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig, TournamentPreset,
-        TournamentProgressEvent, TournamentReporter, TournamentSequence,
+        RunExecutionOutcome, SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig,
+        TournamentPreset, TournamentProgressEvent, TournamentReporter, TournamentSequence,
     },
-    primitive_tracker_reminder_lines,
+    persist_run_artifacts, primitive_tracker_reminder_lines,
     registry::{ComputeBackend, ExecutionMode, SpeciesId},
-    species_registry_for_lane, species_registry_for_species, TournamentLane,
+    species_registry_for_lane, species_registry_for_species, ComparisonAuthority, TournamentLane,
+    TournamentRunReport,
 };
 
 fn main() -> Result<(), FractalError> {
@@ -313,7 +314,11 @@ fn parse_backend(value: &str) -> Result<BackendOverride, FractalError> {
 
 fn run_options(options: &RunOptions) -> Result<(), FractalError> {
     match options.selection() {
-        RunSelection::Preset(preset) => run_preset(options, preset),
+        RunSelection::Preset(preset) => run_preset(
+            options,
+            preset,
+            ComparisonAuthority::AuthoritativeSamePreset,
+        ),
         RunSelection::Sequence(sequence) => run_sequence(options, sequence),
     }
 }
@@ -323,27 +328,54 @@ fn run_sequence(options: &RunOptions, sequence: TournamentSequence) -> Result<()
         if index > 0 {
             println!();
         }
-        run_preset(options, preset)?;
+        run_preset(options, preset, ComparisonAuthority::AdvisoryMixedPreset)?;
     }
     Ok(())
 }
 
-fn run_preset(options: &RunOptions, preset: TournamentPreset) -> Result<(), FractalError> {
+fn run_preset(
+    options: &RunOptions,
+    preset: TournamentPreset,
+    comparison_authority: ComparisonAuthority,
+) -> Result<(), FractalError> {
     let config = options.config_for(preset);
     let lane = options.lane();
     let species = options.species();
-    print_header(preset, lane, species, &config);
-    let tournament = Tournament::new(config)?;
+    print_header(preset, lane, species, &config, comparison_authority);
+    let tournament = Tournament::new(config.clone())?;
     let reporter: Arc<dyn TournamentReporter> = Arc::new(StdoutProgressReporter);
     let species = if let Some(species) = species {
         species_registry_for_species(species)
     } else {
         species_registry_for_lane(lane)
     };
-    let results =
-        aggregate_results(tournament.run_generation_with_reporter(&species, Some(reporter))?);
-    print_results(&results);
-    print_primitive_tracker_reminder(&results, &species);
+    let artifact = tournament.run_generation_artifacts(&species, Some(reporter))?;
+    let results = aggregate_results(
+        artifact
+            .species
+            .iter()
+            .filter_map(|record| record.metrics.clone())
+            .collect::<Vec<_>>(),
+    );
+    let report = TournamentRunReport::new(
+        preset,
+        lane,
+        comparison_authority,
+        config,
+        species,
+        results,
+        artifact,
+    );
+    let persisted = persist_run_artifacts(&report)?;
+    print_results(&report);
+    print_failures(&report);
+    print_primitive_tracker_reminder(&report);
+    println!(
+        "artifacts={} manifest={}",
+        persisted.artifact_path.display(),
+        persisted.manifest_path.display()
+    );
+    ensure_successful_execution(&report)?;
     Ok(())
 }
 
@@ -352,6 +384,7 @@ fn print_header(
     lane: TournamentLane,
     species: Option<SpeciesId>,
     config: &TournamentConfig,
+    comparison_authority: ComparisonAuthority,
 ) {
     println!("== {} ==", preset.name());
     let scope = species
@@ -374,6 +407,7 @@ fn print_header(
         config.train_steps_per_species,
         config.eval_batches_per_family,
     );
+    println!("comparison={}", comparison_authority.label());
     if !config.species_overrides.is_empty() {
         println!(
             "temporary_overrides={}",
@@ -445,8 +479,8 @@ fn print_species_completed(completion: &SpeciesCompletion) {
     );
 }
 
-fn print_results(results: &[fractal::RankedSpeciesResult]) {
-    for result in results {
+fn print_results(report: &TournamentRunReport) {
+    for result in &report.results {
         println!(
             "{:<5} {:<24} {:<10.2} {:<11.2} {:<8.2} {:<7.0} {:.2}",
             result.rank,
@@ -460,12 +494,52 @@ fn print_results(results: &[fractal::RankedSpeciesResult]) {
     }
 }
 
-fn print_primitive_tracker_reminder(
-    results: &[fractal::RankedSpeciesResult],
-    species: &[fractal::SpeciesDefinition],
-) {
-    for line in primitive_tracker_reminder_lines(results, species) {
+fn print_failures(report: &TournamentRunReport) {
+    for record in &report.artifact.species {
+        if matches!(record.execution_outcome, RunExecutionOutcome::Success) {
+            continue;
+        }
+        println!(
+            "failure {:<24} outcome={} error={}",
+            report.variant_name_for(record.stage.species),
+            outcome_label(record.outcome_class()),
+            record.error.as_deref().unwrap_or("unknown error")
+        );
+    }
+}
+
+fn print_primitive_tracker_reminder(report: &TournamentRunReport) {
+    for line in primitive_tracker_reminder_lines(report) {
         println!("{line}");
+    }
+}
+
+fn ensure_successful_execution(report: &TournamentRunReport) -> Result<(), FractalError> {
+    if let Some(record) = report
+        .artifact
+        .species
+        .iter()
+        .find(|record| !matches!(record.execution_outcome, RunExecutionOutcome::Success))
+    {
+        return Err(FractalError::InvalidState(format!(
+            "species {} failed with {:?}: {}",
+            record.stage.species,
+            record.outcome_class(),
+            record.error.as_deref().unwrap_or("unknown error")
+        )));
+    }
+    Ok(())
+}
+
+fn outcome_label(outcome: fractal::RunOutcomeClass) -> &'static str {
+    match outcome {
+        fractal::RunOutcomeClass::Success => "success",
+        fractal::RunOutcomeClass::TrainTimeout => "train-timeout",
+        fractal::RunOutcomeClass::EvalConstrained => "eval-constrained",
+        fractal::RunOutcomeClass::NumericFailure => "numeric-failure",
+        fractal::RunOutcomeClass::LowSignal => "low-signal",
+        fractal::RunOutcomeClass::RuntimeCost => "runtime-cost",
+        fractal::RunOutcomeClass::InfraFailure => "infra-failure",
     }
 }
 

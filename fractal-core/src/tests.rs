@@ -23,7 +23,8 @@ use crate::{
     error::FractalError,
     fitness::SpeciesRawMetrics,
     lifecycle::{
-        Tournament, TournamentConfig, TournamentPreset, TournamentProgressEvent, TournamentSequence,
+        RunExecutionOutcome, RunOutcomeClass, RunQualityOutcome, Tournament, TournamentConfig,
+        TournamentPreset, TournamentProgressEvent, TournamentSequence,
     },
     model::FractalModel,
     primitives::complex_square,
@@ -452,6 +453,95 @@ fn tournament_streams_species_events_in_sequential_mode() {
 }
 
 #[test]
+fn tournament_artifacts_capture_manifests_and_phase_timings() {
+    let tournament = Tournament::new(TournamentConfig::fast_test()).unwrap();
+    let artifact = tournament
+        .run_generation_artifacts(&test_species_registry(), None)
+        .unwrap();
+
+    assert_eq!(artifact.species.len(), SpeciesId::ALL.len());
+    assert_eq!(artifact.outcome_class(), RunOutcomeClass::Success);
+
+    let first = &artifact.species[0];
+    assert_eq!(first.manifest.variant_name.as_str(), "p1_contractive_v1");
+    assert!(first.manifest.timeout_budget.is_none());
+    assert!(!first.phase_timings.is_empty());
+    assert_eq!(first.outcome_class(), RunOutcomeClass::Success);
+}
+
+#[test]
+fn tournament_artifacts_classify_numeric_failure_without_losing_metrics() {
+    let tournament = Tournament::new(TournamentConfig::fast_test()).unwrap();
+    let artifact = tournament
+        .run_generation_artifacts(
+            &[numeric_failure_species_definition(
+                SpeciesId::P1FractalHybrid,
+            )],
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(artifact.species.len(), 1);
+    let record = &artifact.species[0];
+    assert_eq!(record.outcome_class(), RunOutcomeClass::NumericFailure);
+    assert!(matches!(
+        record.quality_outcome,
+        crate::lifecycle::RunQualityOutcome::NumericFailure
+    ));
+    assert!(record.metrics.is_some());
+}
+
+#[test]
+fn run_outcome_class_combines_execution_and_quality_contracts() {
+    assert_eq!(
+        RunOutcomeClass::from_components(RunExecutionOutcome::Success, RunQualityOutcome::Clean),
+        RunOutcomeClass::Success
+    );
+    assert_eq!(
+        RunOutcomeClass::from_components(
+            RunExecutionOutcome::Success,
+            RunQualityOutcome::NumericFailure
+        ),
+        RunOutcomeClass::NumericFailure
+    );
+    assert_eq!(
+        RunOutcomeClass::from_components(
+            RunExecutionOutcome::Success,
+            RunQualityOutcome::LowSignal
+        ),
+        RunOutcomeClass::LowSignal
+    );
+    assert_eq!(
+        RunOutcomeClass::from_components(
+            RunExecutionOutcome::Success,
+            RunQualityOutcome::RuntimeCost
+        ),
+        RunOutcomeClass::RuntimeCost
+    );
+    assert_eq!(
+        RunOutcomeClass::from_components(
+            RunExecutionOutcome::TrainTimeout,
+            RunQualityOutcome::Clean
+        ),
+        RunOutcomeClass::TrainTimeout
+    );
+    assert_eq!(
+        RunOutcomeClass::from_components(
+            RunExecutionOutcome::EvalConstrained,
+            RunQualityOutcome::Clean
+        ),
+        RunOutcomeClass::EvalConstrained
+    );
+    assert_eq!(
+        RunOutcomeClass::from_components(
+            RunExecutionOutcome::InfraFailure,
+            RunQualityOutcome::Clean
+        ),
+        RunOutcomeClass::InfraFailure
+    );
+}
+
+#[test]
 fn tournament_parallel_mode_respects_parallelism_cap() {
     CONCURRENT_SPECIES.store(0, Ordering::SeqCst);
     MAX_CONCURRENT_SPECIES.store(0, Ordering::SeqCst);
@@ -729,6 +819,18 @@ fn indexed_stub_species_runner(
     })
 }
 
+fn numeric_failure_species_runner(
+    context: SpeciesRunContext,
+) -> Result<SpeciesRawMetrics, FractalError> {
+    Ok(SpeciesRawMetrics {
+        species: SpeciesId::ALL[context.index],
+        grad_norm_depth_20: f64::NAN,
+        long_context_perplexity: f64::NAN,
+        arc_accuracy: 0.0,
+        tokens_per_sec: 0.0,
+    })
+}
+
 fn parallelism_stub_species_runner(
     context: SpeciesRunContext,
 ) -> Result<SpeciesRawMetrics, FractalError> {
@@ -818,6 +920,29 @@ fn invalid_species_definition(
             id,
             variant_name,
             indexed_stub_species_runner,
+            stub_species_runner_metal,
+        )
+    }
+}
+
+fn numeric_failure_species_definition(id: SpeciesId) -> SpeciesDefinition {
+    let variant_name = test_variant_name(id);
+    #[cfg(feature = "cuda")]
+    {
+        SpeciesDefinition::new(
+            id,
+            variant_name,
+            numeric_failure_species_runner,
+            stub_species_runner_metal,
+            stub_species_runner_cuda,
+        )
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        SpeciesDefinition::new(
+            id,
+            variant_name,
+            numeric_failure_species_runner,
             stub_species_runner_metal,
         )
     }

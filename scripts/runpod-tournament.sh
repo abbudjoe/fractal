@@ -35,6 +35,9 @@ Notes:
   - If no existing pod matches, the wrapper creates one and requires --gpu-id.
   - Newly created pods are stopped automatically after the run unless --keep-pod is set.
   - Existing pods are left running unless --stop-after-run is set.
+  - After every run, the wrapper preserves the remote log plus any manifest/artifact files
+    under .runpod-local-logs/runpod-results/<run-id>/, with the synced remote tree in
+    `remote/` and a wrapper manifest in `metadata/wrapper-manifest.json`.
   - Tournament arguments after "--" are passed to the cached release example binary as:
       <cached-binary> --backend cuda ...
 
@@ -382,6 +385,142 @@ sync_worktree() {
     fi
 }
 
+sanitize_path_component() {
+    printf '%s' "$1" | tr '[:space:]/:' '___' | tr -cd '[:alnum:]_.-'
+}
+
+prepare_run_preservation() {
+    local started_at run_component pod_component
+    started_at="$(date -u +%Y%m%dT%H%M%SZ)"
+    pod_component="$(sanitize_path_component "${POD_NAME_RESOLVED:-$POD_NAME}")"
+    RUN_STARTED_AT="$started_at"
+    RUN_ID="${started_at}_${pod_component}_${POD_ID}"
+    RUN_RESULTS_ROOT="${REPO_ROOT}/.runpod-local-logs/runpod-results"
+    RUN_RESULT_DIR="${RUN_RESULTS_ROOT}/${RUN_ID}"
+    RUN_RESULT_REMOTE_DIR="${RUN_RESULT_DIR}/remote"
+    RUN_RESULT_METADATA_DIR="${RUN_RESULT_DIR}/metadata"
+    RUN_RESULT_MANIFEST="${RUN_RESULT_METADATA_DIR}/wrapper-manifest.json"
+
+    mkdir -p "$RUN_RESULT_REMOTE_DIR" "$RUN_RESULT_METADATA_DIR"
+}
+
+write_local_wrapper_manifest() {
+    local status="$1"
+    local exit_code="$2"
+    local finished_at="$3"
+    local local_branch="$4"
+    local local_build_key="$5"
+    local local_commit_sha="$6"
+    python3 - "$RUN_RESULT_MANIFEST" \
+        "$status" \
+        "$exit_code" \
+        "$finished_at" \
+        "$RUN_ID" \
+        "$RUN_STARTED_AT" \
+        "$POD_ID" \
+        "${POD_NAME_RESOLVED:-$POD_NAME}" \
+        "$POD_STATUS" \
+        "$REMOTE_DIR" \
+        "$STATE_DIR" \
+        "$local_branch" \
+        "$local_build_key" \
+        "$local_commit_sha" \
+        "$RUN_TIMEOUT_SECONDS" \
+        "${TOURNAMENT_ARGS[@]}" <<'PY'
+import json
+import pathlib
+import sys
+
+(
+    path,
+    status,
+    exit_code,
+    finished_at,
+    run_id,
+    started_at,
+    pod_id,
+    pod_name,
+    pod_status,
+    remote_dir,
+    state_dir,
+    local_branch,
+    local_build_key,
+    local_commit_sha,
+    run_timeout_seconds,
+    *tournament_args,
+) = sys.argv[1:]
+
+manifest = {
+    "run_id": run_id,
+    "started_at": started_at,
+    "finished_at": finished_at,
+    "status": status,
+    "exit_code": int(exit_code),
+    "pod": {
+        "id": pod_id,
+        "name": pod_name,
+        "status": pod_status,
+    },
+    "paths": {
+        "remote_dir": remote_dir,
+        "state_dir": state_dir,
+        "preservation_root": str(pathlib.Path(path).parent.parent),
+    },
+    "build": {
+        "branch": local_branch,
+        "build_key": local_build_key,
+        "commit_sha": local_commit_sha,
+    },
+    "runtime": {
+        "run_timeout_seconds": int(run_timeout_seconds),
+        "tournament_args": tournament_args,
+        "backend": "cuda",
+    },
+}
+
+path_obj = pathlib.Path(path)
+path_obj.parent.mkdir(parents=True, exist_ok=True)
+path_obj.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+PY
+}
+
+preserve_remote_results() {
+    local preserve_status=0
+    log "preserving remote results under ${RUN_RESULT_DIR}"
+    if "${SSH_BASE[@]}" bash -s -- "$STATE_DIR" <<'REMOTE' | tar -x -C "$RUN_RESULT_REMOTE_DIR" -f -; then
+set -euo pipefail
+
+state_dir="$1"
+cd "$state_dir"
+
+tmp_list="$(mktemp)"
+trap 'rm -f "$tmp_list"' EXIT
+
+for path in logs/latest.log last-sync.txt last-build-key.txt; do
+    [ -f "$path" ] && printf '%s\0' "$path" >> "$tmp_list"
+done
+
+for dir in artifacts manifests; do
+    if [ -d "$dir" ]; then
+        find "$dir" -type f -print0 | sort -z >> "$tmp_list"
+    fi
+done
+
+if [ ! -s "$tmp_list" ]; then
+    tar -cf - --files-from /dev/null
+    exit 0
+fi
+
+tar -cf - --null -T "$tmp_list"
+REMOTE
+        preserve_status=0
+    else
+        preserve_status=$?
+        log "warning: could not fully preserve remote results for ${POD_ID} (exit ${preserve_status})"
+    fi
+    return "$preserve_status"
+}
+
 bootstrap_remote() {
     log "bootstrapping remote toolchain"
     "${SSH_BASE[@]}" bash -s -- "$REMOTE_DIR" "$STATE_DIR" <<'REMOTE'
@@ -403,7 +542,7 @@ if [ -f "$HOME/.cargo/env" ]; then
 fi
 
 need_apt=0
-for cmd in curl git cmake pkg-config g++; do
+for cmd in curl git cmake pkg-config g++ python3; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         need_apt=1
     fi
@@ -411,7 +550,7 @@ done
 
 if [ "$need_apt" -eq 1 ]; then
     apt-get update
-    apt-get install -y build-essential cmake curl git pkg-config libssl-dev
+    apt-get install -y build-essential cmake curl git pkg-config libssl-dev python3
 fi
 
 if ! command -v cargo >/dev/null 2>&1 || ! cargo --version >/dev/null 2>&1; then
@@ -429,14 +568,16 @@ if ! command -v nvcc >/dev/null 2>&1; then
     exit 1
 fi
 
-mkdir -p "$remote_dir" "$state_dir/logs" "$state_dir/target"
+mkdir -p "$remote_dir" "$state_dir/logs" "$state_dir/target" "$state_dir/artifacts" "$state_dir/manifests"
 REMOTE
 }
 
 run_remote_tournament() {
     local local_branch
     local local_build_key
+    local local_commit_sha
     local_branch="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)"
+    local_commit_sha="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
     local_build_key="$(python3 - "$REPO_ROOT" <<'PY'
 import hashlib
 import os
@@ -484,26 +625,38 @@ for rel in paths:
 
 print(digest.hexdigest())
 PY
-)"
+    )"
+
+    RUN_LOCAL_BRANCH="$local_branch"
+    RUN_LOCAL_BUILD_KEY="$local_build_key"
+    RUN_LOCAL_COMMIT_SHA="$local_commit_sha"
+
+    write_local_wrapper_manifest "running" 0 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$local_branch" "$local_build_key" "$local_commit_sha"
 
     log "running remote CUDA tournament"
     "${SSH_BASE[@]}" bash -s -- \
         "$REMOTE_DIR" \
         "$STATE_DIR" \
         "$local_branch" \
+        "$local_commit_sha" \
         "$local_build_key" \
         "$NO_COMPILE" \
         "$RUN_TIMEOUT_SECONDS" \
+        "$RUN_ID" \
+        "$POD_ID" \
         "${TOURNAMENT_ARGS[@]}" <<'REMOTE'
 set -euo pipefail
 
 remote_dir="$1"
 state_dir="$2"
 local_branch="$3"
-local_build_key="$4"
-no_compile="$5"
-run_timeout_seconds="$6"
-shift 6
+local_commit_sha="$4"
+local_build_key="$5"
+no_compile="$6"
+run_timeout_seconds="$7"
+run_id="$8"
+pod_id="$9"
+shift 9
 
 if [ -f "$HOME/.cargo/env" ]; then
     # shellcheck disable=SC1090
@@ -519,11 +672,19 @@ if [ -d "${CUDA_HOME}/lib64" ]; then
 fi
 export PATH="$HOME/.cargo/bin:$PATH"
 export CARGO_TARGET_DIR="$state_dir/target"
+export FRACTAL_RUN_ARTIFACT_DIR="$state_dir/artifacts"
+export FRACTAL_RUN_MANIFEST_DIR="$state_dir/manifests"
+export FRACTAL_RUN_ID="$run_id"
+export FRACTAL_RUN_POD_ID="$pod_id"
+export FRACTAL_COMMIT_SHA="$local_commit_sha"
+export FRACTAL_WRAPPER_TIMEOUT_SECONDS="$run_timeout_seconds"
 binary_dir="$state_dir/bin"
 binary_path="$binary_dir/tournament"
 build_key_file="$state_dir/last-build-key.txt"
+remote_manifest="$state_dir/manifests/run-manifest.json"
 
 mkdir -p "$state_dir/logs" "$binary_dir"
+mkdir -p "$(dirname "$remote_manifest")" "$state_dir/artifacts"
 printf 'branch=%s\nbuild_key=%s\nrun_at=%s\n' \
     "$local_branch" \
     "$local_build_key" \
@@ -531,6 +692,80 @@ printf 'branch=%s\nbuild_key=%s\nrun_at=%s\n' \
 
 cd "$remote_dir"
 : > "$state_dir/logs/latest.log"
+
+write_manifest() {
+    local status="$1"
+    local exit_code="$2"
+    local finished_at="$3"
+    python3 - "$remote_manifest" \
+        "$status" \
+        "$exit_code" \
+        "$finished_at" \
+        "$local_branch" \
+        "$local_commit_sha" \
+        "$local_build_key" \
+        "$run_timeout_seconds" \
+        "$state_dir" \
+        "$remote_dir" \
+        "$@" <<'PY'
+import json
+import pathlib
+import sys
+
+(
+    path,
+    status,
+    exit_code,
+    finished_at,
+    local_branch,
+    local_commit_sha,
+    local_build_key,
+    run_timeout_seconds,
+    state_dir,
+    remote_dir,
+    *tournament_args,
+) = sys.argv[1:]
+
+manifest = {
+    "status": status,
+    "exit_code": int(exit_code),
+    "finished_at": finished_at,
+    "build": {
+        "branch": local_branch,
+        "commit_sha": local_commit_sha,
+        "build_key": local_build_key,
+    },
+    "runtime": {
+        "backend": "cuda",
+        "run_timeout_seconds": int(run_timeout_seconds),
+        "tournament_args": tournament_args,
+    },
+    "paths": {
+        "state_dir": state_dir,
+        "remote_dir": remote_dir,
+        "manifest_path": str(pathlib.Path(path).as_posix()),
+    },
+}
+
+path_obj = pathlib.Path(path)
+path_obj.parent.mkdir(parents=True, exist_ok=True)
+path_obj.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+PY
+}
+
+write_manifest "running" 0 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$@"
+
+cleanup_manifest() {
+    local exit_code="$1"
+    local final_status="failure"
+    if [ "$exit_code" -eq 0 ]; then
+        final_status="success"
+    elif [ "$exit_code" -eq 124 ]; then
+        final_status="timeout"
+    fi
+    write_manifest "$final_status" "$exit_code" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$@" || true
+}
+trap 'rc=$?; cleanup_manifest "$rc" "$@"' EXIT
 
 needs_build=1
 if [ -x "$binary_path" ] && [ -f "$build_key_file" ] && [ "$(cat "$build_key_file")" = "$local_build_key" ]; then
@@ -622,6 +857,16 @@ NO_COMPILE=0
 STOP_MODE="auto"
 DRY_RUN=0
 CREATED_POD=0
+RUN_STARTED_AT=""
+RUN_ID=""
+RUN_RESULTS_ROOT=""
+RUN_RESULT_DIR=""
+RUN_RESULT_REMOTE_DIR=""
+RUN_RESULT_METADATA_DIR=""
+RUN_RESULT_MANIFEST=""
+RUN_LOCAL_BRANCH=""
+RUN_LOCAL_BUILD_KEY=""
+RUN_LOCAL_COMMIT_SHA=""
 POD_NAME_RESOLVED=""
 POD_STATUS=""
 PUBLIC_IP=""
@@ -739,6 +984,7 @@ resolve_ssh_key
 ensure_private_key_is_registered
 create_pod_if_needed
 maybe_start_pod
+load_pod_state
 
 if [ "$DRY_RUN" -eq 1 ]; then
     load_pod_state
@@ -754,9 +1000,25 @@ if [ "$DRY_RUN" -eq 1 ]; then
     exit 0
 fi
 
+prepare_run_preservation
 wait_for_ssh
 sync_worktree
 bootstrap_remote
+run_status=0
+set +e
 run_remote_tournament
+run_status=$?
+set -e
+
+final_status="failure"
+if [ "$run_status" -eq 0 ]; then
+    final_status="success"
+elif [ "$run_status" -eq 124 ]; then
+    final_status="timeout"
+fi
+write_local_wrapper_manifest "$final_status" "$run_status" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RUN_LOCAL_BRANCH" "$RUN_LOCAL_BUILD_KEY" "$RUN_LOCAL_COMMIT_SHA" || true
+preserve_remote_results || true
 
 log "remote log saved at ${STATE_DIR}/logs/latest.log"
+log "run artifacts preserved under ${RUN_RESULT_DIR}"
+exit "$run_status"

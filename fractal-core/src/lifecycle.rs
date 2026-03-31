@@ -13,7 +13,11 @@ use crate::{
     },
     error::FractalError,
     fitness::SpeciesRawMetrics,
-    registry::{ComputeBackend, ExecutionMode, SpeciesDefinition, SpeciesId, SpeciesRunContext},
+    registry::{
+        build_failure_artifact, build_success_artifact, classify_quality_outcome, phase_timing,
+        take_last_species_run_artifact, ComputeBackend, ExecutionMode, PrimitiveVariantName,
+        SpeciesDefinition, SpeciesId, SpeciesRunContext,
+    },
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,6 +165,7 @@ pub struct TournamentConfig {
     pub eval_batches_per_family: usize,
     pub learning_rate: f64,
     pub seed: u64,
+    pub run_timeout: Option<Duration>,
     pub generator_depth_config: GeneratorDepthConfig,
     pub execution_backend: ComputeBackend,
     pub execution_mode: ExecutionMode,
@@ -184,6 +189,7 @@ impl Default for TournamentConfig {
             eval_batches_per_family: 1,
             learning_rate: 1e-3,
             seed: 42,
+            run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
             execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
@@ -248,6 +254,13 @@ impl TournamentConfig {
                 "learning_rate must be greater than zero".into(),
             ));
         }
+        if let Some(run_timeout) = self.run_timeout {
+            if run_timeout.is_zero() {
+                return Err(FractalError::InvalidConfig(
+                    "run_timeout must be greater than zero when configured".into(),
+                ));
+            }
+        }
         if !self.execution_backend.is_supported_on_current_platform() {
             return Err(FractalError::InvalidConfig(
                 "selected execution backend is not supported on this platform".into(),
@@ -311,6 +324,7 @@ impl TournamentConfig {
             eval_batches_per_family: 8,
             learning_rate: 1e-3,
             seed: 42,
+            run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
             execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
@@ -334,6 +348,7 @@ impl TournamentConfig {
             eval_batches_per_family: 2,
             learning_rate: 1e-3,
             seed: 42,
+            run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
             execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
@@ -357,6 +372,7 @@ impl TournamentConfig {
             eval_batches_per_family: 2,
             learning_rate: 1e-3,
             seed: 42,
+            run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::polish_top_candidates(),
             execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
@@ -386,6 +402,7 @@ impl TournamentConfig {
             eval_batches_per_family: 2,
             learning_rate: 1e-3,
             seed: 42,
+            run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
             execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
@@ -409,6 +426,7 @@ impl TournamentConfig {
             eval_batches_per_family: 2,
             learning_rate: 5e-4,
             seed: 42,
+            run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
             execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
@@ -440,6 +458,7 @@ impl TournamentConfig {
             eval_batches_per_family: 2,
             learning_rate: 1e-3,
             seed: 42,
+            run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::polish_top_candidates(),
             execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
@@ -467,6 +486,7 @@ impl TournamentConfig {
             eval_batches_per_family: 2,
             learning_rate: 1e-3,
             seed: 42,
+            run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::polish_top_candidates(),
             execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
@@ -490,6 +510,7 @@ impl TournamentConfig {
             eval_batches_per_family: 2,
             learning_rate: 1e-3,
             seed: 42,
+            run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::polish_top_candidates(),
             execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
@@ -526,6 +547,7 @@ impl TournamentConfig {
             eval_batches_per_family: 2,
             learning_rate: 1e-3,
             seed: 42,
+            run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
             execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
@@ -549,6 +571,7 @@ impl TournamentConfig {
             eval_batches_per_family: 1,
             learning_rate: 1e-3,
             seed: 42,
+            run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
             execution_backend: ComputeBackend::CpuCandle,
             execution_mode: ExecutionMode::Sequential,
@@ -572,6 +595,7 @@ impl TournamentConfig {
             eval_batches_per_family: 4,
             learning_rate: 1e-3,
             seed: 42,
+            run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::stress_top_candidates(),
             execution_backend: ComputeBackend::default_for_current_platform(),
             execution_mode: ExecutionMode::Sequential,
@@ -630,6 +654,117 @@ pub struct SpeciesRunStage {
     pub total: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunPhase {
+    Train,
+    Stability,
+    Perplexity,
+    ArcSpeed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunExecutionOutcome {
+    Success,
+    TrainTimeout,
+    EvalConstrained,
+    InfraFailure,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunQualityOutcome {
+    Clean,
+    NumericFailure,
+    LowSignal,
+    RuntimeCost,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunOutcomeClass {
+    Success,
+    TrainTimeout,
+    EvalConstrained,
+    NumericFailure,
+    LowSignal,
+    RuntimeCost,
+    InfraFailure,
+}
+
+impl RunOutcomeClass {
+    pub fn from_components(
+        execution_outcome: RunExecutionOutcome,
+        quality_outcome: RunQualityOutcome,
+    ) -> Self {
+        match execution_outcome {
+            RunExecutionOutcome::Success => match quality_outcome {
+                RunQualityOutcome::Clean => Self::Success,
+                RunQualityOutcome::NumericFailure => Self::NumericFailure,
+                RunQualityOutcome::LowSignal => Self::LowSignal,
+                RunQualityOutcome::RuntimeCost => Self::RuntimeCost,
+            },
+            RunExecutionOutcome::TrainTimeout => Self::TrainTimeout,
+            RunExecutionOutcome::EvalConstrained => Self::EvalConstrained,
+            RunExecutionOutcome::InfraFailure => Self::InfraFailure,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PhaseTiming {
+    pub phase: RunPhase,
+    pub elapsed: Duration,
+    pub completed: usize,
+    pub total: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct RunManifest {
+    pub variant_name: PrimitiveVariantName,
+    pub timeout_budget: Option<Duration>,
+    pub config: TournamentConfig,
+}
+
+#[derive(Clone, Debug)]
+pub struct SpeciesRunArtifact {
+    pub stage: SpeciesRunStage,
+    pub manifest: RunManifest,
+    pub phase_timings: Vec<PhaseTiming>,
+    pub execution_outcome: RunExecutionOutcome,
+    pub quality_outcome: RunQualityOutcome,
+    pub error: Option<String>,
+    pub metrics: Option<SpeciesRawMetrics>,
+}
+
+impl SpeciesRunArtifact {
+    pub fn with_stage(mut self, stage: SpeciesRunStage) -> Self {
+        self.stage = stage;
+        self
+    }
+
+    pub fn outcome_class(&self) -> RunOutcomeClass {
+        RunOutcomeClass::from_components(self.execution_outcome, self.quality_outcome)
+    }
+
+    pub fn is_success(&self) -> bool {
+        self.outcome_class() == RunOutcomeClass::Success
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TournamentRunArtifact {
+    pub config: TournamentConfig,
+    pub species: Vec<SpeciesRunArtifact>,
+}
+
+impl TournamentRunArtifact {
+    pub fn outcome_class(&self) -> RunOutcomeClass {
+        self.species
+            .iter()
+            .map(SpeciesRunArtifact::outcome_class)
+            .find(|outcome| *outcome != RunOutcomeClass::Success)
+            .unwrap_or(RunOutcomeClass::Success)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SpeciesCompletion {
     pub stage: SpeciesRunStage,
@@ -648,6 +783,7 @@ struct SpeciesWorkerMessage {
     index: usize,
     elapsed: Duration,
     result: Result<SpeciesRawMetrics, FractalError>,
+    artifact: SpeciesRunArtifact,
 }
 
 pub trait TournamentReporter: Send + Sync {
@@ -694,7 +830,33 @@ impl Tournament {
         &self,
         species: &[SpeciesDefinition],
     ) -> Result<Vec<SpeciesRawMetrics>, FractalError> {
-        self.run_generation_with_reporter(species, None)
+        let artifact = self.run_generation_artifacts(species, None)?;
+        if artifact.species.iter().any(|record| {
+            matches!(
+                record.execution_outcome,
+                RunExecutionOutcome::InfraFailure
+                    | RunExecutionOutcome::TrainTimeout
+                    | RunExecutionOutcome::EvalConstrained
+            )
+        }) {
+            let failure = first_execution_failure(&artifact.species).ok_or_else(|| {
+                FractalError::InvalidState(
+                    "tournament run reported execution failure without a failure artifact".into(),
+                )
+            })?;
+            return Err(FractalError::InvalidState(format!(
+                "species {} failed with {:?}: {}",
+                failure.stage.species,
+                failure.outcome_class(),
+                failure.error.as_deref().unwrap_or("unknown error")
+            )));
+        }
+
+        Ok(artifact
+            .species
+            .into_iter()
+            .filter_map(|record| record.metrics)
+            .collect())
     }
 
     pub fn run_generation_with_reporter(
@@ -702,19 +864,58 @@ impl Tournament {
         species: &[SpeciesDefinition],
         reporter: Option<Arc<dyn TournamentReporter>>,
     ) -> Result<Vec<SpeciesRawMetrics>, FractalError> {
+        let artifact = self.run_generation_artifacts(species, reporter)?;
+        if artifact.species.iter().any(|record| {
+            matches!(
+                record.execution_outcome,
+                RunExecutionOutcome::InfraFailure
+                    | RunExecutionOutcome::TrainTimeout
+                    | RunExecutionOutcome::EvalConstrained
+            )
+        }) {
+            let failure = first_execution_failure(&artifact.species).ok_or_else(|| {
+                FractalError::InvalidState(
+                    "tournament run reported execution failure without a failure artifact".into(),
+                )
+            })?;
+            return Err(FractalError::InvalidState(format!(
+                "species {} failed with {:?}: {}",
+                failure.stage.species,
+                failure.outcome_class(),
+                failure.error.as_deref().unwrap_or("unknown error")
+            )));
+        }
+
+        Ok(artifact
+            .species
+            .into_iter()
+            .filter_map(|record| record.metrics)
+            .collect())
+    }
+
+    pub fn run_generation_artifacts(
+        &self,
+        species: &[SpeciesDefinition],
+        reporter: Option<Arc<dyn TournamentReporter>>,
+    ) -> Result<TournamentRunArtifact, FractalError> {
         Self::validate_species_definitions(species)?;
-        match self.config.execution_mode {
+        let species_artifacts = match self.config.execution_mode {
             ExecutionMode::Sequential => self.run_sequential(species, reporter),
             ExecutionMode::Parallel => self.run_parallel(species, reporter),
-        }
+        }?;
+
+        Ok(TournamentRunArtifact {
+            config: self.config.clone(),
+            species: species_artifacts,
+        })
     }
 
     fn run_sequential(
         &self,
         species: &[SpeciesDefinition],
         reporter: Option<Arc<dyn TournamentReporter>>,
-    ) -> Result<Vec<SpeciesRawMetrics>, FractalError> {
-        let mut metrics = Vec::with_capacity(species.len());
+    ) -> Result<Vec<SpeciesRunArtifact>, FractalError> {
+        let mut artifacts = Vec::with_capacity(species.len());
         for (index, definition) in species.iter().enumerate() {
             let stage = Self::run_stage(definition.id, index, species.len());
             Self::emit_event(
@@ -722,42 +923,53 @@ impl Tournament {
                 TournamentProgressEvent::SpeciesStarted(stage.clone()),
             );
             let started = Instant::now();
-            let result = definition.run(
-                self.run_context(index, definition.id),
-                &self.config.execution_backend,
-            )?;
-            Self::emit_event(
-                reporter.as_ref(),
-                TournamentProgressEvent::SpeciesCompleted(SpeciesCompletion {
-                    stage,
-                    elapsed: started.elapsed(),
-                    metrics: result.clone(),
-                }),
+            let context = self.run_context(index, definition);
+            let result = definition.run(context.clone(), &self.config.execution_backend);
+            let artifact = Self::capture_species_artifact(
+                definition,
+                stage.clone(),
+                &context,
+                started,
+                &result,
             );
-            metrics.push(result);
+            if let Ok(metrics) = &result {
+                Self::emit_event(
+                    reporter.as_ref(),
+                    TournamentProgressEvent::SpeciesCompleted(SpeciesCompletion {
+                        stage: stage.clone(),
+                        elapsed: started.elapsed(),
+                        metrics: metrics.clone(),
+                    }),
+                );
+            }
+            artifacts.push(artifact);
+            if result.is_err() {
+                break;
+            }
         }
 
-        Ok(metrics)
+        Ok(artifacts)
     }
 
     fn run_parallel(
         &self,
         species: &[SpeciesDefinition],
         reporter: Option<Arc<dyn TournamentReporter>>,
-    ) -> Result<Vec<SpeciesRawMetrics>, FractalError> {
+    ) -> Result<Vec<SpeciesRunArtifact>, FractalError> {
         let total = species.len();
         let concurrency = self.config.parallelism.min(total).max(1);
         let (tx, rx) = mpsc::channel();
         let mut launched = 0usize;
         let mut completed = 0usize;
-        let mut metrics = vec![None; total];
+        let mut failure_encountered = false;
+        let mut artifacts = vec![None; total];
 
         while launched < concurrency {
             self.spawn_species_worker(species[launched], launched, total, reporter.as_ref(), &tx);
             launched += 1;
         }
 
-        while completed < total {
+        while completed < total && (!failure_encountered || completed < launched) {
             let message = rx.recv().map_err(|_| {
                 FractalError::InvalidState("species worker channel closed unexpectedly".into())
             })?;
@@ -772,7 +984,7 @@ impl Tournament {
                             metrics: result.clone(),
                         }),
                     );
-                    metrics[message.index] = Some(result);
+                    artifacts[message.index] = Some(message.artifact);
                     completed += 1;
                     if launched < total {
                         self.spawn_species_worker(
@@ -785,26 +997,77 @@ impl Tournament {
                         launched += 1;
                     }
                 }
-                Err(error) => return Err(error),
+                Err(_) => {
+                    failure_encountered = true;
+                    artifacts[message.index] = Some(message.artifact);
+                    completed += 1;
+                }
             }
         }
 
-        metrics
-            .into_iter()
-            .map(|metric| {
-                metric.ok_or_else(|| {
-                    FractalError::InvalidState("parallel species result missing".into())
-                })
-            })
-            .collect()
+        Ok(artifacts.into_iter().flatten().collect())
     }
 
-    fn run_context(&self, index: usize, species: SpeciesId) -> SpeciesRunContext {
+    fn run_context(&self, index: usize, definition: &SpeciesDefinition) -> SpeciesRunContext {
         SpeciesRunContext {
             index,
-            config: self.config.effective_for_species(species),
+            config: self.config.effective_for_species(definition.id),
             generator: Arc::clone(&self.generator),
+            variant_name: definition.variant_name,
         }
+    }
+
+    fn capture_species_artifact(
+        _definition: &SpeciesDefinition,
+        stage: SpeciesRunStage,
+        context: &SpeciesRunContext,
+        started: Instant,
+        result: &Result<SpeciesRawMetrics, FractalError>,
+    ) -> SpeciesRunArtifact {
+        let mut artifact = take_last_species_run_artifact().unwrap_or_else(|| {
+            let manifest = RunManifest {
+                variant_name: context.variant_name,
+                timeout_budget: context.config.run_timeout,
+                config: context.config.clone(),
+            };
+            match result {
+                Ok(metrics) => build_success_artifact(
+                    stage.clone(),
+                    manifest,
+                    vec![phase_timing(RunPhase::Train, started.elapsed(), 0, 0)],
+                    metrics.clone(),
+                ),
+                Err(error) => build_failure_artifact(
+                    stage.clone(),
+                    manifest,
+                    vec![phase_timing(RunPhase::Train, started.elapsed(), 0, 0)],
+                    RunExecutionOutcome::InfraFailure,
+                    error.to_string(),
+                ),
+            }
+        });
+
+        artifact.stage = stage;
+        if artifact.phase_timings.is_empty() {
+            artifact
+                .phase_timings
+                .push(phase_timing(RunPhase::Train, started.elapsed(), 0, 0));
+        }
+        if artifact.metrics.is_none() {
+            if let Ok(metrics) = result {
+                artifact.quality_outcome = classify_quality_outcome(metrics);
+                artifact.metrics = Some(metrics.clone());
+                artifact.execution_outcome = RunExecutionOutcome::Success;
+            }
+        }
+        if artifact.error.is_none() {
+            if let Err(error) = result {
+                artifact.error = Some(error.to_string());
+                artifact.execution_outcome = RunExecutionOutcome::InfraFailure;
+            }
+        }
+
+        artifact
     }
 
     fn spawn_species_worker(
@@ -818,19 +1081,24 @@ impl Tournament {
         let stage = Self::run_stage(definition.id, index, total);
         Self::emit_event(reporter, TournamentProgressEvent::SpeciesStarted(stage));
 
-        let context = self.run_context(index, definition.id);
+        let context = self.run_context(index, &definition);
         let backend = self.config.execution_backend.clone();
         let tx = tx.clone();
         thread::spawn(move || {
             let started = Instant::now();
-            let result =
-                std::panic::catch_unwind(AssertUnwindSafe(|| definition.run(context, &backend)))
-                    .map_err(|_| FractalError::InvalidState("species worker panicked".into()))
-                    .and_then(|result| result);
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                definition.run(context.clone(), &backend)
+            }))
+            .map_err(|_| FractalError::InvalidState("species worker panicked".into()))
+            .and_then(|result| result);
+            let stage = Self::run_stage(definition.id, index, total);
+            let artifact =
+                Self::capture_species_artifact(&definition, stage, &context, started, &result);
             let _ = tx.send(SpeciesWorkerMessage {
                 index,
                 elapsed: started.elapsed(),
                 result,
+                artifact,
             });
         });
     }
@@ -869,4 +1137,15 @@ impl Tournament {
         }
         Ok(())
     }
+}
+
+fn first_execution_failure(records: &[SpeciesRunArtifact]) -> Option<&SpeciesRunArtifact> {
+    records.iter().find(|record| {
+        matches!(
+            record.execution_outcome,
+            RunExecutionOutcome::InfraFailure
+                | RunExecutionOutcome::TrainTimeout
+                | RunExecutionOutcome::EvalConstrained
+        )
+    })
 }

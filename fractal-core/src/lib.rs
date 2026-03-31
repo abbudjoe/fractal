@@ -14,8 +14,10 @@ pub use data_generator::{
 };
 pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
 pub use lifecycle::{
-    SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig, TournamentPreset,
-    TournamentProgressEvent, TournamentReporter, TournamentSequence,
+    PhaseTiming, RunExecutionOutcome, RunManifest, RunOutcomeClass, RunPhase, RunQualityOutcome,
+    SpeciesCompletion, SpeciesRunArtifact, SpeciesRunStage, Tournament, TournamentConfig,
+    TournamentPreset, TournamentProgressEvent, TournamentReporter, TournamentRunArtifact,
+    TournamentSequence,
 };
 pub use model::FractalModel;
 pub use registry::{

@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
+
 mod primitive_tracker;
+mod run_artifacts;
 
 pub use fractal_core::*;
 pub use fractal_eval_private::{aggregate_results, perplexity_score, speed_score, stability_score};
@@ -9,6 +12,78 @@ pub use fractal_primitives_private::{
     P1FractalHybridDynGate, P2Mandelbrot, P3Hierarchical, SPECIES_REGISTRY,
 };
 pub use primitive_tracker::{primitive_tracker_reminder_lines, TRACKER_PATH};
+pub use run_artifacts::{persist_run_artifacts, PersistedRunPaths};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComparisonAuthority {
+    AuthoritativeSamePreset,
+    AdvisoryMixedPreset,
+}
+
+impl ComparisonAuthority {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::AuthoritativeSamePreset => "authoritative same-preset",
+            Self::AdvisoryMixedPreset => "advisory mixed-preset",
+        }
+    }
+
+    pub fn is_authoritative_same_preset(self) -> bool {
+        matches!(self, Self::AuthoritativeSamePreset)
+    }
+}
+
+#[derive(Clone)]
+pub struct TournamentRunReport {
+    pub preset: TournamentPreset,
+    pub lane: TournamentLane,
+    pub comparison_authority: ComparisonAuthority,
+    pub config: TournamentConfig,
+    pub species: Vec<SpeciesDefinition>,
+    pub results: Vec<RankedSpeciesResult>,
+    pub artifact: TournamentRunArtifact,
+}
+
+impl TournamentRunReport {
+    pub fn new(
+        preset: TournamentPreset,
+        lane: TournamentLane,
+        comparison_authority: ComparisonAuthority,
+        config: TournamentConfig,
+        species: Vec<SpeciesDefinition>,
+        results: Vec<RankedSpeciesResult>,
+        artifact: TournamentRunArtifact,
+    ) -> Self {
+        Self {
+            preset,
+            lane,
+            comparison_authority,
+            config,
+            species,
+            results,
+            artifact,
+        }
+    }
+
+    pub fn comparison_label(&self) -> &'static str {
+        self.comparison_authority.label()
+    }
+
+    pub fn variant_name_for(&self, species: fractal_core::SpeciesId) -> &'static str {
+        self.species
+            .iter()
+            .find(|definition| definition.id == species)
+            .map(|definition| definition.variant_name.as_str())
+            .unwrap_or_else(|| species.as_str())
+    }
+
+    pub fn variant_name_map(&self) -> BTreeMap<fractal_core::SpeciesId, &'static str> {
+        self.species
+            .iter()
+            .map(|definition| (definition.id, definition.variant_name.as_str()))
+            .collect()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TournamentLane {
@@ -97,6 +172,10 @@ pub fn run_ranked_generation_with_reporter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fractal_core::{
+        PhaseTiming, RunExecutionOutcome, RunManifest, RunPhase, RunQualityOutcome,
+        SpeciesRunArtifact, SpeciesRunStage, TournamentRunArtifact,
+    };
 
     #[test]
     fn challenger_lane_only_includes_bullpen_species() {
@@ -136,5 +215,92 @@ mod tests {
             .collect();
 
         assert_eq!(ids, [fractal_core::SpeciesId::GeneralizedMobius]);
+    }
+
+    #[test]
+    fn run_report_marks_same_preset_and_mixed_preset_comparisons() {
+        let species = species_registry_for_species(fractal_core::SpeciesId::P1Contractive);
+        let report = TournamentRunReport::new(
+            TournamentPreset::GenerationFour,
+            TournamentLane::Leader,
+            ComparisonAuthority::AuthoritativeSamePreset,
+            TournamentPreset::GenerationFour.config(),
+            species,
+            vec![RankedSpeciesResult {
+                rank: 1,
+                species: fractal_core::SpeciesId::P1Contractive,
+                stability_score: 0.53,
+                long_context_perplexity: 1.54,
+                arc_accuracy: 0.68,
+                tokens_per_sec: 114.0,
+                fitness: 0.58,
+            }],
+            single_species_artifact(fractal_core::SpeciesId::P1Contractive, "p1_contractive_v1"),
+        );
+
+        assert!(report.comparison_authority.is_authoritative_same_preset());
+        assert_eq!(report.comparison_label(), "authoritative same-preset");
+        assert_eq!(
+            report.variant_name_for(fractal_core::SpeciesId::P1Contractive),
+            "p1_contractive_v1"
+        );
+
+        let advisory = TournamentRunReport::new(
+            TournamentPreset::FastTest,
+            TournamentLane::Baseline,
+            ComparisonAuthority::AdvisoryMixedPreset,
+            TournamentPreset::FastTest.config(),
+            species_registry_for_species(fractal_core::SpeciesId::P3Hierarchical),
+            vec![RankedSpeciesResult {
+                rank: 1,
+                species: fractal_core::SpeciesId::P3Hierarchical,
+                stability_score: 0.55,
+                long_context_perplexity: 1.66,
+                arc_accuracy: 0.44,
+                tokens_per_sec: 34.0,
+                fitness: 0.58,
+            }],
+            single_species_artifact(
+                fractal_core::SpeciesId::P3Hierarchical,
+                "p3_hierarchical_v1",
+            ),
+        );
+
+        assert_eq!(advisory.comparison_label(), "advisory mixed-preset");
+        assert_eq!(
+            advisory.variant_name_for(fractal_core::SpeciesId::P3Hierarchical),
+            "p3_hierarchical_v1"
+        );
+    }
+
+    fn single_species_artifact(
+        species: fractal_core::SpeciesId,
+        variant_name: &'static str,
+    ) -> TournamentRunArtifact {
+        TournamentRunArtifact {
+            config: TournamentPreset::FastTest.config(),
+            species: vec![SpeciesRunArtifact {
+                stage: SpeciesRunStage {
+                    species,
+                    ordinal: 1,
+                    total: 1,
+                },
+                manifest: RunManifest {
+                    variant_name: fractal_core::PrimitiveVariantName::new_unchecked(variant_name),
+                    timeout_budget: None,
+                    config: TournamentPreset::FastTest.config(),
+                },
+                phase_timings: vec![PhaseTiming {
+                    phase: RunPhase::Train,
+                    elapsed: std::time::Duration::from_secs(1),
+                    completed: 1,
+                    total: 1,
+                }],
+                execution_outcome: RunExecutionOutcome::Success,
+                quality_outcome: RunQualityOutcome::Clean,
+                error: None,
+                metrics: None,
+            }],
+        }
     }
 }

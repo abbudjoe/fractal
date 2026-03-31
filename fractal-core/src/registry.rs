@@ -23,7 +23,10 @@ use crate::{
     data_generator::{SimpleHierarchicalGenerator, TaskFamily, TokenBatch, PAD_TOKEN},
     error::FractalError,
     fitness::SpeciesRawMetrics,
-    lifecycle::TournamentConfig,
+    lifecycle::{
+        PhaseTiming, RunExecutionOutcome, RunManifest, RunPhase, RunQualityOutcome,
+        SpeciesRunArtifact, SpeciesRunStage, TournamentConfig,
+    },
     model::FractalModel,
     rule_trait::FractalRule,
 };
@@ -238,6 +241,7 @@ pub struct SpeciesRunContext {
     pub index: usize,
     pub config: TournamentConfig,
     pub generator: Arc<SimpleHierarchicalGenerator>,
+    pub variant_name: PrimitiveVariantName,
 }
 
 type CpuRunner = fn(SpeciesRunContext) -> Result<SpeciesRawMetrics, FractalError>;
@@ -331,6 +335,7 @@ where
     <R as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend> + ModuleDisplay,
     F: FnOnce(&TournamentConfig, &B::Device) -> R,
 {
+    let variant_name = context.variant_name;
     B::seed(
         &device,
         context.config.seed.wrapping_add(context.index as u64 * 101),
@@ -338,7 +343,7 @@ where
 
     let batches = prepare_batches_for_run::<B>(&context.generator, &context.config, &device)?;
     let rule = factory(&context.config, &device);
-    run_species_with_batches(species, context.config, device, rule, batches)
+    run_species_with_batches(species, variant_name, context.config, device, rule, batches)
 }
 
 pub fn run_species_with_factory_candle<R, F>(
@@ -359,6 +364,7 @@ where
         Module<<CpuTrainBackend as AutodiffBackend>::InnerBackend> + ModuleDisplay,
     F: FnOnce(&TournamentConfig, &CandleDevice) -> R,
 {
+    let variant_name = context.variant_name;
     CpuTrainBackend::seed(
         &device,
         context.config.seed.wrapping_add(context.index as u64 * 101),
@@ -366,7 +372,7 @@ where
 
     let batches = prepare_candle_batches_for_run(&context.generator, &context.config, &device)?;
     let rule = factory(&context.config, &device);
-    run_species_with_batches(species, context.config, device, rule, batches)
+    run_species_with_batches(species, variant_name, context.config, device, rule, batches)
 }
 
 pub fn initialize_metal_runtime(device: &WgpuDevice) {
@@ -385,6 +391,16 @@ pub fn initialize_metal_runtime(device: &WgpuDevice) {
     initialized.insert(device.clone());
 }
 
+thread_local! {
+    static LAST_SPECIES_RUN_ARTIFACT: std::cell::RefCell<Option<SpeciesRunArtifact>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+pub fn take_last_species_run_artifact() -> Option<SpeciesRunArtifact> {
+    LAST_SPECIES_RUN_ARTIFACT.with(|slot| slot.borrow_mut().take())
+}
+
 struct RunBatches<B: AutodiffBackend> {
     train_sentence: Vec<TokenBatch<B>>,
     train_arc: Vec<TokenBatch<B>>,
@@ -392,8 +408,102 @@ struct RunBatches<B: AutodiffBackend> {
     eval_arc: Vec<TokenBatch<B>>,
 }
 
+fn record_species_run_artifact(artifact: SpeciesRunArtifact) {
+    LAST_SPECIES_RUN_ARTIFACT.with(|slot| {
+        *slot.borrow_mut() = Some(artifact);
+    });
+}
+
+fn build_run_manifest(
+    config: &TournamentConfig,
+    timeout_budget: Option<Duration>,
+    variant_name: PrimitiveVariantName,
+) -> RunManifest {
+    RunManifest {
+        variant_name,
+        timeout_budget,
+        config: config.clone(),
+    }
+}
+
+pub(crate) fn classify_quality_outcome(metrics: &SpeciesRawMetrics) -> RunQualityOutcome {
+    if !metrics.grad_norm_depth_20.is_finite()
+        || !metrics.long_context_perplexity.is_finite()
+        || !metrics.arc_accuracy.is_finite()
+        || !metrics.tokens_per_sec.is_finite()
+    {
+        RunQualityOutcome::NumericFailure
+    } else if metrics.arc_accuracy <= 0.05 && metrics.long_context_perplexity > 8.0 {
+        RunQualityOutcome::LowSignal
+    } else if metrics.tokens_per_sec <= 1.0 {
+        RunQualityOutcome::RuntimeCost
+    } else {
+        RunQualityOutcome::Clean
+    }
+}
+
+pub(crate) fn build_success_artifact(
+    stage: SpeciesRunStage,
+    manifest: RunManifest,
+    phase_timings: Vec<PhaseTiming>,
+    metrics: SpeciesRawMetrics,
+) -> SpeciesRunArtifact {
+    let quality_outcome = classify_quality_outcome(&metrics);
+    SpeciesRunArtifact {
+        stage,
+        manifest,
+        phase_timings,
+        execution_outcome: RunExecutionOutcome::Success,
+        quality_outcome,
+        error: None,
+        metrics: Some(metrics),
+    }
+}
+
+pub(crate) fn build_failure_artifact(
+    stage: SpeciesRunStage,
+    manifest: RunManifest,
+    phase_timings: Vec<PhaseTiming>,
+    execution_outcome: RunExecutionOutcome,
+    error: impl Into<String>,
+) -> SpeciesRunArtifact {
+    SpeciesRunArtifact {
+        stage,
+        manifest,
+        phase_timings,
+        execution_outcome,
+        quality_outcome: RunQualityOutcome::Clean,
+        error: Some(error.into()),
+        metrics: None,
+    }
+}
+
+pub(crate) fn phase_timing(
+    phase: RunPhase,
+    elapsed: Duration,
+    completed: usize,
+    total: usize,
+) -> PhaseTiming {
+    PhaseTiming {
+        phase,
+        elapsed,
+        completed,
+        total,
+    }
+}
+
+fn timeout_outcome_for_phase(phase: RunPhase) -> RunExecutionOutcome {
+    match phase {
+        RunPhase::Train => RunExecutionOutcome::TrainTimeout,
+        RunPhase::Stability | RunPhase::Perplexity | RunPhase::ArcSpeed => {
+            RunExecutionOutcome::EvalConstrained
+        }
+    }
+}
+
 fn run_species_with_batches<B, R>(
     species: SpeciesId,
+    variant_name: PrimitiveVariantName,
     config: TournamentConfig,
     device: B::Device,
     rule: R,
@@ -410,6 +520,14 @@ where
         + std::fmt::Debug,
     <R as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend> + ModuleDisplay,
 {
+    let manifest = build_run_manifest(&config, config.run_timeout, variant_name);
+    let run_started = Instant::now();
+    let deadline = config.run_timeout.map(|timeout| run_started + timeout);
+    let stage = SpeciesRunStage {
+        species,
+        ordinal: config.parallelism.max(1),
+        total: config.parallelism.max(1),
+    };
     let mut model = FractalModel::new(
         config.vocab_size,
         config.dim,
@@ -423,6 +541,7 @@ where
         .with_pad_tokens(Some(vec![PAD_TOKEN]))
         .init(&device);
     let mut optimizer = AdamConfig::new().init();
+    let mut phase_timings = Vec::with_capacity(4);
 
     log_species_phase_start(
         species,
@@ -434,13 +553,79 @@ where
     );
     let train_started = Instant::now();
     for step in 0..config.train_steps_per_species {
+        if let Some(deadline) = deadline {
+            if Instant::now() >= deadline {
+                let elapsed = train_started.elapsed();
+                phase_timings.push(phase_timing(
+                    RunPhase::Train,
+                    elapsed,
+                    step,
+                    config.train_steps_per_species,
+                ));
+                let artifact = SpeciesRunArtifact {
+                    stage,
+                    manifest: manifest.clone(),
+                    phase_timings,
+                    execution_outcome: timeout_outcome_for_phase(RunPhase::Train),
+                    quality_outcome: RunQualityOutcome::Clean,
+                    error: Some("run timeout exceeded during training".into()),
+                    metrics: None,
+                };
+                record_species_run_artifact(artifact);
+                return Err(FractalError::InvalidState(
+                    "run timeout exceeded during training".into(),
+                ));
+            }
+        }
         let train_batches = if step % 2 == 0 {
             &batches.train_sentence
         } else {
             &batches.train_arc
         };
+        if train_batches.is_empty() {
+            phase_timings.push(phase_timing(
+                RunPhase::Train,
+                train_started.elapsed(),
+                step,
+                config.train_steps_per_species,
+            ));
+            let artifact = SpeciesRunArtifact {
+                stage,
+                manifest: manifest.clone(),
+                phase_timings,
+                execution_outcome: RunExecutionOutcome::InfraFailure,
+                quality_outcome: RunQualityOutcome::Clean,
+                error: Some("training batch cache was empty".into()),
+                metrics: None,
+            };
+            record_species_run_artifact(artifact);
+            return Err(FractalError::InvalidState(
+                "training batch cache was empty".into(),
+            ));
+        }
         let batch = &train_batches[step % train_batches.len()];
-        let loss = model.loss(batch, &criterion, None, true)?;
+        let loss = match model.loss(batch, &criterion, None, true) {
+            Ok(loss) => loss,
+            Err(error) => {
+                phase_timings.push(phase_timing(
+                    RunPhase::Train,
+                    train_started.elapsed(),
+                    step,
+                    config.train_steps_per_species,
+                ));
+                let artifact = SpeciesRunArtifact {
+                    stage,
+                    manifest: manifest.clone(),
+                    phase_timings,
+                    execution_outcome: RunExecutionOutcome::InfraFailure,
+                    quality_outcome: RunQualityOutcome::Clean,
+                    error: Some(error.to_string()),
+                    metrics: None,
+                };
+                record_species_run_artifact(artifact);
+                return Err(error);
+            }
+        };
         let grads = GradientsParams::from_grads(loss.backward(), &model);
         model = optimizer.step(config.learning_rate, model, grads);
         let completed_step = step + 1;
@@ -454,7 +639,14 @@ where
             );
         }
     }
-    log_species_phase_done(species, "train", train_started.elapsed());
+    let train_elapsed = train_started.elapsed();
+    phase_timings.push(phase_timing(
+        RunPhase::Train,
+        train_elapsed,
+        config.train_steps_per_species,
+        config.train_steps_per_species,
+    ));
+    log_species_phase_done(species, "train", train_elapsed);
 
     log_species_phase_start(
         species,
@@ -462,15 +654,81 @@ where
         &[format!("depth={}", config.stability_depth)],
     );
     let stability_started = Instant::now();
-    let stability_loss = model.loss(
-        &batches.eval_sentence[0],
+    if let Some(deadline) = deadline {
+        if Instant::now() >= deadline {
+            let elapsed = stability_started.elapsed();
+            phase_timings.push(phase_timing(RunPhase::Stability, elapsed, 0, 1));
+            let artifact = SpeciesRunArtifact {
+                stage,
+                manifest: manifest.clone(),
+                phase_timings,
+                execution_outcome: timeout_outcome_for_phase(RunPhase::Stability),
+                quality_outcome: RunQualityOutcome::Clean,
+                error: Some("run timeout exceeded during stability".into()),
+                metrics: None,
+            };
+            record_species_run_artifact(artifact);
+            return Err(FractalError::InvalidState(
+                "run timeout exceeded during stability".into(),
+            ));
+        }
+    }
+    let stability_batch = match batches.eval_sentence.first() {
+        Some(batch) => batch,
+        None => {
+            phase_timings.push(phase_timing(
+                RunPhase::Stability,
+                stability_started.elapsed(),
+                0,
+                1,
+            ));
+            let artifact = SpeciesRunArtifact {
+                stage,
+                manifest: manifest.clone(),
+                phase_timings,
+                execution_outcome: RunExecutionOutcome::InfraFailure,
+                quality_outcome: RunQualityOutcome::Clean,
+                error: Some("stability batch cache was empty".into()),
+                metrics: None,
+            };
+            record_species_run_artifact(artifact);
+            return Err(FractalError::InvalidState(
+                "stability batch cache was empty".into(),
+            ));
+        }
+    };
+    let stability_loss = match model.loss(
+        stability_batch,
         &criterion,
         Some(config.stability_depth),
         false,
-    )?;
+    ) {
+        Ok(loss) => loss,
+        Err(error) => {
+            phase_timings.push(phase_timing(
+                RunPhase::Stability,
+                stability_started.elapsed(),
+                0,
+                1,
+            ));
+            let artifact = SpeciesRunArtifact {
+                stage,
+                manifest: manifest.clone(),
+                phase_timings,
+                execution_outcome: RunExecutionOutcome::InfraFailure,
+                quality_outcome: RunQualityOutcome::Clean,
+                error: Some(error.to_string()),
+                metrics: None,
+            };
+            record_species_run_artifact(artifact);
+            return Err(error);
+        }
+    };
     let stability_grads = GradientsParams::from_grads(stability_loss.backward(), &model);
     let grad_norm_depth_20 = gradient_l2_norm(&model, &stability_grads);
-    log_species_phase_done(species, "stability", stability_started.elapsed());
+    let stability_elapsed = stability_started.elapsed();
+    phase_timings.push(phase_timing(RunPhase::Stability, stability_elapsed, 1, 1));
+    log_species_phase_done(species, "stability", stability_elapsed);
 
     log_species_phase_start(
         species,
@@ -478,8 +736,61 @@ where
         &[format!("batches={}", batches.eval_sentence.len())],
     );
     let perplexity_started = Instant::now();
-    let long_context_perplexity = evaluate_perplexity(&model, &criterion, &batches.eval_sentence)?;
-    log_species_phase_done(species, "perplexity", perplexity_started.elapsed());
+    if let Some(deadline) = deadline {
+        if Instant::now() >= deadline {
+            let elapsed = perplexity_started.elapsed();
+            phase_timings.push(phase_timing(
+                RunPhase::Perplexity,
+                elapsed,
+                0,
+                batches.eval_sentence.len(),
+            ));
+            let artifact = SpeciesRunArtifact {
+                stage,
+                manifest: manifest.clone(),
+                phase_timings,
+                execution_outcome: timeout_outcome_for_phase(RunPhase::Perplexity),
+                quality_outcome: RunQualityOutcome::Clean,
+                error: Some("run timeout exceeded during perplexity".into()),
+                metrics: None,
+            };
+            record_species_run_artifact(artifact);
+            return Err(FractalError::InvalidState(
+                "run timeout exceeded during perplexity".into(),
+            ));
+        }
+    }
+    let long_context_perplexity =
+        match evaluate_perplexity(&model, &criterion, &batches.eval_sentence) {
+            Ok(perplexity) => perplexity,
+            Err(error) => {
+                phase_timings.push(phase_timing(
+                    RunPhase::Perplexity,
+                    perplexity_started.elapsed(),
+                    0,
+                    batches.eval_sentence.len(),
+                ));
+                let artifact = SpeciesRunArtifact {
+                    stage,
+                    manifest: manifest.clone(),
+                    phase_timings,
+                    execution_outcome: RunExecutionOutcome::InfraFailure,
+                    quality_outcome: RunQualityOutcome::Clean,
+                    error: Some(error.to_string()),
+                    metrics: None,
+                };
+                record_species_run_artifact(artifact);
+                return Err(error);
+            }
+        };
+    let perplexity_elapsed = perplexity_started.elapsed();
+    phase_timings.push(phase_timing(
+        RunPhase::Perplexity,
+        perplexity_elapsed,
+        batches.eval_sentence.len(),
+        batches.eval_sentence.len(),
+    ));
+    log_species_phase_done(species, "perplexity", perplexity_elapsed);
 
     log_species_phase_start(
         species,
@@ -487,16 +798,82 @@ where
         &[format!("batches={}", batches.eval_arc.len())],
     );
     let accuracy_started = Instant::now();
-    let (arc_accuracy, tokens_per_sec) = evaluate_accuracy_and_speed(&model, &batches.eval_arc)?;
-    log_species_phase_done(species, "arc_speed", accuracy_started.elapsed());
+    if let Some(deadline) = deadline {
+        if Instant::now() >= deadline {
+            let elapsed = accuracy_started.elapsed();
+            phase_timings.push(phase_timing(
+                RunPhase::ArcSpeed,
+                elapsed,
+                0,
+                batches.eval_arc.len(),
+            ));
+            let artifact = SpeciesRunArtifact {
+                stage,
+                manifest: manifest.clone(),
+                phase_timings,
+                execution_outcome: timeout_outcome_for_phase(RunPhase::ArcSpeed),
+                quality_outcome: RunQualityOutcome::Clean,
+                error: Some("run timeout exceeded during ARC/speed evaluation".into()),
+                metrics: None,
+            };
+            record_species_run_artifact(artifact);
+            return Err(FractalError::InvalidState(
+                "run timeout exceeded during ARC/speed evaluation".into(),
+            ));
+        }
+    }
+    let (arc_accuracy, tokens_per_sec) =
+        match evaluate_accuracy_and_speed(&model, &batches.eval_arc) {
+            Ok(result) => result,
+            Err(error) => {
+                phase_timings.push(phase_timing(
+                    RunPhase::ArcSpeed,
+                    accuracy_started.elapsed(),
+                    0,
+                    batches.eval_arc.len(),
+                ));
+                let artifact = SpeciesRunArtifact {
+                    stage,
+                    manifest: manifest.clone(),
+                    phase_timings,
+                    execution_outcome: RunExecutionOutcome::InfraFailure,
+                    quality_outcome: RunQualityOutcome::Clean,
+                    error: Some(error.to_string()),
+                    metrics: None,
+                };
+                record_species_run_artifact(artifact);
+                return Err(error);
+            }
+        };
+    let accuracy_elapsed = accuracy_started.elapsed();
+    phase_timings.push(phase_timing(
+        RunPhase::ArcSpeed,
+        accuracy_elapsed,
+        batches.eval_arc.len(),
+        batches.eval_arc.len(),
+    ));
+    log_species_phase_done(species, "arc_speed", accuracy_elapsed);
 
-    Ok(SpeciesRawMetrics {
+    let metrics = SpeciesRawMetrics {
         species,
         grad_norm_depth_20,
         long_context_perplexity,
         arc_accuracy,
         tokens_per_sec,
-    })
+    };
+    let quality_outcome = classify_quality_outcome(&metrics);
+    let artifact = SpeciesRunArtifact {
+        stage,
+        manifest,
+        phase_timings,
+        execution_outcome: RunExecutionOutcome::Success,
+        quality_outcome,
+        error: None,
+        metrics: Some(metrics.clone()),
+    };
+    record_species_run_artifact(artifact);
+
+    Ok(metrics)
 }
 
 fn prepare_batches_for_run<B: AutodiffBackend>(
