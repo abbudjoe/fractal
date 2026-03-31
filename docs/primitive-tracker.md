@@ -27,3 +27,12 @@
 
 - Compositing test for `p1_fractal_hybrid_v1` with `p1_contractive_v1`
 - Heavy stress or compositing pass for `logistic_chaotic_map_v1`
+
+## Latest Uncommitted Run Results
+
+| Variant Name               | Preset               | Status                     | Last Fitness | Stability | Perplexity | ARC | tok/s | Notes / Next Action |
+|---------------------------|----------------------|----------------------------|--------------|-----------|------------|-----|-------|---------------------|
+| julia_recursive_escape_v1 | minimal_stress_lane  | Timed out                  | n/a          | n/a       | n/a        | n/a | n/a   | Current balanced-node rerun completed train (`1118.8s`) and stability (`17.3s`) but timed out in perplexity after `1200s`; next fix should target eval/runtime cost rather than training stability alone |
+| p1_fractal_hybrid_composite_v1 | lighter_intermediate_stress | Completed         | 0.57         | 0.33      | 1.86       | 0.76 | 3    | First-ever compositing test completed cleanly; ARC improved to `0.76`, stability dropped below `0.80`, and fitness held near the co-leader band, so this is a real promotion candidate |
+| p1_fractal_hybrid_dyn-gate_v1 | lighter_intermediate_stress | Timed out          | n/a          | n/a       | n/a        | n/a | n/a   | Current balanced-node rerun reached at least `36/48` train steps by `1462.4s` but still hit the bounded `1800s` timeout before reporting train completion; this lever remains too expensive on the present control surface |
+| logistic_chaotic_map_v1 | full_medium_stress | Completed | 0.58 | 0.59 | 1.91 | 0.46 | 3 | Heavy-stress rerun completed cleanly; stability improved sharply from the earlier upper-cohort pass while fitness rose into co-leader range, so this variant now merits serious head-to-head consideration |

@@ -3,7 +3,7 @@ use std::{
     fmt::{Display, Formatter},
     str::FromStr,
     sync::{Arc, Mutex, OnceLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use burn::{
@@ -88,27 +88,33 @@ pub enum SpeciesId {
     B2StableHierarchical,
     B1FractalGated,
     P1FractalHybrid,
+    P1FractalHybridComposite,
+    P1FractalHybridDynGate,
     P2Mandelbrot,
     B3FractalHierarchical,
     B4Universal,
     Ifs,
     GeneralizedMobius,
     LogisticChaoticMap,
+    JuliaRecursiveEscape,
 }
 
 impl SpeciesId {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 14] = [
         Self::P1Contractive,
         Self::P3Hierarchical,
         Self::B2StableHierarchical,
         Self::B1FractalGated,
         Self::P1FractalHybrid,
+        Self::P1FractalHybridComposite,
+        Self::P1FractalHybridDynGate,
         Self::P2Mandelbrot,
         Self::B3FractalHierarchical,
         Self::B4Universal,
         Self::Ifs,
         Self::GeneralizedMobius,
         Self::LogisticChaoticMap,
+        Self::JuliaRecursiveEscape,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -118,12 +124,15 @@ impl SpeciesId {
             Self::B2StableHierarchical => "b2_stable_hierarchical",
             Self::B1FractalGated => "b1_fractal_gated",
             Self::P1FractalHybrid => "p1_fractal_hybrid",
+            Self::P1FractalHybridComposite => "p1_fractal_hybrid_composite",
+            Self::P1FractalHybridDynGate => "p1_fractal_hybrid_dyn_gate",
             Self::P2Mandelbrot => "p2_mandelbrot",
             Self::B3FractalHierarchical => "b3_fractal_hierarchical",
             Self::B4Universal => "b4_universal",
             Self::Ifs => "ifs",
             Self::GeneralizedMobius => "generalized_mobius",
             Self::LogisticChaoticMap => "logistic_chaotic_map",
+            Self::JuliaRecursiveEscape => "julia_recursive_escape",
         }
     }
 }
@@ -144,12 +153,15 @@ impl FromStr for SpeciesId {
             "b2_stable_hierarchical" => Ok(Self::B2StableHierarchical),
             "b1_fractal_gated" => Ok(Self::B1FractalGated),
             "p1_fractal_hybrid" => Ok(Self::P1FractalHybrid),
+            "p1_fractal_hybrid_composite" => Ok(Self::P1FractalHybridComposite),
+            "p1_fractal_hybrid_dyn_gate" => Ok(Self::P1FractalHybridDynGate),
             "p2_mandelbrot" => Ok(Self::P2Mandelbrot),
             "b3_fractal_hierarchical" => Ok(Self::B3FractalHierarchical),
             "b4_universal" => Ok(Self::B4Universal),
             "ifs" => Ok(Self::Ifs),
             "generalized_mobius" => Ok(Self::GeneralizedMobius),
             "logistic_chaotic_map" => Ok(Self::LogisticChaoticMap),
+            "julia_recursive_escape" => Ok(Self::JuliaRecursiveEscape),
             _ => Err(()),
         }
     }
@@ -408,6 +420,15 @@ where
         .init(&device);
     let mut optimizer = AdamConfig::new().init();
 
+    log_species_phase_start(
+        species,
+        "train",
+        &[
+            format!("steps={}", config.train_steps_per_species),
+            format!("train_batch={}", config.train_batch_size),
+        ],
+    );
+    let train_started = Instant::now();
     for step in 0..config.train_steps_per_species {
         let train_batches = if step % 2 == 0 {
             &batches.train_sentence
@@ -418,8 +439,25 @@ where
         let loss = model.loss(batch, &criterion, None, true)?;
         let grads = GradientsParams::from_grads(loss.backward(), &model);
         model = optimizer.step(config.learning_rate, model, grads);
+        let completed_step = step + 1;
+        if should_log_training_checkpoint(completed_step, config.train_steps_per_species) {
+            log_species_phase_progress(
+                species,
+                "train",
+                completed_step,
+                config.train_steps_per_species,
+                train_started.elapsed(),
+            );
+        }
     }
+    log_species_phase_done(species, "train", train_started.elapsed());
 
+    log_species_phase_start(
+        species,
+        "stability",
+        &[format!("depth={}", config.stability_depth)],
+    );
+    let stability_started = Instant::now();
     let stability_loss = model.loss(
         &batches.eval_sentence[0],
         &criterion,
@@ -428,9 +466,25 @@ where
     )?;
     let stability_grads = GradientsParams::from_grads(stability_loss.backward(), &model);
     let grad_norm_depth_20 = gradient_l2_norm(&model, &stability_grads);
+    log_species_phase_done(species, "stability", stability_started.elapsed());
 
+    log_species_phase_start(
+        species,
+        "perplexity",
+        &[format!("batches={}", batches.eval_sentence.len())],
+    );
+    let perplexity_started = Instant::now();
     let long_context_perplexity = evaluate_perplexity(&model, &criterion, &batches.eval_sentence)?;
+    log_species_phase_done(species, "perplexity", perplexity_started.elapsed());
+
+    log_species_phase_start(
+        species,
+        "arc_speed",
+        &[format!("batches={}", batches.eval_arc.len())],
+    );
+    let accuracy_started = Instant::now();
     let (arc_accuracy, tokens_per_sec) = evaluate_accuracy_and_speed(&model, &batches.eval_arc)?;
+    log_species_phase_done(species, "arc_speed", accuracy_started.elapsed());
 
     Ok(SpeciesRawMetrics {
         species,
@@ -566,6 +620,53 @@ where
     let tokens_per_sec = total as f64 / elapsed;
 
     Ok((accuracy, tokens_per_sec))
+}
+
+const TRAIN_PROGRESS_TARGET_EVENTS: usize = 4;
+
+pub(crate) fn should_log_training_checkpoint(completed_step: usize, total_steps: usize) -> bool {
+    if total_steps == 0 || completed_step == 0 {
+        return false;
+    }
+
+    if completed_step == total_steps {
+        return total_steps > 0 && completed_step == total_steps;
+    }
+
+    completed_step.is_multiple_of(training_progress_interval(total_steps))
+}
+
+pub(crate) fn training_progress_interval(total_steps: usize) -> usize {
+    total_steps.max(1).div_ceil(TRAIN_PROGRESS_TARGET_EVENTS)
+}
+
+fn log_species_phase_start(species: SpeciesId, phase: &str, details: &[String]) {
+    let suffix = if details.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", details.join(" "))
+    };
+    println!("[phase:start] {species} {phase}{suffix}");
+}
+
+fn log_species_phase_progress(
+    species: SpeciesId,
+    phase: &str,
+    completed: usize,
+    total: usize,
+    elapsed: Duration,
+) {
+    println!(
+        "[phase:progress] {species} {phase} {completed}/{total} elapsed={:.1}s",
+        elapsed.as_secs_f64()
+    );
+}
+
+fn log_species_phase_done(species: SpeciesId, phase: &str, elapsed: Duration) {
+    println!(
+        "[phase:done] {species} {phase} elapsed={:.1}s",
+        elapsed.as_secs_f64()
+    );
 }
 
 fn gradient_l2_norm<M, B>(module: &M, grads: &GradientsParams) -> f64

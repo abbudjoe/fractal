@@ -11,7 +11,8 @@ use fractal_core::{
 
 use crate::{
     species_registry, B1FractalGated, B2StableHierarchical, B3FractalHierarchical, B4Universal,
-    GeneralizedMobius, Ifs, LogisticChaoticMap, P1Contractive, P1FractalHybrid, P2Mandelbrot,
+    GeneralizedMobius, Ifs, JuliaRecursiveEscape, LogisticChaoticMap, P1Contractive,
+    P1FractalHybrid, P1FractalHybridComposite, P1FractalHybridDynGate, P2Mandelbrot,
     P3Hierarchical,
 };
 
@@ -28,12 +29,15 @@ fn primitives_preserve_declared_layout_and_shape() {
         Box::new(B2StableHierarchical::new(8, 3, &device)),
         Box::new(B1FractalGated::new(8, &device)),
         Box::new(P1FractalHybrid::new(8, &device)),
+        Box::new(P1FractalHybridComposite::new(8, &device)),
+        Box::new(P1FractalHybridDynGate::new(8, &device)),
         Box::new(P2Mandelbrot::new(8, &device)),
         Box::new(B3FractalHierarchical::new(8, 3, &device)),
         Box::new(B4Universal::new(8, 3, &device)),
         Box::new(Ifs::new(8, &device)),
         Box::new(GeneralizedMobius::new(8, &device)),
         Box::new(LogisticChaoticMap::new(8, &device)),
+        Box::new(JuliaRecursiveEscape::new(8, &device)),
     ];
 
     for primitive in primitives {
@@ -234,6 +238,135 @@ fn p1_fractal_hybrid_dynamic_clamp_changes_with_state_norm() {
         .unwrap();
 
     assert_ne!(low, high);
+}
+
+#[test]
+fn p1_fractal_hybrid_composite_only_injects_inner_rule_at_controlled_depth() {
+    let device = Default::default();
+    let x = Tensor::<TestBackend, 2>::ones([1, 4], &device);
+    let state = FractalState::Flat(Tensor::<TestBackend, 2>::ones([1, 4], &device));
+    let rule = P1FractalHybridComposite::new(4, &device);
+
+    let shallow = rule
+        .apply(
+            &state,
+            &x,
+            ApplyContext {
+                depth: 1,
+                max_depth: 10,
+            },
+        )
+        .unwrap()
+        .flat()
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let injected = rule
+        .apply(
+            &state,
+            &x,
+            ApplyContext {
+                depth: 5,
+                max_depth: 10,
+            },
+        )
+        .unwrap()
+        .flat()
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+
+    assert_ne!(shallow, injected);
+}
+
+#[test]
+fn p1_fractal_hybrid_dyn_gate_tightens_with_depth() {
+    let device = Default::default();
+    let x = Tensor::<TestBackend, 2>::ones([1, 4], &device);
+    let state = FractalState::Flat(Tensor::<TestBackend, 2>::ones([1, 4], &device));
+    let mut rule = P1FractalHybridDynGate::new(4, &device);
+    rule.core.g_proj.weight = Param::from_data(TensorData::new(vec![10.0f32; 16], [4, 4]), &device);
+    rule.core.g_proj.bias = Some(Param::from_data(
+        TensorData::new(vec![10.0f32; 4], [4]),
+        &device,
+    ));
+
+    let shallow = rule
+        .apply(
+            &state,
+            &x,
+            ApplyContext {
+                depth: 1,
+                max_depth: 10,
+            },
+        )
+        .unwrap()
+        .flat()
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let deep = rule
+        .apply(
+            &state,
+            &x,
+            ApplyContext {
+                depth: 10,
+                max_depth: 10,
+            },
+        )
+        .unwrap()
+        .flat()
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+
+    assert_ne!(shallow, deep);
+}
+
+#[test]
+fn julia_recursive_escape_tightens_escape_radius_with_depth() {
+    let device = Default::default();
+    let x = Tensor::<TestBackend, 2>::ones([1, 4], &device);
+    let state =
+        FractalState::Complex(Tensor::<TestBackend, 2>::ones([1, 8], &device).mul_scalar(3.0));
+    let rule = JuliaRecursiveEscape::new(4, &device);
+
+    let shallow = rule
+        .apply(
+            &state,
+            &x,
+            ApplyContext {
+                depth: 1,
+                max_depth: 8,
+            },
+        )
+        .unwrap()
+        .complex()
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let deep = rule
+        .apply(
+            &state,
+            &x,
+            ApplyContext {
+                depth: 8,
+                max_depth: 8,
+            },
+        )
+        .unwrap()
+        .complex()
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+
+    assert_ne!(shallow, deep);
 }
 
 #[test]

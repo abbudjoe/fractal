@@ -28,7 +28,8 @@ use crate::{
     model::FractalModel,
     primitives::complex_square,
     registry::{
-        is_valid_primitive_variant_name, ComputeBackend, ExecutionMode, PrimitiveVariantName,
+        is_valid_primitive_variant_name, should_log_training_checkpoint,
+        training_progress_interval, ComputeBackend, ExecutionMode, PrimitiveVariantName,
         SpeciesDefinition, SpeciesId, SpeciesRunContext,
     },
     router::EarlyExitRouter,
@@ -166,8 +167,31 @@ fn minimal_baseline_preset_matches_minimal_proving_ground_shape() {
 }
 
 #[test]
+fn minimal_stress_lane_preset_matches_minimal_baseline_shape() {
+    let config = TournamentPreset::MinimalStressLane.config();
+
+    assert_eq!(config.dim, 128);
+    assert_eq!(config.max_recursion_depth, 8);
+    assert_eq!(config.stability_depth, 8);
+    assert_eq!(config.train_steps_per_species, 30);
+    assert_eq!(config.eval_batches_per_family, 2);
+}
+
+#[test]
 fn medium_stress_preset_targets_midweight_single_species_run() {
     let config = TournamentPreset::MediumStress.config();
+
+    assert_eq!(config.dim, 192);
+    assert_eq!(config.max_seq_len, 128);
+    assert_eq!(config.max_recursion_depth, 12);
+    assert_eq!(config.stability_depth, 12);
+    assert_eq!(config.train_steps_per_species, 80);
+    assert_eq!(config.eval_batches_per_family, 2);
+}
+
+#[test]
+fn full_medium_stress_matches_medium_stress_shape() {
+    let config = TournamentPreset::FullMediumStress.config();
 
     assert_eq!(config.dim, 192);
     assert_eq!(config.max_seq_len, 128);
@@ -188,6 +212,39 @@ fn intermediate_stress_preset_targets_hybrid_decider_lane() {
     assert_eq!(config.train_steps_per_species, 48);
     assert_eq!(config.eval_batches_per_family, 2);
     assert_eq!(config.generator_depth_config.sentence_eval_max_depth, 10);
+}
+
+#[test]
+fn lighter_intermediate_stress_halves_medium_batch_sizes() {
+    let config = TournamentPreset::LighterIntermediateStress.config();
+
+    assert_eq!(config.dim, 160);
+    assert_eq!(config.max_seq_len, 96);
+    assert_eq!(config.max_recursion_depth, 10);
+    assert_eq!(config.stability_depth, 10);
+    assert_eq!(config.train_batch_size, 4);
+    assert_eq!(config.eval_batch_size, 2);
+    assert_eq!(config.train_steps_per_species, 48);
+}
+
+#[test]
+fn training_progress_interval_targets_quarterly_phase_checkpoints() {
+    assert_eq!(training_progress_interval(1), 1);
+    assert_eq!(training_progress_interval(4), 1);
+    assert_eq!(training_progress_interval(5), 2);
+    assert_eq!(training_progress_interval(48), 12);
+    assert_eq!(training_progress_interval(80), 20);
+}
+
+#[test]
+fn training_progress_checkpoint_logs_quarterly_and_final_steps() {
+    let checkpoints = (1..=10)
+        .filter(|step| should_log_training_checkpoint(*step, 10))
+        .collect::<Vec<_>>();
+
+    assert_eq!(checkpoints, vec![3, 6, 9, 10]);
+    assert!(!should_log_training_checkpoint(0, 10));
+    assert!(!should_log_training_checkpoint(1, 0));
 }
 
 #[test]
@@ -753,12 +810,15 @@ fn test_variant_name(id: SpeciesId) -> PrimitiveVariantName {
         SpeciesId::B2StableHierarchical => "b2_stable_hierarchical_v1",
         SpeciesId::B1FractalGated => "b1_fractal_gated_dyn-residual-norm_v1",
         SpeciesId::P1FractalHybrid => "p1_fractal_hybrid_v1",
+        SpeciesId::P1FractalHybridComposite => "p1_fractal_hybrid_composite_v1",
+        SpeciesId::P1FractalHybridDynGate => "p1_fractal_hybrid_dyn-gate_v1",
         SpeciesId::P2Mandelbrot => "p2_mandelbrot_dyn-gate-norm_v1",
         SpeciesId::B3FractalHierarchical => "b3_fractal_hierarchical_dyn-radius-depth_v1",
         SpeciesId::B4Universal => "b4_universal_dyn-residual-norm_v1",
         SpeciesId::Ifs => "ifs_dyn-radius-depth_v1",
-        SpeciesId::GeneralizedMobius => "generalized_mobius_dyn-jitter-norm_v1",
+        SpeciesId::GeneralizedMobius => "generalized_mobius_dyn-jitter-norm_v2",
         SpeciesId::LogisticChaoticMap => "logistic_chaotic_map_v1",
+        SpeciesId::JuliaRecursiveEscape => "julia_recursive_escape_v1",
     };
     PrimitiveVariantName::new_unchecked(name)
 }

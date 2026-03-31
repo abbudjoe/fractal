@@ -232,9 +232,14 @@ fn parse_preset(value: &str) -> Result<TournamentPreset, FractalError> {
         "research-medium" => Ok(TournamentPreset::ResearchMedium),
         "challenger-lane" => Ok(TournamentPreset::ChallengerLane),
         "minimal-baseline" => Ok(TournamentPreset::MinimalBaseline),
+        "minimal-stress-lane" | "minimal_stress_lane" => Ok(TournamentPreset::MinimalStressLane),
         "minimal-proving-ground" => Ok(TournamentPreset::MinimalProvingGround),
         "bullpen-polish" => Ok(TournamentPreset::BullpenPolish),
+        "lighter-intermediate-stress" | "lighter_intermediate_stress" => {
+            Ok(TournamentPreset::LighterIntermediateStress)
+        }
         "intermediate-stress" => Ok(TournamentPreset::IntermediateStress),
+        "full-medium-stress" | "full_medium_stress" => Ok(TournamentPreset::FullMediumStress),
         "medium-stress" => Ok(TournamentPreset::MediumStress),
         "pressure-test" => Ok(TournamentPreset::PressureTest),
         "candidate-stress" => Ok(TournamentPreset::CandidateStress),
@@ -486,7 +491,7 @@ fn print_usage() {
     println!();
     println!("Options:");
     println!(
-        "  --preset <default|fast-test|research-medium|challenger-lane|minimal-baseline|minimal-proving-ground|bullpen-polish|intermediate-stress|medium-stress|pressure-test|candidate-stress|generation-four>"
+        "  --preset <default|fast-test|research-medium|challenger-lane|minimal-baseline|minimal-stress-lane|minimal-proving-ground|bullpen-polish|lighter-intermediate-stress|intermediate-stress|full-medium-stress|medium-stress|pressure-test|candidate-stress|generation-four>"
     );
     println!("  --sequence <first-run>");
     println!("  --lane <all|baseline|challenger|bullpen|proving-ground|squaring|leader>");
@@ -503,7 +508,10 @@ fn print_usage() {
     println!("Examples:");
     println!("  cargo run --example tournament -- --preset fast-test");
     println!("  cargo run --release --example tournament -- --preset minimal-baseline");
+    println!("  cargo run --release --example tournament -- --preset minimal-stress-lane");
+    println!("  cargo run --release --example tournament -- --preset lighter-intermediate-stress");
     println!("  cargo run --release --example tournament -- --preset intermediate-stress");
+    println!("  cargo run --release --example tournament -- --preset full-medium-stress");
     println!("  cargo run --release --example tournament -- --preset medium-stress");
     println!("  cargo run --release --example tournament -- --lane baseline");
     println!("  cargo run --release --example tournament -- --lane bullpen");

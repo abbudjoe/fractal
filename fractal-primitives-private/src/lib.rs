@@ -13,10 +13,17 @@ use fractal_core::{
 };
 
 pub use primitives::{
-    b1_fractal_gated::B1FractalGated, b2_stable_hierarchical::B2StableHierarchical,
-    b3_fractal_hierarchical::B3FractalHierarchical, b4_universal::B4Universal,
-    generalized_mobius::GeneralizedMobius, ifs::Ifs, logistic_chaotic_map::LogisticChaoticMap,
-    p1_contractive::P1Contractive, p1_fractal_hybrid::P1FractalHybrid, p2_mandelbrot::P2Mandelbrot,
+    b1_fractal_gated::B1FractalGated,
+    b2_stable_hierarchical::B2StableHierarchical,
+    b3_fractal_hierarchical::B3FractalHierarchical,
+    b4_universal::B4Universal,
+    generalized_mobius::GeneralizedMobius,
+    ifs::Ifs,
+    julia_recursive_escape::JuliaRecursiveEscape,
+    logistic_chaotic_map::LogisticChaoticMap,
+    p1_contractive::P1Contractive,
+    p1_fractal_hybrid::{P1FractalHybrid, P1FractalHybridComposite, P1FractalHybridDynGate},
+    p2_mandelbrot::P2Mandelbrot,
     p3_hierarchical::P3Hierarchical,
 };
 
@@ -138,6 +145,20 @@ define_flat_species_runner!(
     P1FractalHybrid
 );
 define_flat_species_runner!(
+    run_p1_hybrid_composite_cpu,
+    run_p1_hybrid_composite_metal,
+    run_p1_hybrid_composite_cuda,
+    P1FractalHybridComposite,
+    P1FractalHybridComposite
+);
+define_flat_species_runner!(
+    run_p1_hybrid_dyn_gate_cpu,
+    run_p1_hybrid_dyn_gate_metal,
+    run_p1_hybrid_dyn_gate_cuda,
+    P1FractalHybridDynGate,
+    P1FractalHybridDynGate
+);
+define_flat_species_runner!(
     run_p2_cpu,
     run_p2_metal,
     run_p2_cuda,
@@ -173,6 +194,13 @@ define_flat_species_runner!(
     LogisticChaoticMap,
     LogisticChaoticMap
 );
+define_flat_species_runner!(
+    run_julia_cpu,
+    run_julia_metal,
+    run_julia_cuda,
+    JuliaRecursiveEscape,
+    JuliaRecursiveEscape
+);
 
 macro_rules! species_definition {
     ($id:expr, $variant_name:expr, $cpu_fn:ident, $metal_fn:ident, $cuda_fn:ident) => {{
@@ -198,7 +226,7 @@ macro_rules! species_definition {
     }};
 }
 
-pub const SPECIES_REGISTRY: [SpeciesDefinition; 11] = [
+pub const SPECIES_REGISTRY: [SpeciesDefinition; 14] = [
     species_definition!(
         SpeciesId::P1Contractive,
         "p1_contractive_v1",
@@ -233,6 +261,20 @@ pub const SPECIES_REGISTRY: [SpeciesDefinition; 11] = [
         run_p1_hybrid_cpu,
         run_p1_hybrid_metal,
         run_p1_hybrid_cuda
+    ),
+    species_definition!(
+        SpeciesId::P1FractalHybridComposite,
+        "p1_fractal_hybrid_composite_v1",
+        run_p1_hybrid_composite_cpu,
+        run_p1_hybrid_composite_metal,
+        run_p1_hybrid_composite_cuda
+    ),
+    species_definition!(
+        SpeciesId::P1FractalHybridDynGate,
+        "p1_fractal_hybrid_dyn-gate_v1",
+        run_p1_hybrid_dyn_gate_cpu,
+        run_p1_hybrid_dyn_gate_metal,
+        run_p1_hybrid_dyn_gate_cuda
     ),
     species_definition!(
         SpeciesId::P2Mandelbrot,
@@ -275,6 +317,13 @@ pub const SPECIES_REGISTRY: [SpeciesDefinition; 11] = [
         run_logistic_cpu,
         run_logistic_metal,
         run_logistic_cuda
+    ),
+    species_definition!(
+        SpeciesId::JuliaRecursiveEscape,
+        "julia_recursive_escape_v1",
+        run_julia_cpu,
+        run_julia_metal,
+        run_julia_cuda
     ),
 ];
 
