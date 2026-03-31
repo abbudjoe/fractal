@@ -11,6 +11,7 @@ use fractal_core::{
     rule_trait::FractalRule,
     state::{FractalState, StateLayout},
 };
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{B1FractalGated, B3FractalHierarchical, B4Universal, P1FractalHybrid, P2Mandelbrot};
 
@@ -53,22 +54,34 @@ pub struct PrimitiveRunSummary {
     pub tokens: Vec<TokenRecord>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MotifReusePolicy {
+    Off,
+    StateNormSimilarity,
+}
+
 #[derive(Clone, Copy)]
 pub struct PrimitiveFactory<B: Backend> {
     pub name: &'static str,
+    pub motif_reuse: MotifReusePolicy,
     pub build: fn(TokenizerConfig, &B::Device) -> Box<dyn FractalRule<B>>,
 }
 
 impl<B: Backend> PrimitiveFactory<B> {
     pub fn new(
         name: &'static str,
+        motif_reuse: MotifReusePolicy,
         build: fn(TokenizerConfig, &B::Device) -> Box<dyn FractalRule<B>>,
     ) -> Self {
         if let Err(error) = validate_tokenizer_primitive_name(name) {
             panic!("invalid tokenizer primitive name `{name}`: {error}");
         }
 
-        Self { name, build }
+        Self {
+            name,
+            motif_reuse,
+            build,
+        }
     }
 }
 
@@ -76,11 +89,25 @@ pub struct RecursiveTokenizer {
     config: TokenizerConfig,
 }
 
+#[derive(Default)]
+struct MotifRegistry {
+    assigned_by_depth: BTreeMap<usize, BTreeSet<String>>,
+    seen: Vec<SeenMotif>,
+}
+
 #[derive(Clone, Copy)]
 struct Segment<'a> {
     bytes: &'a [u8],
     start: usize,
     depth: usize,
+}
+
+#[derive(Clone)]
+struct SeenMotif {
+    depth: usize,
+    digest: String,
+    norm: f32,
+    signature: Vec<f32>,
 }
 
 impl RecursiveTokenizer {
@@ -94,14 +121,33 @@ impl RecursiveTokenizer {
         text: &str,
         device: &B::Device,
     ) -> Result<Vec<TokenRecord>, FractalError> {
+        self.tokenize_with_policy(rule, text, device, MotifReusePolicy::Off)
+    }
+
+    fn tokenize_with_policy<B: Backend>(
+        &self,
+        rule: &dyn FractalRule<B>,
+        text: &str,
+        device: &B::Device,
+        motif_reuse: MotifReusePolicy,
+    ) -> Result<Vec<TokenRecord>, FractalError> {
         let state = FractalState::zeros(rule.state_layout(), 1, rule.hidden_dim(), device)?;
         let mut tokens = Vec::new();
+        let mut motifs = MotifRegistry::default();
         let root = Segment {
             bytes: text.as_bytes(),
             start: 0,
             depth: 0,
         };
-        self.tokenize_segment(rule, state, root, &mut tokens, device)?;
+        self.tokenize_segment(
+            rule,
+            state,
+            root,
+            &mut tokens,
+            &mut motifs,
+            motif_reuse,
+            device,
+        )?;
         Ok(tokens)
     }
 
@@ -113,7 +159,7 @@ impl RecursiveTokenizer {
     ) -> Result<PrimitiveRunSummary, FractalError> {
         validate_tokenizer_primitive_name(factory.name)?;
         let rule = (factory.build)(self.config, device);
-        let tokens = self.tokenize(rule.as_ref(), text, device)?;
+        let tokens = self.tokenize_with_policy(rule.as_ref(), text, device, factory.motif_reuse)?;
         Ok(PrimitiveRunSummary {
             primitive: factory.name,
             produced: tokens.len(),
@@ -127,6 +173,8 @@ impl RecursiveTokenizer {
         state: FractalState<B>,
         segment: Segment<'_>,
         tokens: &mut Vec<TokenRecord>,
+        motifs: &mut MotifRegistry,
+        motif_reuse: MotifReusePolicy,
         device: &B::Device,
     ) -> Result<(), FractalError> {
         if segment.bytes.is_empty() {
@@ -135,7 +183,13 @@ impl RecursiveTokenizer {
 
         let features = segment_features::<B>(segment.bytes, self.config.dim, device);
         let next_state = rule.apply(&state, &features)?;
-        let summary = summarize_readout(&next_state.readout(), segment.bytes, segment.depth)?;
+        let summary = summarize_readout(
+            &next_state.readout(),
+            segment.bytes,
+            segment.depth,
+            motifs,
+            motif_reuse,
+        )?;
         let end = segment.start + segment.bytes.len();
         tokens.push(TokenRecord {
             depth: segment.depth,
@@ -160,6 +214,8 @@ impl RecursiveTokenizer {
                     depth: segment.depth + 1,
                 },
                 tokens,
+                motifs,
+                motif_reuse,
                 device,
             )?;
             self.tokenize_segment(
@@ -171,6 +227,8 @@ impl RecursiveTokenizer {
                     depth: segment.depth + 1,
                 },
                 tokens,
+                motifs,
+                motif_reuse,
                 device,
             )?;
         }
@@ -181,15 +239,40 @@ impl RecursiveTokenizer {
 
 pub fn revived_primitive_factories<B: Backend>() -> [PrimitiveFactory<B>; 5] {
     [
-        PrimitiveFactory::new("b1_fractal_gated_v1", seeded_b1_fractal_gated::<B>),
-        PrimitiveFactory::new("p1_fractal_hybrid_v1", seeded_p1_fractal_hybrid::<B>),
-        PrimitiveFactory::new("p2_mandelbrot_v1", seeded_p2_mandelbrot::<B>),
+        PrimitiveFactory::new(
+            "b1_fractal_gated_v1",
+            MotifReusePolicy::Off,
+            seeded_b1_fractal_gated::<B>,
+        ),
+        PrimitiveFactory::new(
+            "p1_fractal_hybrid_v1",
+            MotifReusePolicy::Off,
+            seeded_p1_fractal_hybrid::<B>,
+        ),
+        PrimitiveFactory::new(
+            "p2_mandelbrot_v1",
+            MotifReusePolicy::Off,
+            seeded_p2_mandelbrot::<B>,
+        ),
         PrimitiveFactory::new(
             "b3_fractal_hierarchical_v1",
+            MotifReusePolicy::Off,
             seeded_b3_fractal_hierarchical::<B>,
         ),
-        PrimitiveFactory::new("b4_universal_v1", seeded_b4_universal::<B>),
+        PrimitiveFactory::new(
+            "b4_universal_v1",
+            MotifReusePolicy::Off,
+            seeded_b4_universal::<B>,
+        ),
     ]
+}
+
+pub fn p1_dynamic_lever_factory<B: Backend>() -> PrimitiveFactory<B> {
+    PrimitiveFactory::new(
+        "p1_fractal_hybrid_dyn-state-norm_v1",
+        MotifReusePolicy::StateNormSimilarity,
+        seeded_p1_fractal_hybrid_dynamic::<B>,
+    )
 }
 
 pub fn validate_tokenizer_primitive_name(name: &str) -> Result<(), FractalError> {
@@ -258,7 +341,32 @@ fn seeded_p1_fractal_hybrid<B: Backend>(
     config: TokenizerConfig,
     device: &B::Device,
 ) -> Box<dyn FractalRule<B>> {
-    let mut rule = P1FractalHybrid::new(config.dim, device);
+    let mut rule = P1FractalHybrid::new_with_dynamic_lever(config.dim, false, device);
+    seed_linear(
+        &mut rule.g_proj,
+        config.dim,
+        config.dim,
+        config.seed,
+        2,
+        device,
+    );
+    seed_linear(
+        &mut rule.w_h,
+        config.dim,
+        config.dim,
+        config.seed,
+        3,
+        device,
+    );
+    seed_linear(&mut rule.u, config.dim, config.dim, config.seed, 4, device);
+    Box::new(rule)
+}
+
+fn seeded_p1_fractal_hybrid_dynamic<B: Backend>(
+    config: TokenizerConfig,
+    device: &B::Device,
+) -> Box<dyn FractalRule<B>> {
+    let mut rule = P1FractalHybrid::new_with_dynamic_lever(config.dim, true, device);
     seed_linear(
         &mut rule.g_proj,
         config.dim,
@@ -501,16 +609,21 @@ fn summarize_readout<B: Backend>(
     readout: &Tensor<B, 2>,
     bytes: &[u8],
     depth: usize,
+    motifs: &mut MotifRegistry,
+    motif_reuse: MotifReusePolicy,
 ) -> Result<String, FractalError> {
     let values = tensor_data_to_vec::<f32>(readout.clone().into_data(), "token readout")?;
     let prefix = values.iter().take(8).copied().collect::<Vec<_>>();
+    let rolling_norm = normalized_l2(&values);
     let mut digest = 1469598103934665603u64;
     for value in prefix {
         let quantized = (value * 1000.0).round() as i64;
         digest ^= quantized as u64;
         digest = digest.wrapping_mul(1099511628211);
     }
-    Ok(format!("d{depth}-n{}-{digest:016x}", bytes.len()))
+    let digest = format!("{digest:016x}");
+    let motif = motifs.resolve(depth, digest, &values, rolling_norm, motif_reuse);
+    Ok(format!("d{depth}-n{}-{motif}", bytes.len()))
 }
 
 fn tensor_data_to_vec<E: Element>(
@@ -524,4 +637,100 @@ fn tensor_data_to_vec<E: Element>(
 #[allow(dead_code)]
 fn _layout_width(layout: StateLayout, hidden_dim: usize) -> usize {
     layout.readout_width(hidden_dim)
+}
+
+impl MotifRegistry {
+    fn resolve(
+        &mut self,
+        depth: usize,
+        digest: String,
+        signature: &[f32],
+        rolling_norm: f32,
+        motif_reuse: MotifReusePolicy,
+    ) -> String {
+        let resolved = match motif_reuse {
+            MotifReusePolicy::Off => digest.clone(),
+            MotifReusePolicy::StateNormSimilarity => {
+                if self.reuse_gate_open(rolling_norm) {
+                    self.seen
+                        .iter()
+                        .filter(|entry| entry.depth != depth)
+                        .filter(|entry| !self.digest_used_at_depth(depth, &entry.digest))
+                        .filter_map(|entry| {
+                            let distance = signature_distance(signature, &entry.signature);
+                            (distance <= dynamic_similarity_threshold(signature, rolling_norm))
+                                .then_some((entry.digest.clone(), distance))
+                        })
+                        .min_by(|left, right| left.1.total_cmp(&right.1))
+                        .map(|(digest, _)| digest)
+                        .unwrap_or_else(|| digest.clone())
+                } else {
+                    digest.clone()
+                }
+            }
+        };
+
+        self.assigned_by_depth
+            .entry(depth)
+            .or_default()
+            .insert(resolved.clone());
+        self.seen.push(SeenMotif {
+            depth,
+            digest,
+            norm: rolling_norm,
+            signature: signature.to_vec(),
+        });
+        resolved
+    }
+
+    fn digest_used_at_depth(&self, depth: usize, digest: &str) -> bool {
+        self.assigned_by_depth
+            .get(&depth)
+            .is_some_and(|digests| digests.contains(digest))
+    }
+
+    fn reuse_gate_open(&self, rolling_norm: f32) -> bool {
+        self.mean_norm().is_none_or(|mean_norm| rolling_norm >= mean_norm)
+    }
+
+    fn mean_norm(&self) -> Option<f32> {
+        (!self.seen.is_empty()).then(|| {
+            self.seen.iter().map(|entry| entry.norm).sum::<f32>() / self.seen.len() as f32
+        })
+    }
+}
+
+fn dynamic_similarity_threshold(signature: &[f32], rolling_norm: f32) -> f32 {
+    rolling_norm * mean_absolute_value(signature)
+}
+
+fn signature_distance(left: &[f32], right: &[f32]) -> f32 {
+    let width = left.len().min(right.len());
+    if width == 0 {
+        return 0.0;
+    }
+
+    left.iter()
+        .zip(right.iter())
+        .take(width)
+        .map(|(left, right)| (left - right).abs())
+        .sum::<f32>()
+        / width as f32
+}
+
+fn normalized_l2(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+
+    let sum_sq = values.iter().map(|value| value * value).sum::<f32>();
+    (sum_sq / values.len() as f32).sqrt()
+}
+
+fn mean_absolute_value(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+
+    values.iter().map(|value| value.abs()).sum::<f32>() / values.len() as f32
 }
