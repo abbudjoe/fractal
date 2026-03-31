@@ -118,6 +118,7 @@ Deliverable:
 - a combined wrapper such as `ModelFacingDocument { encoded, chunked }`
 - a minimal native-tokenizer compatibility adapter that consumes the packaged frontier
 - batch types that can represent existing-LM and future-fractal inputs
+- a versioned JSON persistence contract for `FaceoffVocab`
 
 Acceptance criteria:
 
@@ -125,7 +126,7 @@ Acceptance criteria:
 - chunk order and reconstruction remain exact
 - no tokenizer semantics leak into adapter code
 - the native compatibility adapter is deterministic and validates against the current benchmark inputs
-- serialization/versioning for vocabularies can remain deferred
+- serialization/versioning for vocabularies is implemented for this phase and validated with save/load round trips
 
 ### Phase 2: Embedding Bridge
 
@@ -222,13 +223,4 @@ The first slice is landed and validated:
 - the native compatibility adapter retokenizes chunk payloads deterministically
 - HF-backed smoke coverage exists for `HuggingFaceNativeTokenizer::from_file`
 - `FaceoffVocab` persistence/versioning is implemented as a versioned JSON contract
-- the embedding bridge and fractal-native runtime remain later phases
-
-## Implementation Status
-
-The first slice is landed and validated:
-
-- the combined wrapper contract is implemented
-- the native compatibility adapter retokenizes chunk payloads deterministically
-- focused tests exercise stress and mixed-domain inputs with exact reconstruction
 - the embedding bridge and fractal-native runtime remain later phases
