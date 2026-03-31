@@ -32,6 +32,9 @@ burn = { version = "=0.20.1", default-features = false, features = ["std", "auto
 burn-candle = "=0.20.1"
 rand = "0.8"
 
+[patch.crates-io]
+burn-candle = { path = "vendor/burn-candle" }
+
 [dependencies]
 fractal-core = { path = "fractal-core" }
 fractal-primitives-private = { path = "fractal-primitives-private" }
