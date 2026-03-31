@@ -28,6 +28,11 @@ const DEFAULT_JSON_WINDOW_LINES: usize = 100;
 const DEFAULT_PAD_MULTIPLE: usize = 8;
 const DEFAULT_CHUNK_LIMIT_TOKENS: usize = 8;
 const DEFAULT_CHUNK_LIMIT_BYTES: usize = 4096;
+const LOG_BUCKET_TARGET: usize = 36;
+const JSONL_BUCKET_TARGET: usize = 24;
+const CODE_BUCKET_TARGET: usize = 36;
+const DOCS_BUCKET_TARGET: usize = 24;
+const OVERSAMPLE_FACTOR: usize = 2;
 
 #[derive(Clone, Debug, Serialize)]
 struct CorpusDocument {
@@ -301,7 +306,11 @@ fn collect_log_candidates(home_state_root: &Path) -> Result<Vec<CorpusCandidate>
     }
 
     let mut out = Vec::new();
-    round_robin_extend(buckets, &mut out, 36);
+    round_robin_extend(
+        buckets,
+        &mut out,
+        LOG_BUCKET_TARGET.saturating_mul(OVERSAMPLE_FACTOR),
+    );
     Ok(out)
 }
 
@@ -333,7 +342,11 @@ fn collect_jsonl_candidates(
     }
 
     let mut out = Vec::new();
-    round_robin_extend(buckets, &mut out, 24);
+    round_robin_extend(
+        buckets,
+        &mut out,
+        JSONL_BUCKET_TARGET.saturating_mul(OVERSAMPLE_FACTOR),
+    );
     Ok(out)
 }
 
@@ -343,7 +356,7 @@ fn collect_code_candidates(fawx_root: &Path) -> Result<Vec<CorpusCandidate>, Box
     let mut rust_candidates = Vec::new();
     for path in sorted_files_with_extension(&fawx_root.join("engine"), "rs")?
         .into_iter()
-        .take(24)
+        .take(CODE_BUCKET_TARGET.saturating_mul(OVERSAMPLE_FACTOR))
     {
         if let Ok(text) = fs::read_to_string(&path) {
             rust_candidates.push(prefix_file_document(&text, &path, "code.rust", 12_000));
@@ -356,7 +369,7 @@ fn collect_code_candidates(fawx_root: &Path) -> Result<Vec<CorpusCandidate>, Box
     let mut swift_candidates = Vec::new();
     for path in sorted_files_with_extension(&fawx_root.join("app"), "swift")?
         .into_iter()
-        .take(12)
+        .take((CODE_BUCKET_TARGET / 2).saturating_mul(OVERSAMPLE_FACTOR))
     {
         if let Ok(text) = fs::read_to_string(&path) {
             swift_candidates.push(prefix_file_document(&text, &path, "code.swift", 12_000));
@@ -367,7 +380,11 @@ fn collect_code_candidates(fawx_root: &Path) -> Result<Vec<CorpusCandidate>, Box
     }
 
     let mut out = Vec::new();
-    round_robin_extend(buckets, &mut out, 36);
+    round_robin_extend(
+        buckets,
+        &mut out,
+        CODE_BUCKET_TARGET.saturating_mul(OVERSAMPLE_FACTOR),
+    );
     Ok(out)
 }
 
@@ -376,14 +393,20 @@ fn collect_markdown_candidates(fawx_root: &Path) -> Result<Vec<CorpusCandidate>,
 
     for path in sorted_files_with_extension(&fawx_root.join("docs"), "md")?
         .into_iter()
-        .take(24)
+        .take(DOCS_BUCKET_TARGET.saturating_mul(OVERSAMPLE_FACTOR))
     {
         if let Ok(text) = fs::read_to_string(&path) {
             candidates.push(prefix_file_document(&text, &path, "docs.spec", 12_000));
         }
     }
 
-    Ok(candidates)
+    let mut out = Vec::new();
+    round_robin_extend(
+        vec![candidates],
+        &mut out,
+        DOCS_BUCKET_TARGET.saturating_mul(OVERSAMPLE_FACTOR),
+    );
+    Ok(out)
 }
 
 fn sorted_files_with_extension(
