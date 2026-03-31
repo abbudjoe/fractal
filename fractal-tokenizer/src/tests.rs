@@ -255,6 +255,10 @@ fn motif_amplification_p1_hybrid_v2_stress() {
         "static_hierarchy_note={}",
         hierarchy_balance_note(&static_summary, &static_unique_by_depth)
     );
+    println!(
+        "{}",
+        format_final_token_spans_preview(&static_summary, &stress_input, 10)
+    );
     println!("{}", format_summary_preview(&dynamic_summary, 20));
     println!("dynamic_lever_type=v2-self-regulating");
     println!(
@@ -268,6 +272,10 @@ fn motif_amplification_p1_hybrid_v2_stress() {
     println!(
         "dynamic_hierarchy_note={}",
         hierarchy_balance_note(&dynamic_summary, &dynamic_unique_by_depth)
+    );
+    println!(
+        "{}",
+        format_final_token_spans_preview(&dynamic_summary, &stress_input, 10)
     );
     println!("{}", tokenizer_tracker_reminder());
 
@@ -323,6 +331,50 @@ fn format_summary_preview(summary: &PrimitiveRunSummary, limit: usize) -> String
         .collect::<Vec<_>>()
         .join(" ");
     format!("{:<24} | {}", summary.primitive, digests)
+}
+
+fn format_final_token_spans_preview(
+    summary: &PrimitiveRunSummary,
+    input: &str,
+    limit: usize,
+) -> String {
+    let final_depth = summary
+        .tokens
+        .iter()
+        .map(|token| token.depth)
+        .max()
+        .unwrap_or_default();
+    let lines = summary
+        .tokens
+        .iter()
+        .filter(|token| token.depth == final_depth)
+        .take(limit)
+        .map(|token| {
+            format!(
+                "{} {}..{} \"{}\"",
+                token.token,
+                token.start,
+                token.end,
+                truncated_token_span(input, token.start, token.end)
+            )
+        })
+        .collect::<Vec<_>>();
+
+    format!(
+        "{}_final_d{final_depth}_spans={}",
+        summary.primitive,
+        lines.join(" | ")
+    )
+}
+
+fn truncated_token_span(input: &str, start: usize, end: usize) -> String {
+    let span = input.get(start..end).unwrap_or_default();
+    if span.chars().count() <= 80 {
+        span.to_string()
+    } else {
+        let truncated = span.chars().take(77).collect::<String>();
+        format!("{truncated}...")
+    }
 }
 
 fn unique_tokens_by_depth(summary: &PrimitiveRunSummary) -> BTreeMap<usize, usize> {

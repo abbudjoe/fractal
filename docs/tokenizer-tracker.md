@@ -52,6 +52,7 @@
 - Static `p1_fractal_hybrid_v1`: first-20-token preview stayed balanced with `d0:1, d1:2, d2:4, d3:8, d4:16, d5:32`, `motif_reuse=0`, `hierarchy remains perfectly balanced`
 - Dynamic `p1_fractal_hybrid_dyn-state-norm_v2`: first-20-token preview stayed balanced with `d0:1, d1:2, d2:4, d3:8, d4:16, d5:32`, `motif_reuse=7`, `hierarchy remains perfectly balanced`
 - Stress note: v2 remains the current leader because it preserves exact hierarchy under heavy repetition, but the stress result shows the self-regulating reuse field scales beyond the earlier `2–4` sweet spot on longer repeated inputs
+- Added token-span debug to stress test; v2 reuses phrase-level motifs on repeated input
 
 ## Retired / Failed Tokenizer Variants
 
