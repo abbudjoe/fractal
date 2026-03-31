@@ -3,11 +3,9 @@ use fractal_core::{rule_trait::FractalRule, state::FractalState};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    revived_primitive_factories,
-    tokenizer::{p1_dynamic_lever_factory, DEFAULT_DYNAMIC_LEVER_SENSITIVITY},
-    tokenizer_tracker_reminder, validate_tokenizer_primitive_name, B1FractalGated,
-    B3FractalHierarchical, B4Universal, P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary,
-    RecursiveTokenizer, TokenizerConfig,
+    revived_primitive_factories, tokenizer::p1_dynamic_lever_factory, tokenizer_tracker_reminder,
+    validate_tokenizer_primitive_name, B1FractalGated, B3FractalHierarchical, B4Universal,
+    P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary, RecursiveTokenizer, TokenizerConfig,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -170,7 +168,6 @@ fn motif_amplification_p1_hybrid_follow_up() {
         .find(|factory| factory.name == "p1_fractal_hybrid_v1")
         .unwrap();
     let dynamic_factory = p1_dynamic_lever_factory::<TestBackend>();
-
     let static_summary = tokenizer
         .run_factory(amplified_sentence, &device, static_factory)
         .unwrap();
@@ -190,14 +187,11 @@ fn motif_amplification_p1_hybrid_follow_up() {
         cross_depth_motif_reuse_count(&static_summary)
     );
     println!(
-        "static_lever_sensitivity={:.1}",
-        DEFAULT_DYNAMIC_LEVER_SENSITIVITY
-    );
-    println!(
         "static_amplification_note={}",
         describe_pattern(&static_summary, &static_unique_by_depth)
     );
     println!("{}", format_summary(&dynamic_summary));
+    println!("dynamic_lever_type=v2-self-regulating");
     println!(
         "dynamic_unique_tokens_by_depth={}",
         format_depth_counts(&dynamic_unique_by_depth)
@@ -207,12 +201,8 @@ fn motif_amplification_p1_hybrid_follow_up() {
         cross_depth_motif_reuse_count(&dynamic_summary)
     );
     println!(
-        "dynamic_lever_sensitivity={:.1}",
-        DEFAULT_DYNAMIC_LEVER_SENSITIVITY
-    );
-    println!(
         "amplification_note={}",
-        dynamic_lever_note(&static_summary, &dynamic_summary)
+        dynamic_lever_note_v2(&static_summary, &dynamic_summary)
     );
     println!("{}", tokenizer_tracker_reminder());
 
@@ -376,23 +366,25 @@ fn describe_motif_reuse(summary: &PrimitiveRunSummary) -> String {
     }
 }
 
-fn dynamic_lever_note(
+fn dynamic_lever_note_v2(
     static_summary: &PrimitiveRunSummary,
     dynamic_summary: &PrimitiveRunSummary,
 ) -> String {
     let static_hits = cross_depth_motif_reuse_count(static_summary);
     let dynamic_hits = cross_depth_motif_reuse_count(dynamic_summary);
 
-    match dynamic_hits.cmp(&static_hits) {
-        std::cmp::Ordering::Greater => format!(
-            "dynamic lever increased motif reuse compared to static ({dynamic_hits} repeated motifs vs {static_hits})"
-        ),
-        std::cmp::Ordering::Equal => format!(
-            "dynamic lever matched the static motif reuse count ({dynamic_hits} repeated motifs)"
-        ),
-        std::cmp::Ordering::Less => format!(
-            "dynamic lever weakened motif reuse compared to static ({dynamic_hits} repeated motifs vs {static_hits})"
-        ),
+    if (2..=4).contains(&dynamic_hits) {
+        format!(
+            "v2 self-regulating lever hit the target window ({dynamic_hits} repeated motifs, static={static_hits})"
+        )
+    } else if dynamic_hits > static_hits {
+        format!(
+            "v2 self-regulating lever increased motif reuse but landed outside the target window ({dynamic_hits} repeated motifs, static={static_hits})"
+        )
+    } else {
+        format!(
+            "v2 self-regulating lever matched the static motif reuse count ({dynamic_hits} repeated motifs)"
+        )
     }
 }
 

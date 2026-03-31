@@ -19,18 +19,16 @@ pub struct P1FractalHybrid<B: Backend> {
     pub u: Linear<B>,
     hidden_dim: usize,
     with_dynamic_lever: bool,
-    lever_sensitivity: f64,
 }
 
 impl<B: Backend> P1FractalHybrid<B> {
     pub fn new(hidden_dim: usize, device: &B::Device) -> Self {
-        Self::new_with_dynamic_lever(hidden_dim, false, 0.6, device)
+        Self::new_with_dynamic_lever(hidden_dim, false, device)
     }
 
     pub fn new_with_dynamic_lever(
         hidden_dim: usize,
         with_dynamic_lever: bool,
-        lever_sensitivity: f64,
         device: &B::Device,
     ) -> Self {
         Self {
@@ -39,16 +37,11 @@ impl<B: Backend> P1FractalHybrid<B> {
             u: LinearConfig::new(hidden_dim, hidden_dim).init(device),
             hidden_dim,
             with_dynamic_lever,
-            lever_sensitivity,
         }
     }
 
     pub fn with_dynamic_lever(&self) -> bool {
         self.with_dynamic_lever
-    }
-
-    pub fn lever_sensitivity(&self) -> f64 {
-        self.lever_sensitivity
     }
 }
 
@@ -75,7 +68,7 @@ impl<B: Backend> FractalRule<B> for P1FractalHybrid<B> {
 
     fn name(&self) -> &'static str {
         if self.with_dynamic_lever {
-            "p1_fractal_hybrid_dyn-state-norm"
+            "p1_fractal_hybrid_dyn-state-norm_v2"
         } else {
             "p1_fractal_hybrid"
         }

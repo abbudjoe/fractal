@@ -37,13 +37,12 @@
 - Motif reuse signal: weak local reuse appeared at deeper levels, but no repeated motif digests appeared across depths
 - Amplification input:
   `"The cat sat on the mat. The dog sat on the mat. The bird sat on the mat. The fox sat on the mat. The cat sat on the mat again."`
-- Amplification result: total and unique depth profiles both returned to `d0:1, d1:2, d2:4, d3:8, d4:16, d5:32`
-- Amplification note: motif reuse weakened compared to the previous motif sample, so repeated phrasing did not yet amplify hierarchical clustering on this run
-- Dynamic lever candidate: `p1_fractal_hybrid_dyn-state-norm_v1`
-- Lever description: rolling normalized state norm modulates a cross-depth motif-distance threshold, allowing digest reuse only when a prior motif is similar enough and still unused at the current depth
-- Sensitivity knob: `lever_sensitivity` attenuates the state-norm similarity threshold as rolling norm falls, so lower values damp reuse less aggressively and higher values suppress reuse sooner
-- Expected test output format: `static_unique_tokens_by_depth=...`, `dynamic_unique_tokens_by_depth=...`, `static_motif_reuse_count=...`, `dynamic_motif_reuse_count=...`, `amplification_note=...`
-- Latest tuned result (`lever_sensitivity=0.6`): static `motif_reuse=0`, dynamic `motif_reuse=0`; both preserved `d0:1, d1:2, d2:4, d3:8, d4:16, d5:32`, so the tuned lever under-shot the target reuse window on this sample
+- Static amplification baseline: total and unique depth profiles both returned to `d0:1, d1:2, d2:4, d3:8, d4:16, d5:32`
+- Static amplification note: motif reuse weakened compared to the previous motif sample, so repeated phrasing alone did not amplify hierarchical clustering on that baseline run
+- Dynamic lever candidate: `p1_fractal_hybrid_dyn-state-norm_v2`
+- Lever description: v2 self-regulates motif reuse from the primitive’s own rolling state norm, current recursion depth, and nearest-vs-local motif distance field, so reuse only opens when a prior cross-depth digest is both locally standout and still unused at the current depth
+- Expected test output format: `static_unique_tokens_by_depth=...`, `dynamic_lever_type=v2-self-regulating`, `dynamic_unique_tokens_by_depth=...`, `static_motif_reuse_count=...`, `dynamic_motif_reuse_count=...`, `amplification_note=...`
+- Live-confirmed dynamic-v2 result: static `motif_reuse=0`, dynamic `motif_reuse=4`; both preserved `d0:1, d1:2, d2:4, d3:8, d4:16, d5:32`, and the latest run printed `amplification_note=v2 self-regulating lever hit the target window (4 repeated motifs, static=0)`
 
 ## Retired / Failed Tokenizer Variants
 

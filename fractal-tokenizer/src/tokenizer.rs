@@ -16,7 +16,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{B1FractalGated, B3FractalHierarchical, B4Universal, P1FractalHybrid, P2Mandelbrot};
 
 const DEFAULT_LEVELS: usize = 3;
-pub const DEFAULT_DYNAMIC_LEVER_SENSITIVITY: f64 = 0.6;
 const TRACKER_REMINDER: &str =
     "Reminder: update docs/tokenizer-tracker.md with the latest tokenizer results.";
 
@@ -58,7 +57,7 @@ pub struct PrimitiveRunSummary {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MotifReusePolicy {
     Off,
-    StateNormSimilarity { sensitivity: f64 },
+    StateNormSimilarityV2,
 }
 
 #[derive(Clone, Copy)]
@@ -270,10 +269,8 @@ pub fn revived_primitive_factories<B: Backend>() -> [PrimitiveFactory<B>; 5] {
 
 pub fn p1_dynamic_lever_factory<B: Backend>() -> PrimitiveFactory<B> {
     PrimitiveFactory::new(
-        "p1_fractal_hybrid_dyn-state-norm_v1",
-        MotifReusePolicy::StateNormSimilarity {
-            sensitivity: DEFAULT_DYNAMIC_LEVER_SENSITIVITY,
-        },
+        "p1_fractal_hybrid_dyn-state-norm_v2",
+        MotifReusePolicy::StateNormSimilarityV2,
         seeded_p1_fractal_hybrid_dynamic::<B>,
     )
 }
@@ -344,12 +341,7 @@ fn seeded_p1_fractal_hybrid<B: Backend>(
     config: TokenizerConfig,
     device: &B::Device,
 ) -> Box<dyn FractalRule<B>> {
-    let mut rule = P1FractalHybrid::new_with_dynamic_lever(
-        config.dim,
-        false,
-        DEFAULT_DYNAMIC_LEVER_SENSITIVITY,
-        device,
-    );
+    let mut rule = P1FractalHybrid::new_with_dynamic_lever(config.dim, false, device);
     seed_linear(
         &mut rule.g_proj,
         config.dim,
@@ -374,12 +366,7 @@ fn seeded_p1_fractal_hybrid_dynamic<B: Backend>(
     config: TokenizerConfig,
     device: &B::Device,
 ) -> Box<dyn FractalRule<B>> {
-    let mut rule = P1FractalHybrid::new_with_dynamic_lever(
-        config.dim,
-        true,
-        DEFAULT_DYNAMIC_LEVER_SENSITIVITY,
-        device,
-    );
+    let mut rule = P1FractalHybrid::new_with_dynamic_lever(config.dim, true, device);
     seed_linear(
         &mut rule.g_proj,
         config.dim,
@@ -663,24 +650,28 @@ impl MotifRegistry {
     ) -> String {
         let resolved = match motif_reuse {
             MotifReusePolicy::Off => digest.clone(),
-            MotifReusePolicy::StateNormSimilarity { sensitivity } => {
+            MotifReusePolicy::StateNormSimilarityV2 => {
                 if self.reuse_gate_open(rolling_norm) {
-                    self.seen
+                    let candidates = self
+                        .seen
                         .iter()
                         .filter(|entry| entry.depth != depth)
                         .filter(|entry| !self.digest_used_at_depth(depth, &entry.digest))
-                        .filter_map(|entry| {
-                            let distance = signature_distance(signature, &entry.signature);
-                            (distance
-                                <= dynamic_similarity_threshold(
-                                    signature,
-                                    rolling_norm,
-                                    sensitivity,
-                                ))
-                            .then_some((entry.digest.clone(), distance))
-                        })
-                        .min_by(|left, right| left.1.total_cmp(&right.1))
-                        .map(|(digest, _)| digest)
+                        .map(|entry| (signature_distance(signature, &entry.signature), entry))
+                        .collect::<Vec<_>>();
+                    let nearest = candidates
+                        .iter()
+                        .min_by(|left, right| left.0.total_cmp(&right.0));
+                    let adaptive_threshold = dynamic_similarity_threshold_v2(
+                        signature,
+                        depth,
+                        rolling_norm,
+                        &candidates,
+                    );
+
+                    nearest
+                        .filter(|(distance, _)| *distance <= adaptive_threshold)
+                        .map(|(_, entry)| entry.digest.clone())
                         .unwrap_or_else(|| digest.clone())
                 } else {
                     digest.clone()
@@ -718,10 +709,31 @@ impl MotifRegistry {
     }
 }
 
-fn dynamic_similarity_threshold(signature: &[f32], rolling_norm: f32, sensitivity: f64) -> f32 {
-    let normalized_norm = rolling_norm.clamp(0.0, 1.0) as f64;
-    let state_scaled_sensitivity = 1.0 - sensitivity * (1.0 - normalized_norm);
-    (rolling_norm as f64 * mean_absolute_value(signature) as f64 * state_scaled_sensitivity) as f32
+fn dynamic_similarity_threshold_v2(
+    signature: &[f32],
+    depth: usize,
+    rolling_norm: f32,
+    candidates: &[(f32, &SeenMotif)],
+) -> f32 {
+    if candidates.is_empty() {
+        return 0.0;
+    }
+
+    let state_scale = rolling_norm * mean_absolute_value(signature);
+    let depth_scale = depth as f32 / (depth + 1) as f32;
+    let local_similarity = candidates
+        .iter()
+        .map(|(distance, _)| *distance)
+        .sum::<f32>()
+        / candidates.len() as f32;
+    let nearest_distance = candidates
+        .iter()
+        .map(|(distance, _)| *distance)
+        .min_by(|left, right| left.total_cmp(right))
+        .unwrap_or(local_similarity);
+    let local_selectivity = local_similarity / (local_similarity + nearest_distance);
+
+    harmonic_mean(state_scale, local_similarity) * depth_scale * local_selectivity
 }
 
 fn signature_distance(left: &[f32], right: &[f32]) -> f32 {
@@ -753,4 +765,13 @@ fn mean_absolute_value(values: &[f32]) -> f32 {
     }
 
     values.iter().map(|value| value.abs()).sum::<f32>() / values.len() as f32
+}
+
+fn harmonic_mean(left: f32, right: f32) -> f32 {
+    let sum = left + right;
+    if sum == 0.0 {
+        0.0
+    } else {
+        (left * right / sum) + (left * right / sum)
+    }
 }
