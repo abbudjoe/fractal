@@ -8,15 +8,15 @@ mod tokenizer;
 
 pub use faceoff::{
     EncodedDocument, EncodedToken, EncodedTokenKind, FaceoffChunk, FaceoffChunkLimits,
-    FaceoffChunkedDocument, FaceoffEmissionPolicy, FaceoffFallbackStats,
-    FaceoffTokenId, FaceoffTokenizer, FaceoffVocab, VocabEntry,
-    FACEOFF_VOCAB_FORMAT_VERSION,
+    FaceoffChunkedDocument, FaceoffEmissionPolicy, FaceoffFallbackStats, FaceoffTokenId,
+    FaceoffTokenizer, FaceoffVocab, VocabEntry, FACEOFF_VOCAB_FORMAT_VERSION,
 };
 pub use model_face::{
     HuggingFaceNativeTokenizer, HuggingFaceNativeTokenizerError, ModelAdapter, ModelBatch,
-    ModelFacingBatch, ModelFacingDocument, NativeCompatibilityAdapter, NativeCompatibilityBatch,
-    NativeCompatibilityError, NativeTokenizer, NativeTokenizedChunk, NativeTokenizedBatch,
-    NativeTokenizedDocument,
+    ModelFacingBatch, ModelFacingDocument, NativeCollatedBatch, NativeCollatedChunk,
+    NativeCollatedDocument, NativeCollationError, NativeCollationSpec, NativeCompatibilityAdapter,
+    NativeCompatibilityBatch, NativeCompatibilityError, NativeTokenizedBatch, NativeTokenizedChunk,
+    NativeTokenizedDocument, NativeTokenizer,
 };
 pub use primitives::{
     B1FractalGated, B3FractalHierarchical, B4Universal, P1FractalHybrid, P2Mandelbrot,

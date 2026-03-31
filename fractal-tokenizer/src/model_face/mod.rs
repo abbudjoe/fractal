@@ -9,8 +9,10 @@ mod traits;
 pub use batch::ModelFacingBatch;
 pub use native::{
     HuggingFaceNativeTokenizer, HuggingFaceNativeTokenizerError, ModelFacingDocumentView,
-    NativeCompatibilityAdapter, NativeCompatibilityBatch, NativeCompatibilityError,
-    NativeTokenizer, NativeTokenizedBatch, NativeTokenizedChunk, NativeTokenizedDocument,
+    NativeCollatedBatch, NativeCollatedChunk, NativeCollatedDocument, NativeCollationError,
+    NativeCollationSpec, NativeCompatibilityAdapter, NativeCompatibilityBatch,
+    NativeCompatibilityError, NativeTokenizedBatch, NativeTokenizedChunk, NativeTokenizedDocument,
+    NativeTokenizer,
 };
 pub use traits::{ModelAdapter, ModelBatch};
 

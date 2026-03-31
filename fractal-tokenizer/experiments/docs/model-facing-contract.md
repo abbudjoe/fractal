@@ -22,6 +22,8 @@ This contract formalizes those pieces as a model-facing ABI.
 The current implementation now also includes file-backed HF tokenizer smoke
 coverage and a versioned JSON persistence contract for `FaceoffVocab`, so the
 contract is no longer purely in-memory.
+The native compatibility path now also includes deterministic right-padded
+collation with binary attention masks and stable multi-document chunk ordering.
 
 For this phase, the canonical adapter input should be treated as a combined
 wrapper concept:

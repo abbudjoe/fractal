@@ -3,6 +3,7 @@ use fractal_core::{
     rule_trait::{ApplyContext, FractalRule},
     state::FractalState,
 };
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
@@ -10,18 +11,21 @@ use std::{
     process::Stdio,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use serde_json::Value;
 use tiktoken::cl100k_base;
+use tokenizers::{
+    models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace, PaddingDirection,
+    PaddingParams, PaddingStrategy, Tokenizer,
+};
 use tokio::{process::Command as TokioCommand, runtime::Builder as TokioRuntimeBuilder};
-use tokenizers::{models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace, Tokenizer};
 
 use crate::{
     revived_primitive_factories, tokenizer::p1_dynamic_lever_factory,
     validate_tokenizer_primitive_name, B1FractalGated, B3FractalHierarchical, B4Universal,
     EncodedDocument, EncodedTokenKind, FaceoffChunkLimits, FaceoffEmissionPolicy, FaceoffTokenizer,
-    FaceoffVocab, FACEOFF_VOCAB_FORMAT_VERSION, HuggingFaceNativeTokenizer, ModelFacingBatch,
-    ModelFacingDocument, NativeCompatibilityAdapter, NativeTokenizer, P1FractalHybrid,
+    FaceoffVocab, HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument,
+    NativeCollationSpec, NativeCompatibilityAdapter, NativeTokenizer, P1FractalHybrid,
     P2Mandelbrot, PrimitiveRunSummary, RecursiveTokenizer, TokenRecord, TokenizerConfig,
+    FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -600,8 +604,14 @@ fn faceoff_chunking_model_packaging() {
         let reconstructed = packaged.reconstruct().unwrap();
 
         assert_eq!(faceoff.decode_document(&encoded).unwrap(), input);
-        assert_eq!(packaged, packaged_again, "chunk packaging must be deterministic");
-        assert_eq!(reconstructed, input, "chunk payload concatenation must reconstruct input");
+        assert_eq!(
+            packaged, packaged_again,
+            "chunk packaging must be deterministic"
+        );
+        assert_eq!(
+            reconstructed, input,
+            "chunk payload concatenation must reconstruct input"
+        );
         assert_eq!(encoded.fallback.unknown_motifs, 0);
         assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
         assert!(encoded.tokens.len() >= packaged.chunks.len());
@@ -614,7 +624,10 @@ fn faceoff_chunking_model_packaging() {
             packaged
                 .chunks
                 .iter()
-                .map(|chunk| format!("c{}:{}tok/{}b", chunk.index, chunk.token_count, chunk.byte_count))
+                .map(|chunk| format!(
+                    "c{}:{}tok/{}b",
+                    chunk.index, chunk.token_count, chunk.byte_count
+                ))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -643,9 +656,10 @@ impl NativeTokenizer for WhitespaceTokenizer {
 
 fn build_hf_native_tokenizer(inputs: &[&str]) -> HuggingFaceNativeTokenizer {
     let mut vocab = HashMap::new();
-    vocab.insert("[UNK]".to_string(), 0);
+    vocab.insert("[PAD]".to_string(), 0);
+    vocab.insert("[UNK]".to_string(), 1);
 
-    let mut next_id = 1u32;
+    let mut next_id = 2u32;
     let mut pieces = BTreeSet::<String>::new();
     for input in inputs {
         pieces.extend(input.split_whitespace().map(str::to_owned));
@@ -662,6 +676,14 @@ fn build_hf_native_tokenizer(inputs: &[&str]) -> HuggingFaceNativeTokenizer {
         .unwrap();
     let mut tokenizer = Tokenizer::new(model);
     tokenizer.with_pre_tokenizer(Some(Whitespace {}));
+    tokenizer.with_padding(Some(PaddingParams {
+        strategy: PaddingStrategy::BatchLongest,
+        direction: PaddingDirection::Right,
+        pad_to_multiple_of: None,
+        pad_id: 0,
+        pad_type_id: 0,
+        pad_token: "[PAD]".to_string(),
+    }));
 
     HuggingFaceNativeTokenizer::new(tokenizer)
 }
@@ -677,16 +699,16 @@ fn unique_temp_path(prefix: &str, suffix: &str) -> PathBuf {
     ))
 }
 
-fn save_hf_tokenizer_to_temp_file(
-    tokenizer: &HuggingFaceNativeTokenizer,
-    prefix: &str,
-) -> PathBuf {
+fn save_hf_tokenizer_to_temp_file(tokenizer: &HuggingFaceNativeTokenizer, prefix: &str) -> PathBuf {
     let path = unique_temp_path(prefix, ".json");
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
     tokenizer.tokenizer().save(&path, false).unwrap();
-    assert!(path.exists(), "expected tokenizer.json to be written to disk");
+    assert!(
+        path.exists(),
+        "expected tokenizer.json to be written to disk"
+    );
     path
 }
 
@@ -713,10 +735,7 @@ fn pretrained_hf_tokenizer_json_paths() -> Vec<(String, PathBuf)> {
         return dedupe_tokenizer_paths(paths);
     }
 
-    for (label, owner_fragment) in [
-        ("llama31", "meta-llama"),
-        ("mistral7", "mistralai"),
-    ] {
+    for (label, owner_fragment) in [("llama31", "meta-llama"), ("mistral7", "mistralai")] {
         if let Some(path) = find_tokenizer_json_under(&cache_root, owner_fragment) {
             paths.push((label.to_string(), path));
         }
@@ -794,7 +813,10 @@ fn model_face_document_roundtrip_on_benchmark_inputs() {
         assert!(document.validate().is_ok());
         assert_eq!(document.fallback().unknown_motifs, 0);
         assert_eq!(document.fallback().byte_fallback_tokens, 0);
-        assert_eq!(document.frontier_token_count(), document.encoded().tokens.len());
+        assert_eq!(
+            document.frontier_token_count(),
+            document.encoded().tokens.len()
+        );
         assert_eq!(document.chunk_count(), document.chunked().chunks.len());
 
         println!("MODEL_FACE_INPUT={name}");
@@ -822,7 +844,7 @@ fn model_face_native_adapter_preserves_chunk_order_and_is_deterministic() {
         .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
         .unwrap();
     let limits = FaceoffChunkLimits::new(8, 4096);
-    let adapter = NativeCompatibilityAdapter::default();
+    let adapter = NativeCompatibilityAdapter;
     let tokenizer = WhitespaceTokenizer;
 
     let documents = vec![
@@ -870,11 +892,21 @@ fn model_face_native_adapter_preserves_chunk_order_and_is_deterministic() {
             .chunks
             .windows(2)
             .all(|pair| pair[0].source.index < pair[1].source.index));
-        assert_eq!(native_document.native_token_count(), native_document.chunks.iter().map(|chunk| chunk.native_tokens.len()).sum::<usize>());
+        assert_eq!(
+            native_document.native_token_count(),
+            native_document
+                .chunks
+                .iter()
+                .map(|chunk| chunk.native_tokens.len())
+                .sum::<usize>()
+        );
 
         println!("MODEL_FACE_BATCH_DOCUMENT_INDEX={index}");
         println!("native_chunk_count={}", native_document.chunk_count());
-        println!("native_token_count={}", native_document.native_token_count());
+        println!(
+            "native_token_count={}",
+            native_document.native_token_count()
+        );
         println!("roundtrip_status=OK");
     }
 }
@@ -890,7 +922,7 @@ fn model_face_hf_native_adapter_preserves_chunk_order_and_is_deterministic() {
         .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
         .unwrap();
     let limits = FaceoffChunkLimits::new(8, 4096);
-    let adapter = NativeCompatibilityAdapter::default();
+    let adapter = NativeCompatibilityAdapter;
     let tokenizer = build_hf_native_tokenizer(&corpus);
 
     let documents = vec![
@@ -917,7 +949,11 @@ fn model_face_hf_native_adapter_preserves_chunk_order_and_is_deterministic() {
     let batch = ModelFacingBatch::from(documents);
 
     for (name, expected, document) in [
-        ("stress-20x-repetition", stress.as_str(), &batch.documents()[0]),
+        (
+            "stress-20x-repetition",
+            stress.as_str(),
+            &batch.documents()[0],
+        ),
         ("mixed-domain", mixed.as_str(), &batch.documents()[1]),
     ] {
         assert_eq!(document.decode().unwrap(), expected);
@@ -962,9 +998,148 @@ fn model_face_hf_native_adapter_preserves_chunk_order_and_is_deterministic() {
 
         println!("MODEL_FACE_HF_BATCH_DOCUMENT_INDEX={index}");
         println!("native_chunk_count={}", native_document.chunk_count());
-        println!("native_token_count={}", native_document.native_token_count());
+        println!(
+            "native_token_count={}",
+            native_document.native_token_count()
+        );
         println!("roundtrip_status=OK");
     }
+}
+
+#[test]
+fn model_face_native_batch_collation_preserves_order_padding_and_attention_mask() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+    let limits = FaceoffChunkLimits::new(8, 4096);
+    let adapter = NativeCompatibilityAdapter;
+    let tokenizer = build_hf_native_tokenizer(&corpus);
+    let pad_id = tokenizer
+        .tokenizer()
+        .get_padding()
+        .map(|padding| padding.pad_id)
+        .unwrap_or(0);
+    let spec = NativeCollationSpec::try_new(pad_id, Some(8)).unwrap();
+
+    let documents = vec![
+        faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                &mixed,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::NoveltyAware,
+            )
+            .unwrap(),
+        faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                &stress,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::NoveltyAware,
+            )
+            .unwrap(),
+        faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                &mixed,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::NoveltyAware,
+            )
+            .unwrap(),
+    ]
+    .into_iter()
+    .map(|encoded| ModelFacingDocument::from_encoded(encoded, limits).unwrap())
+    .collect::<Vec<_>>();
+    let batch = ModelFacingBatch::from(documents);
+
+    let native = adapter.retokenize_batch(&batch, &tokenizer).unwrap();
+    let native_again = adapter.retokenize_batch(&batch, &tokenizer).unwrap();
+    let collated = native.collate(&spec).unwrap();
+    let collated_again = native_again.collate(&spec).unwrap();
+
+    assert_eq!(native, native_again);
+    assert_eq!(collated, collated_again);
+    assert_eq!(collated.len(), batch.len());
+    assert_eq!(collated.spec, spec);
+    assert_eq!(
+        collated.chunk_count(),
+        native.iter().map(|doc| doc.chunk_count()).sum::<usize>()
+    );
+    assert_eq!(collated.sequence_len % 8, 0);
+
+    for (document_index, (native_document, collated_document)) in
+        native.iter().zip(collated.iter()).enumerate()
+    {
+        assert_eq!(collated_document.source_document_index, document_index);
+        assert_eq!(collated_document.input_len, native_document.input_len);
+        assert_eq!(
+            collated_document.frontier_token_count,
+            native_document.frontier_token_count
+        );
+        assert_eq!(
+            collated_document.chunk_count(),
+            native_document.chunk_count()
+        );
+        assert_eq!(
+            collated_document.native_token_count(),
+            native_document.native_token_count()
+        );
+
+        for (chunk_index, (native_chunk, collated_chunk)) in native_document
+            .chunks
+            .iter()
+            .zip(collated_document.chunks.iter())
+            .enumerate()
+        {
+            let valid_len = native_chunk.native_tokens.len();
+
+            assert_eq!(collated_chunk.source_document_index, document_index);
+            assert_eq!(collated_chunk.source_chunk_index, chunk_index);
+            assert_eq!(collated_chunk.source, *native_chunk);
+            assert_eq!(collated_chunk.valid_token_count(), valid_len);
+            assert_eq!(collated_chunk.padded_token_count(), collated.sequence_len);
+            assert_eq!(
+                &collated_chunk.padded_tokens[..valid_len],
+                native_chunk.native_tokens.as_slice()
+            );
+            assert!(collated_chunk.padded_tokens[valid_len..]
+                .iter()
+                .all(|token| *token == pad_id));
+            assert!(collated_chunk.attention_mask[..valid_len]
+                .iter()
+                .all(|mask| *mask));
+            assert!(collated_chunk.attention_mask[valid_len..]
+                .iter()
+                .all(|mask| !*mask));
+        }
+    }
+
+    assert_eq!(
+        collated.documents[0].chunk_count(),
+        collated.documents[2].chunk_count()
+    );
+    for (left, right) in collated.documents[0]
+        .chunks
+        .iter()
+        .zip(collated.documents[2].chunks.iter())
+    {
+        assert_eq!(left.padded_tokens, right.padded_tokens);
+        assert_eq!(left.attention_mask, right.attention_mask);
+    }
+
+    println!("MODEL_FACE_COLLATION_ORDER=mixed,stress,mixed");
+    println!("MODEL_FACE_COLLATION_PAD_ID={pad_id}");
+    println!("MODEL_FACE_COLLATION_DOCUMENTS={}", collated.len());
+    println!("MODEL_FACE_COLLATION_CHUNKS={}", collated.chunk_count());
+    println!(
+        "MODEL_FACE_COLLATION_SEQUENCE_LEN={}",
+        collated.sequence_len
+    );
 }
 
 #[test]
@@ -978,7 +1153,7 @@ fn model_face_file_backed_hf_native_adapter_preserves_chunk_order_and_is_determi
         .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
         .unwrap();
     let limits = FaceoffChunkLimits::new(8, 4096);
-    let adapter = NativeCompatibilityAdapter::default();
+    let adapter = NativeCompatibilityAdapter;
     let in_memory_tokenizer = build_hf_native_tokenizer(&corpus);
     let tokenizer_path = save_hf_tokenizer_to_temp_file(&in_memory_tokenizer, "hf-file-backed");
     let file_backed_tokenizer = HuggingFaceNativeTokenizer::from_file(&tokenizer_path).unwrap();
@@ -1016,6 +1191,7 @@ fn model_face_file_backed_hf_native_adapter_preserves_chunk_order_and_is_determi
         .retokenize_batch(&batch, &in_memory_tokenizer)
         .unwrap();
 
+    assert!(file_backed_tokenizer.tokenizer().get_padding().is_some());
     assert_eq!(file_backed_native, file_backed_again);
     assert_eq!(file_backed_native, in_memory_native);
     assert_eq!(file_backed_native.len(), batch.len());
@@ -1043,7 +1219,10 @@ fn model_face_file_backed_hf_native_adapter_preserves_chunk_order_and_is_determi
         println!("MODEL_FACE_HF_FILE_INPUT_INDEX={index}");
         println!("tokenizer_json_path={}", tokenizer_path.display());
         println!("native_chunk_count={}", native_document.chunk_count());
-        println!("native_token_count={}", native_document.native_token_count());
+        println!(
+            "native_token_count={}",
+            native_document.native_token_count()
+        );
         println!("roundtrip_status=OK");
     }
 }
@@ -1059,7 +1238,7 @@ fn model_face_pretrained_hf_native_adapter_preserves_chunk_order_and_is_determin
         .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
         .unwrap();
     let limits = FaceoffChunkLimits::new(8, 4096);
-    let adapter = NativeCompatibilityAdapter::default();
+    let adapter = NativeCompatibilityAdapter;
     let tokenizer_paths = pretrained_hf_tokenizer_json_paths();
 
     if tokenizer_paths.is_empty() {
@@ -1093,14 +1272,13 @@ fn model_face_pretrained_hf_native_adapter_preserves_chunk_order_and_is_determin
     let batch = ModelFacingBatch::from(documents);
 
     for (label, tokenizer_path) in tokenizer_paths {
-        let tokenizer = HuggingFaceNativeTokenizer::from_file(&tokenizer_path).unwrap_or_else(
-            |error| {
+        let tokenizer =
+            HuggingFaceNativeTokenizer::from_file(&tokenizer_path).unwrap_or_else(|error| {
                 panic!(
                     "failed to load pretrained tokenizer.json for {label} at {}: {error}",
                     tokenizer_path.display()
                 )
-            },
-        );
+            });
         let native = adapter.retokenize_batch(&batch, &tokenizer).unwrap();
         let native_again = adapter.retokenize_batch(&batch, &tokenizer).unwrap();
 
@@ -1129,7 +1307,10 @@ fn model_face_pretrained_hf_native_adapter_preserves_chunk_order_and_is_determin
             println!("MODEL_FACE_PRETRAINED_HF_INPUT_INDEX={index}");
             println!("tokenizer_json_path={}", tokenizer_path.display());
             println!("native_chunk_count={}", native_document.chunk_count());
-            println!("native_token_count={}", native_document.native_token_count());
+            println!(
+                "native_token_count={}",
+                native_document.native_token_count()
+            );
             println!("roundtrip_status=OK");
         }
     }
