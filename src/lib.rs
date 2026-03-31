@@ -4,9 +4,9 @@ pub use fractal_core::*;
 pub use fractal_eval_private::{aggregate_results, perplexity_score, speed_score, stability_score};
 pub use fractal_primitives_private::{
     species_registry, B1FractalGated, B2StableHierarchical, B3FractalHierarchical, B4Universal,
-    GeneralizedMobius, Ifs, JuliaRecursiveEscape, LogisticChaoticMap, P1Contractive,
-    P1FractalHybrid, P1FractalHybridComposite, P1FractalHybridDynGate, P2Mandelbrot,
-    P3Hierarchical, SPECIES_REGISTRY,
+    GeneralizedMobius, Ifs, JuliaRecursiveEscape, LogisticChaoticMap,
+    MandelboxRecursiveDynEscapeRadius, P1Contractive, P1FractalHybrid, P1FractalHybridComposite,
+    P1FractalHybridDynGate, P2Mandelbrot, P3Hierarchical, SPECIES_REGISTRY,
 };
 pub use primitive_tracker::{primitive_tracker_reminder_lines, TRACKER_PATH};
 

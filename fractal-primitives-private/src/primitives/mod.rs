@@ -6,6 +6,7 @@ pub mod generalized_mobius;
 pub mod ifs;
 pub mod julia_recursive_escape;
 pub mod logistic_chaotic_map;
+pub mod mandelbox_recursive;
 pub mod p1_contractive;
 pub mod p1_fractal_hybrid;
 pub mod p2_mandelbrot;

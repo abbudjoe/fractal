@@ -234,6 +234,9 @@ fn parse_preset(value: &str) -> Result<TournamentPreset, FractalError> {
         "minimal-baseline" => Ok(TournamentPreset::MinimalBaseline),
         "minimal-stress-lane" | "minimal_stress_lane" => Ok(TournamentPreset::MinimalStressLane),
         "minimal-proving-ground" => Ok(TournamentPreset::MinimalProvingGround),
+        "proving-ground-baseline" | "proving_ground_baseline" => {
+            Ok(TournamentPreset::ProvingGroundBaseline)
+        }
         "bullpen-polish" => Ok(TournamentPreset::BullpenPolish),
         "lighter-intermediate-stress" | "lighter_intermediate_stress" => {
             Ok(TournamentPreset::LighterIntermediateStress)
@@ -491,7 +494,7 @@ fn print_usage() {
     println!();
     println!("Options:");
     println!(
-        "  --preset <default|fast-test|research-medium|challenger-lane|minimal-baseline|minimal-stress-lane|minimal-proving-ground|bullpen-polish|lighter-intermediate-stress|intermediate-stress|full-medium-stress|medium-stress|pressure-test|candidate-stress|generation-four>"
+        "  --preset <default|fast-test|research-medium|challenger-lane|minimal-baseline|minimal-stress-lane|minimal-proving-ground|proving-ground-baseline|bullpen-polish|lighter-intermediate-stress|intermediate-stress|full-medium-stress|medium-stress|pressure-test|candidate-stress|generation-four>"
     );
     println!("  --sequence <first-run>");
     println!("  --lane <all|baseline|challenger|bullpen|proving-ground|squaring|leader>");
@@ -513,6 +516,9 @@ fn print_usage() {
     println!("  cargo run --release --example tournament -- --preset intermediate-stress");
     println!("  cargo run --release --example tournament -- --preset full-medium-stress");
     println!("  cargo run --release --example tournament -- --preset medium-stress");
+    println!(
+        "  cargo run --release --example tournament -- --preset proving-ground-baseline --species mandelbox_recursive"
+    );
     println!("  cargo run --release --example tournament -- --lane baseline");
     println!("  cargo run --release --example tournament -- --lane bullpen");
     println!("  cargo run --release --example tournament -- --lane proving-ground");
@@ -564,6 +570,32 @@ mod tests {
                 execution_mode: Some(ExecutionMode::Parallel),
                 parallelism: Some(3),
                 backend: Some(BackendOverride::Cpu),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_proving_ground_baseline_preset() {
+        let command = parse_command(vec![
+            "--preset".to_owned(),
+            "proving-ground-baseline".to_owned(),
+            "--species".to_owned(),
+            "mandelbox_recursive".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(
+                    TournamentPreset::ProvingGroundBaseline
+                )),
+                lane: None,
+                species: Some(SpeciesId::MandelboxRecursive),
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
             })
         );
     }

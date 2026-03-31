@@ -156,6 +156,22 @@ fn minimal_proving_ground_preset_targets_reintroduced_squaring_family() {
 }
 
 #[test]
+fn proving_ground_baseline_preset_targets_bounded_first_mandelbox_run() {
+    let config = TournamentPreset::ProvingGroundBaseline.config();
+
+    assert_eq!(config.dim, 128);
+    assert_eq!(config.levels, 3);
+    assert_eq!(config.max_seq_len, 64);
+    assert_eq!(config.max_recursion_depth, 6);
+    assert_eq!(config.stability_depth, 6);
+    assert_eq!(config.train_batch_size, 16);
+    assert_eq!(config.eval_batch_size, 16);
+    assert_eq!(config.train_steps_per_species, 5);
+    assert_eq!(config.eval_batches_per_family, 2);
+    assert_eq!(config.learning_rate, 5e-4);
+}
+
+#[test]
 fn minimal_baseline_preset_matches_minimal_proving_ground_shape() {
     let config = TournamentPreset::MinimalBaseline.config();
 
@@ -356,6 +372,7 @@ fn tournament_presets_never_clip_eval_examples() {
         TournamentPreset::ChallengerLane,
         TournamentPreset::MinimalBaseline,
         TournamentPreset::MinimalProvingGround,
+        TournamentPreset::ProvingGroundBaseline,
         TournamentPreset::IntermediateStress,
         TournamentPreset::MediumStress,
         TournamentPreset::BullpenPolish,
@@ -462,6 +479,9 @@ fn primitive_variant_naming_convention_accepts_versioned_lowercase_variants() {
     ));
     assert!(is_valid_primitive_variant_name(
         "generalized_mobius_dyn-jitter-norm_v2"
+    ));
+    assert!(is_valid_primitive_variant_name(
+        "mandelbox_recursive_dyn-escape-radius_v1"
     ));
 }
 
@@ -819,6 +839,7 @@ fn test_variant_name(id: SpeciesId) -> PrimitiveVariantName {
         SpeciesId::GeneralizedMobius => "generalized_mobius_dyn-jitter-norm_v2",
         SpeciesId::LogisticChaoticMap => "logistic_chaotic_map_v1",
         SpeciesId::JuliaRecursiveEscape => "julia_recursive_escape_v1",
+        SpeciesId::MandelboxRecursive => "mandelbox_recursive_dyn-escape-radius_v1",
     };
     PrimitiveVariantName::new_unchecked(name)
 }

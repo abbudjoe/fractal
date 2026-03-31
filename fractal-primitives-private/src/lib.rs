@@ -21,6 +21,7 @@ pub use primitives::{
     ifs::Ifs,
     julia_recursive_escape::JuliaRecursiveEscape,
     logistic_chaotic_map::LogisticChaoticMap,
+    mandelbox_recursive::MandelboxRecursiveDynEscapeRadius,
     p1_contractive::P1Contractive,
     p1_fractal_hybrid::{P1FractalHybrid, P1FractalHybridComposite, P1FractalHybridDynGate},
     p2_mandelbrot::P2Mandelbrot,
@@ -201,6 +202,13 @@ define_flat_species_runner!(
     JuliaRecursiveEscape,
     JuliaRecursiveEscape
 );
+define_flat_species_runner!(
+    run_mandelbox_cpu,
+    run_mandelbox_metal,
+    run_mandelbox_cuda,
+    MandelboxRecursive,
+    MandelboxRecursiveDynEscapeRadius
+);
 
 macro_rules! species_definition {
     ($id:expr, $variant_name:expr, $cpu_fn:ident, $metal_fn:ident, $cuda_fn:ident) => {{
@@ -226,7 +234,7 @@ macro_rules! species_definition {
     }};
 }
 
-pub const SPECIES_REGISTRY: [SpeciesDefinition; 14] = [
+pub const SPECIES_REGISTRY: [SpeciesDefinition; 15] = [
     species_definition!(
         SpeciesId::P1Contractive,
         "p1_contractive_v1",
@@ -324,6 +332,13 @@ pub const SPECIES_REGISTRY: [SpeciesDefinition; 14] = [
         run_julia_cpu,
         run_julia_metal,
         run_julia_cuda
+    ),
+    species_definition!(
+        SpeciesId::MandelboxRecursive,
+        "mandelbox_recursive_dyn-escape-radius_v1",
+        run_mandelbox_cpu,
+        run_mandelbox_metal,
+        run_mandelbox_cuda
     ),
 ];
 

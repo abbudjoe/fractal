@@ -97,10 +97,11 @@ pub enum SpeciesId {
     GeneralizedMobius,
     LogisticChaoticMap,
     JuliaRecursiveEscape,
+    MandelboxRecursive,
 }
 
 impl SpeciesId {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::P1Contractive,
         Self::P3Hierarchical,
         Self::B2StableHierarchical,
@@ -115,6 +116,7 @@ impl SpeciesId {
         Self::GeneralizedMobius,
         Self::LogisticChaoticMap,
         Self::JuliaRecursiveEscape,
+        Self::MandelboxRecursive,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -133,6 +135,7 @@ impl SpeciesId {
             Self::GeneralizedMobius => "generalized_mobius",
             Self::LogisticChaoticMap => "logistic_chaotic_map",
             Self::JuliaRecursiveEscape => "julia_recursive_escape",
+            Self::MandelboxRecursive => "mandelbox_recursive",
         }
     }
 }
@@ -162,6 +165,7 @@ impl FromStr for SpeciesId {
             "generalized_mobius" => Ok(Self::GeneralizedMobius),
             "logistic_chaotic_map" => Ok(Self::LogisticChaoticMap),
             "julia_recursive_escape" => Ok(Self::JuliaRecursiveEscape),
+            "mandelbox_recursive" => Ok(Self::MandelboxRecursive),
             _ => Err(()),
         }
     }

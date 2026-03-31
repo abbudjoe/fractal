@@ -11,9 +11,9 @@ use fractal_core::{
 
 use crate::{
     species_registry, B1FractalGated, B2StableHierarchical, B3FractalHierarchical, B4Universal,
-    GeneralizedMobius, Ifs, JuliaRecursiveEscape, LogisticChaoticMap, P1Contractive,
-    P1FractalHybrid, P1FractalHybridComposite, P1FractalHybridDynGate, P2Mandelbrot,
-    P3Hierarchical,
+    GeneralizedMobius, Ifs, JuliaRecursiveEscape, LogisticChaoticMap,
+    MandelboxRecursiveDynEscapeRadius, P1Contractive, P1FractalHybrid, P1FractalHybridComposite,
+    P1FractalHybridDynGate, P2Mandelbrot, P3Hierarchical,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -38,6 +38,7 @@ fn primitives_preserve_declared_layout_and_shape() {
         Box::new(GeneralizedMobius::new(8, &device)),
         Box::new(LogisticChaoticMap::new(8, &device)),
         Box::new(JuliaRecursiveEscape::new(8, &device)),
+        Box::new(MandelboxRecursiveDynEscapeRadius::new(8, &device)),
     ];
 
     for primitive in primitives {
@@ -361,6 +362,52 @@ fn julia_recursive_escape_tightens_escape_radius_with_depth() {
         )
         .unwrap()
         .complex()
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+
+    assert_ne!(shallow, deep);
+}
+
+#[test]
+fn mandelbox_recursive_escape_radius_changes_with_depth() {
+    let device = Default::default();
+    let x = Tensor::<TestBackend, 2>::ones([1, 4], &device);
+    let state = FractalState::Flat(Tensor::<TestBackend, 2>::ones([1, 4], &device));
+    let mut rule = MandelboxRecursiveDynEscapeRadius::new(4, &device);
+    rule.drive_proj.weight = Param::from_data(TensorData::new(vec![0.0f32; 16], [4, 4]), &device);
+    rule.drive_proj.bias = Some(Param::from_data(
+        TensorData::new(vec![0.0f32; 4], [4]),
+        &device,
+    ));
+
+    let shallow = rule
+        .apply(
+            &state,
+            &x,
+            ApplyContext {
+                depth: 1,
+                max_depth: 6,
+            },
+        )
+        .unwrap()
+        .flat()
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let deep = rule
+        .apply(
+            &state,
+            &x,
+            ApplyContext {
+                depth: 6,
+                max_depth: 6,
+            },
+        )
+        .unwrap()
+        .flat()
         .unwrap()
         .into_data()
         .to_vec::<f32>()
