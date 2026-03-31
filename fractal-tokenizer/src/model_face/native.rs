@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, str::Utf8Error};
+use std::{error::Error, fmt, path::Path, str::Utf8Error};
 
 use crate::{EncodedDocument, FaceoffChunk, FaceoffChunkedDocument};
 use crate::{ModelFacingBatch, ModelFacingDocument};
@@ -10,6 +10,54 @@ pub trait NativeTokenizer {
 
     fn tokenize(&self, text: &str) -> Result<Vec<Self::Token>, Self::Error>;
 }
+
+/// HF-backed native tokenizer wrapper around `tokenizers::Tokenizer`.
+#[derive(Clone)]
+pub struct HuggingFaceNativeTokenizer {
+    tokenizer: tokenizers::Tokenizer,
+}
+
+impl HuggingFaceNativeTokenizer {
+    pub fn new(tokenizer: tokenizers::Tokenizer) -> Self {
+        Self { tokenizer }
+    }
+
+    pub fn from_file<P: AsRef<Path>>(
+        path: P,
+    ) -> Result<Self, HuggingFaceNativeTokenizerError> {
+        tokenizers::Tokenizer::from_file(path.as_ref())
+            .map(Self::new)
+            .map_err(|source| HuggingFaceNativeTokenizerError::Load {
+                reason: source.to_string(),
+            })
+    }
+
+    pub fn tokenizer(&self) -> &tokenizers::Tokenizer {
+        &self.tokenizer
+    }
+
+    pub fn into_inner(self) -> tokenizers::Tokenizer {
+        self.tokenizer
+    }
+}
+
+/// Errors produced by the HF-backed native tokenizer wrapper.
+#[derive(Debug)]
+pub enum HuggingFaceNativeTokenizerError {
+    Load { reason: String },
+    Encode { reason: String },
+}
+
+impl fmt::Display for HuggingFaceNativeTokenizerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Load { reason } => write!(f, "failed to load tokenizer: {reason}"),
+            Self::Encode { reason } => write!(f, "failed to encode text: {reason}"),
+        }
+    }
+}
+
+impl Error for HuggingFaceNativeTokenizerError {}
 
 /// View trait used by adapter code that wants the combined wrapper contract.
 ///
@@ -255,5 +303,20 @@ impl NativeCompatibilityAdapter {
             documents.push(self.retokenize_document(document, tokenizer)?);
         }
         Ok(NativeCompatibilityBatch { documents })
+    }
+}
+
+impl NativeTokenizer for HuggingFaceNativeTokenizer {
+    type Token = u32;
+    type Error = HuggingFaceNativeTokenizerError;
+
+    fn tokenize(&self, text: &str) -> Result<Vec<Self::Token>, Self::Error> {
+        let encoding = self
+            .tokenizer
+            .encode(text, false)
+            .map_err(|source| HuggingFaceNativeTokenizerError::Encode {
+                reason: source.to_string(),
+            })?;
+        Ok(encoding.get_ids().to_vec())
     }
 }

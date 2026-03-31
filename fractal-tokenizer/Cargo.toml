@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 burn = { workspace = true }
 fractal-core = { path = "../fractal-core" }
+tokenizers = "0.20"
 
 [dev-dependencies]
 tiktoken = { package = "tiktoken-rs", version = "^0.5" }

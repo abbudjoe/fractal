@@ -12,9 +12,10 @@ pub use faceoff::{
     FaceoffTokenizer, FaceoffVocab, VocabEntry,
 };
 pub use model_face::{
-    ModelAdapter, ModelBatch, ModelFacingBatch, ModelFacingDocument, NativeCompatibilityAdapter,
-    NativeCompatibilityBatch, NativeCompatibilityError, NativeTokenizer, NativeTokenizedChunk,
-    NativeTokenizedBatch, NativeTokenizedDocument,
+    HuggingFaceNativeTokenizer, HuggingFaceNativeTokenizerError, ModelAdapter, ModelBatch,
+    ModelFacingBatch, ModelFacingDocument, NativeCompatibilityAdapter, NativeCompatibilityBatch,
+    NativeCompatibilityError, NativeTokenizer, NativeTokenizedChunk, NativeTokenizedBatch,
+    NativeTokenizedDocument,
 };
 pub use primitives::{
     B1FractalGated, B3FractalHierarchical, B4Universal, P1FractalHybrid, P2Mandelbrot,
