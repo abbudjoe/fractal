@@ -4,14 +4,16 @@ Use this tracker alongside [promotion-policy.md](/Users/joseph/fractal/docs/prom
 
 ## Active / Promising Variants
 
-| Variant Name                          | Base Primitive     | Lever Type                  | Status                 | Last Fitness | Stability | Perplexity | ARC   | Notes / Next Action |
-|---------------------------------------|--------------------|-----------------------------|------------------------|--------------|-----------|------------|-------|---------------------|
-| p1_contractive_v1                     | p1                 | contractive gate            | Truth leader (reference only) | 0.58         | 0.53      | 1.54       | 0.68  | Keep as benchmark |
-| p1_fractal_hybrid_v1                  | p1                 | static squaring             | Fractal Core Co-Leader | 0.64         | 0.47      | 1.50       | 0.72  | Winner-lane run completed cleanly and cleared the hard gates; this is now a production-ready fractal primitive, not just a promising co-leader |
-| p1_fractal_hybrid_composite_v1        | p1                 | dynamic compositing lever   | Fractal Core Co-Leader | 0.57         | 0.33      | 1.86       | 0.76  | First successful compositing test still has the best ARC; keep as the primary composited fractal candidate |
-| logistic_chaotic_map_v1               | logistic           | static r-clamp + residual   | Co-Leader              | 0.58         | 0.59      | 1.91       | 0.46  | Full-medium-stress run cleared the winner-lane gates; next highest-value question is compositing against the hybrid shell |
-| p3_hierarchical_v1                    | p3                 | hierarchical compressor     | Co-Leader Contender    | 0.58         | 0.55      | 1.66       | 0.44  | Bounded-stress rerun cleared the contender gate; merits one harder confirmation lane before winner-lane promotion |
-| b2_stable_hierarchical_v1             | b2                 | stable hierarchical blend   | Eval-Constrained       | 0.46         | 0.24      | 1.63       | 0.71  | Latest validation run finished train and stability but timed out in perplexity; allow one reduced-eval rerun before retirement |
+`tok/s` is tracked here as a secondary production-readiness signal. Treat it as authoritative only for same-preset, same-backend comparisons.
+
+| Variant Name                          | Base Primitive     | Lever Type                  | Status                 | Last Fitness | Stability | Perplexity | ARC   | tok/s | Notes / Next Action |
+|---------------------------------------|--------------------|-----------------------------|------------------------|--------------|-----------|------------|-------|-------|---------------------|
+| p1_contractive_v1                     | p1                 | contractive gate            | Truth leader (reference only) | 0.58         | 0.53      | 1.54       | 0.68  | 263   | Keep as benchmark |
+| p1_fractal_hybrid_v1                  | p1                 | static squaring             | Fractal Core Co-Leader | 0.64         | 0.47      | 1.50       | 0.72  | 3     | Winner-lane run completed cleanly and cleared the hard gates; this is now a production-ready fractal primitive, not just a promising co-leader |
+| p1_fractal_hybrid_composite_v1        | p1                 | dynamic compositing lever   | Fractal Core Co-Leader | 0.57         | 0.33      | 1.86       | 0.76  | 3     | First successful compositing test still has the best ARC; keep as the primary composited fractal candidate |
+| logistic_chaotic_map_v1               | logistic           | static r-clamp + residual   | Co-Leader              | 0.58         | 0.59      | 1.91       | 0.46  | 3     | Full-medium-stress run cleared the winner-lane gates; next highest-value question is compositing against the hybrid shell |
+| p3_hierarchical_v1                    | p3                 | hierarchical compressor     | Co-Leader Contender    | 0.58         | 0.55      | 1.66       | 0.44  | 34    | Bounded-stress rerun cleared the contender gate; merits one harder confirmation lane before winner-lane promotion |
+| b2_stable_hierarchical_v1             | b2                 | stable hierarchical blend   | Eval-Constrained       | 0.46         | 0.24      | 1.63       | 0.71  | 104   | Latest validation run finished train and stability but timed out in perplexity; allow one reduced-eval rerun before retirement |
 
 ## Retired / Failed
 
