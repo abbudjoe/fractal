@@ -24,7 +24,7 @@ use crate::{
     error::FractalError,
     fitness::SpeciesRawMetrics,
     lifecycle::{
-        PhaseTiming, RunExecutionOutcome, RunManifest, RunPhase, RunQualityOutcome,
+        ExperimentSpec, PhaseTiming, RunExecutionOutcome, RunManifest, RunPhase, RunQualityOutcome,
         SpeciesRunArtifact, SpeciesRunStage, TournamentConfig,
     },
     model::FractalModel,
@@ -242,6 +242,7 @@ pub struct SpeciesRunContext {
     pub config: TournamentConfig,
     pub generator: Arc<SimpleHierarchicalGenerator>,
     pub variant_name: PrimitiveVariantName,
+    pub experiment: Option<ExperimentSpec>,
 }
 
 type CpuRunner = fn(SpeciesRunContext) -> Result<SpeciesRawMetrics, FractalError>;
@@ -336,6 +337,7 @@ where
     F: FnOnce(&TournamentConfig, &B::Device) -> R,
 {
     let variant_name = context.variant_name;
+    let experiment = context.experiment.clone();
     B::seed(
         &device,
         context.config.seed.wrapping_add(context.index as u64 * 101),
@@ -343,7 +345,15 @@ where
 
     let batches = prepare_batches_for_run::<B>(&context.generator, &context.config, &device)?;
     let rule = factory(&context.config, &device);
-    run_species_with_batches(species, variant_name, context.config, device, rule, batches)
+    run_species_with_batches(
+        species,
+        variant_name,
+        context.config,
+        experiment,
+        device,
+        rule,
+        batches,
+    )
 }
 
 pub fn run_species_with_factory_candle<R, F>(
@@ -365,6 +375,7 @@ where
     F: FnOnce(&TournamentConfig, &CandleDevice) -> R,
 {
     let variant_name = context.variant_name;
+    let experiment = context.experiment.clone();
     CpuTrainBackend::seed(
         &device,
         context.config.seed.wrapping_add(context.index as u64 * 101),
@@ -372,7 +383,15 @@ where
 
     let batches = prepare_candle_batches_for_run(&context.generator, &context.config, &device)?;
     let rule = factory(&context.config, &device);
-    run_species_with_batches(species, variant_name, context.config, device, rule, batches)
+    run_species_with_batches(
+        species,
+        variant_name,
+        context.config,
+        experiment,
+        device,
+        rule,
+        batches,
+    )
 }
 
 pub fn initialize_metal_runtime(device: &WgpuDevice) {
@@ -415,14 +434,17 @@ fn record_species_run_artifact(artifact: SpeciesRunArtifact) {
 }
 
 fn build_run_manifest(
+    species: SpeciesId,
     config: &TournamentConfig,
     timeout_budget: Option<Duration>,
     variant_name: PrimitiveVariantName,
+    experiment: Option<ExperimentSpec>,
 ) -> RunManifest {
     RunManifest {
         variant_name,
         timeout_budget,
         config: config.clone(),
+        experiment: experiment.or_else(|| config.resolved_experiment(species, variant_name)),
     }
 }
 
@@ -505,6 +527,7 @@ fn run_species_with_batches<B, R>(
     species: SpeciesId,
     variant_name: PrimitiveVariantName,
     config: TournamentConfig,
+    experiment: Option<ExperimentSpec>,
     device: B::Device,
     rule: R,
     batches: RunBatches<B>,
@@ -520,7 +543,13 @@ where
         + std::fmt::Debug,
     <R as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend> + ModuleDisplay,
 {
-    let manifest = build_run_manifest(&config, config.run_timeout, variant_name);
+    let manifest = build_run_manifest(
+        species,
+        &config,
+        config.run_timeout,
+        variant_name,
+        experiment,
+    );
     let run_started = Instant::now();
     let deadline = config.run_timeout.map(|timeout| run_started + timeout);
     let stage = SpeciesRunStage {

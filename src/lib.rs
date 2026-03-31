@@ -14,30 +14,11 @@ pub use fractal_primitives_private::{
 pub use primitive_tracker::{primitive_tracker_reminder_lines, TRACKER_PATH};
 pub use run_artifacts::{persist_run_artifacts, PersistedRunPaths};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ComparisonAuthority {
-    AuthoritativeSamePreset,
-    AdvisoryMixedPreset,
-}
-
-impl ComparisonAuthority {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::AuthoritativeSamePreset => "authoritative same-preset",
-            Self::AdvisoryMixedPreset => "advisory mixed-preset",
-        }
-    }
-
-    pub fn is_authoritative_same_preset(self) -> bool {
-        matches!(self, Self::AuthoritativeSamePreset)
-    }
-}
-
 #[derive(Clone)]
 pub struct TournamentRunReport {
     pub preset: TournamentPreset,
     pub lane: TournamentLane,
-    pub comparison_authority: ComparisonAuthority,
+    pub comparison: ComparisonContract,
     pub config: TournamentConfig,
     pub species: Vec<SpeciesDefinition>,
     pub results: Vec<RankedSpeciesResult>,
@@ -48,7 +29,7 @@ impl TournamentRunReport {
     pub fn new(
         preset: TournamentPreset,
         lane: TournamentLane,
-        comparison_authority: ComparisonAuthority,
+        comparison: ComparisonContract,
         config: TournamentConfig,
         species: Vec<SpeciesDefinition>,
         results: Vec<RankedSpeciesResult>,
@@ -57,7 +38,7 @@ impl TournamentRunReport {
         Self {
             preset,
             lane,
-            comparison_authority,
+            comparison,
             config,
             species,
             results,
@@ -66,7 +47,16 @@ impl TournamentRunReport {
     }
 
     pub fn comparison_label(&self) -> &'static str {
-        self.comparison_authority.label()
+        self.comparison.label()
+    }
+
+    pub fn runtime_surface_label(&self) -> String {
+        self.artifact
+            .species
+            .first()
+            .and_then(|record| record.manifest.experiment.as_ref())
+            .map(|experiment| experiment.runtime.label())
+            .unwrap_or_else(|| RuntimeSurfaceSpec::default().label())
     }
 
     pub fn variant_name_for(&self, species: fractal_core::SpeciesId) -> &'static str {
@@ -173,8 +163,8 @@ pub fn run_ranked_generation_with_reporter(
 mod tests {
     use super::*;
     use fractal_core::{
-        PhaseTiming, RunExecutionOutcome, RunManifest, RunPhase, RunQualityOutcome,
-        SpeciesRunArtifact, SpeciesRunStage, TournamentRunArtifact,
+        ComparisonContract, PhaseTiming, RunExecutionOutcome, RunManifest, RunPhase,
+        RunQualityOutcome, SpeciesRunArtifact, SpeciesRunStage, TournamentRunArtifact,
     };
 
     #[test]
@@ -223,7 +213,7 @@ mod tests {
         let report = TournamentRunReport::new(
             TournamentPreset::GenerationFour,
             TournamentLane::Leader,
-            ComparisonAuthority::AuthoritativeSamePreset,
+            ComparisonContract::authoritative_same_preset(),
             TournamentPreset::GenerationFour.config(),
             species,
             vec![RankedSpeciesResult {
@@ -238,8 +228,9 @@ mod tests {
             single_species_artifact(fractal_core::SpeciesId::P1Contractive, "p1_contractive_v1"),
         );
 
-        assert!(report.comparison_authority.is_authoritative_same_preset());
+        assert!(report.comparison.is_authoritative_same_preset());
         assert_eq!(report.comparison_label(), "authoritative same-preset");
+        assert_eq!(report.runtime_surface_label(), "conservative-defaults");
         assert_eq!(
             report.variant_name_for(fractal_core::SpeciesId::P1Contractive),
             "p1_contractive_v1"
@@ -248,7 +239,7 @@ mod tests {
         let advisory = TournamentRunReport::new(
             TournamentPreset::FastTest,
             TournamentLane::Baseline,
-            ComparisonAuthority::AdvisoryMixedPreset,
+            ComparisonContract::advisory_mixed_preset(),
             TournamentPreset::FastTest.config(),
             species_registry_for_species(fractal_core::SpeciesId::P3Hierarchical),
             vec![RankedSpeciesResult {
@@ -289,6 +280,7 @@ mod tests {
                     variant_name: fractal_core::PrimitiveVariantName::new_unchecked(variant_name),
                     timeout_budget: None,
                     config: TournamentPreset::FastTest.config(),
+                    experiment: None,
                 },
                 phase_timings: vec![PhaseTiming {
                     phase: RunPhase::Train,

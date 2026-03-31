@@ -5,7 +5,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use fractal::{species_registry_for_species, ComparisonAuthority, SpeciesId, SpeciesRawMetrics};
+use fractal::{
+    species_registry_for_species, ComparisonAuthority, ComparisonContract, SpeciesId,
+    SpeciesRawMetrics,
+};
 use fractal_eval_private::aggregate_results;
 use serde::Deserialize;
 
@@ -124,10 +127,11 @@ fn summarize_root(root: &Path) -> Result<String, String> {
 
             writeln!(
                 output,
-                "seed={} | preset={} | authority={}{}",
+                "seed={} | preset={} | authority={} | runtime={}{}",
                 group_key.seed_label(),
                 group_key.preset,
-                group_key.authority_label(),
+                group_key.comparison_label(),
+                group_key.runtime_surface_policy,
                 group_key
                     .lane
                     .as_deref()
@@ -154,14 +158,14 @@ fn summarize_root(root: &Path) -> Result<String, String> {
     let authoritative_aggregates = aggregate_rows(
         completed
             .iter()
-            .filter(|row| row.authority == ComparisonAuthority::AuthoritativeSamePreset)
+            .filter(|row| row.comparison.authority == ComparisonAuthority::Authoritative)
             .cloned()
             .collect(),
     );
     let advisory_aggregates = aggregate_rows(
         completed
             .iter()
-            .filter(|row| row.authority == ComparisonAuthority::AdvisoryMixedPreset)
+            .filter(|row| row.comparison.authority == ComparisonAuthority::Advisory)
             .cloned()
             .collect(),
     );
@@ -170,8 +174,8 @@ fn summarize_root(root: &Path) -> Result<String, String> {
     if authoritative_aggregates.is_empty() {
         writeln!(output, "(none yet)").unwrap();
     } else {
-        for (preset, rows) in authoritative_aggregates {
-            writeln!(output, "preset={preset}").unwrap();
+        for ((preset, runtime_surface_policy), rows) in authoritative_aggregates {
+            writeln!(output, "preset={preset} | runtime={runtime_surface_policy}").unwrap();
             output.push_str(&render_aggregate_table(&rows));
             writeln!(output).unwrap();
         }
@@ -179,8 +183,8 @@ fn summarize_root(root: &Path) -> Result<String, String> {
 
     if !advisory_aggregates.is_empty() {
         writeln!(output, "Advisory snapshot:").unwrap();
-        for (preset, rows) in advisory_aggregates {
-            writeln!(output, "preset={preset}").unwrap();
+        for ((preset, runtime_surface_policy), rows) in advisory_aggregates {
+            writeln!(output, "preset={preset} | runtime={runtime_surface_policy}").unwrap();
             output.push_str(&render_aggregate_table(&rows));
             writeln!(output).unwrap();
         }
@@ -271,7 +275,8 @@ fn load_run(run_dir: &Path) -> Result<RunSummary, String> {
                         seed: metadata.seed,
                         preset: metadata.preset.clone(),
                         lane: metadata.lane.clone(),
-                        authority: metadata.authority,
+                        comparison: metadata.comparison.clone(),
+                        runtime_surface_policy: metadata.runtime_surface_policy.clone(),
                         variant_name: record
                             .variant_name
                             .clone()
@@ -290,7 +295,13 @@ fn load_run(run_dir: &Path) -> Result<RunSummary, String> {
                     seed: metadata.seed,
                     preset: metadata.preset.clone(),
                     lane: metadata.lane.clone(),
-                    authority: metadata.authority,
+                    comparison: record
+                        .comparison_contract()
+                        .or_else(|| metadata.comparison.clone()),
+                    runtime_surface_policy: record
+                        .runtime_surface_policy
+                        .clone()
+                        .or_else(|| metadata.runtime_surface_policy.clone()),
                     variant_name: record
                         .variant_name
                         .clone()
@@ -317,7 +328,8 @@ fn load_run(run_dir: &Path) -> Result<RunSummary, String> {
                 seed: metadata.seed,
                 preset: metadata.preset.clone(),
                 lane: metadata.lane.clone(),
-                authority: metadata.authority,
+                comparison: metadata.comparison.clone(),
+                runtime_surface_policy: metadata.runtime_surface_policy.clone(),
                 variant_name: metadata.variant_name.clone(),
                 species: metadata.species,
                 outcome: "infra-failure".to_owned(),
@@ -332,7 +344,8 @@ fn load_run(run_dir: &Path) -> Result<RunSummary, String> {
                 seed: metadata.seed,
                 preset: metadata.preset.clone(),
                 lane: metadata.lane.clone(),
-                authority: metadata.authority,
+                comparison: metadata.comparison.clone(),
+                runtime_surface_policy: metadata.runtime_surface_policy.clone(),
                 variant_name: metadata.variant_name.clone(),
                 species: metadata.species,
                 status: manifest
@@ -348,7 +361,8 @@ fn load_run(run_dir: &Path) -> Result<RunSummary, String> {
             seed: metadata.seed,
             preset: metadata.preset.clone(),
             lane: metadata.lane.clone(),
-            authority: metadata.authority,
+            comparison: metadata.comparison.clone(),
+            runtime_surface_policy: metadata.runtime_surface_policy.clone(),
             variant_name: metadata.variant_name.clone(),
             species: metadata.species,
             status: wrapper_manifest
@@ -414,9 +428,17 @@ fn completed_row_from_artifact(
             .or_else(|| manifest.and_then(|manifest| manifest.preset.clone()))
             .unwrap_or_else(|| "unknown".to_owned()),
         lane: metadata.lane.clone(),
-        authority: metadata
-            .authority
-            .unwrap_or(ComparisonAuthority::AuthoritativeSamePreset),
+        comparison: record
+            .comparison_contract()
+            .or_else(|| metadata.comparison.clone())
+            .or_else(|| manifest.and_then(|manifest| manifest.comparison_contract()))
+            .unwrap_or_else(ComparisonContract::authoritative_same_preset),
+        runtime_surface_policy: record
+            .runtime_surface_policy
+            .clone()
+            .or_else(|| manifest.and_then(|manifest| manifest.runtime_surface_policy.clone()))
+            .or_else(|| metadata.runtime_surface_policy.clone())
+            .unwrap_or_else(|| "conservative-defaults".to_owned()),
         variant_name,
         species,
         rank: result.rank,
@@ -436,14 +458,15 @@ fn species_variant_name(species: SpeciesId) -> String {
 }
 
 fn dedupe_completed_rows(mut rows: Vec<CompletedRow>) -> Vec<CompletedRow> {
-    let mut best_by_key: BTreeMap<(Option<u64>, String, String, String), CompletedRow> =
+    let mut best_by_key: BTreeMap<(Option<u64>, String, String, String, String), CompletedRow> =
         BTreeMap::new();
     for row in rows.drain(..) {
         let key = (
             row.seed,
             row.preset.clone(),
             row.variant_name.clone(),
-            row.authority.label().to_owned(),
+            row.comparison.label().to_owned(),
+            row.runtime_surface_policy.clone(),
         );
         best_by_key
             .entry(key)
@@ -470,21 +493,23 @@ fn group_completed_by_seed_and_contract(
     groups
 }
 
-fn aggregate_rows(rows: Vec<CompletedRow>) -> BTreeMap<String, Vec<AggregateRow>> {
-    let mut grouped: BTreeMap<(String, String, String), Vec<CompletedRow>> = BTreeMap::new();
+fn aggregate_rows(rows: Vec<CompletedRow>) -> BTreeMap<(String, String), Vec<AggregateRow>> {
+    let mut grouped: BTreeMap<(String, String, String, String), Vec<CompletedRow>> =
+        BTreeMap::new();
     for row in rows {
         grouped
             .entry((
                 row.preset.clone(),
-                row.authority.label().to_owned(),
+                row.comparison.label().to_owned(),
+                row.runtime_surface_policy.clone(),
                 row.variant_name.clone(),
             ))
             .or_default()
             .push(row);
     }
 
-    let mut output: BTreeMap<String, Vec<AggregateRow>> = BTreeMap::new();
-    for ((preset, authority_label, variant_name), entries) in grouped {
+    let mut output: BTreeMap<(String, String), Vec<AggregateRow>> = BTreeMap::new();
+    for ((preset, comparison_label, runtime_surface_policy, variant_name), entries) in grouped {
         let count = entries.len() as f64;
         let mut rank = 0usize;
         let mut fitness = 0.0;
@@ -502,18 +527,21 @@ fn aggregate_rows(rows: Vec<CompletedRow>) -> BTreeMap<String, Vec<AggregateRow>
             tok_s += entry.tok_s;
         }
 
-        output.entry(preset).or_default().push(AggregateRow {
-            variant_name,
-            samples: entries.len(),
-            rank,
-            authority: parse_authority(&authority_label)
-                .unwrap_or(ComparisonAuthority::AuthoritativeSamePreset),
-            fitness: fitness / count,
-            stability: stability / count,
-            perplexity: perplexity / count,
-            arc: arc / count,
-            tok_s: tok_s / count,
-        });
+        output
+            .entry((preset, runtime_surface_policy))
+            .or_default()
+            .push(AggregateRow {
+                variant_name,
+                samples: entries.len(),
+                rank,
+                comparison: parse_comparison_contract(None, Some(&comparison_label))
+                    .unwrap_or_else(ComparisonContract::authoritative_same_preset),
+                fitness: fitness / count,
+                stability: stability / count,
+                perplexity: perplexity / count,
+                arc: arc / count,
+                tok_s: tok_s / count,
+            });
     }
 
     for rows in output.values_mut() {
@@ -567,7 +595,7 @@ fn render_aggregate_table(rows: &[AggregateRow]) -> String {
             vec![
                 row.variant_name.clone(),
                 row.samples.to_string(),
-                row.authority.label().to_owned(),
+                row.comparison.label().to_owned(),
                 format!("{:.2}", row.fitness),
                 format!("{:.2}", row.stability),
                 format!("{:.2}", row.perplexity),
@@ -737,7 +765,8 @@ struct RunMetadata {
     seed: Option<u64>,
     preset: Option<String>,
     lane: Option<String>,
-    authority: Option<ComparisonAuthority>,
+    comparison: Option<ComparisonContract>,
+    runtime_surface_policy: Option<String>,
     pod_id: Option<String>,
     species: Option<SpeciesId>,
     variant_name: Option<String>,
@@ -768,14 +797,15 @@ impl RunMetadata {
             .and_then(|manifest| manifest.lane.clone())
             .or_else(|| remote_manifest.and_then(|manifest| manifest.lane.clone()))
             .or_else(|| wrapper_manifest.and_then(|manifest| manifest.lane_from_args()));
-        let authority = artifact
+        let comparison = artifact
             .and_then(|artifact| artifact.manifest.as_ref())
-            .and_then(|manifest| manifest.comparison_authority.as_deref())
-            .and_then(parse_authority)
+            .and_then(|manifest| manifest.comparison_contract())
+            .or_else(|| remote_manifest.and_then(|manifest| manifest.comparison_contract()));
+        let runtime_surface_policy = artifact
+            .and_then(|artifact| artifact.manifest.as_ref())
+            .and_then(|manifest| manifest.runtime_surface_policy.clone())
             .or_else(|| {
-                remote_manifest
-                    .and_then(|manifest| manifest.comparison_authority.as_deref())
-                    .and_then(parse_authority)
+                remote_manifest.and_then(|manifest| manifest.runtime_surface_policy.clone())
             });
         let pod_id = wrapper_manifest
             .and_then(|manifest| manifest.pod.as_ref())
@@ -816,7 +846,8 @@ impl RunMetadata {
             seed,
             preset,
             lane,
-            authority,
+            comparison,
+            runtime_surface_policy,
             pod_id,
             species,
             variant_name,
@@ -831,7 +862,8 @@ struct CompletedRow {
     seed: Option<u64>,
     preset: String,
     lane: Option<String>,
-    authority: ComparisonAuthority,
+    comparison: ComparisonContract,
+    runtime_surface_policy: String,
     variant_name: String,
     species: SpeciesId,
     rank: usize,
@@ -849,7 +881,8 @@ struct FailureRow {
     seed: Option<u64>,
     preset: Option<String>,
     lane: Option<String>,
-    authority: Option<ComparisonAuthority>,
+    comparison: Option<ComparisonContract>,
+    runtime_surface_policy: Option<String>,
     variant_name: Option<String>,
     species: Option<SpeciesId>,
     outcome: String,
@@ -860,8 +893,12 @@ impl FailureRow {
     fn matches_seed_and_contract(&self, key: &RunGroupKey) -> bool {
         self.seed == key.seed.as_option()
             && self.preset.as_deref() == Some(key.preset.as_str())
-            && self.authority.as_ref().map(|authority| authority.label())
-                == Some(key.authority_label.as_str())
+            && self
+                .comparison
+                .as_ref()
+                .map(|comparison| comparison.label())
+                == Some(key.comparison_label.as_str())
+            && self.runtime_surface_policy.as_deref() == Some(key.runtime_surface_policy.as_str())
     }
 }
 
@@ -872,7 +909,8 @@ struct PendingRow {
     seed: Option<u64>,
     preset: Option<String>,
     lane: Option<String>,
-    authority: Option<ComparisonAuthority>,
+    comparison: Option<ComparisonContract>,
+    runtime_surface_policy: Option<String>,
     variant_name: Option<String>,
     species: Option<SpeciesId>,
     status: String,
@@ -884,7 +922,7 @@ struct PendingRow {
 struct AggregateRow {
     variant_name: String,
     samples: usize,
-    authority: ComparisonAuthority,
+    comparison: ComparisonContract,
     rank: usize,
     fitness: f64,
     stability: f64,
@@ -918,6 +956,8 @@ struct RunControlManifest {
     paths: Option<RunPathsRecord>,
     build: Option<RunBuildRecord>,
     comparison_authority: Option<String>,
+    comparison_contract: Option<ComparisonContractRecord>,
+    runtime_surface_policy: Option<String>,
     preset: Option<String>,
     lane: Option<String>,
     backend: Option<String>,
@@ -946,6 +986,13 @@ impl RunControlManifest {
             .as_ref()
             .and_then(|runtime| extract_arg(&runtime.tournament_args, "--species"))
             .and_then(|species| species.parse().ok())
+    }
+
+    fn comparison_contract(&self) -> Option<ComparisonContract> {
+        parse_comparison_contract(
+            self.comparison_contract.as_ref(),
+            self.comparison_authority.as_deref(),
+        )
     }
 }
 
@@ -1024,6 +1071,8 @@ struct RunArtifactFile {
 struct RunManifestFile {
     run_id: Option<String>,
     comparison_authority: Option<String>,
+    comparison_contract: Option<ComparisonContractRecord>,
+    runtime_surface_policy: Option<String>,
     preset: Option<String>,
     lane: Option<String>,
     backend: Option<String>,
@@ -1032,6 +1081,15 @@ struct RunManifestFile {
     timeout_seconds: Option<f64>,
     wrapper_timeout_seconds: Option<u64>,
     config: RunConfigRecord,
+}
+
+impl RunManifestFile {
+    fn comparison_contract(&self) -> Option<ComparisonContract> {
+        parse_comparison_contract(
+            self.comparison_contract.as_ref(),
+            self.comparison_authority.as_deref(),
+        )
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -1045,11 +1103,48 @@ struct ArtifactSpeciesRecord {
     outcome_class: Option<String>,
     execution_outcome: Option<String>,
     quality_outcome: Option<String>,
+    comparison_authority: Option<String>,
+    runtime_surface_policy: Option<String>,
+    experiment: Option<ArtifactExperimentRecord>,
     error: Option<String>,
     timeout_seconds: Option<f64>,
     phase_timings: Vec<ArtifactPhaseTiming>,
     metrics: Option<ArtifactMetricsRecord>,
     ranked_result: Option<ArtifactRankedResult>,
+}
+
+impl ArtifactSpeciesRecord {
+    fn comparison_contract(&self) -> Option<ComparisonContract> {
+        self.experiment
+            .as_ref()
+            .and_then(|experiment| experiment.comparison_contract())
+            .or_else(|| parse_comparison_contract(None, self.comparison_authority.as_deref()))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
+struct ComparisonContractRecord {
+    authority: Option<String>,
+    requires_same_preset: Option<bool>,
+    requires_same_runtime_surfaces: Option<bool>,
+    requires_frozen_commit: Option<bool>,
+    requires_same_backend: Option<bool>,
+    label: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
+struct ArtifactExperimentRecord {
+    comparison: Option<ComparisonContractRecord>,
+}
+
+impl ArtifactExperimentRecord {
+    fn comparison_contract(&self) -> Option<ComparisonContract> {
+        parse_comparison_contract(self.comparison.as_ref(), None)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -1101,7 +1196,8 @@ struct ArtifactRankedResult {
 struct RunGroupKey {
     seed: SeedLabel,
     preset: String,
-    authority_label: String,
+    comparison_label: String,
+    runtime_surface_policy: String,
     lane: Option<String>,
 }
 
@@ -1110,7 +1206,8 @@ impl RunGroupKey {
         Self {
             seed: SeedLabel::from_option(row.seed),
             preset: row.preset.clone(),
-            authority_label: row.authority.label().to_owned(),
+            comparison_label: row.comparison.label().to_owned(),
+            runtime_surface_policy: row.runtime_surface_policy.clone(),
             lane: row.lane.clone(),
         }
     }
@@ -1119,19 +1216,46 @@ impl RunGroupKey {
         self.seed.label()
     }
 
-    fn authority_label(&self) -> &'static str {
-        if self.authority_label == ComparisonAuthority::AuthoritativeSamePreset.label() {
-            ComparisonAuthority::AuthoritativeSamePreset.label()
-        } else {
-            ComparisonAuthority::AdvisoryMixedPreset.label()
-        }
+    fn comparison_label(&self) -> &str {
+        &self.comparison_label
     }
 }
 
-fn parse_authority(value: &str) -> Option<ComparisonAuthority> {
-    match value {
-        "authoritative same-preset" => Some(ComparisonAuthority::AuthoritativeSamePreset),
-        "advisory mixed-preset" => Some(ComparisonAuthority::AdvisoryMixedPreset),
+fn parse_comparison_contract(
+    record: Option<&ComparisonContractRecord>,
+    legacy_label: Option<&str>,
+) -> Option<ComparisonContract> {
+    if let Some(record) = record {
+        return Some(ComparisonContract {
+            authority: match record.authority.as_deref()? {
+                "authoritative" => ComparisonAuthority::Authoritative,
+                "advisory" => ComparisonAuthority::Advisory,
+                _ => return None,
+            },
+            requires_same_preset: record.requires_same_preset.unwrap_or(false),
+            requires_same_runtime_surfaces: record.requires_same_runtime_surfaces.unwrap_or(true),
+            requires_frozen_commit: record.requires_frozen_commit.unwrap_or(false),
+            requires_same_backend: record.requires_same_backend.unwrap_or(true),
+        });
+    }
+
+    match legacy_label {
+        Some("authoritative same-preset") => Some(ComparisonContract::authoritative_same_preset()),
+        Some("advisory mixed-preset") => Some(ComparisonContract::advisory_mixed_preset()),
+        Some("advisory same-preset") => Some(ComparisonContract {
+            authority: ComparisonAuthority::Advisory,
+            requires_same_preset: true,
+            requires_same_runtime_surfaces: true,
+            requires_frozen_commit: false,
+            requires_same_backend: true,
+        }),
+        Some("authoritative mixed-preset") => Some(ComparisonContract {
+            authority: ComparisonAuthority::Authoritative,
+            requires_same_preset: false,
+            requires_same_runtime_surfaces: true,
+            requires_frozen_commit: true,
+            requires_same_backend: true,
+        }),
         _ => None,
     }
 }
@@ -1184,6 +1308,14 @@ mod tests {
                 "manifest": {
                     "run_id": "completed-run",
                     "comparison_authority": "authoritative same-preset",
+                    "comparison_contract": {
+                        "authority": "authoritative",
+                        "requires_same_preset": true,
+                        "requires_same_runtime_surfaces": true,
+                        "requires_frozen_commit": true,
+                        "requires_same_backend": true
+                    },
+                    "runtime_surface_policy": "conservative-defaults",
                     "preset": "full-medium-stress",
                     "lane": "leader",
                     "config": { "seed": 42 }
@@ -1193,6 +1325,8 @@ mod tests {
                         "variant_name": "p1_contractive_v1",
                         "species": "p1_contractive",
                         "outcome_class": "success",
+                        "comparison_authority": "authoritative same-preset",
+                        "runtime_surface_policy": "conservative-defaults",
                         "metrics": {
                             "grad_norm_depth_20": 0.53,
                             "long_context_perplexity": 1.54,
@@ -1227,6 +1361,7 @@ mod tests {
         assert!(output.contains("Per-seed leaderboards:"));
         assert!(output.contains("p1_contractive_v1"));
         assert!(output.contains("Aggregate authoritative leaderboard:"));
+        assert!(output.contains("runtime=conservative-defaults"));
         assert!(output.contains("Pending runs:"));
         assert!(output.contains("p1_fractal_hybrid_v1"));
 
@@ -1240,7 +1375,8 @@ mod tests {
             seed: Some(42),
             preset: "full-medium-stress".to_owned(),
             lane: Some("leader".to_owned()),
-            authority: ComparisonAuthority::AuthoritativeSamePreset,
+            comparison: ComparisonContract::authoritative_same_preset(),
+            runtime_surface_policy: "conservative-defaults".to_owned(),
             variant_name: "p1_contractive_v1".to_owned(),
             species: SpeciesId::P1Contractive,
             rank: 1,
@@ -1252,6 +1388,6 @@ mod tests {
         };
         let key = RunGroupKey::from_row(&row);
         assert_eq!(key.seed_label(), "42");
-        assert_eq!(key.authority_label(), "authoritative same-preset");
+        assert_eq!(key.comparison_label(), "authoritative same-preset");
     }
 }

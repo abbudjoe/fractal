@@ -1,16 +1,22 @@
 use std::sync::Arc;
+use std::{
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use fractal::{
     aggregate_results,
     error::FractalError,
     lifecycle::{
-        RunExecutionOutcome, SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig,
-        TournamentPreset, TournamentProgressEvent, TournamentReporter, TournamentSequence,
+        ArtifactPolicy, BudgetSpec, ComparisonContract, DecisionIntent, ExecutionBackend,
+        ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
+        ExperimentSpecTemplate, LaneIntent, RunExecutionOutcome, RuntimeSurfaceSpec,
+        SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig, TournamentPreset,
+        TournamentProgressEvent, TournamentReporter, TournamentSequence,
     },
     persist_run_artifacts, primitive_tracker_reminder_lines,
     registry::{ComputeBackend, ExecutionMode, SpeciesId},
-    species_registry_for_lane, species_registry_for_species, ComparisonAuthority, TournamentLane,
-    TournamentRunReport,
+    species_registry_for_lane, species_registry_for_species, TournamentLane, TournamentRunReport,
 };
 
 fn main() -> Result<(), FractalError> {
@@ -342,7 +348,7 @@ fn run_options(options: &RunOptions) -> Result<(), FractalError> {
         RunSelection::Preset(preset) => run_preset(
             options,
             preset,
-            ComparisonAuthority::AuthoritativeSamePreset,
+            ComparisonContract::authoritative_same_preset(),
         ),
         RunSelection::Sequence(sequence) => run_sequence(options, sequence),
     }
@@ -353,7 +359,7 @@ fn run_sequence(options: &RunOptions, sequence: TournamentSequence) -> Result<()
         if index > 0 {
             println!();
         }
-        run_preset(options, preset, ComparisonAuthority::AdvisoryMixedPreset)?;
+        run_preset(options, preset, ComparisonContract::advisory_mixed_preset())?;
     }
     Ok(())
 }
@@ -361,12 +367,21 @@ fn run_sequence(options: &RunOptions, sequence: TournamentSequence) -> Result<()
 fn run_preset(
     options: &RunOptions,
     preset: TournamentPreset,
-    comparison_authority: ComparisonAuthority,
+    comparison: ComparisonContract,
 ) -> Result<(), FractalError> {
-    let config = options.config_for(preset);
     let lane = options.lane();
     let species = options.species();
-    print_header(preset, lane, species, &config, comparison_authority);
+    let base_config = options.config_for(preset);
+    let config = base_config
+        .clone()
+        .with_experiment(build_experiment_template(
+            preset,
+            lane,
+            species,
+            &comparison,
+            &base_config,
+        ));
+    print_header(preset, lane, species, &config, &comparison);
     let tournament = Tournament::new(config.clone())?;
     let reporter: Arc<dyn TournamentReporter> = Arc::new(StdoutProgressReporter);
     let species = if let Some(species) = species {
@@ -382,15 +397,8 @@ fn run_preset(
             .filter_map(|record| record.metrics.clone())
             .collect::<Vec<_>>(),
     );
-    let report = TournamentRunReport::new(
-        preset,
-        lane,
-        comparison_authority,
-        config,
-        species,
-        results,
-        artifact,
-    );
+    let report =
+        TournamentRunReport::new(preset, lane, comparison, config, species, results, artifact);
     let persisted = persist_run_artifacts(&report)?;
     print_results(&report);
     print_failures(&report);
@@ -404,12 +412,122 @@ fn run_preset(
     Ok(())
 }
 
+fn build_experiment_template(
+    preset: TournamentPreset,
+    lane: TournamentLane,
+    species: Option<SpeciesId>,
+    comparison: &ComparisonContract,
+    config: &TournamentConfig,
+) -> ExperimentSpecTemplate {
+    let run_id = std::env::var("FRACTAL_RUN_ID").unwrap_or_else(|_| {
+        format!(
+            "{}-{}-{}",
+            current_unix_ms(),
+            preset.name(),
+            species
+                .map(|species| species.as_str().to_owned())
+                .unwrap_or_else(|| lane.name().to_owned())
+        )
+    });
+    let scope = species
+        .map(|species| format!("species={species}"))
+        .unwrap_or_else(|| format!("lane={}", lane.name()));
+
+    ExperimentSpecTemplate {
+        experiment_id: ExperimentId {
+            logical_name: format!("{}-{}", preset.name(), scope.replace('=', "-")),
+            run_id,
+            branch: detect_git_ref("FRACTAL_BRANCH", &["rev-parse", "--abbrev-ref", "HEAD"]),
+            commit_sha: detect_git_ref("FRACTAL_COMMIT_SHA", &["rev-parse", "HEAD"]),
+            created_at_unix_ms: current_unix_ms(),
+        },
+        question: ExperimentQuestion {
+            summary: format!("evaluate {scope} on {}", preset.name()),
+            lane_intent: lane_intent_for_preset(preset),
+            decision_intent: decision_intent_for_contract(comparison),
+        },
+        budget: BudgetSpec::from_config(preset, config),
+        runtime: RuntimeSurfaceSpec::default(),
+        comparison: comparison.clone(),
+        execution: ExecutionTarget {
+            kind: if std::env::var_os("FRACTAL_RUN_POD_ID").is_some() {
+                ExecutionTargetKind::RunPod
+            } else {
+                ExecutionTargetKind::Local
+            },
+            backend: ExecutionBackend::from_compute_backend(&config.execution_backend),
+            execution_mode: config.execution_mode,
+            pod_id: std::env::var("FRACTAL_RUN_POD_ID").ok(),
+            wrapper_timeout_seconds: std::env::var("FRACTAL_WRAPPER_TIMEOUT_SECONDS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok()),
+        },
+        artifacts: ArtifactPolicy::default(),
+    }
+}
+
+fn lane_intent_for_preset(preset: TournamentPreset) -> LaneIntent {
+    match preset {
+        TournamentPreset::FastTest
+        | TournamentPreset::Default
+        | TournamentPreset::ResearchMedium
+        | TournamentPreset::ChallengerLane => LaneIntent::Benchmark,
+        TournamentPreset::MinimalProvingGround
+        | TournamentPreset::ProvingGroundBaseline
+        | TournamentPreset::BullpenPolish => LaneIntent::Bullpen,
+        TournamentPreset::MinimalBaseline
+        | TournamentPreset::MinimalStressLane
+        | TournamentPreset::LighterIntermediateStress
+        | TournamentPreset::IntermediateStress
+        | TournamentPreset::CandidateStress => LaneIntent::Validation,
+        TournamentPreset::FullMediumStress
+        | TournamentPreset::MediumStress
+        | TournamentPreset::PressureTest
+        | TournamentPreset::GenerationFour => LaneIntent::Winner,
+    }
+}
+
+fn decision_intent_for_contract(comparison: &ComparisonContract) -> DecisionIntent {
+    if comparison.is_authoritative_same_preset() {
+        DecisionIntent::Promote
+    } else {
+        DecisionIntent::Benchmark
+    }
+}
+
+fn current_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn detect_git_ref(env_var: &str, args: &[&str]) -> Option<String> {
+    if let Ok(value) = std::env::var(env_var) {
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+
+    let output = Command::new("git").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
 fn print_header(
     preset: TournamentPreset,
     lane: TournamentLane,
     species: Option<SpeciesId>,
     config: &TournamentConfig,
-    comparison_authority: ComparisonAuthority,
+    comparison: &ComparisonContract,
 ) {
     println!("== {} ==", preset.name());
     let scope = species
@@ -434,7 +552,15 @@ fn print_header(
         config.effective_perplexity_eval_batches(),
         config.effective_arc_eval_batches(),
     );
-    println!("comparison={}", comparison_authority.label());
+    println!(
+        "comparison={} runtime={}",
+        comparison.label(),
+        config
+            .experiment
+            .as_ref()
+            .map(|experiment| experiment.runtime.label())
+            .unwrap_or_else(|| RuntimeSurfaceSpec::default().label())
+    );
     if !config.species_overrides.is_empty() {
         println!(
             "temporary_overrides={}",

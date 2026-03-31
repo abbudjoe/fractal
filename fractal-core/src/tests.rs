@@ -23,8 +23,11 @@ use crate::{
     error::FractalError,
     fitness::SpeciesRawMetrics,
     lifecycle::{
-        RunExecutionOutcome, RunOutcomeClass, RunQualityOutcome, Tournament, TournamentConfig,
-        TournamentPreset, TournamentProgressEvent, TournamentSequence,
+        ArtifactPolicy, BudgetSpec, ComparisonContract, DecisionIntent, ExecutionBackend,
+        ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
+        ExperimentSpecTemplate, LaneIntent, RunExecutionOutcome, RunOutcomeClass,
+        RunQualityOutcome, RuntimeSurfaceSpec, Tournament, TournamentConfig, TournamentPreset,
+        TournamentProgressEvent, TournamentSequence,
     },
     model::FractalModel,
     primitives::complex_square,
@@ -495,8 +498,44 @@ fn tournament_artifacts_capture_manifests_and_phase_timings() {
     let first = &artifact.species[0];
     assert_eq!(first.manifest.variant_name.as_str(), "p1_contractive_v1");
     assert!(first.manifest.timeout_budget.is_none());
+    assert!(first.manifest.experiment.is_none());
     assert!(!first.phase_timings.is_empty());
     assert_eq!(first.outcome_class(), RunOutcomeClass::Success);
+}
+
+#[test]
+fn tournament_artifacts_capture_resolved_experiment_spec() {
+    let config = TournamentPreset::FastTest
+        .config()
+        .with_experiment(test_experiment_template(
+            TournamentPreset::FastTest.config(),
+        ));
+    let tournament = Tournament::new(config).unwrap();
+    let artifact = tournament
+        .run_generation_artifacts(&[test_species_definition(SpeciesId::P1Contractive)], None)
+        .unwrap();
+
+    let experiment = artifact.species[0].manifest.experiment.as_ref().unwrap();
+    assert_eq!(experiment.variant.species, SpeciesId::P1Contractive);
+    assert_eq!(
+        experiment.variant.variant_name.as_str(),
+        "p1_contractive_v1"
+    );
+    assert_eq!(experiment.comparison.label(), "authoritative same-preset");
+    assert_eq!(experiment.runtime.label(), "conservative-defaults");
+    assert_eq!(experiment.execution.backend, ExecutionBackend::Cpu);
+}
+
+#[test]
+fn tournament_rejects_experiment_templates_that_disagree_with_config() {
+    let mut config = TournamentPreset::FastTest.config();
+    let mut experiment = test_experiment_template(config.clone());
+    experiment.budget.train_batch_size = config.train_batch_size + 1;
+    config.experiment = Some(experiment);
+
+    let error = Tournament::new(config).unwrap_err();
+
+    assert!(matches!(error, FractalError::InvalidConfig(_)));
 }
 
 #[test]
@@ -975,6 +1014,34 @@ fn numeric_failure_species_definition(id: SpeciesId) -> SpeciesDefinition {
             numeric_failure_species_runner,
             stub_species_runner_metal,
         )
+    }
+}
+
+fn test_experiment_template(config: TournamentConfig) -> ExperimentSpecTemplate {
+    ExperimentSpecTemplate {
+        experiment_id: ExperimentId {
+            logical_name: "fast-test-control".to_owned(),
+            run_id: "run-123".to_owned(),
+            branch: Some("codex/exp-spec-core".to_owned()),
+            commit_sha: Some("abc123".to_owned()),
+            created_at_unix_ms: 123,
+        },
+        question: ExperimentQuestion {
+            summary: "evaluate fast-test control plane".to_owned(),
+            lane_intent: LaneIntent::Benchmark,
+            decision_intent: DecisionIntent::Benchmark,
+        },
+        budget: BudgetSpec::from_config(TournamentPreset::FastTest, &config),
+        runtime: RuntimeSurfaceSpec::default(),
+        comparison: ComparisonContract::authoritative_same_preset(),
+        execution: ExecutionTarget {
+            kind: ExecutionTargetKind::Local,
+            backend: ExecutionBackend::from_compute_backend(&config.execution_backend),
+            execution_mode: config.execution_mode,
+            pod_id: None,
+            wrapper_timeout_seconds: None,
+        },
+        artifacts: ArtifactPolicy::default(),
     }
 }
 

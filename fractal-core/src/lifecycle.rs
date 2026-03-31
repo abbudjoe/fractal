@@ -109,6 +109,421 @@ impl TournamentSequence {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComparisonAuthority {
+    Authoritative,
+    Advisory,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComparisonContract {
+    pub authority: ComparisonAuthority,
+    pub requires_same_preset: bool,
+    pub requires_same_runtime_surfaces: bool,
+    pub requires_frozen_commit: bool,
+    pub requires_same_backend: bool,
+}
+
+impl ComparisonContract {
+    pub const fn authoritative_same_preset() -> Self {
+        Self {
+            authority: ComparisonAuthority::Authoritative,
+            requires_same_preset: true,
+            requires_same_runtime_surfaces: true,
+            requires_frozen_commit: true,
+            requires_same_backend: true,
+        }
+    }
+
+    pub const fn advisory_mixed_preset() -> Self {
+        Self {
+            authority: ComparisonAuthority::Advisory,
+            requires_same_preset: false,
+            requires_same_runtime_surfaces: true,
+            requires_frozen_commit: false,
+            requires_same_backend: true,
+        }
+    }
+
+    pub const fn label(&self) -> &'static str {
+        match (self.authority, self.requires_same_preset) {
+            (ComparisonAuthority::Authoritative, true) => "authoritative same-preset",
+            (ComparisonAuthority::Authoritative, false) => "authoritative mixed-preset",
+            (ComparisonAuthority::Advisory, true) => "advisory same-preset",
+            (ComparisonAuthority::Advisory, false) => "advisory mixed-preset",
+        }
+    }
+
+    pub const fn is_authoritative_same_preset(&self) -> bool {
+        matches!(self.authority, ComparisonAuthority::Authoritative) && self.requires_same_preset
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaneIntent {
+    Benchmark,
+    Bullpen,
+    Validation,
+    Winner,
+}
+
+impl LaneIntent {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Benchmark => "benchmark",
+            Self::Bullpen => "bullpen",
+            Self::Validation => "validation",
+            Self::Winner => "winner",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecisionIntent {
+    Promote,
+    Hold,
+    Retire,
+    Benchmark,
+    Optimize,
+}
+
+impl DecisionIntent {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Promote => "promote",
+            Self::Hold => "hold",
+            Self::Retire => "retire",
+            Self::Benchmark => "benchmark",
+            Self::Optimize => "optimize",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExperimentId {
+    pub logical_name: String,
+    pub run_id: String,
+    pub branch: Option<String>,
+    pub commit_sha: Option<String>,
+    pub created_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExperimentQuestion {
+    pub summary: String,
+    pub lane_intent: LaneIntent,
+    pub decision_intent: DecisionIntent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariantSpec {
+    pub species: SpeciesId,
+    pub variant_name: PrimitiveVariantName,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BudgetSpec {
+    pub preset: TournamentPreset,
+    pub seed: u64,
+    pub train_batch_size: usize,
+    pub eval_batch_size: usize,
+    pub train_steps_per_species: usize,
+    pub eval_batches_per_family: usize,
+    pub perplexity_eval_batches: usize,
+    pub arc_eval_batches: usize,
+    pub max_recursion_depth: usize,
+    pub stability_depth: usize,
+    pub learning_rate: f64,
+    pub timeout_seconds: Option<f64>,
+}
+
+impl BudgetSpec {
+    pub fn from_config(preset: TournamentPreset, config: &TournamentConfig) -> Self {
+        Self {
+            preset,
+            seed: config.seed,
+            train_batch_size: config.train_batch_size,
+            eval_batch_size: config.eval_batch_size,
+            train_steps_per_species: config.train_steps_per_species,
+            eval_batches_per_family: config.eval_batches_per_family,
+            perplexity_eval_batches: config.effective_perplexity_eval_batches(),
+            arc_eval_batches: config.effective_arc_eval_batches(),
+            max_recursion_depth: config.max_recursion_depth,
+            stability_depth: config.stability_depth,
+            learning_rate: config.learning_rate,
+            timeout_seconds: config.run_timeout.map(|timeout| timeout.as_secs_f64()),
+        }
+    }
+
+    fn matches_config(&self, config: &TournamentConfig) -> bool {
+        self.seed == config.seed
+            && self.train_batch_size == config.train_batch_size
+            && self.eval_batch_size == config.eval_batch_size
+            && self.train_steps_per_species == config.train_steps_per_species
+            && self.eval_batches_per_family == config.eval_batches_per_family
+            && self.perplexity_eval_batches == config.effective_perplexity_eval_batches()
+            && self.arc_eval_batches == config.effective_arc_eval_batches()
+            && self.max_recursion_depth == config.max_recursion_depth
+            && self.stability_depth == config.stability_depth
+            && (self.learning_rate - config.learning_rate).abs() < f64::EPSILON
+            && self.timeout_seconds == config.run_timeout.map(|timeout| timeout.as_secs_f64())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvalBackendPolicy {
+    SharedBackend,
+}
+
+impl EvalBackendPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SharedBackend => "shared-backend",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchingPolicy {
+    Padded,
+}
+
+impl BatchingPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Padded => "padded",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForwardExecutionPolicy {
+    SimpleLoop,
+}
+
+impl ForwardExecutionPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SimpleLoop => "simple-loop",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferReusePolicy {
+    Disabled,
+}
+
+impl BufferReusePolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BenchmarkMode {
+    Leaderboard,
+}
+
+impl BenchmarkMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Leaderboard => "leaderboard",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeBackendPolicy {
+    ActiveExecutionBackend,
+}
+
+impl RuntimeBackendPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ActiveExecutionBackend => "active-execution-backend",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeSurfaceSpec {
+    pub eval_backend_policy: EvalBackendPolicy,
+    pub batching_policy: BatchingPolicy,
+    pub execution_policy: ForwardExecutionPolicy,
+    pub buffer_reuse_policy: BufferReusePolicy,
+    pub benchmark_mode: BenchmarkMode,
+    pub backend_policy: RuntimeBackendPolicy,
+}
+
+impl Default for RuntimeSurfaceSpec {
+    fn default() -> Self {
+        Self {
+            eval_backend_policy: EvalBackendPolicy::SharedBackend,
+            batching_policy: BatchingPolicy::Padded,
+            execution_policy: ForwardExecutionPolicy::SimpleLoop,
+            buffer_reuse_policy: BufferReusePolicy::Disabled,
+            benchmark_mode: BenchmarkMode::Leaderboard,
+            backend_policy: RuntimeBackendPolicy::ActiveExecutionBackend,
+        }
+    }
+}
+
+impl RuntimeSurfaceSpec {
+    pub fn label(&self) -> String {
+        if *self == Self::default() {
+            "conservative-defaults".to_owned()
+        } else {
+            format!(
+                "eval_backend={} batching={} execution={} buffer_reuse={} benchmark_mode={} backend_policy={}",
+                self.eval_backend_policy.as_str(),
+                self.batching_policy.as_str(),
+                self.execution_policy.as_str(),
+                self.buffer_reuse_policy.as_str(),
+                self.benchmark_mode.as_str(),
+                self.backend_policy.as_str(),
+            )
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutionTargetKind {
+    Local,
+    RunPod,
+}
+
+impl ExecutionTargetKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::RunPod => "runpod",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutionBackend {
+    Cpu,
+    Metal,
+    Cuda,
+}
+
+impl ExecutionBackend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Metal => "metal",
+            Self::Cuda => "cuda",
+        }
+    }
+
+    pub fn from_compute_backend(backend: &ComputeBackend) -> Self {
+        match backend {
+            ComputeBackend::CpuCandle => Self::Cpu,
+            #[cfg(feature = "cuda")]
+            ComputeBackend::CudaCandle { .. } => Self::Cuda,
+            ComputeBackend::MetalWgpu { .. } => Self::Metal,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionTarget {
+    pub kind: ExecutionTargetKind,
+    pub backend: ExecutionBackend,
+    pub execution_mode: ExecutionMode,
+    pub pod_id: Option<String>,
+    pub wrapper_timeout_seconds: Option<u64>,
+}
+
+impl ExecutionTarget {
+    fn matches_config(&self, config: &TournamentConfig) -> bool {
+        self.backend == ExecutionBackend::from_compute_backend(&config.execution_backend)
+            && self.execution_mode == config.execution_mode
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtifactPolicy {
+    pub manifest_required: bool,
+    pub structured_artifact_required: bool,
+    pub final_log_required: bool,
+    pub tracker_ready_output_required: bool,
+}
+
+impl Default for ArtifactPolicy {
+    fn default() -> Self {
+        Self {
+            manifest_required: true,
+            structured_artifact_required: true,
+            final_log_required: true,
+            tracker_ready_output_required: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExperimentSpec {
+    pub experiment_id: ExperimentId,
+    pub question: ExperimentQuestion,
+    pub variant: VariantSpec,
+    pub budget: BudgetSpec,
+    pub runtime: RuntimeSurfaceSpec,
+    pub comparison: ComparisonContract,
+    pub execution: ExecutionTarget,
+    pub artifacts: ArtifactPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExperimentSpecTemplate {
+    pub experiment_id: ExperimentId,
+    pub question: ExperimentQuestion,
+    pub budget: BudgetSpec,
+    pub runtime: RuntimeSurfaceSpec,
+    pub comparison: ComparisonContract,
+    pub execution: ExecutionTarget,
+    pub artifacts: ArtifactPolicy,
+}
+
+impl ExperimentSpecTemplate {
+    pub fn resolve_variant(
+        &self,
+        species: SpeciesId,
+        variant_name: PrimitiveVariantName,
+    ) -> ExperimentSpec {
+        ExperimentSpec {
+            experiment_id: self.experiment_id.clone(),
+            question: self.question.clone(),
+            variant: VariantSpec {
+                species,
+                variant_name,
+            },
+            budget: self.budget.clone(),
+            runtime: self.runtime.clone(),
+            comparison: self.comparison.clone(),
+            execution: self.execution.clone(),
+            artifacts: self.artifacts.clone(),
+        }
+    }
+
+    fn validate_against_config(&self, config: &TournamentConfig) -> Result<(), FractalError> {
+        if !self.budget.matches_config(config) {
+            return Err(FractalError::InvalidConfig(
+                "experiment budget must match the resolved tournament config".into(),
+            ));
+        }
+        if !self.execution.matches_config(config) {
+            return Err(FractalError::InvalidConfig(
+                "experiment execution target must match the resolved tournament config".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SpeciesPresetOverride {
     pub species: SpeciesId,
@@ -173,6 +588,7 @@ pub struct TournamentConfig {
     pub execution_mode: ExecutionMode,
     pub parallelism: usize,
     pub species_overrides: Vec<SpeciesPresetOverride>,
+    pub experiment: Option<ExperimentSpecTemplate>,
 }
 
 impl Default for TournamentConfig {
@@ -199,6 +615,7 @@ impl Default for TournamentConfig {
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
             species_overrides: Vec::new(),
+            experiment: None,
         }
     }
 }
@@ -320,6 +737,10 @@ impl TournamentConfig {
             }
         }
 
+        if let Some(experiment) = &self.experiment {
+            experiment.validate_against_config(self)?;
+        }
+
         Ok(())
     }
 
@@ -346,6 +767,7 @@ impl TournamentConfig {
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
             species_overrides: Vec::new(),
+            experiment: None,
         }
     }
 
@@ -372,6 +794,7 @@ impl TournamentConfig {
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
             species_overrides: Vec::new(),
+            experiment: None,
         }
     }
 
@@ -404,6 +827,7 @@ impl TournamentConfig {
                 train_steps_per_species: Some(16),
                 ..SpeciesPresetOverride::for_species(SpeciesId::Ifs)
             }],
+            experiment: None,
         }
     }
 
@@ -430,6 +854,7 @@ impl TournamentConfig {
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
             species_overrides: Vec::new(),
+            experiment: None,
         }
     }
 
@@ -456,6 +881,7 @@ impl TournamentConfig {
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
             species_overrides: Vec::new(),
+            experiment: None,
         }
     }
 
@@ -490,6 +916,7 @@ impl TournamentConfig {
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
             species_overrides: Vec::new(),
+            experiment: None,
         }
     }
 
@@ -520,6 +947,7 @@ impl TournamentConfig {
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
             species_overrides: Vec::new(),
+            experiment: None,
         }
     }
 
@@ -546,6 +974,7 @@ impl TournamentConfig {
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
             species_overrides: Vec::new(),
+            experiment: None,
         }
     }
 
@@ -585,6 +1014,7 @@ impl TournamentConfig {
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
             species_overrides: Vec::new(),
+            experiment: None,
         }
     }
 
@@ -611,6 +1041,7 @@ impl TournamentConfig {
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
             species_overrides: Vec::new(),
+            experiment: None,
         }
     }
 
@@ -637,6 +1068,7 @@ impl TournamentConfig {
             execution_mode: ExecutionMode::Sequential,
             parallelism: 4,
             species_overrides: Vec::new(),
+            experiment: None,
         }
     }
 
@@ -653,6 +1085,21 @@ impl TournamentConfig {
     pub fn with_parallelism(mut self, parallelism: usize) -> Self {
         self.parallelism = parallelism;
         self
+    }
+
+    pub fn with_experiment(mut self, experiment: ExperimentSpecTemplate) -> Self {
+        self.experiment = Some(experiment);
+        self
+    }
+
+    pub fn resolved_experiment(
+        &self,
+        species: SpeciesId,
+        variant_name: PrimitiveVariantName,
+    ) -> Option<ExperimentSpec> {
+        self.experiment
+            .as_ref()
+            .map(|experiment| experiment.resolve_variant(species, variant_name))
     }
 
     pub fn effective_for_species(&self, species: SpeciesId) -> Self {
@@ -772,6 +1219,7 @@ pub struct RunManifest {
     pub variant_name: PrimitiveVariantName,
     pub timeout_budget: Option<Duration>,
     pub config: TournamentConfig,
+    pub experiment: Option<ExperimentSpec>,
 }
 
 #[derive(Clone, Debug)]
@@ -1060,9 +1508,11 @@ impl Tournament {
     }
 
     fn run_context(&self, index: usize, definition: &SpeciesDefinition) -> SpeciesRunContext {
+        let config = self.config.effective_for_species(definition.id);
         SpeciesRunContext {
             index,
-            config: self.config.effective_for_species(definition.id),
+            experiment: config.resolved_experiment(definition.id, definition.variant_name),
+            config,
             generator: Arc::clone(&self.generator),
             variant_name: definition.variant_name,
         }
@@ -1080,6 +1530,7 @@ impl Tournament {
                 variant_name: context.variant_name,
                 timeout_budget: context.config.run_timeout,
                 config: context.config.clone(),
+                experiment: context.experiment.clone(),
             };
             match result {
                 Ok(metrics) => build_success_artifact(

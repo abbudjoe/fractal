@@ -6,8 +6,9 @@ pub fn primitive_tracker_reminder_lines(report: &TournamentRunReport) -> Vec<Str
     let variant_names = report.variant_name_map();
     let mut lines = Vec::with_capacity(report.artifact.species.len() + 1);
     lines.push(format!(
-        "primitive-tracker reminder [{}]: review and update {TRACKER_PATH}",
-        report.comparison_label()
+        "primitive-tracker reminder [{} | runtime={}]: review and update {TRACKER_PATH}",
+        report.comparison_label(),
+        report.runtime_surface_label()
     ));
     lines.extend(report.artifact.species.iter().map(|record| {
         let variant_name = variant_names
@@ -55,10 +56,11 @@ fn outcome_label(outcome: fractal_core::RunOutcomeClass) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::primitive_tracker_reminder_lines;
-    use crate::{species_registry_for_species, ComparisonAuthority, TournamentRunReport};
+    use crate::{species_registry_for_species, TournamentRunReport};
     use fractal_core::{
-        PhaseTiming, RankedSpeciesResult, RunExecutionOutcome, RunManifest, RunPhase,
-        RunQualityOutcome, SpeciesId, SpeciesRunArtifact, SpeciesRunStage, TournamentRunArtifact,
+        ComparisonContract, PhaseTiming, RankedSpeciesResult, RunExecutionOutcome, RunManifest,
+        RunPhase, RunQualityOutcome, SpeciesId, SpeciesRunArtifact, SpeciesRunStage,
+        TournamentRunArtifact,
     };
 
     #[test]
@@ -66,7 +68,7 @@ mod tests {
         let report = TournamentRunReport::new(
             crate::TournamentPreset::BullpenPolish,
             crate::TournamentLane::Challenger,
-            ComparisonAuthority::AuthoritativeSamePreset,
+            ComparisonContract::authoritative_same_preset(),
             crate::TournamentPreset::BullpenPolish.config(),
             species_registry_for_species(SpeciesId::P1FractalHybrid),
             vec![RankedSpeciesResult {
@@ -92,6 +94,7 @@ mod tests {
                         ),
                         timeout_budget: None,
                         config: crate::TournamentPreset::BullpenPolish.config(),
+                        experiment: None,
                     },
                     phase_timings: vec![PhaseTiming {
                         phase: RunPhase::Train,
@@ -110,7 +113,7 @@ mod tests {
 
         assert_eq!(
             lines[0],
-            "primitive-tracker reminder [authoritative same-preset]: review and update docs/primitive-tracker.md"
+            "primitive-tracker reminder [authoritative same-preset | runtime=conservative-defaults]: review and update docs/primitive-tracker.md"
         );
         assert!(lines[1].contains("p1_fractal_hybrid_v1"));
     }
