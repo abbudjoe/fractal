@@ -41,7 +41,9 @@
 - Amplification note: motif reuse weakened compared to the previous motif sample, so repeated phrasing did not yet amplify hierarchical clustering on this run
 - Dynamic lever candidate: `p1_fractal_hybrid_dyn-state-norm_v1`
 - Lever description: rolling normalized state norm modulates a cross-depth motif-distance threshold, allowing digest reuse only when a prior motif is similar enough and still unused at the current depth
+- Sensitivity knob: `lever_sensitivity` attenuates the state-norm similarity threshold as rolling norm falls, so lower values damp reuse less aggressively and higher values suppress reuse sooner
 - Expected test output format: `static_unique_tokens_by_depth=...`, `dynamic_unique_tokens_by_depth=...`, `static_motif_reuse_count=...`, `dynamic_motif_reuse_count=...`, `amplification_note=...`
+- Latest tuned result (`lever_sensitivity=0.6`): static `motif_reuse=0`, dynamic `motif_reuse=0`; both preserved `d0:1, d1:2, d2:4, d3:8, d4:16, d5:32`, so the tuned lever under-shot the target reuse window on this sample
 
 ## Retired / Failed Tokenizer Variants
 

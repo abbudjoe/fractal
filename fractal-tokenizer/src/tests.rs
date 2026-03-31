@@ -3,9 +3,11 @@ use fractal_core::{rule_trait::FractalRule, state::FractalState};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    revived_primitive_factories, tokenizer::p1_dynamic_lever_factory, tokenizer_tracker_reminder,
-    validate_tokenizer_primitive_name, B1FractalGated, B3FractalHierarchical, B4Universal,
-    P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary, RecursiveTokenizer, TokenizerConfig,
+    revived_primitive_factories,
+    tokenizer::{p1_dynamic_lever_factory, DEFAULT_DYNAMIC_LEVER_SENSITIVITY},
+    tokenizer_tracker_reminder, validate_tokenizer_primitive_name, B1FractalGated,
+    B3FractalHierarchical, B4Universal, P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary,
+    RecursiveTokenizer, TokenizerConfig,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -188,6 +190,10 @@ fn motif_amplification_p1_hybrid_follow_up() {
         cross_depth_motif_reuse_count(&static_summary)
     );
     println!(
+        "static_lever_sensitivity={:.1}",
+        DEFAULT_DYNAMIC_LEVER_SENSITIVITY
+    );
+    println!(
         "static_amplification_note={}",
         describe_pattern(&static_summary, &static_unique_by_depth)
     );
@@ -199,6 +205,10 @@ fn motif_amplification_p1_hybrid_follow_up() {
     println!(
         "dynamic_motif_reuse_count={}",
         cross_depth_motif_reuse_count(&dynamic_summary)
+    );
+    println!(
+        "dynamic_lever_sensitivity={:.1}",
+        DEFAULT_DYNAMIC_LEVER_SENSITIVITY
     );
     println!(
         "amplification_note={}",
