@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{
     revived_primitive_factories, tokenizer::p1_dynamic_lever_factory, tokenizer_tracker_reminder,
     validate_tokenizer_primitive_name, B1FractalGated, B3FractalHierarchical, B4Universal,
-    P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary, RecursiveTokenizer, TokenizerConfig,
+    P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary, RecursiveTokenizer, TokenRecord,
+    TokenizerConfig,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -259,6 +260,11 @@ fn motif_amplification_p1_hybrid_v2_stress() {
         "{}",
         format_final_token_spans_preview(&static_summary, &stress_input, 10)
     );
+    println!("REUSED MOTIFS (cross-depth) [{}]", static_summary.primitive);
+    println!(
+        "{}",
+        format_reused_motif_spans(&static_summary, &stress_input)
+    );
     println!("{}", format_summary_preview(&dynamic_summary, 20));
     println!("dynamic_lever_type=v2-self-regulating");
     println!(
@@ -276,6 +282,14 @@ fn motif_amplification_p1_hybrid_v2_stress() {
     println!(
         "{}",
         format_final_token_spans_preview(&dynamic_summary, &stress_input, 10)
+    );
+    println!(
+        "REUSED MOTIFS (cross-depth) [{}]",
+        dynamic_summary.primitive
+    );
+    println!(
+        "{}",
+        format_reused_motif_spans(&dynamic_summary, &stress_input)
     );
     println!("{}", tokenizer_tracker_reminder());
 
@@ -377,6 +391,32 @@ fn truncated_token_span(input: &str, start: usize, end: usize) -> String {
     }
 }
 
+fn format_reused_motif_spans(summary: &PrimitiveRunSummary, input: &str) -> String {
+    let repeated = repeated_cross_depth_motifs(summary);
+    if repeated.is_empty() {
+        return "(none)".to_string();
+    }
+
+    repeated
+        .into_iter()
+        .map(|motif| {
+            format!(
+                "digest={} | total_reuse_count={} | ranges={} | text=\"{}\"",
+                motif.digest,
+                motif.total_reuse_count,
+                motif
+                    .ranges
+                    .iter()
+                    .map(|(start, end)| format!("{start}..{end}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                truncated_token_span(input, motif.example_start, motif.example_end)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn unique_tokens_by_depth(summary: &PrimitiveRunSummary) -> BTreeMap<usize, usize> {
     let mut tokens_by_depth = BTreeMap::<usize, BTreeSet<&str>>::new();
     for token in &summary.tokens {
@@ -472,12 +512,7 @@ fn describe_motif_reuse(summary: &PrimitiveRunSummary) -> String {
     let mut motif_hits = BTreeMap::<String, BTreeSet<usize>>::new();
 
     for token in &summary.tokens {
-        let motif = token
-            .token
-            .rsplit_once('-')
-            .map(|(_, digest)| digest)
-            .unwrap_or(token.token.as_str())
-            .to_string();
+        let motif = token_digest(token).to_string();
         motif_hits.entry(motif).or_default().insert(token.depth);
     }
 
@@ -527,19 +562,61 @@ fn dynamic_lever_note_v2(
 }
 
 fn cross_depth_motif_reuse_count(summary: &PrimitiveRunSummary) -> usize {
-    let mut motif_hits = BTreeMap::<String, BTreeSet<usize>>::new();
+    repeated_cross_depth_motifs(summary).len()
+}
+
+fn repeated_cross_depth_motifs(summary: &PrimitiveRunSummary) -> Vec<RepeatedMotif> {
+    let mut motif_hits = BTreeMap::<String, RepeatedMotifAccumulator>::new();
     for token in &summary.tokens {
-        let motif = token
-            .token
-            .rsplit_once('-')
-            .map(|(_, digest)| digest)
-            .unwrap_or(token.token.as_str())
-            .to_string();
-        motif_hits.entry(motif).or_default().insert(token.depth);
+        let entry = motif_hits
+            .entry(token_digest(token).to_string())
+            .or_insert_with(|| RepeatedMotifAccumulator {
+                depths: BTreeSet::new(),
+                ranges: Vec::new(),
+                example_start: token.start,
+                example_end: token.end,
+            });
+        entry.depths.insert(token.depth);
+        entry.ranges.push((token.start, token.end));
+        if entry.ranges.len() == 1 {
+            entry.example_start = token.start;
+            entry.example_end = token.end;
+        }
     }
 
     motif_hits
         .into_iter()
-        .filter(|(_, depths)| depths.len() > 1)
-        .count()
+        .filter_map(|(digest, entry)| {
+            (entry.depths.len() > 1 && entry.ranges.len() >= 2).then_some(RepeatedMotif {
+                digest,
+                total_reuse_count: entry.ranges.len(),
+                ranges: entry.ranges,
+                example_start: entry.example_start,
+                example_end: entry.example_end,
+            })
+        })
+        .collect()
+}
+
+fn token_digest(token: &TokenRecord) -> &str {
+    token
+        .token
+        .rsplit_once('-')
+        .map(|(_, digest)| digest)
+        .unwrap_or(token.token.as_str())
+}
+
+struct RepeatedMotifAccumulator {
+    depths: BTreeSet<usize>,
+    ranges: Vec<(usize, usize)>,
+    example_start: usize,
+    example_end: usize,
+}
+
+struct RepeatedMotif {
+    digest: String,
+    total_reuse_count: usize,
+    ranges: Vec<(usize, usize)>,
+    example_start: usize,
+    example_end: usize,
 }
