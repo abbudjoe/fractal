@@ -690,6 +690,75 @@ fn save_hf_tokenizer_to_temp_file(
     path
 }
 
+fn pretrained_hf_tokenizer_json_paths() -> Vec<(String, PathBuf)> {
+    let mut paths = Vec::new();
+
+    for (label, env_var) in [
+        ("llama31", "HF_LLAMA31_TOKENIZER_JSON"),
+        ("mistral7", "HF_MISTRAL7_TOKENIZER_JSON"),
+    ] {
+        if let Ok(value) = std::env::var(env_var) {
+            let path = PathBuf::from(value);
+            if path.is_file() {
+                paths.push((label.to_string(), path));
+            }
+        }
+    }
+
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return dedupe_tokenizer_paths(paths);
+    };
+    let cache_root = home.join(".cache/huggingface/hub");
+    if !cache_root.is_dir() {
+        return dedupe_tokenizer_paths(paths);
+    }
+
+    for (label, owner_fragment) in [
+        ("llama31", "meta-llama"),
+        ("mistral7", "mistralai"),
+    ] {
+        if let Some(path) = find_tokenizer_json_under(&cache_root, owner_fragment) {
+            paths.push((label.to_string(), path));
+        }
+    }
+
+    dedupe_tokenizer_paths(paths)
+}
+
+fn find_tokenizer_json_under(root: &Path, owner_fragment: &str) -> Option<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.file_name().and_then(|name| name.to_str()) != Some("tokenizer.json") {
+                continue;
+            }
+            if path.to_string_lossy().contains(owner_fragment) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn dedupe_tokenizer_paths(paths: Vec<(String, PathBuf)>) -> Vec<(String, PathBuf)> {
+    let mut seen = BTreeSet::<PathBuf>::new();
+    let mut deduped = Vec::new();
+    for (label, path) in paths {
+        if seen.insert(path.clone()) {
+            deduped.push((label, path));
+        }
+    }
+    deduped
+}
+
 fn write_json_value(path: &Path, value: &Value) {
     fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap();
 }
@@ -976,6 +1045,93 @@ fn model_face_file_backed_hf_native_adapter_preserves_chunk_order_and_is_determi
         println!("native_chunk_count={}", native_document.chunk_count());
         println!("native_token_count={}", native_document.native_token_count());
         println!("roundtrip_status=OK");
+    }
+}
+
+#[test]
+fn model_face_pretrained_hf_native_adapter_preserves_chunk_order_and_is_deterministic() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+    let limits = FaceoffChunkLimits::new(8, 4096);
+    let adapter = NativeCompatibilityAdapter::default();
+    let tokenizer_paths = pretrained_hf_tokenizer_json_paths();
+
+    if tokenizer_paths.is_empty() {
+        println!(
+            "MODEL_FACE_PRETRAINED_HF_SKIP=no local pretrained tokenizer.json configured/found"
+        );
+        return;
+    }
+
+    let documents = vec![
+        faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                &stress,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::NoveltyAware,
+            )
+            .unwrap(),
+        faceoff
+            .encode_text_v2_with_policy::<TestBackend>(
+                &mixed,
+                &vocab,
+                &device,
+                FaceoffEmissionPolicy::NoveltyAware,
+            )
+            .unwrap(),
+    ]
+    .into_iter()
+    .map(|encoded| ModelFacingDocument::from_encoded(encoded, limits).unwrap())
+    .collect::<Vec<_>>();
+    let batch = ModelFacingBatch::from(documents);
+
+    for (label, tokenizer_path) in tokenizer_paths {
+        let tokenizer = HuggingFaceNativeTokenizer::from_file(&tokenizer_path).unwrap_or_else(
+            |error| {
+                panic!(
+                    "failed to load pretrained tokenizer.json for {label} at {}: {error}",
+                    tokenizer_path.display()
+                )
+            },
+        );
+        let native = adapter.retokenize_batch(&batch, &tokenizer).unwrap();
+        let native_again = adapter.retokenize_batch(&batch, &tokenizer).unwrap();
+
+        assert_eq!(native, native_again);
+        assert_eq!(native.len(), batch.len());
+
+        for (index, (document, native_document)) in batch.iter().zip(native.iter()).enumerate() {
+            assert_eq!(document.input_len(), native_document.input_len);
+            assert_eq!(
+                document.frontier_token_count(),
+                native_document.frontier_token_count
+            );
+            assert_eq!(document.chunk_count(), native_document.chunk_count());
+            assert_eq!(document.reconstruct().unwrap(), document.decode().unwrap());
+            assert!(native_document
+                .chunks
+                .iter()
+                .enumerate()
+                .all(|(chunk_index, chunk)| chunk.source.index == chunk_index));
+            assert!(native_document
+                .chunks
+                .windows(2)
+                .all(|pair| pair[0].source.index < pair[1].source.index));
+
+            println!("MODEL_FACE_PRETRAINED_HF_LABEL={label}");
+            println!("MODEL_FACE_PRETRAINED_HF_INPUT_INDEX={index}");
+            println!("tokenizer_json_path={}", tokenizer_path.display());
+            println!("native_chunk_count={}", native_document.chunk_count());
+            println!("native_token_count={}", native_document.native_token_count());
+            println!("roundtrip_status=OK");
+        }
     }
 }
 

@@ -165,6 +165,7 @@ The adapter layer should be validated with the following checks:
 - no fallback corruption
 - model-facing batch shape stability
 - compatibility adapter output for existing LMs
+- pretrained tokenizer.json smoke coverage through `HuggingFaceNativeTokenizer::from_file` using local paths or env vars such as `HF_LLAMA31_TOKENIZER_JSON` and `HF_MISTRAL7_TOKENIZER_JSON`, with a clean skip when no real file is configured
 - file-backed native-tokenizer smoke coverage through `HuggingFaceNativeTokenizer::from_file`
 
 The first adapter validation should use the existing benchmark inputs:
