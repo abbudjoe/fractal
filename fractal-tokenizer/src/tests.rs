@@ -712,18 +712,65 @@ fn save_hf_tokenizer_to_temp_file(tokenizer: &HuggingFaceNativeTokenizer, prefix
     path
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PretrainedTokenizerSource {
+    label: &'static str,
+    env_var: &'static str,
+    owner_fragment: &'static str,
+    repo_fragment: &'static str,
+}
+
+impl PretrainedTokenizerSource {
+    fn env_path(self) -> Option<PathBuf> {
+        let value = std::env::var(self.env_var).ok()?;
+        let path = PathBuf::from(value);
+        path.is_file().then_some(path)
+    }
+
+    fn cache_path(self, cache_root: &Path) -> Option<PathBuf> {
+        find_tokenizer_json_under(cache_root, self.owner_fragment, self.repo_fragment)
+    }
+}
+
 fn pretrained_hf_tokenizer_json_paths() -> Vec<(String, PathBuf)> {
+    const SOURCES: &[PretrainedTokenizerSource] = &[
+        PretrainedTokenizerSource {
+            label: "llama31",
+            env_var: "HF_LLAMA31_TOKENIZER_JSON",
+            owner_fragment: "meta-llama",
+            repo_fragment: "Llama-3.1-8B-Instruct",
+        },
+        PretrainedTokenizerSource {
+            label: "mistral7",
+            env_var: "HF_MISTRAL7_TOKENIZER_JSON",
+            owner_fragment: "mistralai",
+            repo_fragment: "Mistral-7B-Instruct-v0.3",
+        },
+        PretrainedTokenizerSource {
+            label: "qwen25",
+            env_var: "HF_QWEN25_TOKENIZER_JSON",
+            owner_fragment: "Qwen",
+            repo_fragment: "Qwen2.5-7B-Instruct",
+        },
+        PretrainedTokenizerSource {
+            label: "phi3mini",
+            env_var: "HF_PHI3MINI_TOKENIZER_JSON",
+            owner_fragment: "microsoft",
+            repo_fragment: "Phi-3-mini-4k-instruct",
+        },
+        PretrainedTokenizerSource {
+            label: "mixtral8x7b",
+            env_var: "HF_MIXTRAL8X7B_TOKENIZER_JSON",
+            owner_fragment: "mistralai",
+            repo_fragment: "Mixtral-8x7B-Instruct-v0.1",
+        },
+    ];
+
     let mut paths = Vec::new();
 
-    for (label, env_var) in [
-        ("llama31", "HF_LLAMA31_TOKENIZER_JSON"),
-        ("mistral7", "HF_MISTRAL7_TOKENIZER_JSON"),
-    ] {
-        if let Ok(value) = std::env::var(env_var) {
-            let path = PathBuf::from(value);
-            if path.is_file() {
-                paths.push((label.to_string(), path));
-            }
+    for source in SOURCES {
+        if let Some(path) = source.env_path() {
+            paths.push((source.label.to_string(), path));
         }
     }
 
@@ -735,16 +782,20 @@ fn pretrained_hf_tokenizer_json_paths() -> Vec<(String, PathBuf)> {
         return dedupe_tokenizer_paths(paths);
     }
 
-    for (label, owner_fragment) in [("llama31", "meta-llama"), ("mistral7", "mistralai")] {
-        if let Some(path) = find_tokenizer_json_under(&cache_root, owner_fragment) {
-            paths.push((label.to_string(), path));
+    for source in SOURCES {
+        if let Some(path) = source.cache_path(&cache_root) {
+            paths.push((source.label.to_string(), path));
         }
     }
 
     dedupe_tokenizer_paths(paths)
 }
 
-fn find_tokenizer_json_under(root: &Path, owner_fragment: &str) -> Option<PathBuf> {
+fn find_tokenizer_json_under(
+    root: &Path,
+    owner_fragment: &str,
+    repo_fragment: &str,
+) -> Option<PathBuf> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
@@ -759,7 +810,8 @@ fn find_tokenizer_json_under(root: &Path, owner_fragment: &str) -> Option<PathBu
             if path.file_name().and_then(|name| name.to_str()) != Some("tokenizer.json") {
                 continue;
             }
-            if path.to_string_lossy().contains(owner_fragment) {
+            let path_str = path.to_string_lossy();
+            if path_str.contains(owner_fragment) && path_str.contains(repo_fragment) {
                 return Some(path);
             }
         }
