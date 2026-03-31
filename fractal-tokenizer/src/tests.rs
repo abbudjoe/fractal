@@ -216,6 +216,67 @@ fn motif_amplification_p1_hybrid_follow_up() {
     );
 }
 
+#[test]
+fn motif_amplification_p1_hybrid_v2_stress() {
+    let device = Default::default();
+    let config = TokenizerConfig::default();
+    let tokenizer = RecursiveTokenizer::new(config);
+    let repeated_paragraph =
+        "The cat sat on the mat. The dog sat on the mat. The bird sat on the mat. The fox sat on the mat.";
+    let stress_input = std::iter::repeat_n(repeated_paragraph, 20)
+        .collect::<Vec<_>>()
+        .join(" ")
+        + " The cat sat on the mat once more.";
+    let static_factory = revived_primitive_factories::<TestBackend>()
+        .into_iter()
+        .find(|factory| factory.name == "p1_fractal_hybrid_v1")
+        .unwrap();
+    let dynamic_factory = p1_dynamic_lever_factory::<TestBackend>();
+
+    let static_summary = tokenizer
+        .run_factory(&stress_input, &device, static_factory)
+        .unwrap();
+    let dynamic_summary = tokenizer
+        .run_factory(&stress_input, &device, dynamic_factory)
+        .unwrap();
+    let static_unique_by_depth = unique_tokens_by_depth(&static_summary);
+    let dynamic_unique_by_depth = unique_tokens_by_depth(&dynamic_summary);
+
+    println!("{}", format_summary_preview(&static_summary, 20));
+    println!(
+        "static_unique_tokens_by_depth={}",
+        format_depth_counts(&static_unique_by_depth)
+    );
+    println!(
+        "static_motif_reuse_count={}",
+        cross_depth_motif_reuse_count(&static_summary)
+    );
+    println!(
+        "static_hierarchy_note={}",
+        hierarchy_balance_note(&static_summary, &static_unique_by_depth)
+    );
+    println!("{}", format_summary_preview(&dynamic_summary, 20));
+    println!("dynamic_lever_type=v2-self-regulating");
+    println!(
+        "dynamic_unique_tokens_by_depth={}",
+        format_depth_counts(&dynamic_unique_by_depth)
+    );
+    println!(
+        "dynamic_motif_reuse_count={}",
+        cross_depth_motif_reuse_count(&dynamic_summary)
+    );
+    println!(
+        "dynamic_hierarchy_note={}",
+        hierarchy_balance_note(&dynamic_summary, &dynamic_unique_by_depth)
+    );
+    println!("{}", tokenizer_tracker_reminder());
+
+    assert!(!static_summary.tokens.is_empty());
+    assert!(!dynamic_summary.tokens.is_empty());
+    assert!(balanced_recursive_split_holds(&static_summary));
+    assert!(balanced_recursive_split_holds(&dynamic_summary));
+}
+
 fn collect_summaries(
     tokenizer: &RecursiveTokenizer,
     sentence: &str,
@@ -247,6 +308,17 @@ fn format_summary(summary: &PrimitiveRunSummary) -> String {
     let digests = summary
         .tokens
         .iter()
+        .map(|token| token.token.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{:<24} | {}", summary.primitive, digests)
+}
+
+fn format_summary_preview(summary: &PrimitiveRunSummary, limit: usize) -> String {
+    let digests = summary
+        .tokens
+        .iter()
+        .take(limit)
         .map(|token| token.token.as_str())
         .collect::<Vec<_>>()
         .join(" ");
@@ -315,6 +387,20 @@ fn balanced_pattern_note(
         "balanced recursive split pattern holds on longer text"
     } else {
         "balanced recursive split pattern drifted on longer text"
+    }
+}
+
+fn hierarchy_balance_note(
+    summary: &PrimitiveRunSummary,
+    unique_by_depth: &BTreeMap<usize, usize>,
+) -> &'static str {
+    if balanced_recursive_split_holds(summary) && unique_by_depth == &token_counts_by_depth(summary)
+    {
+        "hierarchy remains perfectly balanced"
+    } else if balanced_recursive_split_holds(summary) {
+        "hierarchy remains balanced but shows within-depth reuse"
+    } else {
+        "hierarchy drifted from the balanced split"
     }
 }
 

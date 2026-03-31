@@ -4,8 +4,9 @@
 
 | Variant Name                          | Base Primitive     | Lever Type                  | Status       | Token Count | Notes / Next Action |
 |---------------------------------------|--------------------|-----------------------------|--------------|-------------|---------------------|
+| p1_fractal_hybrid_dyn-state-norm_v2   | p1                 | self-regulating motif reuse | Current Lead | 63          | Hit motif_reuse=4 with perfect split on amplification input |
 | b1_fractal_gated_v1                   | b1                 | static gated + squaring     | Promising    | 43          | Survived seeded test |
-| p1_fractal_hybrid_v1                  | p1                 | static squaring             | Promising    | 43          | Strong performer     |
+| p1_fractal_hybrid_v1                  | p1                 | static squaring             | Promising    | 43          | Strong baseline; motif_reuse=0 on amplification input |
 | p2_mandelbrot_v1                      | p2                 | pure squaring               | Testing      | 43          | Survived seeded test |
 | b3_fractal_hierarchical_v1            | b3                 | squaring + hierarchy        | Testing      | 43          | Survived seeded test |
 | b4_universal_v1                       | b4                 | full fusion                 | Testing      | 43          | Survived seeded test |
@@ -43,6 +44,14 @@
 - Lever description: v2 self-regulates motif reuse from the primitive’s own rolling state norm, current recursion depth, and nearest-vs-local motif distance field, so reuse only opens when a prior cross-depth digest is both locally standout and still unused at the current depth
 - Expected test output format: `static_unique_tokens_by_depth=...`, `dynamic_lever_type=v2-self-regulating`, `dynamic_unique_tokens_by_depth=...`, `static_motif_reuse_count=...`, `dynamic_motif_reuse_count=...`, `amplification_note=...`
 - Live-confirmed dynamic-v2 result: static `motif_reuse=0`, dynamic `motif_reuse=4`; both preserved `d0:1, d1:2, d2:4, d3:8, d4:16, d5:32`, and the latest run printed `amplification_note=v2 self-regulating lever hit the target window (4 repeated motifs, static=0)`
+- Current leader note: `p1_fractal_hybrid_dyn-state-norm_v2` is the tokenizer-track leader because it is the first variant to induce controlled motif reuse while preserving exact balanced hierarchy and per-depth uniqueness
+
+## Latest Stress Test
+
+- Stress input: the motif paragraph (`"The cat sat on the mat. The dog sat on the mat. The bird sat on the mat. The fox sat on the mat."`) repeated `20` times, plus the variation `"The cat sat on the mat once more."`
+- Static `p1_fractal_hybrid_v1`: first-20-token preview stayed balanced with `d0:1, d1:2, d2:4, d3:8, d4:16, d5:32`, `motif_reuse=0`, `hierarchy remains perfectly balanced`
+- Dynamic `p1_fractal_hybrid_dyn-state-norm_v2`: first-20-token preview stayed balanced with `d0:1, d1:2, d2:4, d3:8, d4:16, d5:32`, `motif_reuse=7`, `hierarchy remains perfectly balanced`
+- Stress note: v2 remains the current leader because it preserves exact hierarchy under heavy repetition, but the stress result shows the self-regulating reuse field scales beyond the earlier `2–4` sweet spot on longer repeated inputs
 
 ## Retired / Failed Tokenizer Variants
 
