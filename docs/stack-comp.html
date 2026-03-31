@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Stack Showdown • Legacy vs Next-Gen</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap');
+        
+        :root {
+            --tw-color-primary: #00ff9d;
+        }
+        
+        body {
+            font-family: 'Inter', system_ui, sans-serif;
+        }
+        
+        .title-font {
+            font-family: 'Space Grotesk', sans-serif;
+        }
+
+        .stack-card {
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        .stack-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 25px 50px -12px rgb(0 0 0 / 0.25);
+        }
+        
+        .diagram-svg {
+            transition: all 0.4s ease;
+        }
+        
+        .comparison-row {
+            transition: all 0.3s ease;
+        }
+        
+        .comparison-row:hover {
+            background-color: #111827;
+        }
+        
+        .flow-particle {
+            animation: flow 2s linear infinite;
+        }
+    </style>
+</head>
+<body class="bg-zinc-950 text-white min-h-screen">
+    <div class="max-w-7xl mx-auto px-6 py-12">
+        <!-- Header -->
+        <div class="flex items-center justify-between mb-12">
+            <div>
+                <div class="inline-flex items-center gap-2 bg-zinc-900 border border-zinc-800 rounded-3xl px-6 py-2 text-sm font-medium mb-4">
+                    <span class="relative flex h-3 w-3">
+                        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span class="relative inline-flex rounded-full h-3 w-3 bg-emerald-400"></span>
+                    </span>
+                    FEYNMAN-STYLE BREAKDOWN
+                </div>
+                <h1 class="title-font text-6xl font-semibold tracking-tighter leading-none mb-2">
+                    The AI Stack Showdown
+                </h1>
+                <p class="text-2xl text-zinc-400 max-w-lg">Legacy (what everyone ships today) vs Next-Gen (what we're quietly building)</p>
+            </div>
+            
+            <div class="flex items-center gap-8 text-sm">
+                <div onclick="toggleView()" class="flex items-center gap-2 cursor-pointer hover:text-emerald-400 transition-colors">
+                    <i class="fa-solid fa-eye fa-lg"></i>
+                    <span id="view-mode" class="font-medium">HOW IT WORKS</span>
+                </div>
+                
+                <div class="h-8 w-px bg-zinc-800"></div>
+                
+                <a href="#" onclick="window.print()" class="flex items-center gap-2 text-zinc-400 hover:text-white transition-colors">
+                    <i class="fa-solid fa-download"></i>
+                    <span class="font-medium">Save as PDF</span>
+                </a>
+                
+                <button onclick="copyToClipboard()"
+                        class="flex items-center gap-2 bg-white text-zinc-950 hover:bg-emerald-400 px-6 py-3 rounded-3xl font-semibold transition-all">
+                    <i class="fa-solid fa-copy"></i>
+                    Copy HTML
+                </button>
+            </div>
+        </div>
+
+        <!-- Two Columns -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            
+            <!-- LEGACY STACK -->
+            <div class="stack-card bg-zinc-900 border border-red-500/30 rounded-3xl p-8">
+                <div class="flex items-center gap-3 mb-8">
+                    <div class="w-10 h-10 bg-red-500/10 text-red-400 rounded-2xl flex items-center justify-center">
+                        <i class="fa-solid fa-cube fa-2xl"></i>
+                    </div>
+                    <div>
+                        <h2 class="title-font text-4xl font-semibold text-red-400">Legacy Stack</h2>
+                        <p class="text-red-300/80 text-lg">Transformer + BPE Tokenizer</p>
+                        <div class="text-xs uppercase tracking-widest bg-red-500/10 text-red-400 px-4 py-1 rounded-3xl inline-block mt-2">What OpenAI / Anthropic / Meta still ship</div>
+                    </div>
+                </div>
+
+                <!-- Tokenizer -->
+                <div onclick="toggleSection(this)" class="cursor-pointer mb-8">
+                    <div class="flex justify-between items-center mb-3">
+                        <div class="flex items-center gap-2">
+                            <i class="fa-solid fa-text-height text-amber-400"></i>
+                            <span class="font-semibold text-xl">1. Tokenizer (BPE)</span>
+                        </div>
+                        <i class="fa-solid fa-chevron-down transition-transform"></i>
+                    </div>
+                    <div class="hidden section-content text-zinc-400 leading-relaxed">
+                        Basic 90s-style compression. Chops text into ~100k fixed chunks based on frequency.
+                        Splits "ChatGPT" weirdly. Wastes tokens. Model sees noisy, bloated input.
+                    </div>
+                    
+                    <!-- Small diagram -->
+                    <div class="mt-4 bg-zinc-950 border border-zinc-800 rounded-2xl p-4 text-[10px] font-mono">
+                        <div class="flex gap-1 flex-wrap">
+                            <span class="bg-amber-400/20 text-amber-400 px-2 py-1 rounded">the</span>
+                            <span class="bg-amber-400/20 text-amber-400 px-2 py-1 rounded">quick</span>
+                            <span class="bg-amber-400/10 text-amber-400/70 px-2 py-1 rounded">brown</span>
+                            <span class="bg-red-400/30 text-red-400 px-2 py-1 rounded">fox</span>
+                            <span class="bg-red-400/30 text-red-400 px-2 py-1 rounded">jumps</span>
+                            <span class="text-zinc-500">…</span>
+                            <span class="text-xs text-zinc-500 mt-1">(more tokens = slower)</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Engine -->
+                <div onclick="toggleSection(this)" class="cursor-pointer mb-8">
+                    <div class="flex justify-between items-center mb-3">
+                        <div class="flex items-center gap-2">
+                            <i class="fa-solid fa-network-wired text-purple-400"></i>
+                            <span class="font-semibold text-xl">2. Engine (Transformer)</span>
+                        </div>
+                        <i class="fa-solid fa-chevron-down transition-transform"></i>
+                    </div>
+                    <div class="hidden section-content text-zinc-400 leading-relaxed">
+                        Every token yells at every other token ("attention").
+                        Works great for short chats. But quadratic explosion → can't handle long context cheaply.
+                    </div>
+                    
+                    <!-- Attention diagram -->
+                    <svg id="legacy-svg" class="diagram-svg w-full h-48 mt-4 bg-zinc-950 border border-zinc-800 rounded-3xl p-4" viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg">
+                        <g>
+                            <!-- Tokens -->
+                            <rect x="40" y="40" width="30" height="30" rx="4" fill="#c026d3" fill-opacity="0.6"/>
+                            <rect x="100" y="40" width="30" height="30" rx="4" fill="#c026d3" fill-opacity="0.6"/>
+                            <rect x="160" y="40" width="30" height="30" rx="4" fill="#c026d3" fill-opacity="0.6"/>
+                            <rect x="220" y="40" width="30" height="30" rx="4" fill="#c026d3" fill-opacity="0.6"/>
+                            <rect x="280" y="40" width="30" height="30" rx="4" fill="#c026d3" fill-opacity="0.6"/>
+                            
+                            <!-- Lines (attention) -->
+                            <line x1="55" y1="55" x2="115" y2="55" stroke="#a855f7" stroke-width="2" stroke-opacity="0.4"/>
+                            <line x1="55" y1="55" x2="175" y2="55" stroke="#a855f7" stroke-width="2" stroke-opacity="0.3"/>
+                            <line x1="55" y1="55" x2="235" y2="55" stroke="#a855f7" stroke-width="2" stroke-opacity="0.2"/>
+                            <line x1="55" y1="55" x2="295" y2="55" stroke="#a855f7" stroke-width="2" stroke-opacity="0.1"/>
+                            
+                            <text x="20" y="180" class="text-[10px] fill-zinc-400">Every token talks to EVERY other token</text>
+                            <text x="220" y="180" class="text-[10px] fill-red-400 font-bold">Quadratic cost</text>
+                        </g>
+                    </svg>
+                </div>
+
+                <div class="text-xs uppercase text-red-400 bg-red-500/10 px-6 py-3 rounded-3xl text-center font-medium flex items-center justify-center gap-2">
+                    <i class="fa-solid fa-triangle-exclamation"></i>
+                    Hits the wall on long context • Expensive to scale
+                </div>
+            </div>
+
+            <!-- NEXT-GEN STACK -->
+            <div class="stack-card bg-zinc-900 border border-emerald-400 rounded-3xl p-8 relative">
+                <div class="absolute -top-3 -right-3 bg-emerald-400 text-zinc-950 text-xs font-bold px-6 py-1 rounded-3xl rotate-12 shadow-lg">OUR BET</div>
+                
+                <div class="flex items-center gap-3 mb-8">
+                    <div class="w-10 h-10 bg-emerald-400/10 text-emerald-400 rounded-2xl flex items-center justify-center">
+                        <i class="fa-solid fa-cube fa-2xl"></i>
+                    </div>
+                    <div>
+                        <h2 class="title-font text-4xl font-semibold text-emerald-400">Next-Gen Stack</h2>
+                        <p class="text-emerald-300/80 text-lg">Smart Tokenizer + New Primitive</p>
+                        <div class="text-xs uppercase tracking-widest bg-emerald-400/10 text-emerald-400 px-4 py-1 rounded-3xl inline-block mt-2">What we're testing right now</div>
+                    </div>
+                </div>
+
+                <!-- Tokenizer -->
+                <div onclick="toggleSection(this)" class="cursor-pointer mb-8">
+                    <div class="flex justify-between items-center mb-3">
+                        <div class="flex items-center gap-2">
+                            <i class="fa-solid fa-text-height text-emerald-400"></i>
+                            <span class="font-semibold text-xl">1. New Tokenizer</span>
+                        </div>
+                        <i class="fa-solid fa-chevron-down transition-transform"></i>
+                    </div>
+                    <div class="hidden section-content text-zinc-400 leading-relaxed">
+                        Meaning-aware compression. Preserves semantics. Fewer tokens, cleaner signal.
+                        Already beats BPE in our tests → now running full training head-to-head.
+                    </div>
+                    
+                    <!-- Small diagram -->
+                    <div class="mt-4 bg-zinc-950 border border-zinc-800 rounded-2xl p-4 text-[10px] font-mono">
+                        <div class="flex gap-1 flex-wrap">
+                            <span class="bg-emerald-400/30 text-emerald-400 px-3 py-1 rounded">the quick brown fox</span>
+                            <span class="bg-emerald-400/20 text-emerald-400 px-3 py-1 rounded">jumps over</span>
+                            <span class="text-emerald-400">…</span>
+                            <span class="text-xs text-emerald-400 mt-1">(30-50% fewer tokens)</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Engine -->
+                <div onclick="toggleSection(this)" class="cursor-pointer mb-8">
+                    <div class="flex justify-between items-center mb-3">
+                        <div class="flex items-center gap-2">
+                            <i class="fa-solid fa-waveform text-cyan-400"></i>
+                            <span class="font-semibold text-xl">2. New Primitive (Mamba-3 rival)</span>
+                        </div>
+                        <i class="fa-solid fa-chevron-down transition-transform"></i>
+                    </div>
+                    <div class="hidden section-content text-zinc-400 leading-relaxed">
+                        A flowing "state" carries history forward like a river.
+                        Linear scaling. Remembers insanely long contexts without looking back at everything.
+                    </div>
+                    
+                    <!-- State-flow diagram -->
+                    <svg id="new-svg" class="diagram-svg w-full h-48 mt-4 bg-zinc-950 border border-zinc-800 rounded-3xl p-4" viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg">
+                        <defs>
+                            <linearGradient id="flowGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" stop-color="#22d3ee"/>
+                                <stop offset="100%" stop-color="#00ff9d"/>
+                            </linearGradient>
+                        </defs>
+                        <!-- Tokens -->
+                        <rect x="30" y="80" width="28" height="28" rx="4" fill="#67e8f9" fill-opacity="0.7"/>
+                        <rect x="90" y="80" width="28" height="28" rx="4" fill="#67e8f9" fill-opacity="0.7"/>
+                        <rect x="150" y="80" width="28" height="28" rx="4" fill="#67e8f9" fill-opacity="0.7"/>
+                        <rect x="210" y="80" width="28" height="28" rx="4" fill="#67e8f9" fill-opacity="0.7"/>
+                        <rect x="270" y="80" width="28" height="28" rx="4" fill="#67e8f9" fill-opacity="0.7"/>
+                        
+                        <!-- Flowing state line -->
+                        <path d="M50 94 Q 110 70 160 94 Q 210 120 260 94 Q 310 70 350 94"
+                              fill="none" stroke="url(#flowGrad)" stroke-width="6" stroke-opacity="0.8"/>
+                        
+                        <!-- Particles -->
+                        <circle cx="70" cy="94" r="4" fill="#fff" class="flow-particle"/>
+                        <circle cx="130" cy="94" r="4" fill="#fff" class="flow-particle" style="animation-delay: 0.4s"/>
+                        <circle cx="190" cy="94" r="4" fill="#fff" class="flow-particle" style="animation-delay: 0.8s"/>
+                        <circle cx="250" cy="94" r="4" fill="#fff" class="flow-particle" style="animation-delay: 1.2s"/>
+                        
+                        <text x="20" y="180" class="text-[10px] fill-cyan-300">Carries memory forward automatically</text>
+                        <text x="230" y="180" class="text-[10px] fill-emerald-400 font-bold">Linear cost • Long context king</text>
+                    </svg>
+                </div>
+
+                <div class="text-xs uppercase text-emerald-400 bg-emerald-400/10 px-6 py-3 rounded-3xl text-center font-medium flex items-center justify-center gap-2">
+                    <i class="fa-solid fa-rocket"></i>
+                    Linear scaling • Cheaper • Longer context • Cleaner signal
+                </div>
+            </div>
+        </div>
+
+        <!-- Compounding Magic Section -->
+        <div class="mt-16 bg-gradient-to-r from-zinc-900 to-emerald-950 border border-emerald-400/30 rounded-3xl p-8">
+            <div class="text-center mb-8">
+                <div class="inline-flex items-center gap-2 text-emerald-400 text-sm font-bold tracking-[2px]">
+                    <span>×</span> MULTIPLICATIVE GAINS <span>×</span>
+                </div>
+                <h3 class="title-font text-4xl font-semibold mt-2">When you fix BOTH layers at once…</h3>
+                <p class="text-zinc-400 mt-3 max-w-md mx-auto">The whole model becomes dramatically better. Not additive. Multiplicative.</p>
+            </div>
+            
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-6 text-center">
+                <div class="bg-white/5 rounded-3xl p-6 hover:bg-emerald-400/10 transition-colors">
+                    <div class="text-4xl mb-2">📉</div>
+                    <div class="font-semibold">30-50% fewer tokens</div>
+                    <div class="text-xs text-emerald-400">from smarter tokenizer</div>
+                </div>
+                <div class="bg-white/5 rounded-3xl p-6 hover:bg-emerald-400/10 transition-colors">
+                    <div class="text-4xl mb-2">⚡</div>
+                    <div class="font-semibold">Linear memory</div>
+                    <div class="text-xs text-emerald-400">vs quadratic attention</div>
+                </div>
+                <div class="bg-white/5 rounded-3xl p-6 hover:bg-emerald-400/10 transition-colors">
+                    <div class="text-4xl mb-2">🧠</div>
+                    <div class="font-semibold">Insane context length</div>
+                    <div class="text-xs text-emerald-400">without forgetting</div>
+                </div>
+                <div class="bg-white/5 rounded-3xl p-6 hover:bg-emerald-400/10 transition-colors">
+                    <div class="text-4xl mb-2">🚀</div>
+                    <div class="font-semibold">Faster training + inference</div>
+                    <div class="text-xs text-emerald-400">cleaner signal + efficient engine</div>
+                </div>
+            </div>
+            
+            <p class="text-center text-zinc-400 mt-10 italic">"It's like replacing a diesel truck with an electric drivetrain <span class="text-emerald-400 font-medium">AND</span> a carbon-fiber body at the same time."</p>
+        </div>
+
+        <!-- Footer note -->
+        <div class="mt-12 text-center text-zinc-500 text-sm flex items-center justify-center gap-2">
+            <i class="fa-solid fa-lightbulb"></i>
+            Built as a private Feynman napkin for trusted conversations • Copy-paste into any .html file
+        </div>
+    </div>
+
+    <script>
+        // Tailwind script already loaded via CDN
+        function initializeTailwind() {
+            // Already included via CDN
+        }
+        
+        function toggleSection(el) {
+            const content = el.querySelector('.section-content')
+            const chevron = el.querySelector('.fa-chevron-down')
+            
+            if (content.classList.contains('hidden')) {
+                content.style.display = 'block'
+                chevron.style.transform = 'rotate(180deg)'
+            } else {
+                content.style.display = 'none'
+                chevron.style.transform = 'rotate(0deg)'
+            }
+        }
+        
+        function toggleView() {
+            const mode = document.getElementById('view-mode')
+            if (mode.textContent === 'HOW IT WORKS') {
+                mode.textContent = 'PERFORMANCE IMPACT'
+                // You could add more dynamic switching here if you want
+                alert("🔥 In a real pitch you’d now show loss curves, FLOPs, and context-length benchmarks.\n\n(We can add those next if you want)")
+            } else {
+                mode.textContent = 'HOW IT WORKS'
+            }
+        }
+        
+        function copyToClipboard() {
+            const htmlContent = document.documentElement.outerHTML
+            navigator.clipboard.writeText(htmlContent).then(() => {
+                const btns = document.querySelectorAll('button')
+                const original = btns[btns.length-1].innerHTML
+                btns[btns.length-1].innerHTML = `✅ Copied!`
+                setTimeout(() => {
+                    btns[btns.length-1].innerHTML = original
+                }, 2000)
+            })
+        }
+        
+        // Simple particle animation already in CSS
+        console.log('%c✅ Interactive AI Stack Comparison ready for browser!', 'color:#00ff9d; font-family:monospace')
+    </script>
+</body>
+</html>

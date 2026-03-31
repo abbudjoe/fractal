@@ -4,9 +4,10 @@
 
 | Variant Name                          | Base Primitive     | Lever Type                  | Status                 | Last Fitness | Stability | Perplexity | ARC   | Notes / Next Action |
 |---------------------------------------|--------------------|-----------------------------|------------------------|--------------|-----------|------------|-------|---------------------|
-| p1_contractive_v1                     | p1                 | contractive gate            | Current truth leader   | 0.58         | 0.53      | 1.54       | 0.68  | Keep as ranking reference |
-| p1_fractal_hybrid_v1                  | p1                 | static squaring             | **Co-Leader**          | **0.61**     | 1.24      | 1.73       | **0.74** | **NEW CO-LEADER** - strongest fractal signal on Fitness+ARC; next: compositing test |
-| logistic_chaotic_map_v1               | logistic           | static r-clamp + residual   | Upper Cohort           | 0.46         | 1.18      | 3.49       | 0.44  | Promoted - ready for heavy stress or compositing |
+| p1_contractive_v1                     | p1                 | contractive gate            | Truth leader (reference only) | 0.58         | 0.53      | 1.54       | 0.68  | Keep as benchmark |
+| p1_fractal_hybrid_v1                  | p1                 | static squaring             | Co-Leader              | 0.61         | 1.24      | 1.73       | 0.74  | Still active |
+| p1_fractal_hybrid_composite_v1        | p1                 | dynamic compositing lever   | Fractal Core Co-Leader | 0.57         | 0.33      | 1.86       | 0.76  | FIRST SUCCESSFUL COMPOSITING TEST — highest ARC ever + Stability below 0.80; lock as primary fractal primitive; next: stability-lever mutation |
+| logistic_chaotic_map_v1               | logistic           | static r-clamp + residual   | Co-Leader Contender    | 0.58         | 0.59      | 1.91       | 0.46  | PROMOTED — survived full-medium-stress; next: compositing test with hybrid composite |
 | b2_stable_hierarchical_v1             | b2                 | stable hierarchical blend   | Upper Cohort           | 0.46         | 0.24      | 1.63       | 0.71  | Keep |
 | p3_hierarchical_v1                    | p3                 | hierarchical compressor     | Upper Cohort           | 0.45         | 0.34      | 1.69       | 0.59  | Keep |
 
@@ -22,17 +23,19 @@
 | generalized_mobius_dyn-jitter-norm_v1     | Superseded by v2 after instability in polish |
 | generalized_mobius_dyn-jitter-norm_v2     | NaN failure even after contraction strengthening |
 | ifs_dyn-radius-depth_v1                   | Repeated timeout on bounded minimal stress lane (demoted to tokenizer track only) |
+| p1_fractal_hybrid_dyn-gate_v1             | Timed out @1800s on train cost — too expensive under current harness |
+| julia_recursive_escape_v1                 | Timed out @1200s on eval phase (train completed); eval bottleneck confirmed — demote to tokenizer track only |
 
 ## Bullpen (new ideas to rotate in)
 
-- Compositing test for `p1_fractal_hybrid_v1` with `p1_contractive_v1`
-- Heavy stress or compositing pass for `logistic_chaotic_map_v1`
+- Stability-lever mutation on `p1_fractal_hybrid_composite_v1`
+- Heavy-stress validation on `p1_fractal_hybrid_composite_v1`
+- Compositing test for `logistic_chaotic_map_v1` inside the new fractal composite shell
 
 ## Latest Uncommitted Run Results
 
-| Variant Name               | Preset               | Status                     | Last Fitness | Stability | Perplexity | ARC | tok/s | Notes / Next Action |
-|---------------------------|----------------------|----------------------------|--------------|-----------|------------|-----|-------|---------------------|
-| julia_recursive_escape_v1 | minimal_stress_lane  | Timed out                  | n/a          | n/a       | n/a        | n/a | n/a   | Current balanced-node rerun completed train (`1118.8s`) and stability (`17.3s`) but timed out in perplexity after `1200s`; next fix should target eval/runtime cost rather than training stability alone |
-| p1_fractal_hybrid_composite_v1 | lighter_intermediate_stress | Completed         | 0.57         | 0.33      | 1.86       | 0.76 | 3    | First-ever compositing test completed cleanly; ARC improved to `0.76`, stability dropped below `0.80`, and fitness held near the co-leader band, so this is a real promotion candidate |
-| p1_fractal_hybrid_dyn-gate_v1 | lighter_intermediate_stress | Timed out          | n/a          | n/a       | n/a        | n/a | n/a   | Current balanced-node rerun reached at least `36/48` train steps by `1462.4s` but still hit the bounded `1800s` timeout before reporting train completion; this lever remains too expensive on the present control surface |
-| logistic_chaotic_map_v1 | full_medium_stress | Completed | 0.58 | 0.59 | 1.91 | 0.46 | 3 | Heavy-stress rerun completed cleanly; stability improved sharply from the earlier upper-cohort pass while fitness rose into co-leader range, so this variant now merits serious head-to-head consideration |
+| Variant Name                               | Preset                   | Status    | Last Fitness | Stability | Perplexity | ARC  | tok/s | Notes / Next Action |
+|--------------------------------------------|--------------------------|-----------|--------------|-----------|------------|------|-------|---------------------|
+| mandelbox_recursive_dyn-escape-radius_v1   | proving_ground_baseline  | Completed | 0.13         | 0.00      | 11.18      | 0.00 | 37    | Fast proving-ground completion with no NaN, but learning signal was weak; keep in bullpen only if we want one more mutation pass, otherwise retire cleanly |
+| p3_hierarchical_v1                         | minimal_stress_lane      | Completed | 0.58         | 0.55      | 1.66       | 0.44 | 34    | Clean bounded-stress completion with co-leader-range fitness, but weaker ARC than its earlier best run; likely merits promotion into a harder confirmation lane rather than retirement |
+| b2_stable_hierarchical_v1                  | minimal_stress_lane      | Timed out | n/a          | n/a       | n/a        | n/a  | n/a   | Completed train (`1138.7s`) and stability (`25.0s`) but hit the bounded `1200s` timeout in perplexity; this looks like an eval-budget issue, not a collapse signal |
