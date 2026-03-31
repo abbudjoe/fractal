@@ -1755,6 +1755,7 @@ dependencies = [
  "fractal-core",
  "fractal-eval-private",
  "fractal-primitives-private",
+ "serde",
  "serde_json",
 ]
 
