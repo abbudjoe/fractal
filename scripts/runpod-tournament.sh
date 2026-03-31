@@ -38,6 +38,8 @@ Notes:
   - After every run, the wrapper preserves the remote log plus any manifest/artifact files
     under .runpod-local-logs/runpod-results/<run-id>/, with the synced remote tree in
     `remote/` and a wrapper manifest in `metadata/wrapper-manifest.json`.
+  - Wrapper manifests now record Experiment Interface v1-style identity:
+    logical experiment id/name stay stable across retries, while each attempt gets a new run id.
   - Tournament arguments after "--" are passed to the cached release example binary as:
       <cached-binary> --backend cuda ...
 
@@ -385,17 +387,283 @@ sync_worktree() {
     fi
 }
 
-sanitize_path_component() {
-    printf '%s' "$1" | tr '[:space:]/:' '___' | tr -cd '[:alnum:]_.-'
+resolve_local_identity_context() {
+    RUN_LOCAL_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)"
+    RUN_LOCAL_COMMIT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+}
+
+build_experiment_context() {
+    python3 - "$RUN_RESULTS_ROOT" \
+        "$RUN_STARTED_AT" \
+        "$RUN_TIMEOUT_SECONDS" \
+        "$RUN_LOCAL_BRANCH" \
+        "$RUN_LOCAL_COMMIT_SHA" \
+        "${POD_NAME_RESOLVED:-$POD_NAME}" \
+        "${TOURNAMENT_ARGS[@]}" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+(
+    results_root_raw,
+    started_at,
+    run_timeout_seconds_raw,
+    branch,
+    commit_sha,
+    pod_name,
+    *tournament_args,
+) = sys.argv[1:]
+
+results_root = Path(results_root_raw)
+run_timeout_seconds = int(run_timeout_seconds_raw)
+
+LANE_DEFAULT_PRESET = {
+    "all": "default",
+    "baseline": "research-medium",
+    "challenger": "bullpen-polish",
+    "proving-ground": "minimal-proving-ground",
+    "leader": "generation-four",
+}
+
+
+def extract_arg(args: list[str], flag: str) -> str | None:
+    for index, value in enumerate(args):
+        if value == flag and index + 1 < len(args):
+            return args[index + 1]
+    return None
+
+
+def parse_int(value: str | None) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def sanitize(value: str) -> str:
+    chars = []
+    for ch in value:
+        if ch.isalnum() or ch in "._-":
+            chars.append(ch)
+        elif ch in " /:":
+            chars.append("_")
+    cleaned = "".join(chars).strip("._-")
+    return cleaned or "unknown"
+
+
+def parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    normalized = value
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(normalized).astimezone(timezone.utc)
+    except ValueError:
+        pass
+    for fmt in ("%Y%m%dT%H%M%S%z", "%Y%m%dT%H%M%SZ"):
+        try:
+            dt = datetime.strptime(value, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def format_timestamp(value: datetime | None, fallback: str) -> str:
+    if value is None:
+        return fallback
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def resolve_spec(
+    args: list[str],
+    *,
+    branch_value: str,
+    commit_value: str,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    species = extract_arg(args, "--species")
+    lane = extract_arg(args, "--lane") or "all"
+    preset = extract_arg(args, "--preset")
+    sequence = extract_arg(args, "--sequence")
+    seed = parse_int(extract_arg(args, "--seed"))
+    execution_mode = extract_arg(args, "--mode")
+    parallelism = parse_int(extract_arg(args, "--parallelism"))
+    perplexity_eval_batches = parse_int(extract_arg(args, "--perplexity-eval-batches"))
+    arc_eval_batches = parse_int(extract_arg(args, "--arc-eval-batches"))
+    if preset:
+        selection = {"kind": "preset", "value": preset}
+    elif sequence:
+        selection = {"kind": "sequence", "value": sequence}
+    elif species:
+        selection = {"kind": "preset", "value": "candidate-stress"}
+    else:
+        selection = {"kind": "preset", "value": LANE_DEFAULT_PRESET.get(lane, "default")}
+
+    spec = {
+        "question": {
+            "lane": lane,
+            "selection": selection,
+        },
+        "variant": {
+            "species": species,
+        },
+        "budget": {
+            "seed": seed,
+            "run_timeout_seconds": timeout_seconds,
+            "perplexity_eval_batches": perplexity_eval_batches,
+            "arc_eval_batches": arc_eval_batches,
+        },
+        "runtime": {
+            "backend": "cuda",
+            "execution_mode": execution_mode,
+            "parallelism": parallelism,
+        },
+        "execution": {
+            "target": "runpod",
+        },
+        "build": {
+            "branch": branch_value,
+            "commit_sha": commit_value,
+        },
+    }
+    logical_name_parts = []
+    if species:
+        logical_name_parts.append(f"species-{species}")
+    else:
+        logical_name_parts.append(f"lane-{lane}")
+    logical_name_parts.append(f"{selection['kind']}-{selection['value']}")
+    if seed is not None:
+        logical_name_parts.append(f"seed-{seed}")
+    logical_name_parts.append(f"commit-{(commit_value or 'unknown')[:8]}")
+    logical_name = "_".join(sanitize(part) for part in logical_name_parts)
+    canonical = json.dumps(spec, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    logical_id = f"exp-{hashlib.sha256(canonical).hexdigest()[:16]}"
+    return {
+        "logical_id": logical_id,
+        "logical_name": logical_name,
+        "spec": spec,
+        "resolved": {
+            "lane": lane,
+            "species": species,
+            "preset": selection["value"] if selection["kind"] == "preset" else None,
+            "sequence": selection["value"] if selection["kind"] == "sequence" else None,
+            "seed": seed,
+        },
+    }
+
+
+def infer_identity(manifest: dict[str, Any]) -> tuple[str, str, str | None]:
+    experiment = manifest.get("experiment")
+    if isinstance(experiment, dict):
+        experiment_id = experiment.get("experiment_id")
+        if isinstance(experiment_id, dict):
+            logical_id = experiment_id.get("logical_id")
+            logical_name = experiment_id.get("logical_name")
+            created_at = experiment_id.get("created_at")
+            if logical_id and logical_name:
+                return str(logical_id), str(logical_name), str(created_at) if created_at else None
+    runtime = manifest.get("runtime") if isinstance(manifest.get("runtime"), dict) else {}
+    build = manifest.get("build") if isinstance(manifest.get("build"), dict) else {}
+    args = runtime.get("tournament_args")
+    if not isinstance(args, list):
+        args = []
+    inferred = resolve_spec(
+        [str(arg) for arg in args],
+        branch_value=str(build.get("branch") or ""),
+        commit_value=str(build.get("commit_sha") or ""),
+        timeout_seconds=parse_int(str(runtime.get("run_timeout_seconds"))) or 0,
+    )
+    created_at = manifest.get("started_at")
+    if created_at:
+        created_at = str(created_at)
+    return inferred["logical_id"], inferred["logical_name"], created_at
+
+
+identity = resolve_spec(
+    tournament_args,
+    branch_value=branch,
+    commit_value=commit_sha,
+    timeout_seconds=run_timeout_seconds,
+)
+
+earliest_created_at: datetime | None = parse_timestamp(started_at)
+attempt_count = 0
+if results_root.exists():
+    for wrapper_path in sorted(results_root.glob("*/metadata/wrapper-manifest.json")):
+        try:
+            manifest = json.loads(wrapper_path.read_text())
+        except Exception:
+            continue
+        logical_id, _, created_at_raw = infer_identity(manifest)
+        if logical_id != identity["logical_id"]:
+            continue
+        attempt_count += 1
+        candidate = parse_timestamp(created_at_raw) or parse_timestamp(manifest.get("started_at"))
+        if candidate is not None and (
+            earliest_created_at is None or candidate < earliest_created_at
+        ):
+            earliest_created_at = candidate
+
+attempt_index = attempt_count + 1
+started_at_slug = sanitize(started_at)
+attempt_id = f"{started_at_slug}_a{attempt_index:02d}"
+
+context = {
+    "interface_version": "experiment-interface-v1-wrapper",
+    "identity_source": "wrapper-derived",
+    "experiment_id": {
+        "logical_id": identity["logical_id"],
+        "logical_name": identity["logical_name"],
+        "generated_run_id": attempt_id,
+        "attempt_id": attempt_id,
+        "attempt_index": attempt_index,
+        "branch": branch,
+        "commit_sha": commit_sha,
+        "created_at": format_timestamp(earliest_created_at, started_at),
+        "started_at": started_at,
+    },
+    "question": identity["spec"]["question"],
+    "variant": identity["spec"]["variant"],
+    "budget": identity["spec"]["budget"],
+    "runtime": identity["spec"]["runtime"],
+    "execution": {
+        "target": "runpod",
+        "backend": "cuda",
+        "pod_name": pod_name,
+        "retry_policy": "manual-wrapper-retry",
+    },
+    "artifacts": {
+        "wrapper_manifest_required": True,
+        "wrapper_run_manifest_required": True,
+        "tournament_manifest_required": True,
+        "tournament_artifact_required": True,
+        "final_log_required": True,
+    },
+    "resolved": identity["resolved"],
+}
+print(json.dumps(context, sort_keys=True))
+PY
 }
 
 prepare_run_preservation() {
-    local started_at run_component pod_component
+    local started_at
     started_at="$(date -u +%Y%m%dT%H%M%SZ)"
-    pod_component="$(sanitize_path_component "${POD_NAME_RESOLVED:-$POD_NAME}")"
     RUN_STARTED_AT="$started_at"
-    RUN_ID="${started_at}_${pod_component}_${POD_ID}"
     RUN_RESULTS_ROOT="${REPO_ROOT}/.runpod-local-logs/runpod-results"
+    RUN_EXPERIMENT_CONTEXT_JSON="$(build_experiment_context)"
+    RUN_ID="$(printf '%s' "$RUN_EXPERIMENT_CONTEXT_JSON" | json_value "experiment_id.attempt_id")"
     RUN_RESULT_DIR="${RUN_RESULTS_ROOT}/${RUN_ID}"
     RUN_RESULT_REMOTE_DIR="${RUN_RESULT_DIR}/remote"
     RUN_RESULT_METADATA_DIR="${RUN_RESULT_DIR}/metadata"
@@ -426,6 +694,7 @@ write_local_wrapper_manifest() {
         "$local_build_key" \
         "$local_commit_sha" \
         "$RUN_TIMEOUT_SECONDS" \
+        "$RUN_EXPERIMENT_CONTEXT_JSON" \
         "${TOURNAMENT_ARGS[@]}" <<'PY'
 import json
 import pathlib
@@ -447,9 +716,11 @@ import sys
     local_build_key,
     local_commit_sha,
     run_timeout_seconds,
+    experiment_context_json,
     *tournament_args,
 ) = sys.argv[1:]
 
+experiment = json.loads(experiment_context_json)
 manifest = {
     "run_id": run_id,
     "started_at": started_at,
@@ -476,6 +747,7 @@ manifest = {
         "tournament_args": tournament_args,
         "backend": "cuda",
     },
+    "experiment": experiment,
 }
 
 path_obj = pathlib.Path(path)
@@ -573,11 +845,7 @@ REMOTE
 }
 
 run_remote_tournament() {
-    local local_branch
     local local_build_key
-    local local_commit_sha
-    local_branch="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)"
-    local_commit_sha="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
     local_build_key="$(python3 - "$REPO_ROOT" <<'PY'
 import hashlib
 import os
@@ -627,23 +895,22 @@ print(digest.hexdigest())
 PY
     )"
 
-    RUN_LOCAL_BRANCH="$local_branch"
     RUN_LOCAL_BUILD_KEY="$local_build_key"
-    RUN_LOCAL_COMMIT_SHA="$local_commit_sha"
 
-    write_local_wrapper_manifest "running" 0 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$local_branch" "$local_build_key" "$local_commit_sha"
+    write_local_wrapper_manifest "running" 0 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RUN_LOCAL_BRANCH" "$local_build_key" "$RUN_LOCAL_COMMIT_SHA"
 
     log "running remote CUDA tournament"
     "${SSH_BASE[@]}" bash -s -- \
         "$REMOTE_DIR" \
         "$STATE_DIR" \
-        "$local_branch" \
-        "$local_commit_sha" \
+        "$RUN_LOCAL_BRANCH" \
+        "$RUN_LOCAL_COMMIT_SHA" \
         "$local_build_key" \
         "$NO_COMPILE" \
         "$RUN_TIMEOUT_SECONDS" \
         "$RUN_ID" \
         "$POD_ID" \
+        "$RUN_EXPERIMENT_CONTEXT_JSON" \
         "${TOURNAMENT_ARGS[@]}" <<'REMOTE'
 set -euo pipefail
 
@@ -656,7 +923,8 @@ no_compile="$6"
 run_timeout_seconds="$7"
 run_id="$8"
 pod_id="$9"
-shift 9
+experiment_context_json="${10}"
+shift 10
 
 if [ -f "$HOME/.cargo/env" ]; then
     # shellcheck disable=SC1090
@@ -707,6 +975,7 @@ write_manifest() {
         "$run_timeout_seconds" \
         "$state_dir" \
         "$remote_dir" \
+        "$experiment_context_json" \
         "$@" <<'PY'
 import json
 import pathlib
@@ -723,10 +992,13 @@ import sys
     run_timeout_seconds,
     state_dir,
     remote_dir,
+    experiment_context_json,
     *tournament_args,
 ) = sys.argv[1:]
 
+experiment = json.loads(experiment_context_json)
 manifest = {
+    "run_id": experiment["experiment_id"]["attempt_id"],
     "status": status,
     "exit_code": int(exit_code),
     "finished_at": finished_at,
@@ -745,6 +1017,7 @@ manifest = {
         "remote_dir": remote_dir,
         "manifest_path": str(pathlib.Path(path).as_posix()),
     },
+    "experiment": experiment,
 }
 
 path_obj = pathlib.Path(path)
@@ -864,6 +1137,7 @@ RUN_RESULT_DIR=""
 RUN_RESULT_REMOTE_DIR=""
 RUN_RESULT_METADATA_DIR=""
 RUN_RESULT_MANIFEST=""
+RUN_EXPERIMENT_CONTEXT_JSON=""
 RUN_LOCAL_BRANCH=""
 RUN_LOCAL_BUILD_KEY=""
 RUN_LOCAL_COMMIT_SHA=""
@@ -1000,6 +1274,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     exit 0
 fi
 
+resolve_local_identity_context
 prepare_run_preservation
 wait_for_ssh
 sync_worktree

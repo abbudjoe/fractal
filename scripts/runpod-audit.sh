@@ -80,6 +80,7 @@ fi
 python3 - "$MODE" "$RESULTS_ROOT" "$RUNPODCTL_BIN" "$STALE_HOURS" <<'PY'
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -101,6 +102,7 @@ class RunRecord:
     run_id: str
     wrapper: dict[str, Any] | None
     wrapper_error: str | None
+    identity: "ExperimentIdentity | None" = None
     live_pod: dict[str, Any] | None = None
 
     @property
@@ -116,6 +118,26 @@ class RunRecord:
         return ""
 
 
+@dataclass
+class ExperimentIdentity:
+    logical_id: str
+    logical_name: str
+    attempt_id: str
+    attempt_index: int | None
+    created_at: str | None
+    started_at: str | None
+    source: str
+
+
+LANE_DEFAULT_PRESET = {
+    "all": "default",
+    "baseline": "research-medium",
+    "challenger": "bullpen-polish",
+    "proving-ground": "minimal-proving-ground",
+    "leader": "generation-four",
+}
+
+
 def load_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     try:
         return json.loads(path.read_text()), None
@@ -123,6 +145,100 @@ def load_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
         return None, "missing"
     except Exception as exc:  # noqa: BLE001
         return None, f"invalid-json: {exc}"
+
+
+def extract_arg(args: list[str], flag: str) -> str | None:
+    for index, value in enumerate(args):
+        if value == flag and index + 1 < len(args):
+            return args[index + 1]
+    return None
+
+
+def parse_int(value: str | None) -> int | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def sanitize(value: str) -> str:
+    chars = []
+    for ch in value:
+        if ch.isalnum() or ch in "._-":
+            chars.append(ch)
+        elif ch in " /:":
+            chars.append("_")
+    cleaned = "".join(chars).strip("._-")
+    return cleaned or "unknown"
+
+
+def resolve_spec(
+    args: list[str],
+    *,
+    branch_value: str,
+    commit_value: str,
+    timeout_seconds: int,
+) -> tuple[str, str]:
+    species = extract_arg(args, "--species")
+    lane = extract_arg(args, "--lane") or "all"
+    preset = extract_arg(args, "--preset")
+    sequence = extract_arg(args, "--sequence")
+    seed = parse_int(extract_arg(args, "--seed"))
+    execution_mode = extract_arg(args, "--mode")
+    parallelism = parse_int(extract_arg(args, "--parallelism"))
+    perplexity_eval_batches = parse_int(extract_arg(args, "--perplexity-eval-batches"))
+    arc_eval_batches = parse_int(extract_arg(args, "--arc-eval-batches"))
+    if preset:
+        selection = {"kind": "preset", "value": preset}
+    elif sequence:
+        selection = {"kind": "sequence", "value": sequence}
+    elif species:
+        selection = {"kind": "preset", "value": "candidate-stress"}
+    else:
+        selection = {"kind": "preset", "value": LANE_DEFAULT_PRESET.get(lane, "default")}
+
+    canonical = {
+        "question": {
+            "lane": lane,
+            "selection": selection,
+        },
+        "variant": {
+            "species": species,
+        },
+        "budget": {
+            "seed": seed,
+            "run_timeout_seconds": timeout_seconds,
+            "perplexity_eval_batches": perplexity_eval_batches,
+            "arc_eval_batches": arc_eval_batches,
+        },
+        "runtime": {
+            "backend": "cuda",
+            "execution_mode": execution_mode,
+            "parallelism": parallelism,
+        },
+        "execution": {
+            "target": "runpod",
+        },
+        "build": {
+            "branch": branch_value,
+            "commit_sha": commit_value,
+        },
+    }
+    logical_name_parts = []
+    if species:
+        logical_name_parts.append(f"species-{species}")
+    else:
+        logical_name_parts.append(f"lane-{lane}")
+    logical_name_parts.append(f"{selection['kind']}-{selection['value']}")
+    if seed is not None:
+        logical_name_parts.append(f"seed-{seed}")
+    logical_name_parts.append(f"commit-{(commit_value or 'unknown')[:8]}")
+    logical_name = "_".join(sanitize(part) for part in logical_name_parts)
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    logical_id = f"exp-{hashlib.sha256(payload).hexdigest()[:16]}"
+    return logical_id, logical_name
 
 
 def run_dirs() -> list[RunRecord]:
@@ -152,6 +268,89 @@ def parse_iso8601(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value).astimezone(timezone.utc)
     except Exception:  # noqa: BLE001
         return None
+
+
+def infer_identity(record: RunRecord) -> ExperimentIdentity:
+    wrapper = record.wrapper or {}
+    experiment = wrapper.get("experiment")
+    if isinstance(experiment, dict):
+        experiment_id = experiment.get("experiment_id")
+        if isinstance(experiment_id, dict):
+            logical_id = experiment_id.get("logical_id")
+            logical_name = experiment_id.get("logical_name")
+            if logical_id and logical_name:
+                attempt_id = str(
+                    experiment_id.get("attempt_id")
+                    or experiment_id.get("generated_run_id")
+                    or wrapper.get("run_id")
+                    or record.run_id
+                )
+                attempt_index = parse_int(
+                    str(experiment_id.get("attempt_index"))
+                    if experiment_id.get("attempt_index") is not None
+                    else None
+                )
+                created_at = (
+                    str(experiment_id.get("created_at"))
+                    if experiment_id.get("created_at") is not None
+                    else None
+                )
+                started_at = (
+                    str(experiment_id.get("started_at"))
+                    if experiment_id.get("started_at") is not None
+                    else str(wrapper.get("started_at") or "")
+                )
+                return ExperimentIdentity(
+                    logical_id=str(logical_id),
+                    logical_name=str(logical_name),
+                    attempt_id=attempt_id,
+                    attempt_index=attempt_index,
+                    created_at=created_at,
+                    started_at=started_at or None,
+                    source="explicit",
+                )
+
+    runtime = wrapper.get("runtime") if isinstance(wrapper.get("runtime"), dict) else {}
+    build = wrapper.get("build") if isinstance(wrapper.get("build"), dict) else {}
+    args = runtime.get("tournament_args")
+    if not isinstance(args, list):
+        args = []
+    logical_id, logical_name = resolve_spec(
+        [str(arg) for arg in args],
+        branch_value=str(build.get("branch") or ""),
+        commit_value=str(build.get("commit_sha") or ""),
+        timeout_seconds=parse_int(str(runtime.get("run_timeout_seconds"))) or 0,
+    )
+    return ExperimentIdentity(
+        logical_id=logical_id,
+        logical_name=logical_name,
+        attempt_id=str(wrapper.get("run_id") or record.run_id),
+        attempt_index=None,
+        created_at=str(wrapper.get("started_at") or "") or None,
+        started_at=str(wrapper.get("started_at") or "") or None,
+        source="inferred",
+    )
+
+
+def assign_attempt_indices(records: list[RunRecord]) -> None:
+    grouped: dict[str, list[RunRecord]] = {}
+    for record in records:
+        record.identity = infer_identity(record)
+        grouped.setdefault(record.identity.logical_id, []).append(record)
+
+    for items in grouped.values():
+        items.sort(
+            key=lambda record: (
+                parse_iso8601(record.identity.created_at or record.identity.started_at)
+                or datetime.max.replace(tzinfo=timezone.utc),
+                record.identity.attempt_id,
+            )
+        )
+        next_attempt_index = 1
+        for record in items:
+            if record.identity.attempt_index is None:
+                record.identity.attempt_index = next_attempt_index
+            next_attempt_index = max(next_attempt_index + 1, (record.identity.attempt_index or 0) + 1)
 
 
 def artifact_state(record: RunRecord) -> tuple[str, list[str]]:
@@ -201,11 +400,26 @@ def summarize_artifacts(records: list[RunRecord]) -> int:
 
     print(f"Artifact preservation audit: {results_root}")
     print()
-    header = ["run_id", "pod_id", "wrapper_status", "log", "wrapper_manifest", "wrapper_run_manifest", "tournament_manifest", "artifact", "state", "notes"]
+    header = [
+        "logical_experiment",
+        "attempt",
+        "attempt_id",
+        "identity",
+        "pod_id",
+        "wrapper_status",
+        "log",
+        "wrapper_manifest",
+        "wrapper_run_manifest",
+        "tournament_manifest",
+        "artifact",
+        "state",
+        "notes",
+    ]
     print(" | ".join(header))
     print(" | ".join(["---"] * len(header)))
 
     issue_count = 0
+    logical_experiments = {record.identity.logical_id for record in records if record.identity}
     for record in records:
         state, issues = artifact_state(record)
         wrapper_status = str((record.wrapper or {}).get("status") or record.wrapper_error or "unknown")
@@ -220,7 +434,10 @@ def summarize_artifacts(records: list[RunRecord]) -> int:
         print(
             " | ".join(
                 [
-                    record.run_id,
+                    record.identity.logical_name if record.identity else record.run_id,
+                    f"#{record.identity.attempt_index}" if record.identity and record.identity.attempt_index is not None else "-",
+                    record.identity.attempt_id if record.identity else record.run_id,
+                    record.identity.source if record.identity else "unknown",
                     record.pod_id or "-",
                     wrapper_status,
                     remote_log,
@@ -235,7 +452,10 @@ def summarize_artifacts(records: list[RunRecord]) -> int:
         )
 
     print()
-    print(f"summary: {len(records)} runs scanned, {issue_count} with preservation issues")
+    print(
+        f"summary: {len(records)} attempts across {len(logical_experiments)} logical experiments, "
+        f"{issue_count} with preservation issues"
+    )
     return 1 if issue_count else 0
 
 
@@ -246,12 +466,24 @@ def summarize_pods(records: list[RunRecord]) -> int:
 
     print(f"Pod hygiene audit: {results_root}")
     print()
-    header = ["run_id", "pod_id", "pod_name", "wrapper_status", "live_status", "age", "notes"]
+    header = [
+        "logical_experiment",
+        "attempt",
+        "attempt_id",
+        "identity",
+        "pod_id",
+        "pod_name",
+        "wrapper_status",
+        "live_status",
+        "age",
+        "notes",
+    ]
     print(" | ".join(header))
     print(" | ".join(["---"] * len(header)))
 
     issues = 0
     seen_pods: set[str] = set()
+    logical_experiments = {record.identity.logical_id for record in records if record.identity}
     for record in records:
         wrapper = record.wrapper or {}
         pod = wrapper.get("pod", {}) if isinstance(wrapper, dict) else {}
@@ -283,7 +515,10 @@ def summarize_pods(records: list[RunRecord]) -> int:
         print(
             " | ".join(
                 [
-                    record.run_id,
+                    record.identity.logical_name if record.identity else record.run_id,
+                    f"#{record.identity.attempt_index}" if record.identity and record.identity.attempt_index is not None else "-",
+                    record.identity.attempt_id if record.identity else record.run_id,
+                    record.identity.source if record.identity else "unknown",
                     pod_id or "-",
                     pod_name or "-",
                     wrapper_status,
@@ -302,6 +537,9 @@ def summarize_pods(records: list[RunRecord]) -> int:
             " | ".join(
                 [
                     "-",
+                    "-",
+                    "-",
+                    "-",
                     pod_id or "-",
                     str(pod.get("name") or "-"),
                     "untracked",
@@ -313,11 +551,15 @@ def summarize_pods(records: list[RunRecord]) -> int:
         )
 
     print()
-    print(f"summary: {len(records)} preserved runs scanned, {issues} hygiene issues")
+    print(
+        f"summary: {len(records)} preserved attempts across {len(logical_experiments)} logical experiments, "
+        f"{issues} hygiene issues"
+    )
     return 1 if issues else 0
 
 
 records = run_dirs()
+assign_attempt_indices(records)
 if mode == "artifacts":
     raise SystemExit(summarize_artifacts(records))
 if mode == "pods":
