@@ -1,4 +1,8 @@
-use burn::tensor::{backend::Backend, Element, Tensor, TensorData};
+use burn::{
+    module::Param,
+    nn::Linear,
+    tensor::{backend::Backend, Element, Tensor, TensorData},
+};
 use fractal_core::{
     error::FractalError,
     rule_trait::FractalRule,
@@ -14,6 +18,7 @@ pub struct TokenizerConfig {
     pub dim: usize,
     pub levels: usize,
     pub max_depth: usize,
+    pub seed: u64,
 }
 
 impl Default for TokenizerConfig {
@@ -22,6 +27,7 @@ impl Default for TokenizerConfig {
             dim: 64,
             levels: DEFAULT_LEVELS,
             max_depth: 6,
+            seed: 42,
         }
     }
 }
@@ -158,31 +164,217 @@ pub fn revived_primitive_factories<B: Backend>() -> [PrimitiveFactory<B>; 5] {
     [
         PrimitiveFactory {
             name: "b1_fractal_gated",
-            build: |config, device| Box::new(B1FractalGated::new(config.dim, device)),
+            build: seeded_b1_fractal_gated::<B>,
         },
         PrimitiveFactory {
             name: "p1_fractal_hybrid",
-            build: |config, device| Box::new(P1FractalHybrid::new(config.dim, device)),
+            build: seeded_p1_fractal_hybrid::<B>,
         },
         PrimitiveFactory {
             name: "p2_mandelbrot",
-            build: |config, device| Box::new(P2Mandelbrot::new(config.dim, device)),
+            build: seeded_p2_mandelbrot::<B>,
         },
         PrimitiveFactory {
             name: "b3_fractal_hierarchical",
-            build: |config, device| {
-                Box::new(B3FractalHierarchical::new(
-                    config.dim,
-                    config.levels,
-                    device,
-                ))
-            },
+            build: seeded_b3_fractal_hierarchical::<B>,
         },
         PrimitiveFactory {
             name: "b4_universal",
-            build: |config, device| Box::new(B4Universal::new(config.dim, config.levels, device)),
+            build: seeded_b4_universal::<B>,
         },
     ]
+}
+
+fn seeded_b1_fractal_gated<B: Backend>(
+    config: TokenizerConfig,
+    device: &B::Device,
+) -> Box<dyn FractalRule<B>> {
+    let mut rule = B1FractalGated::new(config.dim, device);
+    seed_linear(
+        &mut rule.g_proj,
+        config.dim,
+        config.dim * 2,
+        config.seed,
+        0,
+        device,
+    );
+    seed_linear(
+        &mut rule.c_proj,
+        config.dim,
+        config.dim * 2,
+        config.seed,
+        1,
+        device,
+    );
+    Box::new(rule)
+}
+
+fn seeded_p1_fractal_hybrid<B: Backend>(
+    config: TokenizerConfig,
+    device: &B::Device,
+) -> Box<dyn FractalRule<B>> {
+    let mut rule = P1FractalHybrid::new(config.dim, device);
+    seed_linear(
+        &mut rule.g_proj,
+        config.dim,
+        config.dim,
+        config.seed,
+        2,
+        device,
+    );
+    seed_linear(
+        &mut rule.w_h,
+        config.dim,
+        config.dim,
+        config.seed,
+        3,
+        device,
+    );
+    seed_linear(&mut rule.u, config.dim, config.dim, config.seed, 4, device);
+    Box::new(rule)
+}
+
+fn seeded_p2_mandelbrot<B: Backend>(
+    config: TokenizerConfig,
+    device: &B::Device,
+) -> Box<dyn FractalRule<B>> {
+    let mut rule = P2Mandelbrot::new(config.dim, device);
+    seed_linear(
+        &mut rule.g_proj,
+        config.dim,
+        config.dim * 2,
+        config.seed,
+        5,
+        device,
+    );
+    seed_linear(
+        &mut rule.c_proj,
+        config.dim,
+        config.dim * 2,
+        config.seed,
+        6,
+        device,
+    );
+    Box::new(rule)
+}
+
+fn seeded_b3_fractal_hierarchical<B: Backend>(
+    config: TokenizerConfig,
+    device: &B::Device,
+) -> Box<dyn FractalRule<B>> {
+    let mut rule = B3FractalHierarchical::new(config.dim, config.levels, device);
+    seed_linear(
+        &mut rule.g_proj,
+        config.dim,
+        config.dim * 2,
+        config.seed,
+        7,
+        device,
+    );
+    seed_linear(
+        &mut rule.c_proj,
+        config.dim,
+        config.dim * 2,
+        config.seed,
+        8,
+        device,
+    );
+    seed_linear(
+        &mut rule.gamma_proj,
+        config.dim,
+        config.dim * 2,
+        config.seed,
+        9,
+        device,
+    );
+    seed_linear(
+        &mut rule.compressor,
+        config.dim * 2,
+        config.dim * 2,
+        config.seed,
+        10,
+        device,
+    );
+    Box::new(rule)
+}
+
+fn seeded_b4_universal<B: Backend>(
+    config: TokenizerConfig,
+    device: &B::Device,
+) -> Box<dyn FractalRule<B>> {
+    let mut rule = B4Universal::new(config.dim, config.levels, device);
+    seed_linear(
+        &mut rule.g_proj,
+        config.dim,
+        config.dim * 2,
+        config.seed,
+        11,
+        device,
+    );
+    seed_linear(
+        &mut rule.c_proj,
+        config.dim,
+        config.dim * 2,
+        config.seed,
+        12,
+        device,
+    );
+    seed_linear(
+        &mut rule.gamma_proj,
+        config.dim,
+        config.dim * 2,
+        config.seed,
+        13,
+        device,
+    );
+    seed_linear(
+        &mut rule.compressor,
+        config.dim * 2,
+        config.dim * 2,
+        config.seed,
+        14,
+        device,
+    );
+    Box::new(rule)
+}
+
+fn seed_linear<B: Backend>(
+    linear: &mut Linear<B>,
+    d_input: usize,
+    d_output: usize,
+    seed: u64,
+    stream: u64,
+    device: &B::Device,
+) {
+    let mut state = mix_seed(seed, stream);
+    let weights = (0..d_input * d_output)
+        .map(|_| next_weight(&mut state))
+        .collect::<Vec<_>>();
+    linear.weight = Param::from_data(TensorData::new(weights, [d_input, d_output]), device);
+
+    if linear.bias.is_some() {
+        let bias = (0..d_output)
+            .map(|_| next_weight(&mut state))
+            .collect::<Vec<_>>();
+        linear.bias = Some(Param::from_data(TensorData::new(bias, [d_output]), device));
+    }
+}
+
+fn mix_seed(seed: u64, stream: u64) -> u64 {
+    let mut state = seed ^ stream.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    state ^= state >> 30;
+    state = state.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    state ^= state >> 27;
+    state = state.wrapping_mul(0x94D0_49BB_1331_11EB);
+    state ^ (state >> 31)
+}
+
+fn next_weight(state: &mut u64) -> f32 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    let unit = ((*state >> 11) as f64) / ((1u64 << 53) as f64);
+    ((unit as f32) * 2.0 - 1.0) * 0.125
 }
 
 fn split_point(bytes: &[u8]) -> Option<usize> {

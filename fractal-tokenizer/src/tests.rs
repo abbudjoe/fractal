@@ -45,39 +45,62 @@ fn revived_primitives_preserve_declared_layout_and_shape() {
 }
 
 #[test]
-fn proving_ground_runs_all_revived_primitives() {
+fn proving_ground_runs_all_revived_primitives_with_fixed_seed() {
     let device = Default::default();
     let config = TokenizerConfig::default();
     let tokenizer = RecursiveTokenizer::new(config);
-    let sentence = "Fractal tokenizers sketch recursive chunks.";
-    let mut summaries = Vec::new();
+    let sentence = "The cat sat on the mat.";
+    let first = collect_summaries(&tokenizer, sentence, &device);
+    let second = collect_summaries(&tokenizer, sentence, &device);
 
-    for factory in revived_primitive_factories::<TestBackend>() {
-        let summary = tokenizer.run_factory(sentence, &device, factory).unwrap();
-        println!("{}", format_summary(&summary));
+    assert_eq!(
+        digest_sequences(&first),
+        digest_sequences(&second),
+        "fixed seed should make proving-ground output reproducible"
+    );
+
+    for summary in &first {
+        println!("{}", format_summary(summary));
         assert!(!summary.tokens.is_empty());
-        summaries.push(summary);
     }
 
-    assert_eq!(summaries.len(), 5);
-    assert!(summaries.iter().all(|summary| summary.produced >= 3));
+    assert_eq!(first.len(), 5);
+    assert!(first.iter().all(|summary| summary.produced >= 3));
+}
+
+fn collect_summaries(
+    tokenizer: &RecursiveTokenizer,
+    sentence: &str,
+    device: &<TestBackend as burn::tensor::backend::Backend>::Device,
+) -> Vec<PrimitiveRunSummary> {
+    revived_primitive_factories::<TestBackend>()
+        .into_iter()
+        .map(|factory| tokenizer.run_factory(sentence, device, factory).unwrap())
+        .collect()
+}
+
+fn digest_sequences(summaries: &[PrimitiveRunSummary]) -> Vec<(&'static str, Vec<String>)> {
+    summaries
+        .iter()
+        .map(|summary| {
+            (
+                summary.primitive,
+                summary
+                    .tokens
+                    .iter()
+                    .map(|token| token.token.clone())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
 }
 
 fn format_summary(summary: &PrimitiveRunSummary) -> String {
-    let preview = summary
+    let digests = summary
         .tokens
         .iter()
-        .take(4)
-        .map(|token| {
-            format!(
-                "{}:{}-{}:{}",
-                token.depth, token.start, token.end, token.token
-            )
-        })
+        .map(|token| token.token.as_str())
         .collect::<Vec<_>>()
-        .join(" | ");
-    format!(
-        "primitive={} produced={} preview={}",
-        summary.primitive, summary.produced, preview
-    )
+        .join(" ");
+    format!("{:<24} | {}", summary.primitive, digests)
 }
