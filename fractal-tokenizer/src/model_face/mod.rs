@@ -3,10 +3,15 @@ use fractal_core::error::FractalError;
 use crate::faceoff::{EncodedDocument, FaceoffChunkLimits, FaceoffChunkedDocument};
 
 mod batch;
+mod bridge;
 mod native;
 mod traits;
 
 pub use batch::ModelFacingBatch;
+pub use bridge::{
+    BridgeBatch, BridgeDocument, BridgeFeatureChunk, BridgeFeatureToken, EmbeddingBridgeAdapter,
+    TypedEmbeddingBridge,
+};
 pub use native::{
     HuggingFaceNativeTokenizer, HuggingFaceNativeTokenizerError, ModelFacingDocumentView,
     NativeCollatedBatch, NativeCollatedChunk, NativeCollatedDocument, NativeCollationError,
