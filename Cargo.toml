@@ -9,8 +9,19 @@ default = []
 cuda = ["fractal-core/cuda", "fractal-primitives-private/cuda"]
 
 [workspace]
-members = ["fractal-core", "fractal-primitives-private", "fractal-eval-private"]
-default-members = [".", "fractal-core", "fractal-primitives-private", "fractal-eval-private"]
+members = [
+    "fractal-core",
+    "fractal-primitives-private",
+    "fractal-eval-private",
+    "fractal-tokenizer",
+]
+default-members = [
+    ".",
+    "fractal-core",
+    "fractal-primitives-private",
+    "fractal-eval-private",
+    "fractal-tokenizer",
+]
 resolver = "2"
 
 [workspace.package]

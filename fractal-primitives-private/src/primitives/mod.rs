@@ -80,3 +80,11 @@ pub(crate) fn clamp_symmetric_by_row<B: Backend>(
     let lower_mask = clamped.clone().lower(lower.clone());
     clamped.mask_where(lower_mask, lower)
 }
+
+pub(crate) fn clamp_max_by_row<B: Backend>(
+    tensor: Tensor<B, 2>,
+    clamp: Tensor<B, 2>,
+) -> Tensor<B, 2> {
+    let upper_mask = tensor.clone().greater(clamp.clone());
+    tensor.mask_where(upper_mask, clamp)
+}

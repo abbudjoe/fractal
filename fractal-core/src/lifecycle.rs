@@ -22,8 +22,10 @@ pub enum TournamentPreset {
     FastTest,
     ResearchMedium,
     ChallengerLane,
+    MinimalBaseline,
     MinimalProvingGround,
     BullpenPolish,
+    MediumStress,
     PressureTest,
     CandidateStress,
     GenerationFour,
@@ -36,8 +38,10 @@ impl TournamentPreset {
             Self::FastTest => "fast-test",
             Self::ResearchMedium => "research-medium",
             Self::ChallengerLane => "challenger-lane",
+            Self::MinimalBaseline => "minimal-baseline",
             Self::MinimalProvingGround => "minimal-proving-ground",
             Self::BullpenPolish => "bullpen-polish",
+            Self::MediumStress => "medium-stress",
             Self::PressureTest => "pressure-test",
             Self::CandidateStress => "candidate-stress",
             Self::GenerationFour => "generation-four",
@@ -50,8 +54,10 @@ impl TournamentPreset {
             Self::FastTest => TournamentConfig::fast_test(),
             Self::ResearchMedium => TournamentConfig::research_medium(),
             Self::ChallengerLane => TournamentConfig::challenger_lane(),
+            Self::MinimalBaseline => TournamentConfig::minimal_baseline(),
             Self::MinimalProvingGround => TournamentConfig::minimal_proving_ground(),
             Self::BullpenPolish => TournamentConfig::bullpen_polish(),
+            Self::MediumStress => TournamentConfig::medium_stress(),
             Self::PressureTest => TournamentConfig::pressure_test(),
             Self::CandidateStress => TournamentConfig::candidate_stress(),
             Self::GenerationFour => TournamentConfig::generation_four(),
@@ -373,6 +379,33 @@ impl TournamentConfig {
         }
     }
 
+    pub fn minimal_baseline() -> Self {
+        Self::minimal_proving_ground()
+    }
+
+    pub fn medium_stress() -> Self {
+        Self {
+            dim: 192,
+            levels: 3,
+            vocab_size: 64,
+            max_seq_len: 128,
+            max_recursion_depth: 12,
+            stability_depth: 12,
+            router_threshold: 0.92,
+            train_batch_size: 8,
+            eval_batch_size: 4,
+            train_steps_per_species: 80,
+            eval_batches_per_family: 2,
+            learning_rate: 1e-3,
+            seed: 42,
+            generator_depth_config: GeneratorDepthConfig::polish_top_candidates(),
+            execution_backend: ComputeBackend::default_for_current_platform(),
+            execution_mode: ExecutionMode::Sequential,
+            parallelism: 4,
+            species_overrides: Vec::new(),
+        }
+    }
+
     pub fn generation_four() -> Self {
         #[cfg(feature = "cuda")]
         {
@@ -577,6 +610,7 @@ impl Tournament {
         species: &[SpeciesDefinition],
         reporter: Option<Arc<dyn TournamentReporter>>,
     ) -> Result<Vec<SpeciesRawMetrics>, FractalError> {
+        Self::validate_species_definitions(species)?;
         match self.config.execution_mode {
             ExecutionMode::Sequential => self.run_sequential(species, reporter),
             ExecutionMode::Parallel => self.run_parallel(species, reporter),
@@ -721,5 +755,26 @@ impl Tournament {
         if let Some(reporter) = reporter {
             reporter.on_event(event);
         }
+    }
+
+    fn validate_species_definitions(species: &[SpeciesDefinition]) -> Result<(), FractalError> {
+        let mut ids = HashSet::with_capacity(species.len());
+        let mut variant_names = HashSet::with_capacity(species.len());
+        for definition in species {
+            if !ids.insert(definition.id) {
+                return Err(FractalError::InvalidConfig(format!(
+                    "duplicate species id in tournament registry: {}",
+                    definition.id
+                )));
+            }
+            definition.variant_name.validate()?;
+            if !variant_names.insert(definition.variant_name) {
+                return Err(FractalError::InvalidConfig(format!(
+                    "duplicate primitive variant name in tournament registry: {}",
+                    definition.variant_name
+                )));
+            }
+        }
+        Ok(())
     }
 }

@@ -7,8 +7,8 @@ use fractal_core::{
     error::FractalError,
     registry::{
         cpu_device, initialize_metal_runtime, run_species_with_factory,
-        run_species_with_factory_candle, MetalTrainBackend, SpeciesDefinition, SpeciesId,
-        SpeciesRunContext,
+        run_species_with_factory_candle, MetalTrainBackend, PrimitiveVariantName,
+        SpeciesDefinition, SpeciesId, SpeciesRunContext,
     },
 };
 
@@ -175,14 +175,25 @@ define_flat_species_runner!(
 );
 
 macro_rules! species_definition {
-    ($id:expr, $cpu_fn:ident, $metal_fn:ident, $cuda_fn:ident) => {{
+    ($id:expr, $variant_name:expr, $cpu_fn:ident, $metal_fn:ident, $cuda_fn:ident) => {{
         #[cfg(feature = "cuda")]
         {
-            SpeciesDefinition::new($id, $cpu_fn, $metal_fn, $cuda_fn)
+            SpeciesDefinition::new(
+                $id,
+                PrimitiveVariantName::new_unchecked($variant_name),
+                $cpu_fn,
+                $metal_fn,
+                $cuda_fn,
+            )
         }
         #[cfg(not(feature = "cuda"))]
         {
-            SpeciesDefinition::new($id, $cpu_fn, $metal_fn)
+            SpeciesDefinition::new(
+                $id,
+                PrimitiveVariantName::new_unchecked($variant_name),
+                $cpu_fn,
+                $metal_fn,
+            )
         }
     }};
 }
@@ -190,61 +201,77 @@ macro_rules! species_definition {
 pub const SPECIES_REGISTRY: [SpeciesDefinition; 11] = [
     species_definition!(
         SpeciesId::P1Contractive,
+        "p1_contractive_v1",
         run_p1_cpu,
         run_p1_metal,
         run_p1_cuda
     ),
     species_definition!(
         SpeciesId::P3Hierarchical,
+        "p3_hierarchical_v1",
         run_p3_cpu,
         run_p3_metal,
         run_p3_cuda
     ),
     species_definition!(
         SpeciesId::B2StableHierarchical,
+        "b2_stable_hierarchical_v1",
         run_b2_cpu,
         run_b2_metal,
         run_b2_cuda
     ),
     species_definition!(
         SpeciesId::B1FractalGated,
+        "b1_fractal_gated_dyn-residual-norm_v1",
         run_b1_cpu,
         run_b1_metal,
         run_b1_cuda
     ),
     species_definition!(
         SpeciesId::P1FractalHybrid,
+        "p1_fractal_hybrid_v1",
         run_p1_hybrid_cpu,
         run_p1_hybrid_metal,
         run_p1_hybrid_cuda
     ),
     species_definition!(
         SpeciesId::P2Mandelbrot,
+        "p2_mandelbrot_dyn-gate-norm_v1",
         run_p2_cpu,
         run_p2_metal,
         run_p2_cuda
     ),
     species_definition!(
         SpeciesId::B3FractalHierarchical,
+        "b3_fractal_hierarchical_dyn-radius-depth_v1",
         run_b3_cpu,
         run_b3_metal,
         run_b3_cuda
     ),
     species_definition!(
         SpeciesId::B4Universal,
+        "b4_universal_dyn-residual-norm_v1",
         run_b4_cpu,
         run_b4_metal,
         run_b4_cuda
     ),
-    species_definition!(SpeciesId::Ifs, run_ifs_cpu, run_ifs_metal, run_ifs_cuda),
+    species_definition!(
+        SpeciesId::Ifs,
+        "ifs_dyn-radius-depth_v1",
+        run_ifs_cpu,
+        run_ifs_metal,
+        run_ifs_cuda
+    ),
     species_definition!(
         SpeciesId::GeneralizedMobius,
+        "generalized_mobius_dyn-jitter-norm_v1",
         run_mobius_cpu,
         run_mobius_metal,
         run_mobius_cuda
     ),
     species_definition!(
         SpeciesId::LogisticChaoticMap,
+        "logistic_chaotic_map_v1",
         run_logistic_cpu,
         run_logistic_metal,
         run_logistic_cuda

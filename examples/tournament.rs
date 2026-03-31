@@ -7,6 +7,7 @@ use fractal::{
         SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig, TournamentPreset,
         TournamentProgressEvent, TournamentReporter, TournamentSequence,
     },
+    primitive_tracker_reminder_lines,
     registry::{ComputeBackend, ExecutionMode, SpeciesId},
     species_registry_for_lane, species_registry_for_species, TournamentLane,
 };
@@ -230,8 +231,10 @@ fn parse_preset(value: &str) -> Result<TournamentPreset, FractalError> {
         "fast-test" => Ok(TournamentPreset::FastTest),
         "research-medium" => Ok(TournamentPreset::ResearchMedium),
         "challenger-lane" => Ok(TournamentPreset::ChallengerLane),
+        "minimal-baseline" => Ok(TournamentPreset::MinimalBaseline),
         "minimal-proving-ground" => Ok(TournamentPreset::MinimalProvingGround),
         "bullpen-polish" => Ok(TournamentPreset::BullpenPolish),
+        "medium-stress" => Ok(TournamentPreset::MediumStress),
         "pressure-test" => Ok(TournamentPreset::PressureTest),
         "candidate-stress" => Ok(TournamentPreset::CandidateStress),
         "generation-four" => Ok(TournamentPreset::GenerationFour),
@@ -330,7 +333,8 @@ fn run_preset(options: &RunOptions, preset: TournamentPreset) -> Result<(), Frac
     };
     let results =
         aggregate_results(tournament.run_generation_with_reporter(&species, Some(reporter))?);
-    print_results(results);
+    print_results(&results);
+    print_primitive_tracker_reminder(&results, &species);
     Ok(())
 }
 
@@ -432,7 +436,7 @@ fn print_species_completed(completion: &SpeciesCompletion) {
     );
 }
 
-fn print_results(results: Vec<fractal::RankedSpeciesResult>) {
+fn print_results(results: &[fractal::RankedSpeciesResult]) {
     for result in results {
         println!(
             "{:<5} {:<24} {:<10.2} {:<11.2} {:<8.2} {:<7.0} {:.2}",
@@ -444,6 +448,15 @@ fn print_results(results: Vec<fractal::RankedSpeciesResult>) {
             result.tokens_per_sec,
             result.fitness
         );
+    }
+}
+
+fn print_primitive_tracker_reminder(
+    results: &[fractal::RankedSpeciesResult],
+    species: &[fractal::SpeciesDefinition],
+) {
+    for line in primitive_tracker_reminder_lines(results, species) {
+        println!("{line}");
     }
 }
 
@@ -472,7 +485,7 @@ fn print_usage() {
     println!();
     println!("Options:");
     println!(
-        "  --preset <default|fast-test|research-medium|challenger-lane|minimal-proving-ground|bullpen-polish|pressure-test|candidate-stress|generation-four>"
+        "  --preset <default|fast-test|research-medium|challenger-lane|minimal-baseline|minimal-proving-ground|bullpen-polish|medium-stress|pressure-test|candidate-stress|generation-four>"
     );
     println!("  --sequence <first-run>");
     println!("  --lane <all|baseline|challenger|bullpen|proving-ground|squaring|leader>");
@@ -488,6 +501,8 @@ fn print_usage() {
     println!();
     println!("Examples:");
     println!("  cargo run --example tournament -- --preset fast-test");
+    println!("  cargo run --release --example tournament -- --preset minimal-baseline");
+    println!("  cargo run --release --example tournament -- --preset medium-stress");
     println!("  cargo run --release --example tournament -- --lane baseline");
     println!("  cargo run --release --example tournament -- --lane bullpen");
     println!("  cargo run --release --example tournament -- --lane proving-ground");
@@ -626,6 +641,44 @@ mod tests {
             command,
             CliCommand::Run(RunOptions {
                 selection: Some(RunSelection::Preset(TournamentPreset::MinimalProvingGround)),
+                lane: None,
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_minimal_baseline_preset() {
+        let command =
+            parse_command(vec!["--preset".to_owned(), "minimal-baseline".to_owned()]).unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::MinimalBaseline)),
+                lane: None,
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_medium_stress_preset() {
+        let command =
+            parse_command(vec!["--preset".to_owned(), "medium-stress".to_owned()]).unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::MediumStress)),
                 lane: None,
                 species: None,
                 seed: None,

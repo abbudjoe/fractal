@@ -155,6 +155,68 @@ impl FromStr for SpeciesId {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PrimitiveVariantName(&'static str);
+
+impl PrimitiveVariantName {
+    pub const fn new_unchecked(name: &'static str) -> Self {
+        Self(name)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+
+    pub fn validate(self) -> Result<(), FractalError> {
+        if is_valid_primitive_variant_name(self.0) {
+            Ok(())
+        } else {
+            Err(FractalError::InvalidConfig(format!(
+                "primitive variant name must match [base]_[lever-description]_v[version]: {}",
+                self.0
+            )))
+        }
+    }
+}
+
+impl Display for PrimitiveVariantName {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+pub fn is_valid_primitive_variant_name(name: &str) -> bool {
+    let mut parts = name.split('_').peekable();
+    let mut count = 0usize;
+
+    while let Some(part) = parts.next() {
+        count += 1;
+        if part.is_empty() {
+            return false;
+        }
+        if parts.peek().is_none() {
+            return is_valid_variant_version(part) && count >= 3;
+        }
+        if !part
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        {
+            return false;
+        }
+    }
+
+    false
+}
+
+fn is_valid_variant_version(part: &str) -> bool {
+    let Some(version) = part.strip_prefix('v') else {
+        return false;
+    };
+    !version.is_empty()
+        && !version.starts_with('0')
+        && version.chars().all(|ch| ch.is_ascii_digit())
+}
+
 #[derive(Clone, Debug)]
 pub struct SpeciesRunContext {
     pub index: usize,
@@ -170,6 +232,7 @@ type MetalRunner = fn(SpeciesRunContext, WgpuDevice) -> Result<SpeciesRawMetrics
 #[derive(Clone, Copy)]
 pub struct SpeciesDefinition {
     pub id: SpeciesId,
+    pub variant_name: PrimitiveVariantName,
     cpu_runner: CpuRunner,
     #[cfg(feature = "cuda")]
     cuda_runner: CudaRunner,
@@ -178,9 +241,15 @@ pub struct SpeciesDefinition {
 
 impl SpeciesDefinition {
     #[cfg(not(feature = "cuda"))]
-    pub const fn new(id: SpeciesId, cpu_runner: CpuRunner, metal_runner: MetalRunner) -> Self {
+    pub const fn new(
+        id: SpeciesId,
+        variant_name: PrimitiveVariantName,
+        cpu_runner: CpuRunner,
+        metal_runner: MetalRunner,
+    ) -> Self {
         Self {
             id,
+            variant_name,
             cpu_runner,
             metal_runner,
         }
@@ -189,12 +258,14 @@ impl SpeciesDefinition {
     #[cfg(feature = "cuda")]
     pub const fn new(
         id: SpeciesId,
+        variant_name: PrimitiveVariantName,
         cpu_runner: CpuRunner,
         metal_runner: MetalRunner,
         cuda_runner: CudaRunner,
     ) -> Self {
         Self {
             id,
+            variant_name,
             cpu_runner,
             cuda_runner,
             metal_runner,

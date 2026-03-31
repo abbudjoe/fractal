@@ -141,10 +141,12 @@ fn ifs_dynamic_radius_shrinks_with_depth() {
 }
 
 #[test]
-fn p2_dynamic_gate_clamp_changes_with_depth() {
+fn p2_dynamic_gate_clamp_changes_with_state_norm() {
     let device = Default::default();
     let x = Tensor::<TestBackend, 2>::ones([1, 4], &device);
-    let state = FractalState::Complex(Tensor::<TestBackend, 2>::ones([1, 8], &device));
+    let low_state = FractalState::Complex(Tensor::<TestBackend, 2>::ones([1, 8], &device));
+    let high_state =
+        FractalState::Complex(Tensor::<TestBackend, 2>::ones([1, 8], &device).mul_scalar(8.0));
     let mut rule = P2Mandelbrot::new(4, &device);
     rule.g_proj.weight = Param::from_data(TensorData::new(vec![10.0f32; 32], [4, 8]), &device);
     rule.g_proj.bias = Some(Param::from_data(
@@ -157,9 +159,9 @@ fn p2_dynamic_gate_clamp_changes_with_depth() {
         &device,
     ));
 
-    let shallow = rule
+    let low = rule
         .apply(
-            &state,
+            &low_state,
             &x,
             ApplyContext {
                 depth: 1,
@@ -172,12 +174,12 @@ fn p2_dynamic_gate_clamp_changes_with_depth() {
         .into_data()
         .to_vec::<f32>()
         .unwrap();
-    let deep = rule
+    let high = rule
         .apply(
-            &state,
+            &high_state,
             &x,
             ApplyContext {
-                depth: 10,
+                depth: 1,
                 max_depth: 10,
             },
         )
@@ -188,7 +190,7 @@ fn p2_dynamic_gate_clamp_changes_with_depth() {
         .to_vec::<f32>()
         .unwrap();
 
-    assert_ne!(shallow, deep);
+    assert_ne!(low, high);
 }
 
 #[test]

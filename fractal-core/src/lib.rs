@@ -19,8 +19,8 @@ pub use lifecycle::{
 };
 pub use model::FractalModel;
 pub use registry::{
-    ComputeBackend, CpuBackend, CpuTrainBackend, ExecutionMode, MetalBackend, MetalTrainBackend,
-    SpeciesDefinition, SpeciesId,
+    is_valid_primitive_variant_name, ComputeBackend, CpuBackend, CpuTrainBackend, ExecutionMode,
+    MetalBackend, MetalTrainBackend, PrimitiveVariantName, SpeciesDefinition, SpeciesId,
 };
 pub use router::EarlyExitRouter;
 pub use state::{FractalState, StateLayout};

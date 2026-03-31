@@ -27,7 +27,10 @@ use crate::{
     },
     model::FractalModel,
     primitives::complex_square,
-    registry::{ComputeBackend, ExecutionMode, SpeciesDefinition, SpeciesId, SpeciesRunContext},
+    registry::{
+        is_valid_primitive_variant_name, ComputeBackend, ExecutionMode, PrimitiveVariantName,
+        SpeciesDefinition, SpeciesId, SpeciesRunContext,
+    },
     router::EarlyExitRouter,
     rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
@@ -152,6 +155,29 @@ fn minimal_proving_ground_preset_targets_reintroduced_squaring_family() {
 }
 
 #[test]
+fn minimal_baseline_preset_matches_minimal_proving_ground_shape() {
+    let config = TournamentPreset::MinimalBaseline.config();
+
+    assert_eq!(config.dim, 128);
+    assert_eq!(config.max_recursion_depth, 8);
+    assert_eq!(config.stability_depth, 8);
+    assert_eq!(config.train_steps_per_species, 30);
+    assert_eq!(config.eval_batches_per_family, 2);
+}
+
+#[test]
+fn medium_stress_preset_targets_midweight_single_species_run() {
+    let config = TournamentPreset::MediumStress.config();
+
+    assert_eq!(config.dim, 192);
+    assert_eq!(config.max_seq_len, 128);
+    assert_eq!(config.max_recursion_depth, 12);
+    assert_eq!(config.stability_depth, 12);
+    assert_eq!(config.train_steps_per_species, 80);
+    assert_eq!(config.eval_batches_per_family, 2);
+}
+
+#[test]
 fn bullpen_polish_preset_targets_top_candidates_with_harder_recursion() {
     let config = TournamentPreset::BullpenPolish.config();
 
@@ -258,7 +284,9 @@ fn tournament_presets_never_clip_eval_examples() {
         TournamentPreset::FastTest,
         TournamentPreset::ResearchMedium,
         TournamentPreset::ChallengerLane,
+        TournamentPreset::MinimalBaseline,
         TournamentPreset::MinimalProvingGround,
+        TournamentPreset::MediumStress,
         TournamentPreset::BullpenPolish,
         TournamentPreset::PressureTest,
         TournamentPreset::CandidateStress,
@@ -353,6 +381,38 @@ fn tournament_parallel_mode_respects_parallelism_cap() {
     assert_eq!(results.len(), SpeciesId::ALL.len());
     assert!(MAX_CONCURRENT_SPECIES.load(Ordering::SeqCst) <= 2);
     assert!(MAX_CONCURRENT_SPECIES.load(Ordering::SeqCst) >= 2);
+}
+
+#[test]
+fn primitive_variant_naming_convention_accepts_versioned_lowercase_variants() {
+    assert!(is_valid_primitive_variant_name("p1_fractal_hybrid_v1"));
+    assert!(is_valid_primitive_variant_name(
+        "b1_fractal_gated_dyn-residual-norm_v1"
+    ));
+    assert!(is_valid_primitive_variant_name(
+        "generalized_mobius_dyn-jitter-norm_v2"
+    ));
+}
+
+#[test]
+fn primitive_variant_naming_convention_rejects_invalid_shapes() {
+    assert!(!is_valid_primitive_variant_name("ifs_v1"));
+    assert!(!is_valid_primitive_variant_name("IFS_dyn-radius-depth_v1"));
+    assert!(!is_valid_primitive_variant_name("p1_fractal_hybrid"));
+    assert!(!is_valid_primitive_variant_name("p1__hybrid_v1"));
+}
+
+#[test]
+fn tournament_rejects_species_with_invalid_variant_names() {
+    let tournament = Tournament::new(TournamentConfig::fast_test()).unwrap();
+    let error = tournament
+        .run_generation(&[invalid_species_definition(
+            SpeciesId::P1Contractive,
+            PrimitiveVariantName::new_unchecked("invalid"),
+        )])
+        .unwrap_err();
+
+    assert!(matches!(error, FractalError::InvalidConfig(_)));
 }
 
 #[test]
@@ -547,13 +607,19 @@ fn test_species_registry() -> Vec<SpeciesDefinition> {
 
 #[cfg(not(feature = "cuda"))]
 fn test_species_definition(id: SpeciesId) -> SpeciesDefinition {
-    SpeciesDefinition::new(id, indexed_stub_species_runner, stub_species_runner_metal)
+    SpeciesDefinition::new(
+        id,
+        test_variant_name(id),
+        indexed_stub_species_runner,
+        stub_species_runner_metal,
+    )
 }
 
 #[cfg(feature = "cuda")]
 fn test_species_definition(id: SpeciesId) -> SpeciesDefinition {
     SpeciesDefinition::new(
         id,
+        test_variant_name(id),
         indexed_stub_species_runner,
         stub_species_runner_metal,
         stub_species_runner_cuda,
@@ -624,6 +690,7 @@ fn parallelism_test_species_registry() -> Vec<SpeciesDefinition> {
 fn parallelism_test_species_definition(id: SpeciesId) -> SpeciesDefinition {
     SpeciesDefinition::new(
         id,
+        test_variant_name(id),
         parallelism_stub_species_runner,
         parallelism_stub_species_runner_metal,
     )
@@ -633,8 +700,51 @@ fn parallelism_test_species_definition(id: SpeciesId) -> SpeciesDefinition {
 fn parallelism_test_species_definition(id: SpeciesId) -> SpeciesDefinition {
     SpeciesDefinition::new(
         id,
+        test_variant_name(id),
         parallelism_stub_species_runner,
         parallelism_stub_species_runner_metal,
         parallelism_stub_species_runner_cuda,
     )
+}
+
+fn invalid_species_definition(
+    id: SpeciesId,
+    variant_name: PrimitiveVariantName,
+) -> SpeciesDefinition {
+    #[cfg(feature = "cuda")]
+    {
+        SpeciesDefinition::new(
+            id,
+            variant_name,
+            indexed_stub_species_runner,
+            stub_species_runner_metal,
+            stub_species_runner_cuda,
+        )
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        SpeciesDefinition::new(
+            id,
+            variant_name,
+            indexed_stub_species_runner,
+            stub_species_runner_metal,
+        )
+    }
+}
+
+fn test_variant_name(id: SpeciesId) -> PrimitiveVariantName {
+    let name = match id {
+        SpeciesId::P1Contractive => "p1_contractive_v1",
+        SpeciesId::P3Hierarchical => "p3_hierarchical_v1",
+        SpeciesId::B2StableHierarchical => "b2_stable_hierarchical_v1",
+        SpeciesId::B1FractalGated => "b1_fractal_gated_dyn-residual-norm_v1",
+        SpeciesId::P1FractalHybrid => "p1_fractal_hybrid_v1",
+        SpeciesId::P2Mandelbrot => "p2_mandelbrot_dyn-gate-norm_v1",
+        SpeciesId::B3FractalHierarchical => "b3_fractal_hierarchical_dyn-radius-depth_v1",
+        SpeciesId::B4Universal => "b4_universal_dyn-residual-norm_v1",
+        SpeciesId::Ifs => "ifs_dyn-radius-depth_v1",
+        SpeciesId::GeneralizedMobius => "generalized_mobius_dyn-jitter-norm_v1",
+        SpeciesId::LogisticChaoticMap => "logistic_chaotic_map_v1",
+    };
+    PrimitiveVariantName::new_unchecked(name)
 }

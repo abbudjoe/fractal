@@ -1,3 +1,5 @@
+mod primitive_tracker;
+
 pub use fractal_core::*;
 pub use fractal_eval_private::{aggregate_results, perplexity_score, speed_score, stability_score};
 pub use fractal_primitives_private::{
@@ -5,6 +7,7 @@ pub use fractal_primitives_private::{
     GeneralizedMobius, Ifs, LogisticChaoticMap, P1Contractive, P1FractalHybrid, P2Mandelbrot,
     P3Hierarchical, SPECIES_REGISTRY,
 };
+pub use primitive_tracker::{primitive_tracker_reminder_lines, TRACKER_PATH};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TournamentLane {
