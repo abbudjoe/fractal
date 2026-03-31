@@ -5,3 +5,5 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+burn = { workspace = true }
+fractal-core = { path = "../fractal-core" }
