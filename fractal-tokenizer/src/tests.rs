@@ -1726,6 +1726,63 @@ fn model_face_pretrained_adapter_handles_edge_case_documents_deterministically()
 }
 
 #[test]
+fn model_face_pretrained_adapter_unicode_heavy_documents_are_utf8_safe() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let unicode = unicode_heavy_input();
+    let json_code_log = json_code_log_input();
+    let near_repetition = near_repetition_input();
+    let corpus = vec![json_code_log.as_str(), near_repetition.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+    let limits = FaceoffChunkLimits::new(1, 8);
+    let adapter = NativeCompatibilityAdapter;
+    let tokenizer_paths = pretrained_hf_tokenizer_json_paths();
+
+    if tokenizer_paths.is_empty() {
+        println!("MODEL_FACE_UNICODE_SKIP=no local pretrained tokenizer.json configured/found");
+        return;
+    }
+
+    let document = faceoff
+        .encode_text_v2_with_policy::<TestBackend>(
+            &unicode,
+            &vocab,
+            &device,
+            FaceoffEmissionPolicy::NoveltyAware,
+        )
+        .unwrap();
+    let document = ModelFacingDocument::from_encoded(document, limits).unwrap();
+    let batch = ModelFacingBatch::from(vec![document]);
+
+    for (label, tokenizer_path) in tokenizer_paths {
+        let tokenizer =
+            HuggingFaceNativeTokenizer::from_file(&tokenizer_path).unwrap_or_else(|error| {
+                panic!(
+                    "failed to load pretrained tokenizer.json for {label} at {}: {error}",
+                    tokenizer_path.display()
+                )
+            });
+        let native = adapter.retokenize_batch(&batch, &tokenizer).unwrap();
+
+        assert_eq!(native.len(), 1);
+        let document = batch.iter().next().unwrap();
+        let native_document = native.documents.first().unwrap();
+        assert_eq!(native_document.input_len, unicode.len());
+        assert_eq!(
+            native_document.frontier_token_count,
+            document.frontier_token_count()
+        );
+        assert!(native_document.native_token_count() > 0);
+        assert!(native_document
+            .chunks
+            .iter()
+            .all(|chunk| std::str::from_utf8(&chunk.source.payload).is_ok()));
+    }
+}
+
+#[test]
 fn faceoff_tokenizer_slice_report() {
     let device = Default::default();
     let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());

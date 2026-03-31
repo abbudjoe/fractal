@@ -76,7 +76,9 @@ impl FaceoffChunkedDocument {
         }
 
         String::from_utf8(bytes).map_err(|error| {
-            FractalError::InvalidState(format!("reconstructed chunk payload is not valid UTF-8: {error}"))
+            FractalError::InvalidState(format!(
+                "reconstructed chunk payload is not valid UTF-8: {error}"
+            ))
         })
     }
 }
@@ -107,10 +109,19 @@ pub(crate) fn package_document(
     let mut current_payload = Vec::new();
 
     for token in ordered {
-        let would_exceed_tokens = current_token_count >= limits.max_tokens_per_chunk;
-        let would_exceed_bytes = current_token_count > 0
-            && current_byte_count + token.bytes.len() > limits.max_bytes_per_chunk;
-        if would_exceed_tokens || would_exceed_bytes {
+        if current_token_count == 0 {
+            current_start = token.start;
+        }
+        current_end = token.end;
+        current_token_count += 1;
+        current_byte_count += token.bytes.len();
+        current_payload.extend_from_slice(&token.bytes);
+
+        let payload_is_utf8 = std::str::from_utf8(&current_payload).is_ok();
+        let reached_token_limit = current_token_count >= limits.max_tokens_per_chunk;
+        let reached_byte_limit = current_byte_count >= limits.max_bytes_per_chunk;
+
+        if payload_is_utf8 && (reached_token_limit || reached_byte_limit) {
             chunks.push(FaceoffChunk {
                 index: chunks.len(),
                 token_count: current_token_count,
@@ -122,14 +133,6 @@ pub(crate) fn package_document(
             current_token_count = 0;
             current_byte_count = 0;
         }
-
-        if current_token_count == 0 {
-            current_start = token.start;
-        }
-        current_end = token.end;
-        current_token_count += 1;
-        current_byte_count += token.bytes.len();
-        current_payload.extend_from_slice(&token.bytes);
     }
 
     if current_token_count > 0 {
@@ -148,4 +151,54 @@ pub(crate) fn package_document(
         frontier_token_count: document.tokens.len(),
         chunks,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        EncodedDocument, EncodedToken, EncodedTokenKind, FaceoffFallbackStats, FaceoffTokenId,
+    };
+
+    fn byte_token(id: u32, start: usize, end: usize, value: u8) -> EncodedToken {
+        EncodedToken {
+            id: FaceoffTokenId::new(id),
+            kind: EncodedTokenKind::Byte { value },
+            depth: 0,
+            start,
+            end,
+            bytes: vec![value],
+        }
+    }
+
+    #[test]
+    fn packages_unicode_safe_chunk_boundaries() {
+        let input = "🙂é語";
+        let bytes = input.as_bytes();
+        let tokens = bytes
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, value)| byte_token(index as u32, index, index + 1, value))
+            .collect::<Vec<_>>();
+        let document = EncodedDocument {
+            input_len: bytes.len(),
+            tokens,
+            fallback: FaceoffFallbackStats {
+                motif_hits: 0,
+                unknown_motifs: 0,
+                recursed_to_children: 0,
+                byte_fallback_tokens: bytes.len(),
+            },
+        };
+
+        let chunked = package_document(&document, FaceoffChunkLimits::new(1, 1)).unwrap();
+
+        assert_eq!(chunked.reconstruct().unwrap(), input);
+        assert!(chunked
+            .chunks
+            .iter()
+            .all(|chunk| std::str::from_utf8(&chunk.payload).is_ok()));
+        assert!(chunked.chunks.iter().all(|chunk| chunk.token_count >= 1));
+    }
 }
