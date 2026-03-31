@@ -50,9 +50,13 @@ impl<B: Backend> FractalRule<B> for GeneralizedMobius<B> {
             .tanh()
             .mul_scalar(0.5)
             .add_scalar(1.0);
-        let epsilon = row_l2_norm(state.clone())
+        // Stronger denominator control for the bounded minimal-stress rerun.
+        let norm = row_l2_norm(state.clone());
+        let epsilon = norm
+            .clone()
             .mul_scalar(1e-5)
             .add_scalar(1e-6)
+            .mul(norm.mul_scalar(0.5).add_scalar(1.0))
             .repeat(&[1, self.hidden_dim]);
 
         let numerator = a * state.clone() + b;

@@ -264,7 +264,7 @@ pub const SPECIES_REGISTRY: [SpeciesDefinition; 11] = [
     ),
     species_definition!(
         SpeciesId::GeneralizedMobius,
-        "generalized_mobius_dyn-jitter-norm_v1",
+        "generalized_mobius_dyn-jitter-norm_v2",
         run_mobius_cpu,
         run_mobius_metal,
         run_mobius_cuda

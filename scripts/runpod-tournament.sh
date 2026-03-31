@@ -24,6 +24,7 @@ Wrapper options:
   --state-dir PATH                Override remote state path. Default: <volumeMountPath>/.fractal-runpod
   --timeout-seconds N             Wait timeout for pod + SSH readiness. Default: 900
   --poll-seconds N                Poll interval while waiting. Default: 5
+  --run-timeout-seconds N         Bound remote tournament runtime with timeout(1).
   --no-compile                    Reuse a cached remote binary and fail if it is missing.
   --stop-after-run                Always stop the pod after the command finishes.
   --keep-pod                      Never stop the pod automatically.
@@ -492,6 +493,7 @@ PY
         "$local_branch" \
         "$local_build_key" \
         "$NO_COMPILE" \
+        "$RUN_TIMEOUT_SECONDS" \
         "${TOURNAMENT_ARGS[@]}" <<'REMOTE'
 set -euo pipefail
 
@@ -500,7 +502,8 @@ state_dir="$2"
 local_branch="$3"
 local_build_key="$4"
 no_compile="$5"
-shift 5
+run_timeout_seconds="$6"
+shift 6
 
 if [ -f "$HOME/.cargo/env" ]; then
     # shellcheck disable=SC1090
@@ -553,6 +556,19 @@ else
     echo "[runpod-wrapper] reusing cached release binary" | tee -a "$state_dir/logs/latest.log"
 fi
 
+if [ -n "$run_timeout_seconds" ] && [ "$run_timeout_seconds" -gt 0 ]; then
+    set +e
+    timeout --signal=TERM "$run_timeout_seconds" \
+        stdbuf -oL -eL "$binary_path" --backend cuda "$@" 2>&1 | tee -a "$state_dir/logs/latest.log"
+    run_status=$?
+    set -e
+    if [ "$run_status" -eq 124 ]; then
+        echo "[runpod-wrapper] tournament timed out after ${run_timeout_seconds}s" \
+            | tee -a "$state_dir/logs/latest.log"
+    fi
+    exit "$run_status"
+fi
+
 stdbuf -oL -eL "$binary_path" --backend cuda "$@" 2>&1 | tee -a "$state_dir/logs/latest.log"
 REMOTE
 }
@@ -601,6 +617,7 @@ REMOTE_DIR=""
 STATE_DIR=""
 TIMEOUT_SECONDS="900"
 POLL_SECONDS="5"
+RUN_TIMEOUT_SECONDS="0"
 NO_COMPILE=0
 STOP_MODE="auto"
 DRY_RUN=0
@@ -673,6 +690,10 @@ while [ $# -gt 0 ]; do
             ;;
         --poll-seconds)
             POLL_SECONDS="$2"
+            shift 2
+            ;;
+        --run-timeout-seconds)
+            RUN_TIMEOUT_SECONDS="$2"
             shift 2
             ;;
         --no-compile)

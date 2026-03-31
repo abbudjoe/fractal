@@ -178,6 +178,19 @@ fn medium_stress_preset_targets_midweight_single_species_run() {
 }
 
 #[test]
+fn intermediate_stress_preset_targets_hybrid_decider_lane() {
+    let config = TournamentPreset::IntermediateStress.config();
+
+    assert_eq!(config.dim, 160);
+    assert_eq!(config.max_seq_len, 96);
+    assert_eq!(config.max_recursion_depth, 10);
+    assert_eq!(config.stability_depth, 10);
+    assert_eq!(config.train_steps_per_species, 48);
+    assert_eq!(config.eval_batches_per_family, 2);
+    assert_eq!(config.generator_depth_config.sentence_eval_max_depth, 10);
+}
+
+#[test]
 fn bullpen_polish_preset_targets_top_candidates_with_harder_recursion() {
     let config = TournamentPreset::BullpenPolish.config();
 
@@ -286,6 +299,7 @@ fn tournament_presets_never_clip_eval_examples() {
         TournamentPreset::ChallengerLane,
         TournamentPreset::MinimalBaseline,
         TournamentPreset::MinimalProvingGround,
+        TournamentPreset::IntermediateStress,
         TournamentPreset::MediumStress,
         TournamentPreset::BullpenPolish,
         TournamentPreset::PressureTest,

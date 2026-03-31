@@ -234,6 +234,7 @@ fn parse_preset(value: &str) -> Result<TournamentPreset, FractalError> {
         "minimal-baseline" => Ok(TournamentPreset::MinimalBaseline),
         "minimal-proving-ground" => Ok(TournamentPreset::MinimalProvingGround),
         "bullpen-polish" => Ok(TournamentPreset::BullpenPolish),
+        "intermediate-stress" => Ok(TournamentPreset::IntermediateStress),
         "medium-stress" => Ok(TournamentPreset::MediumStress),
         "pressure-test" => Ok(TournamentPreset::PressureTest),
         "candidate-stress" => Ok(TournamentPreset::CandidateStress),
@@ -485,7 +486,7 @@ fn print_usage() {
     println!();
     println!("Options:");
     println!(
-        "  --preset <default|fast-test|research-medium|challenger-lane|minimal-baseline|minimal-proving-ground|bullpen-polish|medium-stress|pressure-test|candidate-stress|generation-four>"
+        "  --preset <default|fast-test|research-medium|challenger-lane|minimal-baseline|minimal-proving-ground|bullpen-polish|intermediate-stress|medium-stress|pressure-test|candidate-stress|generation-four>"
     );
     println!("  --sequence <first-run>");
     println!("  --lane <all|baseline|challenger|bullpen|proving-ground|squaring|leader>");
@@ -502,6 +503,7 @@ fn print_usage() {
     println!("Examples:");
     println!("  cargo run --example tournament -- --preset fast-test");
     println!("  cargo run --release --example tournament -- --preset minimal-baseline");
+    println!("  cargo run --release --example tournament -- --preset intermediate-stress");
     println!("  cargo run --release --example tournament -- --preset medium-stress");
     println!("  cargo run --release --example tournament -- --lane baseline");
     println!("  cargo run --release --example tournament -- --lane bullpen");
@@ -679,6 +681,28 @@ mod tests {
             command,
             CliCommand::Run(RunOptions {
                 selection: Some(RunSelection::Preset(TournamentPreset::MediumStress)),
+                lane: None,
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_intermediate_stress_preset() {
+        let command = parse_command(vec![
+            "--preset".to_owned(),
+            "intermediate-stress".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::IntermediateStress)),
                 lane: None,
                 species: None,
                 seed: None,
