@@ -163,6 +163,8 @@ pub struct TournamentConfig {
     pub eval_batch_size: usize,
     pub train_steps_per_species: usize,
     pub eval_batches_per_family: usize,
+    pub perplexity_eval_batches: Option<usize>,
+    pub arc_eval_batches: Option<usize>,
     pub learning_rate: f64,
     pub seed: u64,
     pub run_timeout: Option<Duration>,
@@ -187,6 +189,8 @@ impl Default for TournamentConfig {
             eval_batch_size: 1,
             train_steps_per_species: 1,
             eval_batches_per_family: 1,
+            perplexity_eval_batches: None,
+            arc_eval_batches: None,
             learning_rate: 1e-3,
             seed: 42,
             run_timeout: None,
@@ -247,6 +251,16 @@ impl TournamentConfig {
         if self.eval_batches_per_family == 0 {
             return Err(FractalError::InvalidConfig(
                 "eval_batches_per_family must be greater than zero".into(),
+            ));
+        }
+        if self.perplexity_eval_batches == Some(0) {
+            return Err(FractalError::InvalidConfig(
+                "perplexity_eval_batches must be greater than zero when configured".into(),
+            ));
+        }
+        if self.arc_eval_batches == Some(0) {
+            return Err(FractalError::InvalidConfig(
+                "arc_eval_batches must be greater than zero when configured".into(),
             ));
         }
         if self.learning_rate <= 0.0 {
@@ -322,6 +336,8 @@ impl TournamentConfig {
             eval_batch_size: 8,
             train_steps_per_species: 50,
             eval_batches_per_family: 8,
+            perplexity_eval_batches: None,
+            arc_eval_batches: None,
             learning_rate: 1e-3,
             seed: 42,
             run_timeout: None,
@@ -346,6 +362,8 @@ impl TournamentConfig {
             eval_batch_size: 4,
             train_steps_per_species: 12,
             eval_batches_per_family: 2,
+            perplexity_eval_batches: None,
+            arc_eval_batches: None,
             learning_rate: 1e-3,
             seed: 42,
             run_timeout: None,
@@ -370,6 +388,8 @@ impl TournamentConfig {
             eval_batch_size: 8,
             train_steps_per_species: 24,
             eval_batches_per_family: 2,
+            perplexity_eval_batches: None,
+            arc_eval_batches: None,
             learning_rate: 1e-3,
             seed: 42,
             run_timeout: None,
@@ -400,6 +420,8 @@ impl TournamentConfig {
             eval_batch_size: 8,
             train_steps_per_species: 30,
             eval_batches_per_family: 2,
+            perplexity_eval_batches: None,
+            arc_eval_batches: None,
             learning_rate: 1e-3,
             seed: 42,
             run_timeout: None,
@@ -424,6 +446,8 @@ impl TournamentConfig {
             eval_batch_size: 16,
             train_steps_per_species: 5,
             eval_batches_per_family: 2,
+            perplexity_eval_batches: None,
+            arc_eval_batches: None,
             learning_rate: 5e-4,
             seed: 42,
             run_timeout: None,
@@ -456,6 +480,8 @@ impl TournamentConfig {
             eval_batch_size: 4,
             train_steps_per_species: 80,
             eval_batches_per_family: 2,
+            perplexity_eval_batches: None,
+            arc_eval_batches: None,
             learning_rate: 1e-3,
             seed: 42,
             run_timeout: None,
@@ -484,6 +510,8 @@ impl TournamentConfig {
             eval_batch_size: 4,
             train_steps_per_species: 48,
             eval_batches_per_family: 2,
+            perplexity_eval_batches: None,
+            arc_eval_batches: None,
             learning_rate: 1e-3,
             seed: 42,
             run_timeout: None,
@@ -508,6 +536,8 @@ impl TournamentConfig {
             eval_batch_size: 2,
             train_steps_per_species: 48,
             eval_batches_per_family: 2,
+            perplexity_eval_batches: None,
+            arc_eval_batches: None,
             learning_rate: 1e-3,
             seed: 42,
             run_timeout: None,
@@ -545,6 +575,8 @@ impl TournamentConfig {
             eval_batch_size: 2,
             train_steps_per_species: 5,
             eval_batches_per_family: 2,
+            perplexity_eval_batches: None,
+            arc_eval_batches: None,
             learning_rate: 1e-3,
             seed: 42,
             run_timeout: None,
@@ -569,6 +601,8 @@ impl TournamentConfig {
             eval_batch_size: 1,
             train_steps_per_species: 0,
             eval_batches_per_family: 1,
+            perplexity_eval_batches: None,
+            arc_eval_batches: None,
             learning_rate: 1e-3,
             seed: 42,
             run_timeout: None,
@@ -593,6 +627,8 @@ impl TournamentConfig {
             eval_batch_size: 4,
             train_steps_per_species: 120,
             eval_batches_per_family: 4,
+            perplexity_eval_batches: None,
+            arc_eval_batches: None,
             learning_rate: 1e-3,
             seed: 42,
             run_timeout: None,
@@ -644,6 +680,21 @@ impl TournamentConfig {
             .iter()
             .filter_map(|override_config| override_config.eval_batch_size)
             .fold(self.eval_batch_size, usize::max)
+    }
+
+    pub fn effective_perplexity_eval_batches(&self) -> usize {
+        self.perplexity_eval_batches
+            .unwrap_or(self.eval_batches_per_family)
+    }
+
+    pub fn effective_arc_eval_batches(&self) -> usize {
+        self.arc_eval_batches
+            .unwrap_or(self.eval_batches_per_family)
+    }
+
+    fn max_effective_eval_batches_per_family(&self) -> usize {
+        self.effective_perplexity_eval_batches()
+            .max(self.effective_arc_eval_batches())
     }
 }
 
@@ -810,7 +861,7 @@ impl Tournament {
         config.validate()?;
         let train_examples_per_family = (config.max_train_batch_size() * 8).max(96);
         let eval_examples_per_family =
-            (config.max_eval_batch_size() * config.eval_batches_per_family).max(32);
+            (config.max_eval_batch_size() * config.max_effective_eval_batches_per_family()).max(32);
         let generator = SimpleHierarchicalGenerator::new(GeneratorConfig {
             vocab_size: config.vocab_size,
             max_seq_len: config.max_seq_len,

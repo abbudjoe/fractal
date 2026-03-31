@@ -52,6 +52,8 @@ struct RunOptions {
     execution_mode: Option<ExecutionMode>,
     parallelism: Option<usize>,
     backend: Option<BackendOverride>,
+    perplexity_eval_batches: Option<usize>,
+    arc_eval_batches: Option<usize>,
 }
 
 impl Default for RunOptions {
@@ -64,6 +66,8 @@ impl Default for RunOptions {
             execution_mode: None,
             parallelism: None,
             backend: None,
+            perplexity_eval_batches: None,
+            arc_eval_batches: None,
         }
     }
 }
@@ -139,6 +143,12 @@ impl RunOptions {
         if let Some(backend) = self.backend {
             config.execution_backend = backend.into();
         }
+        if let Some(perplexity_eval_batches) = self.perplexity_eval_batches {
+            config.perplexity_eval_batches = Some(perplexity_eval_batches);
+        }
+        if let Some(arc_eval_batches) = self.arc_eval_batches {
+            config.arc_eval_batches = Some(arc_eval_batches);
+        }
         config
     }
 }
@@ -212,6 +222,17 @@ where
         "--backend" => {
             let value = next_value(args, "--backend")?;
             options.backend = Some(parse_backend(&value)?);
+            Ok(())
+        }
+        "--perplexity-eval-batches" => {
+            let value = next_value(args, "--perplexity-eval-batches")?;
+            options.perplexity_eval_batches =
+                Some(parse_positive_usize(&value, "--perplexity-eval-batches")?);
+            Ok(())
+        }
+        "--arc-eval-batches" => {
+            let value = next_value(args, "--arc-eval-batches")?;
+            options.arc_eval_batches = Some(parse_positive_usize(&value, "--arc-eval-batches")?);
             Ok(())
         }
         _ => Err(invalid_argument(format!("unknown argument: {arg}"))),
@@ -291,15 +312,19 @@ fn parse_execution_mode(value: &str) -> Result<ExecutionMode, FractalError> {
 }
 
 fn parse_parallelism(value: &str) -> Result<usize, FractalError> {
-    let parallelism = value
+    parse_positive_usize(value, "--parallelism")
+}
+
+fn parse_positive_usize(value: &str, flag: &str) -> Result<usize, FractalError> {
+    let parsed = value
         .parse::<usize>()
-        .map_err(|_| invalid_argument(format!("invalid parallelism: {value}")))?;
-    if parallelism == 0 {
-        return Err(invalid_argument(
-            "parallelism must be greater than zero".to_owned(),
-        ));
+        .map_err(|_| invalid_argument(format!("invalid value for {flag}: {value}")))?;
+    if parsed == 0 {
+        return Err(invalid_argument(format!(
+            "{flag} must be greater than zero"
+        )));
     }
-    Ok(parallelism)
+    Ok(parsed)
 }
 
 fn parse_backend(value: &str) -> Result<BackendOverride, FractalError> {
@@ -391,7 +416,7 @@ fn print_header(
         .map(|species| format!("species={species}"))
         .unwrap_or_else(|| format!("lane={}", lane.name()));
     println!(
-        "{} backend={} mode={} parallelism={} seed={} dim={} levels={} seq={} depth={} stability_depth={} train_batch={} eval_batch={} train_steps={} eval_batches={}",
+        "{} backend={} mode={} parallelism={} seed={} dim={} levels={} seq={} depth={} stability_depth={} train_batch={} eval_batch={} train_steps={} eval_batches={} perplexity_eval_batches={} arc_eval_batches={}",
         scope,
         backend_name(&config.execution_backend),
         execution_mode_name(config.execution_mode),
@@ -406,6 +431,8 @@ fn print_header(
         config.eval_batch_size,
         config.train_steps_per_species,
         config.eval_batches_per_family,
+        config.effective_perplexity_eval_batches(),
+        config.effective_arc_eval_batches(),
     );
     println!("comparison={}", comparison_authority.label());
     if !config.species_overrides.is_empty() {
@@ -576,6 +603,8 @@ fn print_usage() {
     println!("  --seed <u64>");
     println!("  --mode <sequential|parallel>");
     println!("  --parallelism <usize>");
+    println!("  --perplexity-eval-batches <usize>");
+    println!("  --arc-eval-batches <usize>");
     #[cfg(feature = "cuda")]
     println!("  --backend <cpu|cuda|metal>");
     #[cfg(not(feature = "cuda"))]
@@ -644,6 +673,8 @@ mod tests {
                 execution_mode: Some(ExecutionMode::Parallel),
                 parallelism: Some(3),
                 backend: Some(BackendOverride::Cpu),
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
             })
         );
     }
@@ -670,6 +701,8 @@ mod tests {
                 execution_mode: None,
                 parallelism: None,
                 backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
             })
         );
     }
@@ -695,6 +728,8 @@ mod tests {
                 execution_mode: None,
                 parallelism: None,
                 backend: Some(BackendOverride::Cuda),
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
             })
         );
     }
@@ -741,6 +776,8 @@ mod tests {
                 execution_mode: None,
                 parallelism: None,
                 backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
             })
         );
     }
@@ -763,6 +800,8 @@ mod tests {
                 execution_mode: None,
                 parallelism: None,
                 backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
             })
         );
     }
@@ -782,6 +821,8 @@ mod tests {
                 execution_mode: None,
                 parallelism: None,
                 backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
             })
         );
     }
@@ -801,6 +842,8 @@ mod tests {
                 execution_mode: None,
                 parallelism: None,
                 backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
             })
         );
     }
@@ -823,6 +866,8 @@ mod tests {
                 execution_mode: None,
                 parallelism: None,
                 backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
             })
         );
     }
@@ -842,6 +887,8 @@ mod tests {
                 execution_mode: None,
                 parallelism: None,
                 backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
             })
         );
     }
@@ -860,6 +907,8 @@ mod tests {
                 execution_mode: None,
                 parallelism: None,
                 backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
             })
         );
     }
@@ -878,6 +927,8 @@ mod tests {
                 execution_mode: None,
                 parallelism: None,
                 backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
             })
         );
     }
@@ -900,6 +951,8 @@ mod tests {
                 execution_mode: None,
                 parallelism: None,
                 backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
             })
         );
     }
@@ -928,5 +981,33 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, FractalError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn parse_command_accepts_explicit_eval_budget_overrides() {
+        let command = parse_command(vec![
+            "--preset".to_owned(),
+            "minimal-stress-lane".to_owned(),
+            "--perplexity-eval-batches".to_owned(),
+            "1".to_owned(),
+            "--arc-eval-batches".to_owned(),
+            "3".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::MinimalStressLane)),
+                lane: None,
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+                perplexity_eval_batches: Some(1),
+                arc_eval_batches: Some(3),
+            })
+        );
     }
 }

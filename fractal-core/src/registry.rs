@@ -733,7 +733,10 @@ where
     log_species_phase_start(
         species,
         "perplexity",
-        &[format!("batches={}", batches.eval_sentence.len())],
+        &[format!(
+            "batches={}",
+            config.effective_perplexity_eval_batches()
+        )],
     );
     let perplexity_started = Instant::now();
     if let Some(deadline) = deadline {
@@ -795,7 +798,7 @@ where
     log_species_phase_start(
         species,
         "arc_speed",
-        &[format!("batches={}", batches.eval_arc.len())],
+        &[format!("batches={}", config.effective_arc_eval_batches())],
     );
     let accuracy_started = Instant::now();
     if let Some(deadline) = deadline {
@@ -895,13 +898,13 @@ fn prepare_batches_for_run<B: AutodiffBackend>(
         eval_sentence: generator.eval_batches_for::<B>(
             TaskFamily::RecursiveSentence,
             config.eval_batch_size,
-            config.eval_batches_per_family,
+            config.effective_perplexity_eval_batches(),
             device,
         )?,
         eval_arc: generator.eval_batches_for::<B>(
             TaskFamily::ArcGrid,
             config.eval_batch_size,
-            config.eval_batches_per_family,
+            config.effective_arc_eval_batches(),
             device,
         )?,
     })
@@ -934,13 +937,13 @@ fn prepare_candle_batches_for_run(
         eval_sentence: move_batches(generator.eval_batches_for::<CpuTrainBackend>(
             TaskFamily::RecursiveSentence,
             config.eval_batch_size,
-            config.eval_batches_per_family,
+            config.effective_perplexity_eval_batches(),
             &staging_device,
         )?),
         eval_arc: move_batches(generator.eval_batches_for::<CpuTrainBackend>(
             TaskFamily::ArcGrid,
             config.eval_batch_size,
-            config.eval_batches_per_family,
+            config.effective_arc_eval_batches(),
             &staging_device,
         )?),
     })

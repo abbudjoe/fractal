@@ -195,6 +195,36 @@ fn minimal_stress_lane_preset_matches_minimal_baseline_shape() {
 }
 
 #[test]
+fn eval_budget_defaults_to_eval_batches_per_family_when_unset() {
+    let config = TournamentPreset::MinimalStressLane.config();
+
+    assert_eq!(config.perplexity_eval_batches, None);
+    assert_eq!(config.arc_eval_batches, None);
+    assert_eq!(config.effective_perplexity_eval_batches(), 2);
+    assert_eq!(config.effective_arc_eval_batches(), 2);
+}
+
+#[test]
+fn eval_budget_can_be_split_explicitly() {
+    let mut config = TournamentPreset::MinimalStressLane.config();
+    config.perplexity_eval_batches = Some(1);
+    config.arc_eval_batches = Some(3);
+
+    assert_eq!(config.effective_perplexity_eval_batches(), 1);
+    assert_eq!(config.effective_arc_eval_batches(), 3);
+}
+
+#[test]
+fn zero_explicit_eval_budget_is_rejected() {
+    let mut config = TournamentPreset::MinimalStressLane.config();
+    config.perplexity_eval_batches = Some(0);
+
+    let error = Tournament::new(config).unwrap_err();
+
+    assert!(matches!(error, FractalError::InvalidConfig(_)));
+}
+
+#[test]
 fn medium_stress_preset_targets_midweight_single_species_run() {
     let config = TournamentPreset::MediumStress.config();
 
