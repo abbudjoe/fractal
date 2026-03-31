@@ -1,3 +1,6 @@
+// Naming Convention for tokenizer primitives:
+// [base]_[lever-description]_v[version]
+// Examples: p1_fractal_hybrid_v1, b1_fractal_gated_dyn-residual-norm_v1
 use burn::{
     module::Param,
     nn::Linear,
@@ -12,6 +15,8 @@ use fractal_core::{
 use crate::{B1FractalGated, B3FractalHierarchical, B4Universal, P1FractalHybrid, P2Mandelbrot};
 
 const DEFAULT_LEVELS: usize = 3;
+const TRACKER_REMINDER: &str =
+    "Reminder: update docs/tokenizer-tracker.md with the latest tokenizer results.";
 
 #[derive(Clone, Copy, Debug)]
 pub struct TokenizerConfig {
@@ -54,6 +59,19 @@ pub struct PrimitiveFactory<B: Backend> {
     pub build: fn(TokenizerConfig, &B::Device) -> Box<dyn FractalRule<B>>,
 }
 
+impl<B: Backend> PrimitiveFactory<B> {
+    pub fn new(
+        name: &'static str,
+        build: fn(TokenizerConfig, &B::Device) -> Box<dyn FractalRule<B>>,
+    ) -> Self {
+        if let Err(error) = validate_tokenizer_primitive_name(name) {
+            panic!("invalid tokenizer primitive name `{name}`: {error}");
+        }
+
+        Self { name, build }
+    }
+}
+
 pub struct RecursiveTokenizer {
     config: TokenizerConfig,
 }
@@ -93,6 +111,7 @@ impl RecursiveTokenizer {
         device: &B::Device,
         factory: PrimitiveFactory<B>,
     ) -> Result<PrimitiveRunSummary, FractalError> {
+        validate_tokenizer_primitive_name(factory.name)?;
         let rule = (factory.build)(self.config, device);
         let tokens = self.tokenize(rule.as_ref(), text, device)?;
         Ok(PrimitiveRunSummary {
@@ -162,27 +181,53 @@ impl RecursiveTokenizer {
 
 pub fn revived_primitive_factories<B: Backend>() -> [PrimitiveFactory<B>; 5] {
     [
-        PrimitiveFactory {
-            name: "b1_fractal_gated",
-            build: seeded_b1_fractal_gated::<B>,
-        },
-        PrimitiveFactory {
-            name: "p1_fractal_hybrid",
-            build: seeded_p1_fractal_hybrid::<B>,
-        },
-        PrimitiveFactory {
-            name: "p2_mandelbrot",
-            build: seeded_p2_mandelbrot::<B>,
-        },
-        PrimitiveFactory {
-            name: "b3_fractal_hierarchical",
-            build: seeded_b3_fractal_hierarchical::<B>,
-        },
-        PrimitiveFactory {
-            name: "b4_universal",
-            build: seeded_b4_universal::<B>,
-        },
+        PrimitiveFactory::new("b1_fractal_gated_v1", seeded_b1_fractal_gated::<B>),
+        PrimitiveFactory::new("p1_fractal_hybrid_v1", seeded_p1_fractal_hybrid::<B>),
+        PrimitiveFactory::new("p2_mandelbrot_v1", seeded_p2_mandelbrot::<B>),
+        PrimitiveFactory::new(
+            "b3_fractal_hierarchical_v1",
+            seeded_b3_fractal_hierarchical::<B>,
+        ),
+        PrimitiveFactory::new("b4_universal_v1", seeded_b4_universal::<B>),
     ]
+}
+
+pub fn validate_tokenizer_primitive_name(name: &str) -> Result<(), FractalError> {
+    let (prefix, version) = name.rsplit_once("_v").ok_or_else(|| {
+        FractalError::InvalidConfig(format!(
+            "tokenizer primitive `{name}` must end with `_v[version]`"
+        ))
+    })?;
+
+    if version.is_empty() || !version.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err(FractalError::InvalidConfig(format!(
+            "tokenizer primitive `{name}` must use a numeric version suffix"
+        )));
+    }
+
+    let (base, lever) = prefix.split_once('_').ok_or_else(|| {
+        FractalError::InvalidConfig(format!(
+            "tokenizer primitive `{name}` must follow `[base]_[lever-description]_v[version]`"
+        ))
+    })?;
+
+    if !is_valid_base_segment(base) {
+        return Err(FractalError::InvalidConfig(format!(
+            "tokenizer primitive `{name}` has an invalid base segment `{base}`"
+        )));
+    }
+
+    if !is_valid_lever_segment(lever) {
+        return Err(FractalError::InvalidConfig(format!(
+            "tokenizer primitive `{name}` has an invalid lever segment `{lever}`"
+        )));
+    }
+
+    Ok(())
+}
+
+pub fn tokenizer_tracker_reminder() -> &'static str {
+    TRACKER_REMINDER
 }
 
 fn seeded_b1_fractal_gated<B: Backend>(
@@ -375,6 +420,20 @@ fn next_weight(state: &mut u64) -> f32 {
         .wrapping_add(1_442_695_040_888_963_407);
     let unit = ((*state >> 11) as f64) / ((1u64 << 53) as f64);
     ((unit as f32) * 2.0 - 1.0) * 0.125
+}
+
+fn is_valid_base_segment(base: &str) -> bool {
+    !base.is_empty()
+        && base
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+}
+
+fn is_valid_lever_segment(lever: &str) -> bool {
+    !lever.is_empty()
+        && lever
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
 }
 
 fn split_point(bytes: &[u8]) -> Option<usize> {

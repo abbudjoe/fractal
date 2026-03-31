@@ -8,8 +8,8 @@ pub use primitives::{
     B1FractalGated, B3FractalHierarchical, B4Universal, P1FractalHybrid, P2Mandelbrot,
 };
 pub use tokenizer::{
-    revived_primitive_factories, PrimitiveFactory, PrimitiveRunSummary, RecursiveTokenizer,
-    TokenRecord, TokenizerConfig,
+    revived_primitive_factories, tokenizer_tracker_reminder, validate_tokenizer_primitive_name,
+    PrimitiveFactory, PrimitiveRunSummary, RecursiveTokenizer, TokenRecord, TokenizerConfig,
 };
 
 #[cfg(test)]

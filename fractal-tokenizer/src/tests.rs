@@ -2,8 +2,9 @@ use burn::backend::Candle;
 use fractal_core::{rule_trait::FractalRule, state::FractalState};
 
 use crate::{
-    revived_primitive_factories, B1FractalGated, B3FractalHierarchical, B4Universal,
-    P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary, RecursiveTokenizer, TokenizerConfig,
+    revived_primitive_factories, tokenizer_tracker_reminder, validate_tokenizer_primitive_name,
+    B1FractalGated, B3FractalHierarchical, B4Universal, P1FractalHybrid, P2Mandelbrot,
+    PrimitiveRunSummary, RecursiveTokenizer, TokenizerConfig,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -63,9 +64,17 @@ fn proving_ground_runs_all_revived_primitives_with_fixed_seed() {
         println!("{}", format_summary(summary));
         assert!(!summary.tokens.is_empty());
     }
+    println!("{}", tokenizer_tracker_reminder());
 
     assert_eq!(first.len(), 5);
     assert!(first.iter().all(|summary| summary.produced >= 3));
+}
+
+#[test]
+fn revived_tokenizer_factory_names_follow_convention() {
+    for factory in revived_primitive_factories::<TestBackend>() {
+        validate_tokenizer_primitive_name(factory.name).unwrap();
+    }
 }
 
 fn collect_summaries(
