@@ -22,6 +22,7 @@ pub enum TournamentPreset {
     FastTest,
     ResearchMedium,
     ChallengerLane,
+    MinimalProvingGround,
     BullpenPolish,
     PressureTest,
     CandidateStress,
@@ -35,6 +36,7 @@ impl TournamentPreset {
             Self::FastTest => "fast-test",
             Self::ResearchMedium => "research-medium",
             Self::ChallengerLane => "challenger-lane",
+            Self::MinimalProvingGround => "minimal-proving-ground",
             Self::BullpenPolish => "bullpen-polish",
             Self::PressureTest => "pressure-test",
             Self::CandidateStress => "candidate-stress",
@@ -48,6 +50,7 @@ impl TournamentPreset {
             Self::FastTest => TournamentConfig::fast_test(),
             Self::ResearchMedium => TournamentConfig::research_medium(),
             Self::ChallengerLane => TournamentConfig::challenger_lane(),
+            Self::MinimalProvingGround => TournamentConfig::minimal_proving_ground(),
             Self::BullpenPolish => TournamentConfig::bullpen_polish(),
             Self::PressureTest => TournamentConfig::pressure_test(),
             Self::CandidateStress => TournamentConfig::candidate_stress(),
@@ -344,6 +347,29 @@ impl TournamentConfig {
                 train_steps_per_species: Some(16),
                 ..SpeciesPresetOverride::for_species(SpeciesId::Ifs)
             }],
+        }
+    }
+
+    pub fn minimal_proving_ground() -> Self {
+        Self {
+            dim: 128,
+            levels: 3,
+            vocab_size: 64,
+            max_seq_len: 96,
+            max_recursion_depth: 8,
+            stability_depth: 8,
+            router_threshold: 0.92,
+            train_batch_size: 8,
+            eval_batch_size: 8,
+            train_steps_per_species: 30,
+            eval_batches_per_family: 2,
+            learning_rate: 1e-3,
+            seed: 42,
+            generator_depth_config: GeneratorDepthConfig::default(),
+            execution_backend: ComputeBackend::default_for_current_platform(),
+            execution_mode: ExecutionMode::Sequential,
+            parallelism: 4,
+            species_overrides: Vec::new(),
         }
     }
 

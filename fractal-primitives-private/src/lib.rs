@@ -13,8 +13,10 @@ use fractal_core::{
 };
 
 pub use primitives::{
-    b2_stable_hierarchical::B2StableHierarchical, generalized_mobius::GeneralizedMobius, ifs::Ifs,
-    logistic_chaotic_map::LogisticChaoticMap, p1_contractive::P1Contractive,
+    b1_fractal_gated::B1FractalGated, b2_stable_hierarchical::B2StableHierarchical,
+    b3_fractal_hierarchical::B3FractalHierarchical, b4_universal::B4Universal,
+    generalized_mobius::GeneralizedMobius, ifs::Ifs, logistic_chaotic_map::LogisticChaoticMap,
+    p1_contractive::P1Contractive, p1_fractal_hybrid::P1FractalHybrid, p2_mandelbrot::P2Mandelbrot,
     p3_hierarchical::P3Hierarchical,
 };
 
@@ -121,6 +123,41 @@ define_hierarchical_species_runner!(
     B2StableHierarchical,
     B2StableHierarchical
 );
+define_flat_species_runner!(
+    run_b1_cpu,
+    run_b1_metal,
+    run_b1_cuda,
+    B1FractalGated,
+    B1FractalGated
+);
+define_flat_species_runner!(
+    run_p1_hybrid_cpu,
+    run_p1_hybrid_metal,
+    run_p1_hybrid_cuda,
+    P1FractalHybrid,
+    P1FractalHybrid
+);
+define_flat_species_runner!(
+    run_p2_cpu,
+    run_p2_metal,
+    run_p2_cuda,
+    P2Mandelbrot,
+    P2Mandelbrot
+);
+define_hierarchical_species_runner!(
+    run_b3_cpu,
+    run_b3_metal,
+    run_b3_cuda,
+    B3FractalHierarchical,
+    B3FractalHierarchical
+);
+define_hierarchical_species_runner!(
+    run_b4_cpu,
+    run_b4_metal,
+    run_b4_cuda,
+    B4Universal,
+    B4Universal
+);
 define_flat_species_runner!(run_ifs_cpu, run_ifs_metal, run_ifs_cuda, Ifs, Ifs);
 define_flat_species_runner!(
     run_mobius_cpu,
@@ -150,7 +187,7 @@ macro_rules! species_definition {
     }};
 }
 
-pub const SPECIES_REGISTRY: [SpeciesDefinition; 6] = [
+pub const SPECIES_REGISTRY: [SpeciesDefinition; 11] = [
     species_definition!(
         SpeciesId::P1Contractive,
         run_p1_cpu,
@@ -168,6 +205,36 @@ pub const SPECIES_REGISTRY: [SpeciesDefinition; 6] = [
         run_b2_cpu,
         run_b2_metal,
         run_b2_cuda
+    ),
+    species_definition!(
+        SpeciesId::B1FractalGated,
+        run_b1_cpu,
+        run_b1_metal,
+        run_b1_cuda
+    ),
+    species_definition!(
+        SpeciesId::P1FractalHybrid,
+        run_p1_hybrid_cpu,
+        run_p1_hybrid_metal,
+        run_p1_hybrid_cuda
+    ),
+    species_definition!(
+        SpeciesId::P2Mandelbrot,
+        run_p2_cpu,
+        run_p2_metal,
+        run_p2_cuda
+    ),
+    species_definition!(
+        SpeciesId::B3FractalHierarchical,
+        run_b3_cpu,
+        run_b3_metal,
+        run_b3_cuda
+    ),
+    species_definition!(
+        SpeciesId::B4Universal,
+        run_b4_cpu,
+        run_b4_metal,
+        run_b4_cuda
     ),
     species_definition!(SpeciesId::Ifs, run_ifs_cpu, run_ifs_metal, run_ifs_cuda),
     species_definition!(

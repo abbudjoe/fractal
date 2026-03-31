@@ -1,8 +1,9 @@
 pub use fractal_core::*;
 pub use fractal_eval_private::{aggregate_results, perplexity_score, speed_score, stability_score};
 pub use fractal_primitives_private::{
-    species_registry, B2StableHierarchical, GeneralizedMobius, Ifs, LogisticChaoticMap,
-    P1Contractive, P3Hierarchical, SPECIES_REGISTRY,
+    species_registry, B1FractalGated, B2StableHierarchical, B3FractalHierarchical, B4Universal,
+    GeneralizedMobius, Ifs, LogisticChaoticMap, P1Contractive, P1FractalHybrid, P2Mandelbrot,
+    P3Hierarchical, SPECIES_REGISTRY,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10,6 +11,7 @@ pub enum TournamentLane {
     All,
     Baseline,
     Challenger,
+    ProvingGround,
     Leader,
 }
 
@@ -17,6 +19,13 @@ const CHALLENGER_SPECIES: [fractal_core::SpeciesId; 3] = [
     fractal_core::SpeciesId::Ifs,
     fractal_core::SpeciesId::GeneralizedMobius,
     fractal_core::SpeciesId::LogisticChaoticMap,
+];
+const PROVING_GROUND_SPECIES: [fractal_core::SpeciesId; 5] = [
+    fractal_core::SpeciesId::B1FractalGated,
+    fractal_core::SpeciesId::P1FractalHybrid,
+    fractal_core::SpeciesId::P2Mandelbrot,
+    fractal_core::SpeciesId::B3FractalHierarchical,
+    fractal_core::SpeciesId::B4Universal,
 ];
 
 const LEADER_SPECIES: [fractal_core::SpeciesId; 1] = [fractal_core::SpeciesId::P1Contractive];
@@ -27,6 +36,7 @@ impl TournamentLane {
             Self::All => "all",
             Self::Baseline => "baseline",
             Self::Challenger => "challenger",
+            Self::ProvingGround => "proving-ground",
             Self::Leader => "leader",
         }
     }
@@ -36,6 +46,7 @@ impl TournamentLane {
             Self::All => TournamentPreset::Default,
             Self::Baseline => TournamentPreset::ResearchMedium,
             Self::Challenger => TournamentPreset::BullpenPolish,
+            Self::ProvingGround => TournamentPreset::MinimalProvingGround,
             Self::Leader => TournamentPreset::GenerationFour,
         }
     }
@@ -45,6 +56,7 @@ pub fn species_registry_for_lane(lane: TournamentLane) -> Vec<SpeciesDefinition>
     match lane {
         TournamentLane::All | TournamentLane::Baseline => species_registry().to_vec(),
         TournamentLane::Challenger => filter_species_registry(&CHALLENGER_SPECIES),
+        TournamentLane::ProvingGround => filter_species_registry(&PROVING_GROUND_SPECIES),
         TournamentLane::Leader => filter_species_registry(&LEADER_SPECIES),
     }
 }
@@ -90,6 +102,16 @@ mod tests {
             .collect();
 
         assert_eq!(ids, CHALLENGER_SPECIES);
+    }
+
+    #[test]
+    fn proving_ground_lane_only_includes_squaring_species() {
+        let ids: Vec<_> = species_registry_for_lane(TournamentLane::ProvingGround)
+            .into_iter()
+            .map(|definition| definition.id)
+            .collect();
+
+        assert_eq!(ids, PROVING_GROUND_SPECIES);
     }
 
     #[test]

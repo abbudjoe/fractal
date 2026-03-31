@@ -136,6 +136,22 @@ fn challenger_lane_preset_targets_midweight_single_gpu_run() {
 }
 
 #[test]
+fn minimal_proving_ground_preset_targets_reintroduced_squaring_family() {
+    let config = TournamentPreset::MinimalProvingGround.config();
+
+    assert_eq!(config.dim, 128);
+    assert_eq!(config.levels, 3);
+    assert_eq!(config.max_seq_len, 96);
+    assert_eq!(config.max_recursion_depth, 8);
+    assert_eq!(config.stability_depth, 8);
+    assert_eq!(config.train_batch_size, 8);
+    assert_eq!(config.eval_batch_size, 8);
+    assert_eq!(config.train_steps_per_species, 30);
+    assert_eq!(config.eval_batches_per_family, 2);
+    assert_eq!(config.execution_mode, ExecutionMode::Sequential);
+}
+
+#[test]
 fn bullpen_polish_preset_targets_top_candidates_with_harder_recursion() {
     let config = TournamentPreset::BullpenPolish.config();
 
@@ -242,6 +258,7 @@ fn tournament_presets_never_clip_eval_examples() {
         TournamentPreset::FastTest,
         TournamentPreset::ResearchMedium,
         TournamentPreset::ChallengerLane,
+        TournamentPreset::MinimalProvingGround,
         TournamentPreset::BullpenPolish,
         TournamentPreset::PressureTest,
         TournamentPreset::CandidateStress,

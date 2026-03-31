@@ -1,4 +1,8 @@
-use burn::{backend::Candle, tensor::Tensor};
+use burn::{
+    backend::Candle,
+    module::Param,
+    tensor::{Tensor, TensorData},
+};
 use fractal_core::{
     registry::SpeciesId,
     rule_trait::{ApplyContext, FractalRule},
@@ -6,8 +10,9 @@ use fractal_core::{
 };
 
 use crate::{
-    species_registry, B2StableHierarchical, GeneralizedMobius, Ifs, LogisticChaoticMap,
-    P1Contractive, P3Hierarchical,
+    species_registry, B1FractalGated, B2StableHierarchical, B3FractalHierarchical, B4Universal,
+    GeneralizedMobius, Ifs, LogisticChaoticMap, P1Contractive, P1FractalHybrid, P2Mandelbrot,
+    P3Hierarchical,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -21,6 +26,11 @@ fn primitives_preserve_declared_layout_and_shape() {
         Box::new(P1Contractive::new(8, &device)),
         Box::new(P3Hierarchical::new(8, 3, &device)),
         Box::new(B2StableHierarchical::new(8, 3, &device)),
+        Box::new(B1FractalGated::new(8, &device)),
+        Box::new(P1FractalHybrid::new(8, &device)),
+        Box::new(P2Mandelbrot::new(8, &device)),
+        Box::new(B3FractalHierarchical::new(8, 3, &device)),
+        Box::new(B4Universal::new(8, 3, &device)),
         Box::new(Ifs::new(8, &device)),
         Box::new(GeneralizedMobius::new(8, &device)),
         Box::new(LogisticChaoticMap::new(8, &device)),
@@ -122,6 +132,142 @@ fn ifs_dynamic_radius_shrinks_with_depth() {
         )
         .unwrap()
         .flat()
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+
+    assert_ne!(shallow, deep);
+}
+
+#[test]
+fn p2_dynamic_gate_clamp_changes_with_depth() {
+    let device = Default::default();
+    let x = Tensor::<TestBackend, 2>::ones([1, 4], &device);
+    let state = FractalState::Complex(Tensor::<TestBackend, 2>::ones([1, 8], &device));
+    let mut rule = P2Mandelbrot::new(4, &device);
+    rule.g_proj.weight = Param::from_data(TensorData::new(vec![10.0f32; 32], [4, 8]), &device);
+    rule.g_proj.bias = Some(Param::from_data(
+        TensorData::new(vec![10.0f32; 8], [8]),
+        &device,
+    ));
+    rule.c_proj.weight = Param::from_data(TensorData::new(vec![0.0f32; 32], [4, 8]), &device);
+    rule.c_proj.bias = Some(Param::from_data(
+        TensorData::new(vec![0.0f32; 8], [8]),
+        &device,
+    ));
+
+    let shallow = rule
+        .apply(
+            &state,
+            &x,
+            ApplyContext {
+                depth: 1,
+                max_depth: 10,
+            },
+        )
+        .unwrap()
+        .complex()
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let deep = rule
+        .apply(
+            &state,
+            &x,
+            ApplyContext {
+                depth: 10,
+                max_depth: 10,
+            },
+        )
+        .unwrap()
+        .complex()
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+
+    assert_ne!(shallow, deep);
+}
+
+#[test]
+fn p1_fractal_hybrid_dynamic_clamp_changes_with_state_norm() {
+    let device = Default::default();
+    let x = Tensor::<TestBackend, 2>::ones([1, 4], &device);
+    let low_state = FractalState::Flat(Tensor::<TestBackend, 2>::ones([1, 4], &device));
+    let high_state =
+        FractalState::Flat(Tensor::<TestBackend, 2>::ones([1, 4], &device).mul_scalar(8.0));
+    let rule = P1FractalHybrid::new(4, &device);
+
+    let low = rule
+        .apply(
+            &low_state,
+            &x,
+            ApplyContext {
+                depth: 1,
+                max_depth: 8,
+            },
+        )
+        .unwrap()
+        .flat()
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let high = rule
+        .apply(
+            &high_state,
+            &x,
+            ApplyContext {
+                depth: 1,
+                max_depth: 8,
+            },
+        )
+        .unwrap()
+        .flat()
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+
+    assert_ne!(low, high);
+}
+
+#[test]
+fn b3_dynamic_radius_changes_hierarchical_complex_update_with_depth() {
+    let device = Default::default();
+    let x = Tensor::<TestBackend, 2>::ones([1, 4], &device);
+    let state =
+        FractalState::HierarchicalComplex(Tensor::<TestBackend, 3>::ones([1, 3, 8], &device));
+    let rule = B3FractalHierarchical::new(4, 3, &device);
+
+    let shallow = rule
+        .apply(
+            &state,
+            &x,
+            ApplyContext {
+                depth: 1,
+                max_depth: 10,
+            },
+        )
+        .unwrap()
+        .hierarchical_complex()
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let deep = rule
+        .apply(
+            &state,
+            &x,
+            ApplyContext {
+                depth: 10,
+                max_depth: 10,
+            },
+        )
+        .unwrap()
+        .hierarchical_complex()
         .unwrap()
         .into_data()
         .to_vec::<f32>()

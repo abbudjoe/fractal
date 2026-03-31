@@ -230,6 +230,7 @@ fn parse_preset(value: &str) -> Result<TournamentPreset, FractalError> {
         "fast-test" => Ok(TournamentPreset::FastTest),
         "research-medium" => Ok(TournamentPreset::ResearchMedium),
         "challenger-lane" => Ok(TournamentPreset::ChallengerLane),
+        "minimal-proving-ground" => Ok(TournamentPreset::MinimalProvingGround),
         "bullpen-polish" => Ok(TournamentPreset::BullpenPolish),
         "pressure-test" => Ok(TournamentPreset::PressureTest),
         "candidate-stress" => Ok(TournamentPreset::CandidateStress),
@@ -256,6 +257,7 @@ fn parse_lane(value: &str) -> Result<TournamentLane, FractalError> {
         "all" => Ok(TournamentLane::All),
         "baseline" => Ok(TournamentLane::Baseline),
         "challenger" | "bullpen" => Ok(TournamentLane::Challenger),
+        "proving-ground" | "squaring" => Ok(TournamentLane::ProvingGround),
         "leader" => Ok(TournamentLane::Leader),
         _ => Err(invalid_argument(format!("unknown lane: {value}"))),
     }
@@ -470,10 +472,10 @@ fn print_usage() {
     println!();
     println!("Options:");
     println!(
-        "  --preset <default|fast-test|research-medium|challenger-lane|bullpen-polish|pressure-test|candidate-stress|generation-four>"
+        "  --preset <default|fast-test|research-medium|challenger-lane|minimal-proving-ground|bullpen-polish|pressure-test|candidate-stress|generation-four>"
     );
     println!("  --sequence <first-run>");
-    println!("  --lane <all|baseline|challenger|bullpen|leader>");
+    println!("  --lane <all|baseline|challenger|bullpen|proving-ground|squaring|leader>");
     println!("  --species <species-id>");
     println!("  --seed <u64>");
     println!("  --mode <sequential|parallel>");
@@ -488,6 +490,7 @@ fn print_usage() {
     println!("  cargo run --example tournament -- --preset fast-test");
     println!("  cargo run --release --example tournament -- --lane baseline");
     println!("  cargo run --release --example tournament -- --lane bullpen");
+    println!("  cargo run --release --example tournament -- --lane proving-ground");
     println!("  cargo run --release --example tournament -- --species generalized_mobius");
     println!("  cargo run --release --example tournament -- --preset research-medium --mode parallel --parallelism 4");
     #[cfg(feature = "cuda")]
@@ -612,6 +615,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_command_accepts_minimal_proving_ground_preset() {
+        let command = parse_command(vec![
+            "--preset".to_owned(),
+            "minimal-proving-ground".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::MinimalProvingGround)),
+                lane: None,
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+            })
+        );
+    }
+
+    #[test]
     fn parse_command_accepts_challenger_lane_preset() {
         let command =
             parse_command(vec!["--preset".to_owned(), "challenger-lane".to_owned()]).unwrap();
@@ -639,6 +664,24 @@ mod tests {
             CliCommand::Run(RunOptions {
                 selection: None,
                 lane: Some(TournamentLane::Challenger),
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_proving_ground_lane_alias() {
+        let command = parse_command(vec!["--lane".to_owned(), "squaring".to_owned()]).unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: None,
+                lane: Some(TournamentLane::ProvingGround),
                 species: None,
                 seed: None,
                 execution_mode: None,
