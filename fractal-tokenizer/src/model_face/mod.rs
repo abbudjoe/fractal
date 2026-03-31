@@ -12,7 +12,7 @@ pub use native::{
     NativeCollatedBatch, NativeCollatedChunk, NativeCollatedDocument, NativeCollationError,
     NativeCollationSpec, NativeCompatibilityAdapter, NativeCompatibilityBatch,
     NativeCompatibilityError, NativeTokenizedBatch, NativeTokenizedChunk, NativeTokenizedDocument,
-    NativeTokenizer,
+    NativeTokenizer, NativeTruncationPolicy,
 };
 pub use traits::{ModelAdapter, ModelBatch};
 

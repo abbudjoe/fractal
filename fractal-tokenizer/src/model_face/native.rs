@@ -152,6 +152,21 @@ pub type NativeTokenizedBatch<T> = NativeCompatibilityBatch<T>;
 pub struct NativeCollationSpec<T> {
     pub pad_token: T,
     pub pad_to_multiple_of: Option<NonZeroUsize>,
+    pub max_sequence_len: Option<NonZeroUsize>,
+    pub truncation_policy: NativeTruncationPolicy,
+}
+
+/// Whether overflow should be rejected or truncated to the configured cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeTruncationPolicy {
+    Reject,
+    Truncate,
+}
+
+impl Default for NativeTruncationPolicy {
+    fn default() -> Self {
+        Self::Reject
+    }
 }
 
 impl<T> NativeCollationSpec<T> {
@@ -159,6 +174,8 @@ impl<T> NativeCollationSpec<T> {
         Self {
             pad_token,
             pad_to_multiple_of: None,
+            max_sequence_len: None,
+            truncation_policy: NativeTruncationPolicy::Reject,
         }
     }
 
@@ -180,11 +197,23 @@ impl<T> NativeCollationSpec<T> {
         Ok(Self {
             pad_token,
             pad_to_multiple_of,
+            max_sequence_len: None,
+            truncation_policy: NativeTruncationPolicy::Reject,
         })
     }
 
     pub fn with_pad_to_multiple_of(mut self, pad_to_multiple_of: NonZeroUsize) -> Self {
         self.pad_to_multiple_of = Some(pad_to_multiple_of);
+        self
+    }
+
+    pub fn with_max_sequence_len(mut self, max_sequence_len: NonZeroUsize) -> Self {
+        self.max_sequence_len = Some(max_sequence_len);
+        self
+    }
+
+    pub fn with_truncation_policy(mut self, truncation_policy: NativeTruncationPolicy) -> Self {
+        self.truncation_policy = truncation_policy;
         self
     }
 
@@ -215,6 +244,12 @@ pub enum NativeCollationError {
         chunk_index: usize,
         source_index: usize,
     },
+    SequenceTooLong {
+        document_index: usize,
+        chunk_index: usize,
+        actual_len: usize,
+        max_sequence_len: usize,
+    },
 }
 
 impl fmt::Display for NativeCollationError {
@@ -230,6 +265,15 @@ impl fmt::Display for NativeCollationError {
             } => write!(
                 f,
                 "document {document_index} chunk {chunk_index} is out of source order: saw source index {source_index}"
+            ),
+            Self::SequenceTooLong {
+                document_index,
+                chunk_index,
+                actual_len,
+                max_sequence_len,
+            } => write!(
+                f,
+                "document {document_index} chunk {chunk_index} is too long: actual length {actual_len} exceeds max sequence length {max_sequence_len}"
             ),
         }
     }
@@ -249,7 +293,7 @@ pub struct NativeCollatedChunk<T> {
 
 impl<T> NativeCollatedChunk<T> {
     pub fn valid_token_count(&self) -> usize {
-        self.source.native_tokens.len()
+        self.attention_mask.iter().filter(|mask| **mask).count()
     }
 
     pub fn padded_token_count(&self) -> usize {
@@ -488,7 +532,37 @@ impl<T: Clone> NativeCompatibilityBatch<T> {
             .map(|chunk| chunk.native_tokens.len())
             .max()
             .unwrap_or(0);
-        let sequence_len = spec.padded_sequence_len(max_sequence_len);
+        let mut sequence_len = spec.padded_sequence_len(max_sequence_len);
+
+        if let Some(max_sequence_len) = spec.max_sequence_len {
+            let max_sequence_len = max_sequence_len.get();
+            if sequence_len > max_sequence_len {
+                match spec.truncation_policy {
+                    NativeTruncationPolicy::Reject => {
+                        for (document_index, document) in self.documents.iter().enumerate() {
+                            for (chunk_index, chunk) in document.chunks.iter().enumerate() {
+                                let padded_len =
+                                    spec.padded_sequence_len(chunk.native_tokens.len());
+                                if padded_len > max_sequence_len {
+                                    return Err(NativeCollationError::SequenceTooLong {
+                                        document_index,
+                                        chunk_index,
+                                        actual_len: padded_len,
+                                        max_sequence_len,
+                                    });
+                                }
+                            }
+                        }
+                        unreachable!(
+                            "at least one chunk must exceed the configured max when the batch max does"
+                        );
+                    }
+                    NativeTruncationPolicy::Truncate => {
+                        sequence_len = max_sequence_len;
+                    }
+                }
+            }
+        }
 
         let mut documents = Vec::with_capacity(self.documents.len());
         for (document_index, document) in self.documents.iter().enumerate() {
@@ -502,10 +576,11 @@ impl<T: Clone> NativeCompatibilityBatch<T> {
                     });
                 }
 
-                let mut padded_tokens = chunk.native_tokens.clone();
+                let valid_len = std::cmp::min(chunk.native_tokens.len(), sequence_len);
+                let mut padded_tokens = chunk.native_tokens[..valid_len].to_vec();
                 padded_tokens.resize(sequence_len, spec.pad_token.clone());
 
-                let mut attention_mask = vec![true; chunk.native_tokens.len()];
+                let mut attention_mask = vec![true; valid_len];
                 attention_mask.resize(sequence_len, false);
 
                 chunks.push(NativeCollatedChunk {
@@ -649,5 +724,121 @@ mod tests {
                 source_index: 1,
             })
         ));
+    }
+
+    #[test]
+    fn collates_empty_batch_stably() {
+        let batch = NativeCompatibilityBatch::<u32> { documents: vec![] };
+        let spec = NativeCollationSpec::new(0u32);
+
+        let collated = batch.collate(&spec).expect("empty batch should collate");
+
+        assert!(collated.is_empty());
+        assert_eq!(collated.len(), 0);
+        assert_eq!(collated.chunk_count(), 0);
+        assert_eq!(collated.sequence_len, 0);
+    }
+
+    #[test]
+    fn rejects_overflow_without_truncation_policy() {
+        let batch = NativeCompatibilityBatch {
+            documents: vec![NativeTokenizedDocument {
+                input_len: 3,
+                frontier_token_count: 1,
+                chunks: vec![chunk(0, 1, 0, 3, vec![1, 2, 3])],
+            }],
+        };
+        let spec = NativeCollationSpec::new(0u32)
+            .with_max_sequence_len(NonZeroUsize::new(2).expect("non-zero literal"));
+
+        assert!(matches!(
+            batch.collate(&spec),
+            Err(NativeCollationError::SequenceTooLong {
+                document_index: 0,
+                chunk_index: 0,
+                actual_len: 3,
+                max_sequence_len: 2,
+            })
+        ));
+    }
+
+    #[test]
+    fn truncates_with_explicit_policy() {
+        let batch = NativeCompatibilityBatch {
+            documents: vec![NativeTokenizedDocument {
+                input_len: 3,
+                frontier_token_count: 1,
+                chunks: vec![chunk(0, 1, 0, 3, vec![1, 2, 3])],
+            }],
+        };
+        let spec = NativeCollationSpec::new(0u32)
+            .with_max_sequence_len(NonZeroUsize::new(2).expect("non-zero literal"))
+            .with_truncation_policy(NativeTruncationPolicy::Truncate);
+
+        let collated = batch.collate(&spec).expect("truncation should collate");
+
+        assert_eq!(collated.sequence_len, 2);
+        assert_eq!(collated.len(), 1);
+        assert_eq!(collated.documents[0].chunks[0].valid_token_count(), 2);
+        assert_eq!(collated.documents[0].chunks[0].padded_token_count(), 2);
+        assert_eq!(collated.documents[0].chunks[0].padded_tokens, vec![1, 2]);
+        assert_eq!(
+            collated.documents[0].chunks[0].attention_mask,
+            vec![true, true]
+        );
+    }
+
+    #[test]
+    fn multi_document_order_is_stable_under_truncation() {
+        let batch = NativeCompatibilityBatch {
+            documents: vec![
+                NativeTokenizedDocument {
+                    input_len: 3,
+                    frontier_token_count: 1,
+                    chunks: vec![chunk(0, 1, 0, 3, vec![1, 2, 3])],
+                },
+                NativeTokenizedDocument {
+                    input_len: 2,
+                    frontier_token_count: 1,
+                    chunks: vec![chunk(0, 1, 0, 2, vec![4, 5])],
+                },
+                NativeTokenizedDocument {
+                    input_len: 4,
+                    frontier_token_count: 1,
+                    chunks: vec![chunk(0, 1, 0, 4, vec![6, 7, 8, 9])],
+                },
+            ],
+        };
+        let spec = NativeCollationSpec::new(0u32)
+            .with_max_sequence_len(NonZeroUsize::new(2).expect("non-zero literal"))
+            .with_truncation_policy(NativeTruncationPolicy::Truncate);
+
+        let collated = batch.collate(&spec).expect("truncation should collate");
+
+        assert_eq!(
+            collated
+                .documents
+                .iter()
+                .map(|document| document.source_document_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            collated
+                .documents
+                .iter()
+                .map(|document| document.chunks[0].source_chunk_index)
+                .collect::<Vec<_>>(),
+            vec![0, 0, 0]
+        );
+        assert_eq!(
+            collated
+                .documents
+                .iter()
+                .map(|document| document.chunks[0].valid_token_count())
+                .collect::<Vec<_>>(),
+            vec![2, 2, 2]
+        );
+        assert_eq!(collated.sequence_len, 2);
     }
 }

@@ -16,7 +16,7 @@ pub use model_face::{
     ModelFacingBatch, ModelFacingDocument, NativeCollatedBatch, NativeCollatedChunk,
     NativeCollatedDocument, NativeCollationError, NativeCollationSpec, NativeCompatibilityAdapter,
     NativeCompatibilityBatch, NativeCompatibilityError, NativeTokenizedBatch, NativeTokenizedChunk,
-    NativeTokenizedDocument, NativeTokenizer,
+    NativeTokenizedDocument, NativeTokenizer, NativeTruncationPolicy,
 };
 pub use primitives::{
     B1FractalGated, B3FractalHierarchical, B4Universal, P1FractalHybrid, P2Mandelbrot,
