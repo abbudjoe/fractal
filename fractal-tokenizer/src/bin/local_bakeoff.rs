@@ -1401,12 +1401,50 @@ mod tests {
     }
 
     #[test]
-    fn split_for_source_path_is_stable_for_same_file() {
-        let path = Path::new("/tmp/fawx/server.log");
-        let first = split_for_source_path(path);
-        let second = split_for_source_path(path);
+    fn assign_local_splits_keeps_same_source_together() {
+        let mut candidates = vec![
+            CorpusCandidate {
+                corpus: build_corpus_document(
+                    "a-1".to_string(),
+                    "code.rust".to_string(),
+                    SourceFamily::LocalFawx,
+                    CorpusSplit::Induction,
+                    "/tmp/a.rs".to_string(),
+                    1,
+                    10,
+                    "fn a() {}\n".to_string(),
+                ),
+            },
+            CorpusCandidate {
+                corpus: build_corpus_document(
+                    "a-2".to_string(),
+                    "code.rust".to_string(),
+                    SourceFamily::LocalFawx,
+                    CorpusSplit::Induction,
+                    "/tmp/a.rs".to_string(),
+                    11,
+                    20,
+                    "fn b() {}\n".to_string(),
+                ),
+            },
+            CorpusCandidate {
+                corpus: build_corpus_document(
+                    "b-1".to_string(),
+                    "code.rust".to_string(),
+                    SourceFamily::LocalFawx,
+                    CorpusSplit::Induction,
+                    "/tmp/b.rs".to_string(),
+                    1,
+                    10,
+                    "fn c() {}\n".to_string(),
+                ),
+            },
+        ];
 
-        assert_eq!(first, second);
+        assign_local_splits(&mut candidates);
+
+        assert_eq!(candidates[0].corpus.split, candidates[1].corpus.split);
+        assert_ne!(candidates[0].corpus.split, candidates[2].corpus.split);
     }
 
     fn fake_record(
@@ -1528,6 +1566,37 @@ mod tests {
             summarize_verdict(&suspicious_nonlogs).verdict,
             BakeoffVerdict::Yellow
         );
+    }
+
+    #[test]
+    fn verdict_is_yellow_on_extreme_nonlog_held_out_compression() {
+        let results = vec![
+            fake_record(
+                "logs.repetition_heavy",
+                8.0,
+                1,
+                true,
+                true,
+                true,
+                0,
+                CorpusSplit::Evaluation,
+            ),
+            fake_record(
+                "docs.spec",
+                HELD_OUT_NONLOG_CAUTION_RATIO + 1.0,
+                0,
+                true,
+                true,
+                true,
+                0,
+                CorpusSplit::Evaluation,
+            ),
+        ];
+
+        let verdict = summarize_verdict(&results);
+
+        assert_eq!(verdict.verdict, BakeoffVerdict::Yellow);
+        assert_eq!(verdict.suspicious_nonlog_overcollapse_docs, 1);
     }
 
     #[test]
