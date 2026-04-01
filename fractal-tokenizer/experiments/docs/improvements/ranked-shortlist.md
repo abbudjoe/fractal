@@ -21,33 +21,33 @@ Candidates are ranked by:
 
 ## Latest Trial Snapshot
 
-Most recent completed trial: prototype precision guardrails on top of the
+Most recent completed trial: adaptive signature granularity on top of the
 state-signature prototype surface.
 
 - `BAKEOFF_DOCUMENTS=120`
 - `BAKEOFF_INDUCTION_DOCUMENTS=63`
 - `BAKEOFF_EVALUATION_DOCUMENTS=57`
-- `BAKEOFF_VERDICT=GREEN`
+- `BAKEOFF_VERDICT=YELLOW`
 - `byte_fallback_docs=0`
 - hard-gate failures: `0`
 
 Result:
 
-- the guardrails removed the structured JSONL overcollapse
-- but they also collapsed the structural gains back toward the old baseline
+- adaptive refinement recovered a meaningful share of the prototype lift without
+  returning to the catastrophic `jsonl.signals=113.26` failure
 - `full` mode on `p1_fractal_hybrid_dyn-state-norm_v2` now shows:
   - `exact_motif_hit_docs=1`
-  - `prototype_hit_docs=3`
-  - `lexical_only_docs=42`
-- `code.rust`, `code.swift`, and `docs.spec` all fell back to the old
-  pre-state-signature level
+  - `prototype_hit_docs=19`
+  - `lexical_only_docs=31`
+- but the held-out run still trips the non-log overcollapse gate:
+  - `jsonl.signals=7.60`
+  - `suspicious_nonlog_overcollapse_docs=10`
 
 New read:
 
-- the first precision gate was too blunt
-- the active problem is now selective precision, not broad recall
-- candidate 2 does not earn a turn until a precision fix preserves more of the
-  state-signature gains
+- adaptive precision-by-representation is better than blunt rejection
+- it is still not selective enough to pass the bakeoff gate
+- candidate 3 does not earn a turn from this line
 
 ## Current Baseline
 
@@ -126,13 +126,13 @@ Expected failure mode:
 Decision:
 
 - tried and not promoted
-- do not proceed to candidate 2 yet
+- candidate 2 was the justified replacement attempt after this failure
 
 ### 2. Targeted Prototype Precision
 
 Status:
 
-- `Active`
+- `Tried`
 
 Why it ranks second now:
 
@@ -141,19 +141,24 @@ Why it ranks second now:
 - the next honest move, if we stay on this line, is a narrower precision
   function instead of a blunt cutoff
 
-Expected upside:
+Observed result:
 
-- keep more of the `prototype_hit_docs=29` lift
-- reduce JSONL false positives without dropping back to lexical-only behavior
-
-Expected failure mode:
-
-- another precision pass either stays too permissive or collapses back to the
-  old baseline again
+- adaptive refinement improved over the coarse baseline:
+  - `prototype_hit_docs=3 -> 19`
+  - `lexical_only_docs=42 -> 31`
+  - `code.rust=0.81 -> 0.83`
+  - `code.swift=0.90 -> 0.91`
+  - `docs.spec=0.76 -> 0.78`
+- but it still failed the gate:
+  - `jsonl.signals=7.60`
+  - verdict: `YELLOW`
 
 Decision:
 
-- this is now the only control-plane continuation that earns another cycle
+- tried and not promoted
+- keep adaptive granularity available as an explicit experiment mode
+- keep coarse mode as the stable default
+- do not proceed to candidate 3 from this branch
 
 ### 3. Primitive Comparison Pivot
 

@@ -12,7 +12,19 @@ use crate::{PrimitiveRunSummary, TokenRecord};
 
 use super::{lexeme::lexical_shape_key, FaceoffIdentityMode, FaceoffLexemeKind, FaceoffTokenId};
 
-pub const FACEOFF_VOCAB_FORMAT_VERSION: u32 = 4;
+pub const FACEOFF_VOCAB_FORMAT_VERSION: u32 = 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrototypeGranularityMode {
+    Coarse,
+    Adaptive,
+}
+
+impl Default for PrototypeGranularityMode {
+    fn default() -> Self {
+        Self::Coarse
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PrototypeAdmissionPolicy {
@@ -96,6 +108,7 @@ pub struct FaceoffVocabConfig {
     pub min_shape_occurrence_count: usize,
     pub min_shape_doc_count: usize,
     pub min_shape_distinct_text_count: usize,
+    pub prototype_granularity: PrototypeGranularityMode,
     pub prototype_admission_policy: PrototypeAdmissionPolicy,
 }
 
@@ -109,6 +122,7 @@ impl Default for FaceoffVocabConfig {
             min_shape_occurrence_count: 2,
             min_shape_doc_count: 2,
             min_shape_distinct_text_count: 2,
+            prototype_granularity: PrototypeGranularityMode::Coarse,
             prototype_admission_policy: PrototypeAdmissionPolicy::default(),
         }
     }
@@ -189,7 +203,7 @@ impl FaceoffVocab {
                     let aggregate = aggregates.entry(record.text.clone()).or_default();
                     aggregate.observe(record, doc_index)?;
                 }
-                let cluster = prototype_cluster_key(record)?;
+                let cluster = prototype_coarse_cluster_key(record)?;
                 let aggregate = prototype_aggregates.entry(cluster).or_default();
                 aggregate.observe(record, &record.text, doc_index)?;
                 if config.identity_mode == FaceoffIdentityMode::Legacy {
@@ -206,7 +220,7 @@ impl FaceoffVocab {
             .collect::<Vec<_>>();
         let prototype_entries = prototype_aggregates
             .into_iter()
-            .filter_map(|(cluster, aggregate)| aggregate.into_entry(cluster, config))
+            .flat_map(|(cluster, aggregate)| aggregate.into_entries(cluster, config))
             .collect::<Vec<_>>();
         let shape_entries = shape_aggregates
             .into_iter()
@@ -233,7 +247,7 @@ impl FaceoffVocab {
                 let aggregate = aggregates.entry(record.text.clone()).or_default();
                 aggregate.observe(record, 0)?;
             }
-            let cluster = prototype_cluster_key(record)?;
+            let cluster = prototype_coarse_cluster_key(record)?;
             let aggregate = prototype_aggregates.entry(cluster).or_default();
             aggregate.observe(record, &record.text, 0)?;
             if identity_mode == FaceoffIdentityMode::Legacy {
@@ -250,8 +264,8 @@ impl FaceoffVocab {
             .collect::<Vec<_>>();
         let prototype_entries = prototype_aggregates
             .into_iter()
-            .filter_map(|(cluster, aggregate)| {
-                aggregate.into_entry(cluster, FaceoffVocabConfig::default())
+            .flat_map(|(cluster, aggregate)| {
+                aggregate.into_entries(cluster, FaceoffVocabConfig::default())
             })
             .collect::<Vec<_>>();
         let shape_entries = shape_aggregates
@@ -296,8 +310,12 @@ impl FaceoffVocab {
         &self,
         record: &TokenRecord,
     ) -> Result<Option<FaceoffTokenId>, FractalError> {
-        let cluster = prototype_cluster_key(record)?;
-        Ok(self.prototype_to_id.get(&cluster).copied())
+        let coarse = prototype_coarse_cluster_key(record)?;
+        if let Some(id) = self.prototype_to_id.get(&coarse).copied() {
+            return Ok(Some(id));
+        }
+        let fine = prototype_fine_cluster_key(record)?;
+        Ok(self.prototype_to_id.get(&fine).copied())
     }
 
     pub fn literal_id(&self, text: &str) -> Option<FaceoffTokenId> {
@@ -757,6 +775,12 @@ struct ShapeAggregate {
 
 #[derive(Default)]
 struct PrototypeAggregate {
+    coarse: PrototypeLeafAggregate,
+    fine_clusters: BTreeMap<String, PrototypeLeafAggregate>,
+}
+
+#[derive(Default)]
+struct PrototypeLeafAggregate {
     occurrence_count: usize,
     doc_ids: BTreeSet<usize>,
     distinct_texts: BTreeSet<String>,
@@ -764,6 +788,43 @@ struct PrototypeAggregate {
 }
 
 impl PrototypeAggregate {
+    fn observe(
+        &mut self,
+        record: &TokenRecord,
+        text: &str,
+        doc_index: usize,
+    ) -> Result<(), FractalError> {
+        self.coarse.observe(record, text, doc_index)?;
+        let fine_cluster = prototype_fine_cluster_key(record)?;
+        self.fine_clusters
+            .entry(fine_cluster)
+            .or_default()
+            .observe(record, text, doc_index)
+    }
+
+    fn into_entries(self, cluster: String, config: FaceoffVocabConfig) -> Vec<PrototypeEntry> {
+        let PrototypeAggregate {
+            coarse,
+            fine_clusters,
+        } = self;
+
+        if let Some(entry) = coarse.into_entry(cluster.clone(), config, true) {
+            return vec![entry];
+        }
+        if config.prototype_granularity == PrototypeGranularityMode::Coarse {
+            return Vec::new();
+        }
+
+        fine_clusters
+            .into_iter()
+            .filter_map(|(fine_cluster, aggregate)| {
+                aggregate.into_entry(fine_cluster, config, false)
+            })
+            .collect()
+    }
+}
+
+impl PrototypeLeafAggregate {
     fn observe(
         &mut self,
         record: &TokenRecord,
@@ -780,7 +841,12 @@ impl PrototypeAggregate {
         Ok(())
     }
 
-    fn into_entry(self, cluster: String, config: FaceoffVocabConfig) -> Option<PrototypeEntry> {
+    fn into_entry(
+        self,
+        cluster: String,
+        config: FaceoffVocabConfig,
+        enforce_admission_policy: bool,
+    ) -> Option<PrototypeEntry> {
         let doc_count = self.doc_ids.len();
         let distinct_text_count = self.distinct_texts.len();
         if self.occurrence_count < config.min_shape_occurrence_count
@@ -795,11 +861,13 @@ impl PrototypeAggregate {
         {
             return None;
         }
-        if !config.prototype_admission_policy.allows(
-            self.occurrence_count,
-            distinct_text_count,
-            self.max_byte_len,
-        ) {
+        if enforce_admission_policy
+            && !config.prototype_admission_policy.allows(
+                self.occurrence_count,
+                distinct_text_count,
+                self.max_byte_len,
+            )
+        {
             return None;
         }
 
@@ -881,16 +949,30 @@ fn prototype_digest(cluster: &str) -> String {
     format!("prototype::{digest:016x}")
 }
 
-pub(crate) fn prototype_cluster_key(record: &TokenRecord) -> Result<String, FractalError> {
+pub(crate) fn prototype_coarse_cluster_key(record: &TokenRecord) -> Result<String, FractalError> {
     let byte_len = record.end.saturating_sub(record.start);
     let len_bucket = byte_len_bucket(byte_len);
     let state_bucket = state_bin_bucket(record.state_signature.state_bin);
     Ok(format!(
-        "d{}-lb{len_bucket}-qb{state_bucket}-nb{}-ab{}-pb{}",
+        "coarse::d{}-lb{len_bucket}-qb{state_bucket}-nb{}-ab{}-pb{}",
         record.depth,
         record.state_signature.norm_bin,
         record.state_signature.mean_abs_bin,
         encode_prefix_bins(&record.state_signature.prefix_bins)
+    ))
+}
+
+pub(crate) fn prototype_fine_cluster_key(record: &TokenRecord) -> Result<String, FractalError> {
+    let byte_len = record.end.saturating_sub(record.start);
+    let len_bucket = byte_len_bucket(byte_len);
+    Ok(format!(
+        "fine::d{}-lb{len_bucket}-sb{}-nb{}-ab{}-pb{}-tb{}",
+        record.depth,
+        record.state_signature.state_bin,
+        record.state_signature.norm_bin,
+        record.state_signature.mean_abs_bin,
+        encode_prefix_bins(&record.state_signature.prefix_bins),
+        encode_prefix_bins(&record.state_signature.suffix_bins)
     ))
 }
 

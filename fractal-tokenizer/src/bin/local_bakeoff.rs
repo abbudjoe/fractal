@@ -8,7 +8,7 @@ use fractal_tokenizer::{
     FaceoffEmissionPolicy, FaceoffFallbackMode, FaceoffIdentityMode, FaceoffTokenizer,
     FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer, ModelFacingBatch,
     ModelFacingDocument, MotifReusePolicy, NativeCollationSpec, NativeCompatibilityAdapter,
-    PrimitiveFactory, SplitPolicy, TokenizerConfig,
+    PrimitiveFactory, PrototypeGranularityMode, SplitPolicy, TokenizerConfig,
 };
 use serde::Serialize;
 use std::{
@@ -265,6 +265,7 @@ struct Args {
     all_primitives: bool,
     fallback_mode: FaceoffFallbackMode,
     identity_mode: FaceoffIdentityMode,
+    prototype_granularity: PrototypeGranularityMode,
 }
 
 impl Args {
@@ -278,6 +279,7 @@ impl Args {
         let mut all_primitives = false;
         let mut fallback_mode = FaceoffFallbackMode::Full;
         let mut identity_mode = FaceoffIdentityMode::Legacy;
+        let mut prototype_granularity = PrototypeGranularityMode::Coarse;
 
         let mut args = env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -320,6 +322,13 @@ impl Args {
                         &args.next().ok_or("--identity-mode requires a value")?,
                     )?;
                 }
+                "--prototype-granularity" => {
+                    prototype_granularity = parse_prototype_granularity(
+                        &args
+                            .next()
+                            .ok_or("--prototype-granularity requires a value")?,
+                    )?;
+                }
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -340,13 +349,14 @@ impl Args {
             all_primitives,
             fallback_mode,
             identity_mode,
+            prototype_granularity,
         })
     }
 }
 
 fn print_help() {
     eprintln!(
-        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--fawx-root DIR] [--home-state-root DIR] [--max-review-count N] [--primitive NAME] [--all-primitives] [--fallback-mode full|motif-only] [--identity-mode legacy|prototype-primary]"
+        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--fawx-root DIR] [--home-state-root DIR] [--max-review-count N] [--primitive NAME] [--all-primitives] [--fallback-mode full|motif-only] [--identity-mode legacy|prototype-primary] [--prototype-granularity coarse|adaptive]"
     );
 }
 
@@ -366,6 +376,17 @@ fn parse_identity_mode(value: &str) -> Result<FaceoffIdentityMode, Box<dyn Error
         "prototype-primary" => Ok(FaceoffIdentityMode::PrototypePrimary),
         other => Err(format!(
             "unknown identity mode `{other}`; expected one of: legacy, prototype-primary"
+        )
+        .into()),
+    }
+}
+
+fn parse_prototype_granularity(value: &str) -> Result<PrototypeGranularityMode, Box<dyn Error>> {
+    match value {
+        "coarse" => Ok(PrototypeGranularityMode::Coarse),
+        "adaptive" => Ok(PrototypeGranularityMode::Adaptive),
+        other => Err(format!(
+            "unknown prototype granularity `{other}`; expected one of: coarse, adaptive"
         )
         .into()),
     }
@@ -1012,8 +1033,13 @@ fn run_primitive_bakeoff(
     primitive: PrimitiveCandidate,
 ) -> Result<PrimitiveBakeoffRun, Box<dyn Error>> {
     let primitive_name = primitive.name.to_string();
-    let (works, vocab) =
-        build_fractal_documents(corpus, primitive, args.fallback_mode, args.identity_mode)?;
+    let (works, vocab) = build_fractal_documents(
+        corpus,
+        primitive,
+        args.fallback_mode,
+        args.identity_mode,
+        args.prototype_granularity,
+    )?;
     let model_results = run_model_bakeoff(&works, model_sources)?;
     let results = merge_results(works, model_results);
     Ok(PrimitiveBakeoffRun {
@@ -1028,6 +1054,7 @@ fn build_fractal_documents(
     primitive: PrimitiveCandidate,
     fallback_mode: FaceoffFallbackMode,
     identity_mode: FaceoffIdentityMode,
+    prototype_granularity: PrototypeGranularityMode,
 ) -> Result<(Vec<DocumentWork>, FaceoffVocab), Box<dyn Error>> {
     let device = Default::default();
     let tokenizer = FaceoffTokenizer::new(TokenizerConfig {
@@ -1048,6 +1075,7 @@ fn build_fractal_documents(
         primitive.factory.clone(),
         FaceoffVocabConfig {
             identity_mode,
+            prototype_granularity,
             ..FaceoffVocabConfig::default()
         },
     )?;
@@ -1308,6 +1336,13 @@ fn print_summary(primitive: &str, results: &[BakeoffRecord], vocab: &FaceoffVoca
     println!("BAKEOFF_PRIMITIVE={primitive}");
     println!("BAKEOFF_FALLBACK_MODE={}", args.fallback_mode.as_str());
     println!("BAKEOFF_IDENTITY_MODE={}", args.identity_mode.as_str());
+    println!(
+        "BAKEOFF_PROTOTYPE_GRANULARITY={}",
+        match args.prototype_granularity {
+            PrototypeGranularityMode::Coarse => "coarse",
+            PrototypeGranularityMode::Adaptive => "adaptive",
+        }
+    );
     println!("BAKEOFF_DOCUMENTS={total_docs}");
     println!("BAKEOFF_INDUCTION_DOCUMENTS={induction_docs}");
     println!("BAKEOFF_EVALUATION_DOCUMENTS={}", held_out.len());
@@ -1783,6 +1818,7 @@ mod tests {
             all_primitives: false,
             fallback_mode: FaceoffFallbackMode::Full,
             identity_mode: FaceoffIdentityMode::Legacy,
+            prototype_granularity: PrototypeGranularityMode::Coarse,
         }
     }
 
@@ -1836,6 +1872,31 @@ mod tests {
             .expect("unknown identity mode should error")
             .to_string();
         assert!(error.contains("unknown identity mode `totally-fake`"));
+    }
+
+    #[test]
+    fn parse_prototype_granularity_defaults_to_coarse() {
+        assert_eq!(
+            base_args().prototype_granularity,
+            PrototypeGranularityMode::Coarse
+        );
+    }
+
+    #[test]
+    fn parse_prototype_granularity_accepts_adaptive() {
+        assert_eq!(
+            parse_prototype_granularity("adaptive").unwrap(),
+            PrototypeGranularityMode::Adaptive
+        );
+    }
+
+    #[test]
+    fn parse_prototype_granularity_rejects_unknown_value() {
+        let error = parse_prototype_granularity("totally-fake")
+            .err()
+            .expect("unknown prototype granularity should error")
+            .to_string();
+        assert!(error.contains("unknown prototype granularity `totally-fake`"));
     }
 
     #[test]

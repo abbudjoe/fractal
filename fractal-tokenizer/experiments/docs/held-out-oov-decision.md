@@ -336,6 +336,58 @@ Updated read:
 - if we continue on this path, the next fix must be prototype precision /
   anti-overcollapse guardrails, not looser matching
 
+## Adaptive Signature Granularity Result
+
+The next empirical step kept the typed state-signature surface, but changed the
+precision mechanism:
+
+- keep coarse prototypes when they pass admission
+- refine overly broad coarse clusters into finer state-signature prototypes
+- keep the stable default on coarse mode
+- run adaptive granularity only as an explicit experiment mode
+
+Focused regression result:
+
+- a broad short-span cluster is rejected in `Coarse` mode
+- the same source records refine into multiple `fine::` prototype clusters in
+  `Adaptive` mode
+
+Held-out local bakeoff result for `p1_fractal_hybrid_dyn-state-norm_v2`:
+
+- `coarse`
+  - `prototype_hit_docs=3`
+  - `lexical_only_docs=42`
+  - `code.rust=0.81`
+  - `code.swift=0.90`
+  - `docs.spec=0.76`
+  - `jsonl.signals=3.45`
+  - verdict: `GREEN`
+- `adaptive`
+  - `prototype_hit_docs=19`
+  - `lexical_only_docs=31`
+  - `code.rust=0.83`
+  - `code.swift=0.91`
+  - `docs.spec=0.78`
+  - `jsonl.signals=7.60`
+  - verdict: `YELLOW`
+
+Interpretation:
+
+- adaptive refinement is meaningfully better than blunt guardrails
+- it keeps a real share of the recall lift from state-signature induction
+- it also avoids the catastrophic structured JSONL collapse from the raw
+  state-signature pass
+- but it still trips the non-log overcollapse gate and only modestly improves
+  code/docs
+
+Updated read:
+
+- this line is now better instrumented and more explicit
+- but it still does not clear the bakeoff gate
+- the stable default should remain coarse
+- adaptive refinement can stay available as an experiment mode
+- the gate from candidate 2 to candidate 3 does not open
+
 ## Prototype Precision Guardrails Result
 
 The next empirical step added a dynamic prototype admission policy based on:

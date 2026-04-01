@@ -25,8 +25,8 @@ use crate::{
     FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLexemeKind, FaceoffTokenizer, FaceoffVocab,
     FaceoffVocabConfig, HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument,
     NativeCollationSpec, NativeCompatibilityAdapter, NativeTokenizer, P1FractalHybrid,
-    P2Mandelbrot, PrimitiveRunSummary, RecursiveTokenizer, StateSignature, TokenRecord,
-    TokenizerConfig, FACEOFF_VOCAB_FORMAT_VERSION,
+    P2Mandelbrot, PrimitiveRunSummary, PrototypeGranularityMode, RecursiveTokenizer,
+    StateSignature, TokenRecord, TokenizerConfig, FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -1563,6 +1563,7 @@ fn faceoff_state_signature_prototype_clusters_ignore_lexical_shape() {
         norm_bin: 11,
         mean_abs_bin: 7,
         prefix_bins: [1, -2, 0, 3, -1, 2],
+        suffix_bins: [2, -1, 1, 0],
     };
     let summaries = vec![
         PrimitiveRunSummary {
@@ -1617,6 +1618,7 @@ fn faceoff_state_signature_prototype_clusters_ignore_lexical_shape() {
             min_occurrence_count: 2,
             min_doc_count: 2,
             max_token_bytes: Some(128),
+            prototype_granularity: PrototypeGranularityMode::Coarse,
             ..FaceoffVocabConfig::default()
         },
     )
@@ -1639,6 +1641,7 @@ fn faceoff_prototype_precision_guardrails_reject_all_unique_short_clusters() {
         norm_bin: 9,
         mean_abs_bin: 8,
         prefix_bins: [2, -1, 1, -2, 0, 2],
+        suffix_bins: [1, 1, -1, -1],
     };
     let summaries = vec![
         manual_summary_with_signature("render_home()", "aaaaaaaaaaaaaaaa", signature),
@@ -1651,6 +1654,7 @@ fn faceoff_prototype_precision_guardrails_reject_all_unique_short_clusters() {
             min_occurrence_count: 2,
             min_doc_count: 2,
             max_token_bytes: Some(128),
+            prototype_granularity: PrototypeGranularityMode::Coarse,
             ..FaceoffVocabConfig::default()
         },
     )
@@ -1669,6 +1673,7 @@ fn faceoff_prototype_precision_guardrails_keep_repeated_short_clusters() {
         norm_bin: 9,
         mean_abs_bin: 8,
         prefix_bins: [2, -1, 1, -2, 0, 2],
+        suffix_bins: [1, 1, -1, -1],
     };
     let summaries = vec![
         manual_summary_with_signature_pair(
@@ -1701,6 +1706,107 @@ fn faceoff_prototype_precision_guardrails_keep_repeated_short_clusters() {
     let prototypes = vocab.prototype_entries();
     assert_eq!(prototypes.len(), 1);
     assert_eq!(prototypes[0].distinct_text_count, 2);
+}
+
+#[test]
+fn faceoff_adaptive_signature_granularity_refines_broad_clusters() {
+    let signature_a = StateSignature {
+        state_bin: 640,
+        norm_bin: 9,
+        mean_abs_bin: 8,
+        prefix_bins: [2, -1, 1, -2, 0, 2],
+        suffix_bins: [1, 1, -1, -1],
+    };
+    let signature_b = StateSignature {
+        state_bin: 646,
+        norm_bin: 9,
+        mean_abs_bin: 8,
+        prefix_bins: [2, -1, 1, -2, 0, 2],
+        suffix_bins: [-1, -1, 1, 1],
+    };
+    let summaries = vec![
+        PrimitiveRunSummary {
+            primitive: "manual",
+            produced: 2,
+            tokens: vec![
+                TokenRecord {
+                    depth: 2,
+                    start: 0,
+                    end: "render_home()".len(),
+                    text: "render_home()".to_string(),
+                    token: "d2-n13-q640-aaaaaaaaaaaaaaaa".to_string(),
+                    state_signature: signature_a,
+                },
+                TokenRecord {
+                    depth: 2,
+                    start: 20,
+                    end: 20 + "AUTH_2026!?".len(),
+                    text: "AUTH_2026!?".to_string(),
+                    token: "d2-n11-q646-bbbbbbbbbbbbbbbb".to_string(),
+                    state_signature: signature_b,
+                },
+            ],
+        },
+        PrimitiveRunSummary {
+            primitive: "manual",
+            produced: 2,
+            tokens: vec![
+                TokenRecord {
+                    depth: 2,
+                    start: 0,
+                    end: "render_usage()".len(),
+                    text: "render_usage()".to_string(),
+                    token: "d2-n14-q640-cccccccccccccccc".to_string(),
+                    state_signature: signature_a,
+                },
+                TokenRecord {
+                    depth: 2,
+                    start: 20,
+                    end: 20 + "AUTH_2028!?".len(),
+                    text: "AUTH_2028!?".to_string(),
+                    token: "d2-n11-q646-dddddddddddddddd".to_string(),
+                    state_signature: signature_b,
+                },
+            ],
+        },
+    ];
+
+    let coarse_vocab = FaceoffVocab::from_summaries_with_config(
+        summaries.iter(),
+        FaceoffVocabConfig {
+            min_occurrence_count: 2,
+            min_doc_count: 2,
+            max_token_bytes: Some(128),
+            prototype_granularity: PrototypeGranularityMode::Coarse,
+            ..FaceoffVocabConfig::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        coarse_vocab.prototype_entries().is_empty(),
+        "coarse admission should reject this broad short-span cluster before refinement"
+    );
+
+    let adaptive_vocab = FaceoffVocab::from_summaries_with_config(
+        summaries.iter(),
+        FaceoffVocabConfig {
+            min_occurrence_count: 2,
+            min_doc_count: 2,
+            max_token_bytes: Some(128),
+            prototype_granularity: PrototypeGranularityMode::Adaptive,
+            ..FaceoffVocabConfig::default()
+        },
+    )
+    .unwrap();
+
+    let prototypes = adaptive_vocab.prototype_entries();
+    assert_eq!(prototypes.len(), 2);
+    assert!(prototypes
+        .iter()
+        .all(|entry| entry.cluster.starts_with("fine::")));
+    assert!(prototypes
+        .iter()
+        .all(|entry| entry.distinct_text_count == 2));
 }
 
 #[test]

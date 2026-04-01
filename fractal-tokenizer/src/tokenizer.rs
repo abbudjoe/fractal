@@ -47,6 +47,7 @@ impl Default for TokenizerConfig {
 }
 
 const STATE_SIGNATURE_PREFIX_WIDTH: usize = 6;
+const STATE_SIGNATURE_SUFFIX_WIDTH: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StateSignature {
@@ -54,6 +55,7 @@ pub struct StateSignature {
     pub norm_bin: u8,
     pub mean_abs_bin: u8,
     pub prefix_bins: [i8; STATE_SIGNATURE_PREFIX_WIDTH],
+    pub suffix_bins: [i8; STATE_SIGNATURE_SUFFIX_WIDTH],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -948,12 +950,19 @@ impl StateSignature {
             let value = values.get(index).copied().unwrap_or_default();
             *slot = quantize_signed_bucket(value, 4.0, 7);
         }
+        let mut suffix_bins = [0; STATE_SIGNATURE_SUFFIX_WIDTH];
+        let tail_start = values.len().saturating_sub(STATE_SIGNATURE_SUFFIX_WIDTH);
+        for (index, slot) in suffix_bins.iter_mut().enumerate() {
+            let value = values.get(tail_start + index).copied().unwrap_or_default();
+            *slot = quantize_signed_bucket(value, 4.0, 7);
+        }
 
         Self {
             state_bin: quantize_state_signal(rolling_norm, values),
             norm_bin: quantize_unsigned_bucket(rolling_norm, 32.0),
             mean_abs_bin: quantize_unsigned_bucket(mean_abs, 32.0),
             prefix_bins,
+            suffix_bins,
         }
     }
 }

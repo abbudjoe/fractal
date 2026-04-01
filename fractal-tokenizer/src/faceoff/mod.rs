@@ -12,8 +12,8 @@ pub use encode::FaceoffTokenizer;
 pub use fallback::FaceoffFallbackStats;
 pub use packaging::{FaceoffChunk, FaceoffChunkLimits, FaceoffChunkedDocument};
 pub use vocab::{
-    FaceoffVocab, FaceoffVocabConfig, PrototypeAdmissionPolicy, PrototypeEntry, ShapeEntry,
-    VocabEntry, FACEOFF_VOCAB_FORMAT_VERSION,
+    FaceoffVocab, FaceoffVocabConfig, PrototypeAdmissionPolicy, PrototypeEntry,
+    PrototypeGranularityMode, ShapeEntry, VocabEntry, FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
