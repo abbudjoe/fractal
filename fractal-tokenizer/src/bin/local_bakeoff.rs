@@ -1,8 +1,14 @@
 use burn::backend::Candle;
+use fractal_primitives_private::{
+    B2StableHierarchical, GeneralizedMobius, Ifs, JuliaRecursiveEscape, LogisticChaoticMap,
+    MandelboxRecursiveDynEscapeRadius, P1Contractive, P1FractalHybridComposite, P3Hierarchical,
+};
 use fractal_tokenizer::{
-    EncodedDocument, FaceoffChunkLimits, FaceoffEmissionPolicy, FaceoffTokenizer, FaceoffVocab,
-    HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument, NativeCollationSpec,
-    NativeCompatibilityAdapter, SplitPolicy, TokenizerConfig,
+    p1_dynamic_lever_factory, revived_primitive_factories, EncodedDocument, FaceoffChunkLimits,
+    FaceoffEmissionPolicy, FaceoffFallbackMode, FaceoffTokenizer, FaceoffVocab,
+    HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument, MotifReusePolicy,
+    NativeCollationSpec, NativeCompatibilityAdapter, PrimitiveFactory, SplitPolicy,
+    TokenizerConfig,
 };
 use serde::Serialize;
 use std::{
@@ -81,6 +87,9 @@ struct FractalMetrics {
     avg_chars_per_frontier_token: f64,
     motif_reuse_count: usize,
     fallback_motif_hits: usize,
+    fallback_exact_motif_hits: usize,
+    fallback_prototype_hits: usize,
+    fallback_literal_hits: usize,
     fallback_shape_hits: usize,
     fallback_unknown_motifs: usize,
     fallback_recursed_to_children: usize,
@@ -131,6 +140,36 @@ struct ModelTokenizerSource {
     tokenizer_json_path: PathBuf,
     tokenizer: Option<HuggingFaceNativeTokenizer>,
     status: String,
+}
+
+#[derive(Clone)]
+struct PrimitiveCandidate {
+    name: &'static str,
+    factory: PrimitiveFactory<Backend>,
+}
+
+#[derive(Clone, Debug)]
+struct PrimitiveBakeoffRun {
+    primitive: String,
+    results: Vec<BakeoffRecord>,
+    vocab: FaceoffVocab,
+}
+
+#[derive(Clone, Debug)]
+struct PrimitiveRunDigest {
+    primitive: String,
+    fallback_mode: FaceoffFallbackMode,
+    verdict: BakeoffVerdict,
+    byte_fallback_docs: usize,
+    exact_motif_hit_docs: usize,
+    prototype_hit_docs: usize,
+    lexical_only_docs: usize,
+    logs_repetition_heavy_ratio: f64,
+    logs_operational_mixed_ratio: f64,
+    jsonl_signals_ratio: f64,
+    code_rust_ratio: f64,
+    code_swift_ratio: f64,
+    docs_spec_ratio: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,18 +229,28 @@ fn main() -> Result<(), Box<dyn Error>> {
         corpus.iter().map(|candidate| &candidate.corpus),
     )?;
 
-    let (works, vocab) = build_fractal_documents(&corpus, &args)?;
     let model_sources = discover_model_tokenizers(&args)?;
-    let model_results = run_model_bakeoff(&works, &model_sources)?;
+    let primitives = selected_primitive_candidates(&args)?;
+    let mut runs = Vec::with_capacity(primitives.len());
 
-    let results = merge_results(works, model_results);
-    write_jsonl(
-        args.output_dir.join("local_bakeoff_results.jsonl"),
-        results.iter(),
-    )?;
+    for primitive in primitives {
+        let run = run_primitive_bakeoff(&corpus, &model_sources, &args, primitive)?;
+        write_jsonl(
+            args.output_dir.join(format!(
+                "{}_{}_results.jsonl",
+                run.primitive,
+                args.fallback_mode.as_str()
+            )),
+            run.results.iter(),
+        )?;
+        print_summary(&run.primitive, &run.results, &run.vocab, &args);
+        print_review_list(&run.primitive, &run.results, &args);
+        runs.push(run);
+    }
 
-    print_summary(&results, &vocab, &args);
-    print_review_list(&results, &args);
+    if runs.len() > 1 {
+        print_field_summary(&runs, args.fallback_mode);
+    }
 
     Ok(())
 }
@@ -212,6 +261,9 @@ struct Args {
     fawx_root: PathBuf,
     home_state_root: PathBuf,
     max_review_count: usize,
+    selected_primitives: Vec<String>,
+    all_primitives: bool,
+    fallback_mode: FaceoffFallbackMode,
 }
 
 impl Args {
@@ -221,6 +273,9 @@ impl Args {
         let mut fawx_root = PathBuf::from(DEFAULT_FAWX_ROOT);
         let mut home_state_root = PathBuf::from(DEFAULT_HOME_STATE_ROOT);
         let mut max_review_count = 10usize;
+        let mut selected_primitives = Vec::new();
+        let mut all_primitives = false;
+        let mut fallback_mode = FaceoffFallbackMode::Full;
 
         let mut args = env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -247,6 +302,17 @@ impl Args {
                         .ok_or("--max-review-count requires a value")?
                         .parse()?;
                 }
+                "--primitive" => {
+                    selected_primitives.push(args.next().ok_or("--primitive requires a value")?);
+                }
+                "--all-primitives" => {
+                    all_primitives = true;
+                }
+                "--fallback-mode" => {
+                    fallback_mode = parse_fallback_mode(
+                        &args.next().ok_or("--fallback-mode requires a value")?,
+                    )?;
+                }
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -263,14 +329,164 @@ impl Args {
             fawx_root,
             home_state_root,
             max_review_count,
+            selected_primitives,
+            all_primitives,
+            fallback_mode,
         })
     }
 }
 
 fn print_help() {
     eprintln!(
-        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--fawx-root DIR] [--home-state-root DIR] [--max-review-count N]"
+        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--fawx-root DIR] [--home-state-root DIR] [--max-review-count N] [--primitive NAME] [--all-primitives] [--fallback-mode full|motif-only]"
     );
+}
+
+fn parse_fallback_mode(value: &str) -> Result<FaceoffFallbackMode, Box<dyn Error>> {
+    match value {
+        "full" => Ok(FaceoffFallbackMode::Full),
+        "motif-only" => Ok(FaceoffFallbackMode::MotifOnly),
+        other => Err(
+            format!("unknown fallback mode `{other}`; expected one of: full, motif-only").into(),
+        ),
+    }
+}
+
+fn selected_primitive_candidates(args: &Args) -> Result<Vec<PrimitiveCandidate>, Box<dyn Error>> {
+    let available = available_primitive_candidates();
+    if args.all_primitives {
+        return Ok(available);
+    }
+
+    if args.selected_primitives.is_empty() {
+        return Ok(vec![PrimitiveCandidate {
+            name: "p1_fractal_hybrid_dyn-state-norm_v2",
+            factory: p1_dynamic_lever_factory::<Backend>(),
+        }]);
+    }
+
+    let mut selected = Vec::new();
+    for name in &args.selected_primitives {
+        let candidate = available
+            .iter()
+            .cloned()
+            .find(|candidate| candidate.name == name)
+            .ok_or_else(|| {
+                format!(
+                    "unknown primitive `{name}`; available: {}",
+                    available
+                        .iter()
+                        .map(|candidate| candidate.name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+        if !selected
+            .iter()
+            .any(|existing: &PrimitiveCandidate| existing.name == candidate.name)
+        {
+            selected.push(candidate);
+        }
+    }
+
+    Ok(selected)
+}
+
+fn available_primitive_candidates() -> Vec<PrimitiveCandidate> {
+    let mut out = revived_primitive_factories::<Backend>()
+        .into_iter()
+        .map(|factory| PrimitiveCandidate {
+            name: factory.name,
+            factory,
+        })
+        .collect::<Vec<_>>();
+    out.extend(shared_base_primitive_candidates());
+    out.push(PrimitiveCandidate {
+        name: "p1_fractal_hybrid_dyn-state-norm_v2",
+        factory: p1_dynamic_lever_factory::<Backend>(),
+    });
+    out
+}
+
+fn shared_base_primitive_candidates() -> Vec<PrimitiveCandidate> {
+    vec![
+        PrimitiveCandidate {
+            name: "p1_contractive_v1",
+            factory: PrimitiveFactory::new(
+                "p1_contractive_v1",
+                MotifReusePolicy::Off,
+                |config, device| Box::new(P1Contractive::new(config.dim, device)),
+            ),
+        },
+        PrimitiveCandidate {
+            name: "p1_fractal_hybrid_composite_v1",
+            factory: PrimitiveFactory::new(
+                "p1_fractal_hybrid_composite_v1",
+                MotifReusePolicy::Off,
+                |config, device| Box::new(P1FractalHybridComposite::new(config.dim, device)),
+            ),
+        },
+        PrimitiveCandidate {
+            name: "logistic_chaotic_map_v1",
+            factory: PrimitiveFactory::new(
+                "logistic_chaotic_map_v1",
+                MotifReusePolicy::Off,
+                |config, device| Box::new(LogisticChaoticMap::new(config.dim, device)),
+            ),
+        },
+        PrimitiveCandidate {
+            name: "p3_hierarchical_v1",
+            factory: PrimitiveFactory::new(
+                "p3_hierarchical_v1",
+                MotifReusePolicy::Off,
+                |config, device| Box::new(P3Hierarchical::new(config.dim, config.levels, device)),
+            ),
+        },
+        PrimitiveCandidate {
+            name: "b2_stable_hierarchical_v1",
+            factory: PrimitiveFactory::new(
+                "b2_stable_hierarchical_v1",
+                MotifReusePolicy::Off,
+                |config, device| {
+                    Box::new(B2StableHierarchical::new(config.dim, config.levels, device))
+                },
+            ),
+        },
+        PrimitiveCandidate {
+            name: "ifs_dyn-radius-depth_v1",
+            factory: PrimitiveFactory::new(
+                "ifs_dyn-radius-depth_v1",
+                MotifReusePolicy::Off,
+                |config, device| Box::new(Ifs::new(config.dim, device)),
+            ),
+        },
+        PrimitiveCandidate {
+            name: "generalized_mobius_dyn-jitter-norm_v2",
+            factory: PrimitiveFactory::new(
+                "generalized_mobius_dyn-jitter-norm_v2",
+                MotifReusePolicy::Off,
+                |config, device| Box::new(GeneralizedMobius::new(config.dim, device)),
+            ),
+        },
+        PrimitiveCandidate {
+            name: "julia_recursive_escape_v1",
+            factory: PrimitiveFactory::new(
+                "julia_recursive_escape_v1",
+                MotifReusePolicy::Off,
+                |config, device| Box::new(JuliaRecursiveEscape::new(config.dim, device)),
+            ),
+        },
+        PrimitiveCandidate {
+            name: "mandelbox_recursive_dyn-escape-radius_v1",
+            factory: PrimitiveFactory::new(
+                "mandelbox_recursive_dyn-escape-radius_v1",
+                MotifReusePolicy::Off,
+                |config, device| {
+                    Box::new(MandelboxRecursiveDynEscapeRadius::new(config.dim, device))
+                },
+            ),
+        },
+    ]
 }
 
 fn build_corpus(args: &Args) -> Result<Vec<CorpusCandidate>, Box<dyn Error>> {
@@ -770,9 +986,27 @@ fn round_robin_extend(
     }
 }
 
+fn run_primitive_bakeoff(
+    corpus: &[CorpusCandidate],
+    model_sources: &[ModelTokenizerSource],
+    args: &Args,
+    primitive: PrimitiveCandidate,
+) -> Result<PrimitiveBakeoffRun, Box<dyn Error>> {
+    let primitive_name = primitive.name.to_string();
+    let (works, vocab) = build_fractal_documents(corpus, primitive, args.fallback_mode)?;
+    let model_results = run_model_bakeoff(&works, model_sources)?;
+    let results = merge_results(works, model_results);
+    Ok(PrimitiveBakeoffRun {
+        primitive: primitive_name,
+        results,
+        vocab,
+    })
+}
+
 fn build_fractal_documents(
     corpus: &[CorpusCandidate],
-    _args: &Args,
+    primitive: PrimitiveCandidate,
+    fallback_mode: FaceoffFallbackMode,
 ) -> Result<(Vec<DocumentWork>, FaceoffVocab), Box<dyn Error>> {
     let device = Default::default();
     let tokenizer = FaceoffTokenizer::new(TokenizerConfig {
@@ -787,17 +1021,23 @@ fn build_fractal_documents(
     if texts.is_empty() {
         return Err("local bakeoff needs at least one induction document".into());
     }
-    let vocab = tokenizer.induce_vocab_from_texts::<Backend>(&texts, &device)?;
+    let vocab = tokenizer.induce_vocab_from_texts_for_factory::<Backend>(
+        &texts,
+        &device,
+        primitive.factory.clone(),
+    )?;
     let limits = FaceoffChunkLimits::new(DEFAULT_CHUNK_LIMIT_TOKENS, DEFAULT_CHUNK_LIMIT_BYTES);
     let mut works = Vec::with_capacity(corpus.len());
 
     for candidate in corpus {
         let started = Instant::now();
-        let encoded = tokenizer.encode_text_v2_with_policy::<Backend>(
+        let encoded = tokenizer.encode_text_with_factory_and_policy::<Backend>(
             &candidate.corpus.text,
             &vocab,
             &device,
+            primitive.factory.clone(),
             FaceoffEmissionPolicy::NoveltyAware,
+            fallback_mode,
         )?;
         let wall_time_ms = started.elapsed().as_secs_f64() * 1000.0;
         let model_facing = ModelFacingDocument::from_encoded(encoded.clone(), limits)?;
@@ -818,6 +1058,9 @@ fn build_fractal_documents(
                 / encoded.tokens.len().max(1) as f64,
             motif_reuse_count,
             fallback_motif_hits: encoded.fallback.motif_hits,
+            fallback_exact_motif_hits: encoded.fallback.exact_motif_hits,
+            fallback_prototype_hits: encoded.fallback.prototype_hits,
+            fallback_literal_hits: encoded.fallback.literal_hits,
             fallback_shape_hits: encoded.fallback.shape_hits,
             fallback_unknown_motifs: encoded.fallback.unknown_motifs,
             fallback_recursed_to_children: encoded.fallback.recursed_to_children,
@@ -1000,7 +1243,7 @@ fn merge_results(
         .collect()
 }
 
-fn print_summary(results: &[BakeoffRecord], vocab: &FaceoffVocab, args: &Args) {
+fn print_summary(primitive: &str, results: &[BakeoffRecord], vocab: &FaceoffVocab, args: &Args) {
     let total_docs = results.len();
     let induction_docs = results
         .iter()
@@ -1017,7 +1260,28 @@ fn print_summary(results: &[BakeoffRecord], vocab: &FaceoffVocab, args: &Args) {
         .iter()
         .map(|record| record.fractal.frontier_token_count)
         .sum();
+    let exact_motif_hit_docs = held_out
+        .iter()
+        .filter(|record| record.fractal.fallback_exact_motif_hits > 0)
+        .count();
+    let prototype_hit_docs = held_out
+        .iter()
+        .filter(|record| record.fractal.fallback_prototype_hits > 0)
+        .count();
+    let lexical_only_docs = held_out
+        .iter()
+        .filter(|record| {
+            record.fractal.fallback_exact_motif_hits == 0
+                && record.fractal.fallback_prototype_hits == 0
+                && record.fractal.fallback_literal_hits == 0
+                && record.fractal.fallback_shape_hits == 0
+                && record.fractal.fallback_lexical_fallback_tokens > 0
+        })
+        .count();
 
+    println!("PRIMITIVE_START name={primitive}");
+    println!("BAKEOFF_PRIMITIVE={primitive}");
+    println!("BAKEOFF_FALLBACK_MODE={}", args.fallback_mode.as_str());
     println!("BAKEOFF_DOCUMENTS={total_docs}");
     println!("BAKEOFF_INDUCTION_DOCUMENTS={induction_docs}");
     println!("BAKEOFF_EVALUATION_DOCUMENTS={}", held_out.len());
@@ -1029,6 +1293,10 @@ fn print_summary(results: &[BakeoffRecord], vocab: &FaceoffVocab, args: &Args) {
     println!("BAKEOFF_OUTPUT_DIR={}", args.output_dir.display());
     println!("BAKEOFF_SPLIT_POLICY=boundary_aware");
     println!("BAKEOFF_VERDICT_SCOPE=evaluation");
+    println!(
+        "BAKEOFF_DIAGNOSTIC split=evaluation exact_motif_hit_docs={} prototype_hit_docs={} lexical_only_docs={}",
+        exact_motif_hit_docs, prototype_hit_docs, lexical_only_docs
+    );
 
     let verdict = summarize_verdict(results);
     println!(
@@ -1089,9 +1357,10 @@ fn print_summary(results: &[BakeoffRecord], vocab: &FaceoffVocab, args: &Args) {
     for reason in verdict.reasons {
         println!("BAKEOFF_VERDICT_REASON={reason}");
     }
+    println!("PRIMITIVE_END name={primitive}");
 }
 
-fn print_review_list(results: &[BakeoffRecord], args: &Args) {
+fn print_review_list(primitive: &str, results: &[BakeoffRecord], args: &Args) {
     let held_out = held_out_records(results);
     let mut review = held_out
         .iter()
@@ -1107,6 +1376,11 @@ fn print_review_list(results: &[BakeoffRecord], args: &Args) {
                 record.corpus.id.as_str(),
                 record.corpus.bucket.as_str(),
                 record.fractal.motif_reuse_count,
+                record.fractal.fallback_exact_motif_hits,
+                record.fractal.fallback_prototype_hits,
+                record.fractal.fallback_literal_hits,
+                record.fractal.fallback_shape_hits,
+                record.fractal.fallback_lexical_fallback_tokens,
                 record.fractal.roundtrip_ok,
                 record.fractal.chunk_utf8_ok,
                 record.fractal.collation_ok,
@@ -1120,14 +1394,101 @@ fn print_review_list(results: &[BakeoffRecord], args: &Args) {
     });
 
     println!(
-        "BAKEOFF_REVIEW_SET split=evaluation count={}",
+        "BAKEOFF_REVIEW_SET primitive={primitive} split=evaluation count={}",
         args.max_review_count.min(review.len())
     );
-    for (ratio, id, bucket, motif_reuse, roundtrip_ok, chunk_utf8_ok, collation_ok) in
-        review.into_iter().take(args.max_review_count)
+    for (
+        ratio,
+        id,
+        bucket,
+        motif_reuse,
+        exact_hits,
+        prototype_hits,
+        literal_hits,
+        shape_hits,
+        lexical_tokens,
+        roundtrip_ok,
+        chunk_utf8_ok,
+        collation_ok,
+    ) in review.into_iter().take(args.max_review_count)
     {
         println!(
-            "review id={id} bucket={bucket} best_ratio={ratio:.2} motif_reuse={motif_reuse} roundtrip={roundtrip_ok} chunk_utf8={chunk_utf8_ok} collation={collation_ok}"
+            "review primitive={primitive} fallback_mode={} id={id} bucket={bucket} best_ratio={ratio:.2} motif_reuse={motif_reuse} exact_hits={exact_hits} prototype_hits={prototype_hits} literal_hits={literal_hits} shape_hits={shape_hits} lexical_tokens={lexical_tokens} roundtrip={roundtrip_ok} chunk_utf8={chunk_utf8_ok} collation={collation_ok}",
+            args.fallback_mode.as_str()
+        );
+    }
+}
+
+fn print_field_summary(runs: &[PrimitiveBakeoffRun], fallback_mode: FaceoffFallbackMode) {
+    let mut digests = runs
+        .iter()
+        .map(|run| {
+            let verdict = summarize_verdict(&run.results);
+            PrimitiveRunDigest {
+                primitive: run.primitive.clone(),
+                fallback_mode,
+                verdict: verdict.verdict,
+                byte_fallback_docs: verdict.byte_fallback_docs,
+                exact_motif_hit_docs: held_out_records(&run.results)
+                    .iter()
+                    .filter(|record| record.fractal.fallback_exact_motif_hits > 0)
+                    .count(),
+                prototype_hit_docs: held_out_records(&run.results)
+                    .iter()
+                    .filter(|record| record.fractal.fallback_prototype_hits > 0)
+                    .count(),
+                lexical_only_docs: held_out_records(&run.results)
+                    .iter()
+                    .filter(|record| {
+                        record.fractal.fallback_exact_motif_hits == 0
+                            && record.fractal.fallback_prototype_hits == 0
+                            && record.fractal.fallback_literal_hits == 0
+                            && record.fractal.fallback_shape_hits == 0
+                            && record.fractal.fallback_lexical_fallback_tokens > 0
+                    })
+                    .count(),
+                logs_repetition_heavy_ratio: bucket_ratio(&run.results, "logs.repetition_heavy"),
+                logs_operational_mixed_ratio: bucket_ratio(&run.results, "logs.operational_mixed"),
+                jsonl_signals_ratio: bucket_ratio(&run.results, "jsonl.signals"),
+                code_rust_ratio: bucket_ratio(&run.results, "code.rust"),
+                code_swift_ratio: bucket_ratio(&run.results, "code.swift"),
+                docs_spec_ratio: bucket_ratio(&run.results, "docs.spec"),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    digests.sort_by(|left, right| {
+        right
+            .jsonl_signals_ratio
+            .partial_cmp(&left.jsonl_signals_ratio)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                right
+                    .logs_repetition_heavy_ratio
+                    .partial_cmp(&left.logs_repetition_heavy_ratio)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.primitive.cmp(&right.primitive))
+    });
+
+    println!("FIELD_FALLBACK_MODE={}", fallback_mode.as_str());
+    println!("FIELD_SUMMARY_COUNT={}", digests.len());
+    for digest in digests {
+        println!(
+            "FIELD_SUMMARY primitive={} fallback_mode={} verdict={} byte_fallback_docs={} exact_motif_hit_docs={} prototype_hit_docs={} lexical_only_docs={} logs.repetition_heavy={:.2} logs.operational_mixed={:.2} jsonl.signals={:.2} code.rust={:.2} code.swift={:.2} docs.spec={:.2}",
+            digest.primitive,
+            digest.fallback_mode.as_str(),
+            digest.verdict.as_str(),
+            digest.byte_fallback_docs,
+            digest.exact_motif_hit_docs,
+            digest.prototype_hit_docs,
+            digest.lexical_only_docs,
+            digest.logs_repetition_heavy_ratio,
+            digest.logs_operational_mixed_ratio,
+            digest.jsonl_signals_ratio,
+            digest.code_rust_ratio,
+            digest.code_swift_ratio,
+            digest.docs_spec_ratio
         );
     }
 }
@@ -1320,6 +1681,14 @@ fn best_ratio(record: &BakeoffRecord) -> Option<f64> {
         .min_by(|left, right| left.partial_cmp(right).unwrap())
 }
 
+fn bucket_ratio(results: &[BakeoffRecord], bucket: &str) -> f64 {
+    summarize_buckets(results)
+        .into_iter()
+        .find(|summary| summary.bucket == bucket)
+        .map(|summary| summary.median_best_ratio)
+        .unwrap_or(0.0)
+}
+
 fn median_sorted(values: &[f64]) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -1376,6 +1745,90 @@ fn fnv1a64(text: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn base_args() -> Args {
+        Args {
+            output_dir: PathBuf::from("/tmp/out"),
+            corpus_limit: DEFAULT_CORPUS_LIMIT,
+            fawx_root: PathBuf::from(DEFAULT_FAWX_ROOT),
+            home_state_root: PathBuf::from(DEFAULT_HOME_STATE_ROOT),
+            max_review_count: 10,
+            selected_primitives: Vec::new(),
+            all_primitives: false,
+            fallback_mode: FaceoffFallbackMode::Full,
+        }
+    }
+
+    #[test]
+    fn selected_primitives_default_to_dynamic_p1() {
+        let args = base_args();
+        let selected = selected_primitive_candidates(&args).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "p1_fractal_hybrid_dyn-state-norm_v2");
+    }
+
+    #[test]
+    fn parse_fallback_mode_defaults_to_full() {
+        assert_eq!(base_args().fallback_mode, FaceoffFallbackMode::Full);
+    }
+
+    #[test]
+    fn parse_fallback_mode_accepts_motif_only() {
+        assert_eq!(
+            parse_fallback_mode("motif-only").unwrap(),
+            FaceoffFallbackMode::MotifOnly
+        );
+    }
+
+    #[test]
+    fn parse_fallback_mode_rejects_unknown_value() {
+        let error = parse_fallback_mode("totally-fake")
+            .err()
+            .expect("unknown fallback mode should error")
+            .to_string();
+        assert!(error.contains("unknown fallback mode `totally-fake`"));
+    }
+
+    #[test]
+    fn selected_primitives_all_returns_revived_field_plus_dynamic() {
+        let mut args = base_args();
+        args.all_primitives = true;
+        let selected = selected_primitive_candidates(&args).unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|candidate| candidate.name)
+                .collect::<Vec<_>>(),
+            vec![
+                "b1_fractal_gated_v1",
+                "p1_fractal_hybrid_v1",
+                "p2_mandelbrot_v1",
+                "b3_fractal_hierarchical_v1",
+                "b4_universal_v1",
+                "p1_contractive_v1",
+                "p1_fractal_hybrid_composite_v1",
+                "logistic_chaotic_map_v1",
+                "p3_hierarchical_v1",
+                "b2_stable_hierarchical_v1",
+                "ifs_dyn-radius-depth_v1",
+                "generalized_mobius_dyn-jitter-norm_v2",
+                "julia_recursive_escape_v1",
+                "mandelbox_recursive_dyn-escape-radius_v1",
+                "p1_fractal_hybrid_dyn-state-norm_v2",
+            ]
+        );
+    }
+
+    #[test]
+    fn selected_primitives_reject_unknown_names() {
+        let mut args = base_args();
+        args.selected_primitives = vec!["totally_fake_v1".to_string()];
+        let error = selected_primitive_candidates(&args)
+            .err()
+            .expect("unknown primitive should error")
+            .to_string();
+        assert!(error.contains("unknown primitive `totally_fake_v1`"));
+    }
 
     #[test]
     fn split_inclusive_lines_preserves_trailing_segment() {
@@ -1582,6 +2035,9 @@ mod tests {
                 avg_chars_per_frontier_token: 10.0,
                 motif_reuse_count,
                 fallback_motif_hits: 0,
+                fallback_exact_motif_hits: 0,
+                fallback_prototype_hits: 0,
+                fallback_literal_hits: 0,
                 fallback_shape_hits: 0,
                 fallback_unknown_motifs: 0,
                 fallback_recursed_to_children: 0,

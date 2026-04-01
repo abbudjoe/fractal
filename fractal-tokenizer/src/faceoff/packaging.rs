@@ -186,6 +186,9 @@ mod tests {
             tokens,
             fallback: FaceoffFallbackStats {
                 motif_hits: 0,
+                exact_motif_hits: 0,
+                prototype_hits: 0,
+                literal_hits: 0,
                 shape_hits: 0,
                 unknown_motifs: 0,
                 recursed_to_children: 0,

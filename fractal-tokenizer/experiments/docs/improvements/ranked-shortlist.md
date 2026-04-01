@@ -21,8 +21,9 @@ Candidates are ranked by:
 
 ## Latest Trial Snapshot
 
-Most recent completed trial: held-out local bakeoff rerun after typed lexical
-fallback, compositional vocab hardening, and structural shape aliases.
+Most recent completed trial: held-out local bakeoff rerun after clustered
+structural induction over coarse state buckets, length buckets, and lexical
+shape.
 
 - `BAKEOFF_DOCUMENTS=120`
 - `BAKEOFF_INDUCTION_DOCUMENTS=63`
@@ -33,20 +34,26 @@ fallback, compositional vocab hardening, and structural shape aliases.
 
 Result:
 
-- held-out byte collapse is fixed
-- shape-based structural aliases produced real held-out motif hits
-- `jsonl.signals` became a strong held-out win
+- held-out byte collapse remains fixed
+- clustered induction produced real held-out prototype hits
+- `full` mode on `p1_fractal_hybrid_dyn-state-norm_v2` now shows:
+  - `exact_motif_hit_docs=1`
+  - `prototype_hit_docs=5`
+  - `lexical_only_docs=42`
+- `motif-only` mode still shows:
+  - `exact_motif_hit_docs=1`
+  - `prototype_hit_docs=5`
+  - `lexical_only_docs=52`
+- `jsonl.signals` remains a strong held-out win
 - `code.rust`, `code.swift`, and `docs.spec` are still below native-tokenizer
   parity
-- the active bottleneck is now held-out structural generalization on code/docs,
-  not frontier selection and not raw OOV collapse
 
 New read:
 
-- code/docs are now failing mainly because they are almost entirely lexicalized
-- the most plausible remaining rescue path is boundary-aware segmentation
-- after that, the repo should pivot to comparing other primitives instead of
-  continuing local `p1` patching
+- clustered induction is a real but modest lift
+- the active bottleneck is now the primary motif identity surface
+- the next disciplined step is to make prototype identity primary before
+  considering any neighborhood matching
 
 ## Current Baseline
 
@@ -97,7 +104,7 @@ The ranking below applies to **next** frontier candidates. Packaging is now trea
 
 ## Ranked Candidates
 
-### 1. Primitive Comparison Pivot
+### 1. Prototype-Primary Identity
 
 Status:
 
@@ -105,8 +112,38 @@ Status:
 
 Why it ranks first now:
 
+- clustered induction (`#2`) produced real prototype hits
+- but prototypes are still acting like a secondary rescue tier
+- held-out code/docs did not materially move while lexical-only behavior stayed
+  dominant
+
+Expected upside:
+
+- prototype hits become the main structural signal instead of a side effect
+- held-out code/docs may finally move above the current ceiling
+- the next bakeoff will tell us whether this control-plane line still has real
+  headroom
+
+Expected failure mode:
+
+- prototype hits rise a little but code/docs remain flat
+- which would strongly suggest the kill criterion is approaching
+
+Decision:
+
+- move here now
+
+### 2. Primitive Comparison Pivot
+
+Status:
+
+- `Active`
+
+Why it ranks second now:
+
 - the one allowed serious rescue pass for `p1` has now been tried
-- it did not materially move the held-out code/docs outcome
+- clustered induction still did not materially move the held-out code/docs
+  outcome
 - the experiment pipeline is strong enough to compare primitives honestly
 
 Expected upside:
@@ -123,7 +160,7 @@ Decision:
 
 - move here now
 
-### 2. Boundary-Aware Split For `p1`
+### 3. Boundary-Aware Split For `p1`
 
 Status:
 
@@ -148,7 +185,7 @@ Decision:
 - tried and not promoted
 - do not spend more cycles here before primitive comparison
 
-### 3. Novelty-Aware Frontier
+### 4. Novelty-Aware Frontier
 
 Status:
 
@@ -168,9 +205,11 @@ Decision:
 
 1. Typed lexical fallback above bytes
 2. Compositional recurring-submotif vocab
-3. Held-out local bakeoff rerun
-4. If still weak on code/docs, primitive comparison pivot
-5. Hybrid bakeoff implementation
+3. Clustered structural induction
+4. Prototype-primary identity
+5. Held-out local bakeoff rerun
+6. If still weak on code/docs, primitive comparison pivot
+7. Hybrid bakeoff implementation
 
 ## Promotion Rule
 

@@ -11,7 +11,8 @@ pub use encode::FaceoffTokenizer;
 pub use fallback::FaceoffFallbackStats;
 pub use packaging::{FaceoffChunk, FaceoffChunkLimits, FaceoffChunkedDocument};
 pub use vocab::{
-    FaceoffVocab, FaceoffVocabConfig, ShapeEntry, VocabEntry, FACEOFF_VOCAB_FORMAT_VERSION,
+    FaceoffVocab, FaceoffVocabConfig, PrototypeEntry, ShapeEntry, VocabEntry,
+    FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +25,30 @@ pub enum FaceoffEmissionPolicy {
     HybridStructural,
     SpanLengthAware,
     Budgeted,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FaceoffFallbackMode {
+    #[default]
+    Full,
+    MotifOnly,
+}
+
+impl FaceoffFallbackMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::MotifOnly => "motif-only",
+        }
+    }
+
+    pub(crate) fn allows_literal_rescue(self) -> bool {
+        matches!(self, Self::Full)
+    }
+
+    pub(crate) fn allows_shape_rescue(self) -> bool {
+        matches!(self, Self::Full)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

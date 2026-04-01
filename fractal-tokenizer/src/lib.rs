@@ -8,9 +8,9 @@ mod tokenizer;
 
 pub use faceoff::{
     EncodedDocument, EncodedToken, EncodedTokenKind, FaceoffChunk, FaceoffChunkLimits,
-    FaceoffChunkedDocument, FaceoffEmissionPolicy, FaceoffFallbackStats, FaceoffLexemeKind,
-    FaceoffTokenId, FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, ShapeEntry, VocabEntry,
-    FACEOFF_VOCAB_FORMAT_VERSION,
+    FaceoffChunkedDocument, FaceoffEmissionPolicy, FaceoffFallbackMode, FaceoffFallbackStats,
+    FaceoffLexemeKind, FaceoffTokenId, FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig,
+    PrototypeEntry, ShapeEntry, VocabEntry, FACEOFF_VOCAB_FORMAT_VERSION,
 };
 pub use model_face::{
     BridgeBatch, BridgeDocument, BridgeFeatureChunk, BridgeFeatureToken, EmbeddingBridgeAdapter,
@@ -24,9 +24,9 @@ pub use primitives::{
     B1FractalGated, B3FractalHierarchical, B4Universal, P1FractalHybrid, P2Mandelbrot,
 };
 pub use tokenizer::{
-    revived_primitive_factories, tokenizer_tracker_reminder, validate_tokenizer_primitive_name,
-    PrimitiveFactory, PrimitiveRunSummary, RecursiveTokenizer, SplitPolicy, TokenRecord,
-    TokenizerConfig,
+    p1_dynamic_lever_factory, revived_primitive_factories, tokenizer_tracker_reminder,
+    validate_tokenizer_primitive_name, MotifReusePolicy, PrimitiveFactory, PrimitiveRunSummary,
+    RecursiveTokenizer, SplitPolicy, TokenRecord, TokenizerConfig,
 };
 
 #[cfg(test)]

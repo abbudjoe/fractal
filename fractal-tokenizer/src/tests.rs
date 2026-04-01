@@ -22,7 +22,7 @@ use crate::{
     revived_primitive_factories, tokenizer::p1_dynamic_lever_factory,
     validate_tokenizer_primitive_name, B1FractalGated, B3FractalHierarchical, B4Universal,
     EncodedDocument, EncodedTokenKind, FaceoffChunkLimits, FaceoffEmissionPolicy,
-    FaceoffLexemeKind, FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig,
+    FaceoffFallbackMode, FaceoffLexemeKind, FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig,
     HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument, NativeCollationSpec,
     NativeCompatibilityAdapter, NativeTokenizer, P1FractalHybrid, P2Mandelbrot,
     PrimitiveRunSummary, RecursiveTokenizer, TokenRecord, TokenizerConfig,
@@ -1498,6 +1498,103 @@ fn faceoff_vocab_recovers_held_out_shape_aliases() {
         encoded.fallback.shape_hits > 0,
         "held-out shape-equivalent text should recover at least one shape-based structural hit"
     );
+    assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
+}
+
+#[test]
+fn faceoff_motif_only_ablation_disables_literal_and_shape_rescue() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let induction_a = "fn render_home() {\n    let auth_provider = 2026;\n}\n";
+    let induction_b = "fn render_settings() {\n    let oauth_flow = 2027;\n}\n";
+    let held_out = "fn render_usage() {\n    let experiments = 2028;\n}\n";
+    let corpus = vec![induction_a, induction_b];
+
+    let vocab = faceoff
+        .induce_vocab_from_texts_with_config::<TestBackend>(
+            &corpus,
+            &device,
+            FaceoffVocabConfig {
+                min_occurrence_count: 2,
+                min_doc_count: 2,
+                max_token_bytes: Some(128),
+                ..FaceoffVocabConfig::default()
+            },
+        )
+        .unwrap();
+
+    let full = faceoff
+        .encode_text_v2_with_policy_and_fallback_mode::<TestBackend>(
+            held_out,
+            &vocab,
+            &device,
+            FaceoffEmissionPolicy::NoveltyAware,
+            FaceoffFallbackMode::Full,
+        )
+        .unwrap();
+    let motif_only = faceoff
+        .encode_text_v2_with_policy_and_fallback_mode::<TestBackend>(
+            held_out,
+            &vocab,
+            &device,
+            FaceoffEmissionPolicy::NoveltyAware,
+            FaceoffFallbackMode::MotifOnly,
+        )
+        .unwrap();
+
+    assert_eq!(faceoff.decode_document(&full).unwrap(), held_out);
+    assert_eq!(faceoff.decode_document(&motif_only).unwrap(), held_out);
+    assert!(full.fallback.shape_hits > 0);
+    assert_eq!(full.fallback.byte_fallback_tokens, 0);
+
+    assert_eq!(motif_only.fallback.literal_hits, 0);
+    assert_eq!(motif_only.fallback.shape_hits, 0);
+    assert_eq!(motif_only.fallback.byte_fallback_tokens, 0);
+    assert!(
+        motif_only.fallback.lexical_fallback_tokens > 0,
+        "motif-only ablation should fall through to typed lexical fallback when alias rescue is disabled"
+    );
+}
+
+#[test]
+fn faceoff_clustered_vocab_recovers_prototype_hits_on_held_out_shape_equivalent_text() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let induction_a = "fn render_home() {\n    let auth_provider = 2026;\n}\n";
+    let induction_b = "fn render_settings() {\n    let oauth_flow = 2027;\n}\n";
+    let held_out = "fn render_usage() {\n    let experiments = 2028;\n}\n";
+    let corpus = vec![induction_a, induction_b];
+
+    let vocab = faceoff
+        .induce_vocab_from_texts_with_config::<TestBackend>(
+            &corpus,
+            &device,
+            FaceoffVocabConfig {
+                min_occurrence_count: 2,
+                min_doc_count: 2,
+                max_token_bytes: Some(128),
+                ..FaceoffVocabConfig::default()
+            },
+        )
+        .unwrap();
+
+    let encoded = faceoff
+        .encode_text_v2_with_policy_and_fallback_mode::<TestBackend>(
+            held_out,
+            &vocab,
+            &device,
+            FaceoffEmissionPolicy::NoveltyAware,
+            FaceoffFallbackMode::MotifOnly,
+        )
+        .unwrap();
+
+    assert_eq!(faceoff.decode_document(&encoded).unwrap(), held_out);
+    assert!(
+        encoded.fallback.prototype_hits > 0,
+        "clustered vocab should recover at least one prototype hit on held-out shape-equivalent text"
+    );
+    assert_eq!(encoded.fallback.literal_hits, 0);
+    assert_eq!(encoded.fallback.shape_hits, 0);
     assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
 }
 

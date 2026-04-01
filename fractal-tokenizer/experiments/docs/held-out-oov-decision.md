@@ -183,3 +183,51 @@ This decision is carried forward in:
 - [primitive-kill-criterion.md](./primitive-kill-criterion.md)
 - [compositional-motif-vocab-spec.md](./compositional-motif-vocab-spec.md)
 - [typed-lexical-fallback-spec.md](./typed-lexical-fallback-spec.md)
+
+## Clustered Structural Induction Result
+
+The next empirical step after the control-plane diagnosis was:
+
+- keep runtime matching strict
+- add clustered structural induction over coarse state bucket + length bucket +
+  lexical shape
+- treat cluster membership as an exact prototype hit
+- do **not** add neighborhood or approximate matching yet
+
+This was meant to test whether induction itself was the missing layer.
+
+Focused regression result:
+
+- a held-out shape-equivalent function example recovered real prototype hits in
+  `motif-only` mode
+
+Held-out local bakeoff result for `p1_fractal_hybrid_dyn-state-norm_v2`:
+
+- `full` mode:
+  - `exact_motif_hit_docs=1`
+  - `prototype_hit_docs=5`
+  - `lexical_only_docs=42`
+- `motif-only` mode:
+  - `exact_motif_hit_docs=1`
+  - `prototype_hit_docs=5`
+  - `lexical_only_docs=52`
+
+Interpretation:
+
+- clustered structural induction is real and not just a fake signal
+- it reduced pure lexical collapse somewhat
+- it did **not** materially improve held-out code/docs bucket medians
+- the bottleneck remains the motif identity surface itself, not only induction
+
+Updated read:
+
+- `#2` worked as a partial lift
+- `#1` is now justified as the next architectural move
+- if stronger prototype-primary identity still fails to move held-out code/docs,
+  the kill criterion gets much closer to firing
+
+## Next Spec
+
+The next decision is carried forward in:
+
+- [prototype-primary-identity-spec.md](./prototype-primary-identity-spec.md)

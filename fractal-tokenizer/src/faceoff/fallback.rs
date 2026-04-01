@@ -6,12 +6,15 @@ use crate::{PrimitiveRunSummary, TokenRecord};
 
 use super::{
     lexeme::scan_lexemes, vocab::token_digest, EncodedDocument, EncodedToken, EncodedTokenKind,
-    FaceoffEmissionPolicy, FaceoffVocab,
+    FaceoffEmissionPolicy, FaceoffFallbackMode, FaceoffVocab,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FaceoffFallbackStats {
     pub motif_hits: usize,
+    pub exact_motif_hits: usize,
+    pub prototype_hits: usize,
+    pub literal_hits: usize,
     pub shape_hits: usize,
     pub unknown_motifs: usize,
     pub recursed_to_children: usize,
@@ -24,13 +27,23 @@ pub(crate) fn encode_summary_document(
     summary: &PrimitiveRunSummary,
     vocab: &FaceoffVocab,
     policy: FaceoffEmissionPolicy,
+    fallback_mode: FaceoffFallbackMode,
 ) -> Result<EncodedDocument, FractalError> {
     let input = text.as_bytes();
     let tree = SummaryTree::new(summary, input.len())?;
     let root = tree.root()?;
     let mut encoded = Vec::new();
     let mut stats = FaceoffFallbackStats::default();
-    encode_node(root, &tree, input, vocab, policy, &mut encoded, &mut stats)?;
+    encode_node(
+        root,
+        &tree,
+        input,
+        vocab,
+        policy,
+        fallback_mode,
+        &mut encoded,
+        &mut stats,
+    )?;
     encoded.sort_by_key(|token| token.start);
     Ok(EncodedDocument {
         input_len: input.len(),
@@ -45,6 +58,7 @@ fn encode_node(
     input: &[u8],
     vocab: &FaceoffVocab,
     policy: FaceoffEmissionPolicy,
+    fallback_mode: FaceoffFallbackMode,
     encoded: &mut Vec<EncodedToken>,
     stats: &mut FaceoffFallbackStats,
 ) -> Result<(), FractalError> {
@@ -72,16 +86,59 @@ fn encode_node(
         if should_recurse_known {
             stats.recursed_to_children += 1;
             for child in &children {
-                encode_node(child, tree, input, vocab, policy, encoded, stats)?;
+                encode_node(
+                    child,
+                    tree,
+                    input,
+                    vocab,
+                    policy,
+                    fallback_mode,
+                    encoded,
+                    stats,
+                )?;
             }
             return Ok(());
         }
 
         stats.motif_hits += 1;
+        stats.exact_motif_hits += 1;
         encoded.push(EncodedToken {
             id,
             kind: EncodedTokenKind::Motif {
                 digest: digest.to_owned(),
+            },
+            depth: record.depth,
+            start: record.start,
+            end: record.end,
+            bytes: input[record.start..record.end].to_vec(),
+        });
+        return Ok(());
+    }
+
+    if let Some(id) = vocab.prototype_id(record)? {
+        if should_recurse_known {
+            stats.recursed_to_children += 1;
+            for child in &children {
+                encode_node(
+                    child,
+                    tree,
+                    input,
+                    vocab,
+                    policy,
+                    fallback_mode,
+                    encoded,
+                    stats,
+                )?;
+            }
+            return Ok(());
+        }
+
+        stats.motif_hits += 1;
+        stats.prototype_hits += 1;
+        encoded.push(EncodedToken {
+            id,
+            kind: EncodedTokenKind::Motif {
+                digest: vocab.motif_digest(id).unwrap_or(digest).to_owned(),
             },
             depth: record.depth,
             start: record.start,
@@ -97,50 +154,73 @@ fn encode_node(
             record.start, record.end
         ))
     })?;
-    if let Some(id) = vocab.literal_id(literal) {
-        stats.motif_hits += 1;
-        encoded.push(EncodedToken {
-            id,
-            kind: EncodedTokenKind::Motif {
-                digest: vocab.motif_digest(id).unwrap_or(digest).to_owned(),
-            },
-            depth: record.depth,
-            start: record.start,
-            end: record.end,
-            bytes: input[record.start..record.end].to_vec(),
-        });
-        return Ok(());
-    }
-
-    if let Some(id) = vocab.shape_id_for_text(literal) {
-        if should_recurse_known {
-            stats.recursed_to_children += 1;
-            for child in &children {
-                encode_node(child, tree, input, vocab, policy, encoded, stats)?;
-            }
+    if fallback_mode.allows_literal_rescue() {
+        if let Some(id) = vocab.literal_id(literal) {
+            stats.motif_hits += 1;
+            stats.literal_hits += 1;
+            encoded.push(EncodedToken {
+                id,
+                kind: EncodedTokenKind::Motif {
+                    digest: vocab.motif_digest(id).unwrap_or(digest).to_owned(),
+                },
+                depth: record.depth,
+                start: record.start,
+                end: record.end,
+                bytes: input[record.start..record.end].to_vec(),
+            });
             return Ok(());
         }
+    }
 
-        stats.motif_hits += 1;
-        stats.shape_hits += 1;
-        encoded.push(EncodedToken {
-            id,
-            kind: EncodedTokenKind::Motif {
-                digest: vocab.motif_digest(id).unwrap_or(digest).to_owned(),
-            },
-            depth: record.depth,
-            start: record.start,
-            end: record.end,
-            bytes: input[record.start..record.end].to_vec(),
-        });
-        return Ok(());
+    if fallback_mode.allows_shape_rescue() {
+        if let Some(id) = vocab.shape_id_for_text(literal) {
+            if should_recurse_known {
+                stats.recursed_to_children += 1;
+                for child in &children {
+                    encode_node(
+                        child,
+                        tree,
+                        input,
+                        vocab,
+                        policy,
+                        fallback_mode,
+                        encoded,
+                        stats,
+                    )?;
+                }
+                return Ok(());
+            }
+
+            stats.motif_hits += 1;
+            stats.shape_hits += 1;
+            encoded.push(EncodedToken {
+                id,
+                kind: EncodedTokenKind::Motif {
+                    digest: vocab.motif_digest(id).unwrap_or(digest).to_owned(),
+                },
+                depth: record.depth,
+                start: record.start,
+                end: record.end,
+                bytes: input[record.start..record.end].to_vec(),
+            });
+            return Ok(());
+        }
     }
 
     stats.unknown_motifs += 1;
     if children_cover_parent {
         stats.recursed_to_children += 1;
         for child in &children {
-            encode_node(child, tree, input, vocab, policy, encoded, stats)?;
+            encode_node(
+                child,
+                tree,
+                input,
+                vocab,
+                policy,
+                fallback_mode,
+                encoded,
+                stats,
+            )?;
         }
         return Ok(());
     }
