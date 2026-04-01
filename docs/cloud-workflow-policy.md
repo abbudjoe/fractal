@@ -4,6 +4,9 @@
 
 All current development flows through cloud frontier models (Codex as orchestrator, cloud LLMs for generation). Full local sovereignty is not achievable yet. This policy is structural hygiene: compartmentalize novelty now so that future local-compute migration is straightforward.
 
+Related operator note:
+- [runpod-runbook-hazards.md](/Users/joseph/fractal/docs/runpod-runbook-hazards.md)
+
 ## Principle
 
 Reduce unnecessary exposure of novel experimental logic to cloud-hosted tooling. The harness (runner, config, CLI, persistence, evaluation framework) is cloud-safe. The concrete experimental primitives (mutation implementations, fitness functions, selection algorithms) are novel-bearing and should be isolated.
