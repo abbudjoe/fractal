@@ -387,6 +387,30 @@ sync_worktree() {
     fi
 }
 
+build_remote_tournament_args() {
+    REMOTE_TOURNAMENT_ARGS=()
+    local index=0
+    local arg
+    local manifest_path
+    local rewritten
+    while [ "$index" -lt "${#TOURNAMENT_ARGS[@]}" ]; do
+        arg="${TOURNAMENT_ARGS[$index]}"
+        if [ "$arg" = "--experiment-manifest" ] && [ $((index + 1)) -lt "${#TOURNAMENT_ARGS[@]}" ]; then
+            manifest_path="${TOURNAMENT_ARGS[$((index + 1))]}"
+            if [ "${manifest_path#${REPO_ROOT}/}" != "$manifest_path" ]; then
+                rewritten="${REMOTE_DIR}/${manifest_path#${REPO_ROOT}/}"
+            else
+                rewritten="$manifest_path"
+            fi
+            REMOTE_TOURNAMENT_ARGS+=("$arg" "$rewritten")
+            index=$((index + 2))
+            continue
+        fi
+        REMOTE_TOURNAMENT_ARGS+=("$arg")
+        index=$((index + 1))
+    done
+}
+
 resolve_local_identity_context() {
     RUN_LOCAL_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)"
     RUN_LOCAL_COMMIT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -493,6 +517,75 @@ def resolve_spec(
     commit_value: str,
     timeout_seconds: int,
 ) -> dict[str, Any]:
+    manifest_path = extract_arg(args, "--experiment-manifest")
+    if manifest_path:
+        manifest = json.loads(Path(manifest_path).read_text())
+        species = manifest.get("species")
+        preset = manifest.get("preset")
+        seed = manifest.get("seed")
+        execution_mode = manifest.get("execution_mode")
+        parallelism = manifest.get("parallelism")
+        backend = manifest.get("backend") or "cuda"
+        comparison_contract = manifest.get("comparison") or "authoritative_same_preset"
+        benchmark_mode = manifest.get("benchmark_mode") or "leaderboard"
+        logical_name = manifest.get("logical_name")
+        question_summary = manifest.get("question_summary")
+        spec = {
+            "question": {
+                "lane": "manifest",
+                "selection": {
+                    "kind": "manifest",
+                    "value": str(Path(manifest_path).name),
+                },
+                "summary": question_summary,
+            },
+            "variant": {
+                "species": species,
+            },
+            "budget": {
+                "seed": seed,
+                "run_timeout_seconds": timeout_seconds,
+                "perplexity_eval_batches": manifest.get("perplexity_eval_batches"),
+                "arc_eval_batches": manifest.get("arc_eval_batches"),
+            },
+            "runtime": {
+                "backend": backend,
+                "execution_mode": execution_mode,
+                "parallelism": parallelism,
+                "benchmark_mode": benchmark_mode,
+            },
+            "comparison": {
+                "contract": comparison_contract,
+            },
+            "execution": {
+                "target": "runpod",
+                "expected_branch": manifest.get("expected_branch"),
+            },
+            "build": {
+                "branch": branch_value,
+                "commit_sha": commit_value,
+            },
+        }
+        if not logical_name:
+            logical_name = sanitize(
+                f"{benchmark_mode}-{species or 'unknown'}-seed-{seed if seed is not None else 'na'}-{(commit_value or 'unknown')[:8]}"
+            )
+        canonical = json.dumps(spec, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        logical_id = f"exp-{hashlib.sha256(canonical).hexdigest()[:16]}"
+        return {
+            "logical_id": logical_id,
+            "logical_name": logical_name,
+            "spec": spec,
+            "resolved": {
+                "lane": "manifest",
+                "species": species,
+                "preset": preset,
+                "sequence": None,
+                "seed": seed,
+                "manifest_path": manifest_path,
+            },
+        }
+
     species = extract_arg(args, "--species")
     lane = extract_arg(args, "--lane") or "all"
     preset = extract_arg(args, "--preset")
@@ -638,6 +731,7 @@ context = {
     "variant": identity["spec"]["variant"],
     "budget": identity["spec"]["budget"],
     "runtime": identity["spec"]["runtime"],
+    "comparison": identity["spec"].get("comparison", {}),
     "execution": {
         "target": "runpod",
         "backend": "cuda",
@@ -846,6 +940,7 @@ REMOTE
 
 run_remote_tournament() {
     local local_build_key
+    local run_experiment_context_b64
     local_build_key="$(python3 - "$REPO_ROOT" <<'PY'
 import hashlib
 import os
@@ -896,6 +991,8 @@ PY
     )"
 
     RUN_LOCAL_BUILD_KEY="$local_build_key"
+    build_remote_tournament_args
+    run_experiment_context_b64="$(printf '%s' "$RUN_EXPERIMENT_CONTEXT_JSON" | base64 | tr -d '\n')"
 
     write_local_wrapper_manifest "running" 0 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RUN_LOCAL_BRANCH" "$local_build_key" "$RUN_LOCAL_COMMIT_SHA"
 
@@ -910,8 +1007,8 @@ PY
         "$RUN_TIMEOUT_SECONDS" \
         "$RUN_ID" \
         "$POD_ID" \
-        "$RUN_EXPERIMENT_CONTEXT_JSON" \
-        "${TOURNAMENT_ARGS[@]}" <<'REMOTE'
+        "$run_experiment_context_b64" \
+        "${REMOTE_TOURNAMENT_ARGS[@]}" <<'REMOTE'
 set -euo pipefail
 
 remote_dir="$1"
@@ -923,7 +1020,7 @@ no_compile="$6"
 run_timeout_seconds="$7"
 run_id="$8"
 pod_id="$9"
-experiment_context_json="${10}"
+experiment_context_b64="${10}"
 shift 10
 
 if [ -f "$HOME/.cargo/env" ]; then
@@ -975,8 +1072,9 @@ write_manifest() {
         "$run_timeout_seconds" \
         "$state_dir" \
         "$remote_dir" \
-        "$experiment_context_json" \
+        "$experiment_context_b64" \
         "$@" <<'PY'
+import base64
 import json
 import pathlib
 import sys
@@ -992,11 +1090,11 @@ import sys
     run_timeout_seconds,
     state_dir,
     remote_dir,
-    experiment_context_json,
+    experiment_context_b64,
     *tournament_args,
 ) = sys.argv[1:]
 
-experiment = json.loads(experiment_context_json)
+experiment = json.loads(base64.b64decode(experiment_context_b64).decode("utf-8"))
 manifest = {
     "run_id": experiment["experiment_id"]["attempt_id"],
     "status": status,
