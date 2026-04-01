@@ -1908,6 +1908,7 @@ dependencies = [
  "burn",
  "burn-candle",
  "rand 0.8.5",
+ "serde",
 ]
 
 [[package]]

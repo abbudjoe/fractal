@@ -13,15 +13,17 @@ use fractal::{
     lifecycle::{
         ArtifactPolicy, BenchmarkMode, BudgetSpec, ComparisonContract, DecisionIntent,
         ExecutionBackend, ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
-        ExperimentSpecTemplate, LaneIntent, RunExecutionOutcome, RuntimeSurfaceSpec,
-        SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig, TournamentPreset,
-        TournamentProgressEvent, TournamentReporter, TournamentSequence, TrainingInputSpec,
+        ExperimentSpecTemplate, LaneIntent, OptimizerSpec, RunExecutionOutcome,
+        RuntimeSurfaceSpec, SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig,
+        TournamentPreset, TournamentProgressEvent, TournamentReporter, TournamentSequence,
+        TrainingInputSpec,
     },
     persist_run_artifacts, primitive_tracker_reminder_lines,
     registry::{ComputeBackend, ExecutionMode, SpeciesId},
     species_registry_for_lane, species_registry_for_species, TournamentLane, TournamentRunReport,
 };
 use serde::Deserialize;
+use serde_json::Value;
 
 fn main() -> Result<(), FractalError> {
     match parse_command(std::env::args().skip(1))? {
@@ -169,7 +171,7 @@ impl RunOptions {
         self.species
     }
 
-    fn config_for(&self, preset: TournamentPreset) -> TournamentConfig {
+    fn config_for(&self, preset: TournamentPreset) -> Result<TournamentConfig, FractalError> {
         let mut config = preset.config();
         if let Some(seed) = self.seed {
             config.seed = seed;
@@ -189,7 +191,18 @@ impl RunOptions {
         if let Some(arc_eval_batches) = self.arc_eval_batches {
             config.arc_eval_batches = Some(arc_eval_batches);
         }
-        config
+        if let Some(path) = self.manifest_path.as_deref() {
+            if let Some(manifest) = load_manifest_v2(path)? {
+                manifest.experiment.config.apply(&mut config)?;
+                if let Some(optimizer) = manifest.experiment.optimizer {
+                    config = config.with_optimizer(optimizer);
+                }
+                if let Some(runtime) = manifest.experiment.runtime {
+                    config = config.with_launch_policy(runtime.launch_policy);
+                }
+            }
+        }
+        Ok(config)
     }
 
     fn comparison_for(&self, fallback: ComparisonContract) -> ComparisonContract {
@@ -256,6 +269,156 @@ struct ExperimentManifestFile {
     expected_commit_sha: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ManifestQuestionOverrides {
+    lane_intent: Option<LaneIntent>,
+    decision_intent: Option<DecisionIntent>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ManifestConfigOverrides {
+    seed: Option<u64>,
+    dim: Option<usize>,
+    levels: Option<usize>,
+    vocab_size: Option<usize>,
+    max_seq_len: Option<usize>,
+    max_recursion_depth: Option<usize>,
+    stability_depth: Option<usize>,
+    router_threshold: Option<f32>,
+    train_batch_size: Option<usize>,
+    eval_batch_size: Option<usize>,
+    train_steps_per_species: Option<usize>,
+    eval_batches_per_family: Option<usize>,
+    perplexity_eval_batches: Option<usize>,
+    arc_eval_batches: Option<usize>,
+    execution_mode: Option<String>,
+    parallelism: Option<usize>,
+    backend: Option<String>,
+    timeout_seconds: Option<f64>,
+}
+
+impl ManifestConfigOverrides {
+    fn apply(&self, config: &mut TournamentConfig) -> Result<(), FractalError> {
+        if let Some(seed) = self.seed {
+            config.seed = seed;
+        }
+        apply_positive_override(&mut config.dim, self.dim, "dim")?;
+        apply_positive_override(&mut config.levels, self.levels, "levels")?;
+        apply_positive_override(&mut config.vocab_size, self.vocab_size, "vocab_size")?;
+        apply_positive_override(&mut config.max_seq_len, self.max_seq_len, "max_seq_len")?;
+        apply_positive_override(
+            &mut config.max_recursion_depth,
+            self.max_recursion_depth,
+            "max_recursion_depth",
+        )?;
+        apply_positive_override(
+            &mut config.stability_depth,
+            self.stability_depth,
+            "stability_depth",
+        )?;
+        if let Some(router_threshold) = self.router_threshold {
+            config.router_threshold = router_threshold;
+        }
+        apply_positive_override(
+            &mut config.train_batch_size,
+            self.train_batch_size,
+            "train_batch_size",
+        )?;
+        apply_positive_override(
+            &mut config.eval_batch_size,
+            self.eval_batch_size,
+            "eval_batch_size",
+        )?;
+        apply_positive_override(
+            &mut config.train_steps_per_species,
+            self.train_steps_per_species,
+            "train_steps_per_species",
+        )?;
+        apply_positive_override(
+            &mut config.eval_batches_per_family,
+            self.eval_batches_per_family,
+            "eval_batches_per_family",
+        )?;
+        if let Some(perplexity_eval_batches) = self.perplexity_eval_batches {
+            if perplexity_eval_batches == 0 {
+                return Err(invalid_argument(
+                    "manifest v2 perplexity_eval_batches must be greater than zero".to_owned(),
+                ));
+            }
+            config.perplexity_eval_batches = Some(perplexity_eval_batches);
+        }
+        if let Some(arc_eval_batches) = self.arc_eval_batches {
+            if arc_eval_batches == 0 {
+                return Err(invalid_argument(
+                    "manifest v2 arc_eval_batches must be greater than zero".to_owned(),
+                ));
+            }
+            config.arc_eval_batches = Some(arc_eval_batches);
+        }
+        if let Some(execution_mode) = self.execution_mode.as_deref() {
+            config.execution_mode = parse_execution_mode(execution_mode)?;
+        }
+        if let Some(parallelism) = self.parallelism {
+            if parallelism == 0 {
+                return Err(invalid_argument(
+                    "manifest v2 parallelism must be greater than zero".to_owned(),
+                ));
+            }
+            config.parallelism = parallelism;
+        }
+        if let Some(backend) = self.backend.as_deref() {
+            config.execution_backend = parse_backend(backend)?.into();
+        }
+        if let Some(timeout_seconds) = self.timeout_seconds {
+            if timeout_seconds <= 0.0 {
+                return Err(invalid_argument(
+                    "manifest v2 timeout_seconds must be greater than zero".to_owned(),
+                ));
+            }
+            config.run_timeout = Some(std::time::Duration::from_secs_f64(timeout_seconds));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ExperimentManifestV2Spec {
+    question: ManifestQuestionOverrides,
+    config: ManifestConfigOverrides,
+    training_input: Option<TrainingInputSpec>,
+    optimizer: Option<OptimizerSpec>,
+    runtime: Option<RuntimeSurfaceSpec>,
+    comparison: Option<ComparisonContract>,
+    artifacts: Option<ArtifactPolicy>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExperimentManifestFileV2 {
+    logical_name: String,
+    #[serde(default)]
+    question_summary: Option<String>,
+    preset: String,
+    #[serde(default)]
+    lane: Option<String>,
+    #[serde(default)]
+    species: Option<String>,
+    #[serde(default)]
+    expected_branch: Option<String>,
+    #[serde(default)]
+    expected_commit_sha: Option<String>,
+    experiment: ExperimentManifestV2Spec,
+}
+
+#[derive(Clone, Debug)]
+enum LoadedManifest {
+    Legacy(ExperimentManifestFile),
+    V2(ExperimentManifestFileV2),
+}
+
 impl ExperimentManifestFile {
     fn into_run_options(self, path: &Path) -> Result<RunOptions, FractalError> {
         if self.logical_name.trim().is_empty() {
@@ -302,16 +465,112 @@ impl ExperimentManifestFile {
     }
 }
 
-fn load_manifest_run_options(path: &Path) -> Result<RunOptions, FractalError> {
+impl ExperimentManifestFileV2 {
+    fn into_run_options(self, path: &Path) -> Result<RunOptions, FractalError> {
+        if self.logical_name.trim().is_empty() {
+            return Err(invalid_argument(format!(
+                "experiment manifest {} must define a non-empty logical_name",
+                path.display()
+            )));
+        }
+        if self.lane.is_some() && self.species.is_some() {
+            return Err(invalid_argument(format!(
+                "experiment manifest {} must choose either lane or species, not both",
+                path.display()
+            )));
+        }
+
+        validate_manifest_identity(path, &self.expected_branch, &self.expected_commit_sha)?;
+
+        Ok(RunOptions {
+            selection: Some(RunSelection::Preset(parse_preset(&self.preset)?)),
+            lane: self.lane.as_deref().map(parse_lane).transpose()?,
+            species: self.species.as_deref().map(parse_species).transpose()?,
+            seed: self.experiment.config.seed,
+            execution_mode: self
+                .experiment
+                .config
+                .execution_mode
+                .as_deref()
+                .map(parse_execution_mode)
+                .transpose()?,
+            parallelism: self.experiment.config.parallelism,
+            backend: self
+                .experiment
+                .config
+                .backend
+                .as_deref()
+                .map(parse_backend)
+                .transpose()?,
+            perplexity_eval_batches: self.experiment.config.perplexity_eval_batches,
+            arc_eval_batches: self.experiment.config.arc_eval_batches,
+            benchmark_mode: Some(
+                self.experiment
+                    .runtime
+                    .as_ref()
+                    .map(|runtime| runtime.benchmark_mode)
+                    .unwrap_or(BenchmarkMode::Leaderboard),
+            ),
+            manifest_path: Some(path.to_path_buf()),
+            logical_name: Some(self.logical_name),
+            question_summary: self.question_summary,
+            comparison_override: Some(
+                self.experiment
+                    .comparison
+                    .unwrap_or_else(ComparisonContract::authoritative_same_preset),
+            ),
+        })
+    }
+}
+
+impl LoadedManifest {
+    fn into_run_options(self, path: &Path) -> Result<RunOptions, FractalError> {
+        match self {
+            Self::Legacy(manifest) => manifest.into_run_options(path),
+            Self::V2(manifest) => manifest.into_run_options(path),
+        }
+    }
+}
+
+fn load_manifest_file(path: &Path) -> Result<LoadedManifest, FractalError> {
     let content = fs::read_to_string(path)
         .map_err(|error| invalid_argument(format!("failed to read {}: {error}", path.display())))?;
-    let manifest: ExperimentManifestFile = serde_json::from_str(&content).map_err(|error| {
+    let value: Value = serde_json::from_str(&content).map_err(|error| {
         invalid_argument(format!(
             "failed to parse experiment manifest {}: {error}",
             path.display()
         ))
     })?;
-    manifest.into_run_options(path)
+
+    if value.get("experiment").is_some() {
+        let manifest: ExperimentManifestFileV2 =
+            serde_json::from_value(value).map_err(|error| {
+                invalid_argument(format!(
+                    "failed to parse experiment manifest v2 {}: {error}",
+                    path.display()
+                ))
+            })?;
+        Ok(LoadedManifest::V2(manifest))
+    } else {
+        let manifest: ExperimentManifestFile = serde_json::from_value(value).map_err(|error| {
+            invalid_argument(format!(
+                "failed to parse experiment manifest {}: {error}",
+                path.display()
+            ))
+        })?;
+        Ok(LoadedManifest::Legacy(manifest))
+    }
+}
+
+fn load_manifest_v2(path: &Path) -> Result<Option<ExperimentManifestFileV2>, FractalError> {
+    match load_manifest_file(path)? {
+        LoadedManifest::Legacy(_) => Ok(None),
+        LoadedManifest::V2(manifest) => Ok(Some(manifest)),
+    }
+}
+
+fn load_manifest_run_options(path: &Path) -> Result<RunOptions, FractalError> {
+    load_manifest_file(path)?.into_run_options(path)
 }
 
 fn validate_manifest_identity(
@@ -570,6 +829,22 @@ fn parse_positive_usize(value: &str, flag: &str) -> Result<usize, FractalError> 
     Ok(parsed)
 }
 
+fn apply_positive_override(
+    slot: &mut usize,
+    value: Option<usize>,
+    field_name: &str,
+) -> Result<(), FractalError> {
+    if let Some(value) = value {
+        if value == 0 {
+            return Err(invalid_argument(format!(
+                "manifest v2 {field_name} must be greater than zero"
+            )));
+        }
+        *slot = value;
+    }
+    Ok(())
+}
+
 fn parse_backend(value: &str) -> Result<BackendOverride, FractalError> {
     match value {
         "cpu" => Ok(BackendOverride::Cpu),
@@ -651,7 +926,13 @@ fn run_preset(
 ) -> Result<(), FractalError> {
     let lane = options.lane();
     let species = options.species();
-    let base_config = options.config_for(preset);
+    let manifest_v2 = options
+        .manifest_path
+        .as_deref()
+        .map(load_manifest_v2)
+        .transpose()?
+        .flatten();
+    let base_config = options.config_for(preset)?;
     let config = base_config
         .clone()
         .with_experiment(build_experiment_template(
@@ -661,6 +942,7 @@ fn run_preset(
             &comparison,
             &base_config,
             options,
+            manifest_v2.as_ref(),
         ));
     print_header(preset, lane, species, &config, &comparison);
     let tournament = Tournament::new(config.clone())?;
@@ -708,6 +990,7 @@ fn build_experiment_template(
     comparison: &ComparisonContract,
     config: &TournamentConfig,
     options: &RunOptions,
+    manifest_v2: Option<&ExperimentManifestFileV2>,
 ) -> ExperimentSpecTemplate {
     let run_id = std::env::var("FRACTAL_RUN_ID").unwrap_or_else(|_| {
         format!(
@@ -731,7 +1014,9 @@ fn build_experiment_template(
         .clone()
         .unwrap_or_else(|| format!("evaluate {scope} on {}", preset.name()));
 
-    let mut runtime = options.runtime_surface_spec();
+    let mut runtime = manifest_v2
+        .and_then(|manifest| manifest.experiment.runtime.clone())
+        .unwrap_or_else(|| options.runtime_surface_spec());
     runtime.launch_policy = config.launch_policy.clone();
 
     ExperimentSpecTemplate {
@@ -744,12 +1029,18 @@ fn build_experiment_template(
         },
         question: ExperimentQuestion {
             summary: question_summary,
-            lane_intent: lane_intent_for_preset(preset),
-            decision_intent: decision_intent_for_contract(comparison),
+            lane_intent: manifest_v2
+                .and_then(|manifest| manifest.experiment.question.lane_intent)
+                .unwrap_or_else(|| lane_intent_for_preset(preset)),
+            decision_intent: manifest_v2
+                .and_then(|manifest| manifest.experiment.question.decision_intent)
+                .unwrap_or_else(|| decision_intent_for_contract(comparison)),
         },
         budget: BudgetSpec::from_config(preset, config),
         optimizer: config.optimizer.clone(),
-        training_input: TrainingInputSpec::synthetic(),
+        training_input: manifest_v2
+            .and_then(|manifest| manifest.experiment.training_input.clone())
+            .unwrap_or_else(TrainingInputSpec::synthetic),
         runtime,
         comparison: comparison.clone(),
         execution: ExecutionTarget {
@@ -765,7 +1056,9 @@ fn build_experiment_template(
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok()),
         },
-        artifacts: ArtifactPolicy::default(),
+        artifacts: manifest_v2
+            .and_then(|manifest| manifest.experiment.artifacts.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -1077,6 +1370,7 @@ fn print_usage() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fractal::TrainingInputMode;
     use std::fs;
 
     #[test]
@@ -1771,6 +2065,175 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, FractalError::InvalidConfig(_)));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_command_loads_experiment_manifest_v2_with_typed_stage0_contract() {
+        let root =
+            std::env::temp_dir().join(format!("fractal-exp-manifest-v2-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let manifest_path = root.join("stage0-canary-s42-p1-contractive.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "logical_name": "stage0-canary-s42-p1-contractive",
+                "question_summary": "prove the Stage 0 canary launch path end-to-end for p1_contractive_v1",
+                "preset": "fast-test",
+                "species": "p1_contractive",
+                "experiment": {
+                    "question": {
+                        "lane_intent": "benchmark",
+                        "decision_intent": "benchmark"
+                    },
+                    "config": {
+                        "seed": 42,
+                        "dim": 1024,
+                        "levels": 6,
+                        "vocab_size": 32000,
+                        "max_seq_len": 2048,
+                        "train_batch_size": 2,
+                        "eval_batch_size": 2,
+                        "train_steps_per_species": 8,
+                        "eval_batches_per_family": 1,
+                        "perplexity_eval_batches": 1,
+                        "arc_eval_batches": 1,
+                        "execution_mode": "sequential",
+                        "parallelism": 1,
+                        "backend": "cpu"
+                    },
+                    "training_input": {
+                        "mode": "tokenizer-backed-text",
+                        "corpus_name": "fineweb-stage0",
+                        "tokenizer": {
+                            "artifact_id": "openlm-research/open_llama_3b_v2",
+                            "artifact_path": "/tmp/tokenizer.model",
+                            "vocab_size": 32000,
+                            "pad_token_id": 0
+                        },
+                        "bridge": {
+                            "enabled": true,
+                            "observational_only": true
+                        },
+                        "arc_source": {
+                            "mode": "synthetic-canonical"
+                        }
+                    },
+                    "optimizer": {
+                        "kind": "adamw",
+                        "peak_learning_rate": 0.0002,
+                        "beta_1": 0.9,
+                        "beta_2": 0.95,
+                        "epsilon": 1e-8,
+                        "weight_decay": 0.05,
+                        "gradient_clip_norm": 1.0,
+                        "schedule": {
+                            "kind": "warmup-cosine",
+                            "warmup_fraction": 0.02,
+                            "decay_floor_fraction": 0.1
+                        }
+                    },
+                    "runtime": {
+                        "eval_backend_policy": "shared-backend",
+                        "batching_policy": "padded",
+                        "execution_policy": "simple-loop",
+                        "buffer_reuse_policy": "disabled",
+                        "benchmark_mode": "leaderboard",
+                        "backend_policy": "active-execution-backend",
+                        "launch_policy": {
+                            "precision": {
+                                "compute": "bf16",
+                                "optimizer_state": "fp32",
+                                "reduction": "fp32",
+                                "tf32_enabled": true
+                            },
+                            "checkpoint": {
+                                "interval_tokens": 10000000,
+                                "keep_latest": true,
+                                "keep_best": true,
+                                "keep_final": true,
+                                "keep_previous": true
+                            },
+                            "eval_cadence": {
+                                "perplexity_interval_tokens": 10000000,
+                                "stability_interval_tokens": 10000000,
+                                "arc_interval_tokens": 20000000,
+                                "systems_speed_interval_tokens": 20000000,
+                                "final_full_eval": true
+                            },
+                            "resume": {
+                                "resume_on_interrupt": true,
+                                "restart_on_corruption": true,
+                                "restart_on_contract_ambiguity": true
+                            }
+                        }
+                    },
+                    "comparison": {
+                        "authority": "authoritative",
+                        "requires_same_preset": true,
+                        "requires_same_runtime_surfaces": true,
+                        "requires_frozen_commit": true,
+                        "requires_same_backend": true
+                    },
+                    "artifacts": {
+                        "manifest_required": true,
+                        "structured_artifact_required": true,
+                        "final_log_required": true,
+                        "tracker_ready_output_required": true
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let command = parse_command(vec![
+            "--experiment-manifest".to_owned(),
+            manifest_path.display().to_string(),
+        ])
+        .unwrap();
+
+        let options = match command {
+            CliCommand::Run(options) => options,
+            other => panic!("expected run command, got {other:?}"),
+        };
+
+        assert_eq!(options.species, Some(SpeciesId::P1Contractive));
+        assert_eq!(options.seed, Some(42));
+        assert_eq!(options.backend, Some(BackendOverride::Cpu));
+        assert_eq!(options.parallelism, Some(1));
+        assert_eq!(
+            options.comparison_override,
+            Some(ComparisonContract::authoritative_same_preset())
+        );
+
+        let config = options.config_for(TournamentPreset::FastTest).unwrap();
+        assert_eq!(config.dim, 1024);
+        assert_eq!(config.levels, 6);
+        assert_eq!(config.vocab_size, 32000);
+        assert_eq!(config.max_seq_len, 2048);
+        assert_eq!(config.optimizer, OptimizerSpec::stage0_adamw());
+        assert_eq!(config.launch_policy, fractal::LaunchPolicySpec::stage0_default());
+
+        let manifest_v2 = load_manifest_v2(&manifest_path).unwrap().unwrap();
+        let template = build_experiment_template(
+            TournamentPreset::FastTest,
+            TournamentLane::All,
+            Some(SpeciesId::P1Contractive),
+            &ComparisonContract::authoritative_same_preset(),
+            &config,
+            &options,
+            Some(&manifest_v2),
+        );
+
+        assert_eq!(template.training_input.mode, TrainingInputMode::TokenizerBackedText);
+        assert_eq!(template.training_input.corpus_name.as_deref(), Some("fineweb-stage0"));
+        assert_eq!(template.runtime.launch_policy, fractal::LaunchPolicySpec::stage0_default());
+        assert_eq!(template.question.lane_intent, LaneIntent::Benchmark);
+        assert_eq!(template.question.decision_intent, DecisionIntent::Benchmark);
+        assert_eq!(template.artifacts, ArtifactPolicy::default());
+
         let _ = fs::remove_dir_all(&root);
     }
 }

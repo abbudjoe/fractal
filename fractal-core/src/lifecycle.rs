@@ -6,6 +6,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     data_generator::{
         GeneratorConfig, GeneratorDepthConfig, SimpleHierarchicalGenerator, MIN_SEQUENCE_LEN,
@@ -109,13 +111,14 @@ impl TournamentSequence {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ComparisonAuthority {
     Authoritative,
     Advisory,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComparisonContract {
     pub authority: ComparisonAuthority,
     pub requires_same_preset: bool,
@@ -159,7 +162,8 @@ impl ComparisonContract {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum LaneIntent {
     Benchmark,
     Bullpen,
@@ -178,7 +182,8 @@ impl LaneIntent {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum DecisionIntent {
     Promote,
     Hold,
@@ -221,9 +226,11 @@ pub struct VariantSpec {
     pub variant_name: PrimitiveVariantName,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OptimizerKind {
+    #[serde(rename = "adam")]
     Adam,
+    #[serde(rename = "adamw", alias = "adam-w")]
     AdamW,
 }
 
@@ -236,7 +243,8 @@ impl OptimizerKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum TrainingInputMode {
     Synthetic,
     TokenizerBackedText,
@@ -251,7 +259,8 @@ impl TrainingInputMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum LearningRateScheduleKind {
     Constant,
     WarmupCosine,
@@ -266,7 +275,8 @@ impl LearningRateScheduleKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ArcSourceMode {
     SyntheticCanonical,
     TokenizerBackedCanonical,
@@ -283,7 +293,7 @@ impl ArcSourceMode {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LearningRateScheduleSpec {
     pub kind: LearningRateScheduleKind,
     pub warmup_fraction: f64,
@@ -386,7 +396,7 @@ impl LearningRateScheduleSpec {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OptimizerSpec {
     pub kind: OptimizerKind,
     pub peak_learning_rate: f64,
@@ -475,7 +485,7 @@ impl OptimizerSpec {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArcSourceSpec {
     pub mode: ArcSourceMode,
 }
@@ -516,7 +526,7 @@ impl ArcSourceSpec {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenizerArtifactSpec {
     pub artifact_id: String,
     pub artifact_path: Option<String>,
@@ -573,7 +583,7 @@ impl TokenizerArtifactSpec {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenizerBridgeSpec {
     pub enabled: bool,
     pub observational_only: bool,
@@ -615,7 +625,7 @@ impl TokenizerBridgeSpec {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrainingInputSpec {
     pub mode: TrainingInputMode,
     pub corpus_name: Option<String>,
@@ -748,7 +758,8 @@ impl BudgetSpec {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum EvalBackendPolicy {
     SharedBackend,
 }
@@ -761,7 +772,8 @@ impl EvalBackendPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum BatchingPolicy {
     Padded,
 }
@@ -774,7 +786,8 @@ impl BatchingPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ForwardExecutionPolicy {
     SimpleLoop,
 }
@@ -787,7 +800,8 @@ impl ForwardExecutionPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum BufferReusePolicy {
     Disabled,
 }
@@ -800,7 +814,8 @@ impl BufferReusePolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum BenchmarkMode {
     Leaderboard,
     SystemsSpeed,
@@ -815,7 +830,8 @@ impl BenchmarkMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum RuntimeBackendPolicy {
     ActiveExecutionBackend,
 }
@@ -828,7 +844,8 @@ impl RuntimeBackendPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum NumericPrecisionKind {
     BackendDefault,
     Bf16,
@@ -845,7 +862,7 @@ impl NumericPrecisionKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrecisionPolicy {
     pub compute: NumericPrecisionKind,
     pub optimizer_state: NumericPrecisionKind,
@@ -893,7 +910,7 @@ impl PrecisionPolicy {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointPolicy {
     pub interval_tokens: Option<usize>,
     pub keep_latest: bool,
@@ -956,7 +973,7 @@ impl CheckpointPolicy {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvalCadencePolicy {
     pub perplexity_interval_tokens: Option<usize>,
     pub stability_interval_tokens: Option<usize>,
@@ -1026,7 +1043,7 @@ impl EvalCadencePolicy {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResumePolicy {
     pub resume_on_interrupt: bool,
     pub restart_on_corruption: bool,
@@ -1077,7 +1094,7 @@ impl ResumePolicy {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchPolicySpec {
     pub precision: PrecisionPolicy,
     pub checkpoint: CheckpointPolicy,
@@ -1133,7 +1150,7 @@ impl LaunchPolicySpec {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeSurfaceSpec {
     pub eval_backend_policy: EvalBackendPolicy,
     pub batching_policy: BatchingPolicy,
@@ -1234,7 +1251,7 @@ impl ExecutionTarget {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactPolicy {
     pub manifest_required: bool,
     pub structured_artifact_required: bool,
