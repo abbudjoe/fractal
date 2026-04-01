@@ -25,8 +25,8 @@ use crate::{
     FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLexemeKind, FaceoffTokenizer, FaceoffVocab,
     FaceoffVocabConfig, HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument,
     NativeCollationSpec, NativeCompatibilityAdapter, NativeTokenizer, P1FractalHybrid,
-    P2Mandelbrot, PrimitiveRunSummary, RecursiveTokenizer, TokenRecord, TokenizerConfig,
-    FACEOFF_VOCAB_FORMAT_VERSION,
+    P2Mandelbrot, PrimitiveRunSummary, RecursiveTokenizer, StateSignature, TokenRecord,
+    TokenizerConfig, FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -1466,7 +1466,7 @@ fn faceoff_vocab_recover_descendant_cover_on_held_out_input() {
 }
 
 #[test]
-fn faceoff_vocab_recovers_held_out_shape_aliases() {
+fn faceoff_vocab_recovers_held_out_structural_aliases() {
     let device = Default::default();
     let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
     let induction_a = "fn render_home() {\n    let auth_provider = 2026;\n}\n";
@@ -1495,8 +1495,8 @@ fn faceoff_vocab_recovers_held_out_shape_aliases() {
 
     assert_eq!(faceoff.decode_document(&encoded).unwrap(), held_out);
     assert!(
-        encoded.fallback.shape_hits > 0,
-        "held-out shape-equivalent text should recover at least one shape-based structural hit"
+        encoded.fallback.shape_hits > 0 || encoded.fallback.prototype_hits > 0,
+        "held-out shape-equivalent text should recover at least one structural hit"
     );
     assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
 }
@@ -1544,15 +1544,71 @@ fn faceoff_motif_only_ablation_disables_literal_and_shape_rescue() {
 
     assert_eq!(faceoff.decode_document(&full).unwrap(), held_out);
     assert_eq!(faceoff.decode_document(&motif_only).unwrap(), held_out);
-    assert!(full.fallback.shape_hits > 0);
+    assert!(full.fallback.shape_hits > 0 || full.fallback.prototype_hits > 0);
     assert_eq!(full.fallback.byte_fallback_tokens, 0);
 
     assert_eq!(motif_only.fallback.literal_hits, 0);
     assert_eq!(motif_only.fallback.shape_hits, 0);
     assert_eq!(motif_only.fallback.byte_fallback_tokens, 0);
     assert!(
-        motif_only.fallback.lexical_fallback_tokens > 0,
-        "motif-only ablation should fall through to typed lexical fallback when alias rescue is disabled"
+        motif_only.fallback.prototype_hits > 0 || motif_only.fallback.lexical_fallback_tokens > 0,
+        "motif-only ablation should avoid literal/shape rescue while still recovering structurally or lexically"
+    );
+}
+
+#[test]
+fn faceoff_state_signature_prototype_clusters_ignore_lexical_shape() {
+    let signature = StateSignature {
+        state_bin: 512,
+        norm_bin: 11,
+        mean_abs_bin: 7,
+        prefix_bins: [1, -2, 0, 3, -1, 2],
+    };
+    let summaries = vec![
+        PrimitiveRunSummary {
+            primitive: "manual",
+            produced: 1,
+            tokens: vec![TokenRecord {
+                depth: 2,
+                start: 0,
+                end: "render_home()".len(),
+                text: "render_home()".to_string(),
+                token: "d2-n13-q512-aaaaaaaaaaaaaaaa".to_string(),
+                state_signature: signature,
+            }],
+        },
+        PrimitiveRunSummary {
+            primitive: "manual",
+            produced: 1,
+            tokens: vec![TokenRecord {
+                depth: 2,
+                start: 0,
+                end: "AUTH_2026!?".len(),
+                text: "AUTH_2026!?".to_string(),
+                token: "d2-n11-q512-bbbbbbbbbbbbbbbb".to_string(),
+                state_signature: signature,
+            }],
+        },
+    ];
+
+    let vocab = FaceoffVocab::from_summaries_with_config(
+        summaries.iter(),
+        FaceoffVocabConfig {
+            min_occurrence_count: 2,
+            min_doc_count: 2,
+            max_token_bytes: Some(128),
+            ..FaceoffVocabConfig::default()
+        },
+    )
+    .unwrap();
+
+    let prototypes = vocab.prototype_entries();
+    assert_eq!(prototypes.len(), 1);
+    assert_eq!(prototypes[0].distinct_text_count, 2);
+    assert!(vocab.shape_entries().is_empty());
+    assert!(
+        !prototypes[0].cluster.contains('\u{001f}'),
+        "state-signature prototypes should no longer encode lexical-shape aliases"
     );
 }
 
@@ -2864,6 +2920,7 @@ fn merge_streaming_summaries(
                 end: token.end + offset,
                 text: token.text.clone(),
                 token: token.token.clone(),
+                state_signature: token.state_signature,
             })
         })
         .collect();

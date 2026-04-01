@@ -800,50 +800,15 @@ fn prototype_digest(cluster: &str) -> String {
 }
 
 pub(crate) fn prototype_cluster_key(record: &TokenRecord) -> Result<String, FractalError> {
-    let (prefix, _) = record.token.rsplit_once('-').ok_or_else(|| {
-        FractalError::InvalidState(format!(
-            "token `{}` is missing digest suffix in expected dX-nY-qZ-digest format",
-            record.token
-        ))
-    })?;
-    let mut depth = None;
-    let mut state_bin = None;
-    for part in prefix.split('-') {
-        if let Some(value) = part.strip_prefix('d') {
-            depth = Some(value.parse::<usize>().map_err(|source| {
-                FractalError::InvalidState(format!(
-                    "failed to parse depth from token `{}`: {source}",
-                    record.token
-                ))
-            })?);
-        } else if let Some(value) = part.strip_prefix('q') {
-            state_bin = Some(value.parse::<u16>().map_err(|source| {
-                FractalError::InvalidState(format!(
-                    "failed to parse state bin from token `{}`: {source}",
-                    record.token
-                ))
-            })?);
-        }
-    }
-
-    let depth = depth.ok_or_else(|| {
-        FractalError::InvalidState(format!(
-            "token `{}` is missing depth prefix for prototype clustering",
-            record.token
-        ))
-    })?;
-    let state_bin = state_bin.ok_or_else(|| {
-        FractalError::InvalidState(format!(
-            "token `{}` is missing state bin prefix for prototype clustering",
-            record.token
-        ))
-    })?;
     let byte_len = record.end.saturating_sub(record.start);
     let len_bucket = byte_len_bucket(byte_len);
-    let state_bucket = state_bin_bucket(state_bin);
-    let shape = lexical_shape_key(&record.text);
+    let state_bucket = state_bin_bucket(record.state_signature.state_bin);
     Ok(format!(
-        "d{depth}-lb{len_bucket}-qb{state_bucket}\u{001f}{shape}"
+        "d{}-lb{len_bucket}-qb{state_bucket}-nb{}-ab{}-pb{}",
+        record.depth,
+        record.state_signature.norm_bin,
+        record.state_signature.mean_abs_bin,
+        encode_prefix_bins(&record.state_signature.prefix_bins)
     ))
 }
 
@@ -856,4 +821,12 @@ fn byte_len_bucket(byte_len: usize) -> usize {
 
 fn state_bin_bucket(state_bin: u16) -> u16 {
     state_bin / 16
+}
+
+fn encode_prefix_bins(prefix_bins: &[i8]) -> String {
+    prefix_bins
+        .iter()
+        .map(i8::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }

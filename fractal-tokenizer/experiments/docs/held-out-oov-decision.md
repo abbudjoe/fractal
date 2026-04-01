@@ -278,3 +278,60 @@ Updated read:
 - further rescue work should be tightly limited
 - primitive comparison or a more radical tokenizer-architecture pivot is now
   better justified than additional local rescue tuning
+
+## State-Signature Prototype Induction Result
+
+The next empirical step moved prototype induction onto a richer typed
+`StateSignature` surface carried directly in `TokenRecord`.
+
+This changed prototype clustering from:
+
+- coarse state bucket
+- coarse length bucket
+- lexical shape
+
+to:
+
+- coarse length bucket
+- coarse typed state signature
+
+with exact matching still preserved.
+
+Focused regression result:
+
+- two records with the same typed state signature but different lexical shapes
+  now induce one shared prototype cluster
+
+Held-out legacy bakeoff result for `p1_fractal_hybrid_dyn-state-norm_v2`:
+
+- `exact_motif_hit_docs=1`
+- `prototype_hit_docs=29`
+- `lexical_only_docs=27`
+- `code.rust=0.83`
+- `code.swift=0.93`
+- `docs.spec=0.92`
+- `jsonl.signals=113.26`
+- verdict: `YELLOW`
+
+Motif-only diagnostic:
+
+- `prototype_hit_docs=29`
+- `lexical_only_docs=28`
+- `jsonl.signals=27.45`
+- verdict: `YELLOW`
+
+Interpretation:
+
+- this is the first control-plane pass that materially increased held-out
+  structural reuse
+- it also moved docs/code upward in the right direction
+- but it introduced obvious false-positive overcollapse on structured JSONL
+- the problem is no longer "no structural hits"; it is now "structural hits
+  are too permissive on some buckets"
+
+Updated read:
+
+- the typed state-signature surface is a real improvement and should stay
+- the current line is not yet seaworthy
+- if we continue on this path, the next fix must be prototype precision /
+  anti-overcollapse guardrails, not looser matching

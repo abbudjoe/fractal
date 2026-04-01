@@ -21,8 +21,8 @@ Candidates are ranked by:
 
 ## Latest Trial Snapshot
 
-Most recent completed trial: prototype-primary identity on top of clustered
-structural induction.
+Most recent completed trial: state-signature prototype induction on the stable
+legacy control-plane path.
 
 - `BAKEOFF_DOCUMENTS=120`
 - `BAKEOFF_INDUCTION_DOCUMENTS=63`
@@ -34,21 +34,22 @@ structural induction.
 Result:
 
 - held-out byte collapse remains fixed
-- prototype-primary identity is technically valid and deterministic
-- `full` mode on `p1_fractal_hybrid_dyn-state-norm_v2` shows:
-  - `exact_motif_hit_docs=0`
-  - `prototype_hit_docs=5`
-  - `lexical_only_docs=52`
-- `jsonl.signals` remains the only strong held-out win
-- `code.rust`, `code.swift`, and `docs.spec` are unchanged and still below
-  native-tokenizer parity
+- the typed state-signature surface materially increased held-out prototype
+  hits
+- `full` mode on `p1_fractal_hybrid_dyn-state-norm_v2` now shows:
+  - `exact_motif_hit_docs=1`
+  - `prototype_hit_docs=29`
+  - `lexical_only_docs=27`
+- `code.rust`, `code.swift`, and `docs.spec` all moved upward
+- `jsonl.signals` overcollapsed badly enough to force a `YELLOW` verdict
 
 New read:
 
-- clustered induction plus prototype-primary identity is still not enough
-- the active bottleneck is now deeper than the exact-vs-prototype surface
-- the next disciplined step is primitive comparison or tokenizer-architecture
-  pivot work, not more local rescue tuning
+- this is the first control-plane pass that produced a real held-out structural
+  lift
+- the active problem is no longer absence of prototype hits
+- the active problem is prototype precision and false-positive overcollapse on
+  structured non-log text
 
 ## Current Baseline
 
@@ -99,7 +100,7 @@ The ranking below applies to **next** frontier candidates. Packaging is now trea
 
 ## Ranked Candidates
 
-### 1. Primitive Comparison Pivot
+### 1. Prototype Precision Guardrails
 
 Status:
 
@@ -107,10 +108,39 @@ Status:
 
 Why it ranks first now:
 
-- the major control-plane rescue passes have now been tried
-- prototype-primary identity did not materially improve held-out code/docs
-- the pipeline is good enough to compare primitives honestly and avoid spending
-  more cycles on local rescue tuning
+- state-signature induction finally moved held-out structural reuse
+- but it did so too aggressively on `jsonl.signals`
+- the highest-value next move is to constrain false positives without giving
+  back the new prototype hits
+
+Expected upside:
+
+- keep the gains on `docs.spec`, `code.rust`, and `code.swift`
+- reduce structured JSONL overcollapse back into a sane range
+- learn whether the current control-plane line can be made selective enough to
+  survive the scorecard
+
+Expected failure mode:
+
+- guardrails kill the new prototype hits and drop us back to lexical-only
+- or the false positives remain, showing this line is still too blunt
+
+Decision:
+
+- move here now
+
+### 2. Primitive Comparison Pivot
+
+Status:
+
+- `Active`
+
+Why it ranks second now:
+
+- if precision guardrails cannot rescue the new state-signature line,
+  primitive comparison is the next honest branch
+- the pipeline is strong enough now to compare primitives against the same held-out
+  control-plane contract
 
 Expected upside:
 
@@ -125,36 +155,37 @@ Expected failure mode:
 
 Decision:
 
-- move here now
+- keep ready as the next branch if the precision pass fails
 
-### 2. Prototype-Primary Identity
+### 3. State-Signature Prototype Induction
 
 Status:
 
 - `Tried`
 
-Why it ranks second now:
+Why it mattered:
 
-- clustered induction produced real prototype hits
-- but making prototypes primary still did not materially move held-out
-  code/docs
-- this was the last clean control-plane rescue pass before pivoting
+- it replaced the hidden string-parsing contract with a typed state-signature
+  surface on `TokenRecord`
+- it is the first control-plane pass that materially improved held-out
+  prototype reuse
 
 Expected upside:
 
-- prototype hits become the main structural signal instead of a side effect
-- held-out code/docs may move above the current ceiling
+- more held-out structural hits
+- less lexical-only behavior
+- upward movement on docs/code
 
-Expected failure mode:
+Observed failure mode:
 
-- prototype hits rise only slightly and code/docs remain flat
+- structured JSONL overcollapse became the dominant new regression
 
 Decision:
 
-- tried and not promoted
-- do not spend the next cycle here again before broader pivot work
+- keep the typed state-signature surface
+- do not treat it as seaworthy without precision guardrails
 
-### 3. Boundary-Aware Split For `p1`
+### 4. Boundary-Aware Split For `p1`
 
 Status:
 
@@ -179,7 +210,7 @@ Decision:
 - tried and not promoted
 - do not spend more cycles here before primitive comparison
 
-### 4. Novelty-Aware Frontier
+### 5. Novelty-Aware Frontier
 
 Status:
 
@@ -201,9 +232,10 @@ Decision:
 2. Compositional recurring-submotif vocab
 3. Clustered structural induction
 4. Prototype-primary identity
-5. Held-out local bakeoff rerun
-6. Primitive comparison pivot
-7. If no primitive breaks out, broader tokenizer-architecture pivot
+5. State-signature prototype induction
+6. Prototype precision guardrails
+7. If still yellow, primitive comparison pivot
+8. If no primitive breaks out, broader tokenizer-architecture pivot
 
 ## Promotion Rule
 

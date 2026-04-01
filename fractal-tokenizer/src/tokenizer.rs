@@ -46,6 +46,16 @@ impl Default for TokenizerConfig {
     }
 }
 
+const STATE_SIGNATURE_PREFIX_WIDTH: usize = 6;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StateSignature {
+    pub state_bin: u16,
+    pub norm_bin: u8,
+    pub mean_abs_bin: u8,
+    pub prefix_bins: [i8; STATE_SIGNATURE_PREFIX_WIDTH],
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TokenRecord {
     pub depth: usize,
@@ -53,6 +63,7 @@ pub struct TokenRecord {
     pub end: usize,
     pub text: String,
     pub token: String,
+    pub state_signature: StateSignature,
 }
 
 #[derive(Clone, Debug)]
@@ -116,6 +127,11 @@ struct SeenMotif {
     digest: String,
     norm: f32,
     signature: Vec<f32>,
+}
+
+struct TokenSummary {
+    token: String,
+    state_signature: StateSignature,
 }
 
 impl RecursiveTokenizer {
@@ -211,7 +227,8 @@ impl RecursiveTokenizer {
             start: segment.start,
             end,
             text: String::from_utf8_lossy(segment.bytes).into_owned(),
-            token: summary,
+            token: summary.token,
+            state_signature: summary.state_signature,
         });
 
         if segment.depth + 1 >= self.config.max_depth || segment.bytes.len() <= 1 {
@@ -687,11 +704,10 @@ fn summarize_readout<B: Backend>(
     depth: usize,
     motifs: &mut MotifRegistry,
     motif_reuse: MotifReusePolicy,
-) -> Result<String, FractalError> {
+) -> Result<TokenSummary, FractalError> {
     let values = tensor_data_to_vec::<f32>(readout.clone().into_data(), "token readout")?;
+    let state_signature = StateSignature::from_values(&values);
     let prefix = values.iter().take(8).copied().collect::<Vec<_>>();
-    let rolling_norm = normalized_l2(&values);
-    let state_bin = quantize_state_signal(rolling_norm, &values);
     let mut digest = 1469598103934665603u64;
     for value in prefix {
         let quantized = (value * 1000.0).round() as i64;
@@ -699,8 +715,15 @@ fn summarize_readout<B: Backend>(
         digest = digest.wrapping_mul(1099511628211);
     }
     let digest = format!("{digest:016x}");
-    let motif = motifs.resolve(depth, digest, &values, rolling_norm, motif_reuse);
-    Ok(format!("d{depth}-n{}-q{state_bin}-{motif}", bytes.len()))
+    let motif = motifs.resolve(depth, digest, &values, normalized_l2(&values), motif_reuse);
+    Ok(TokenSummary {
+        token: format!(
+            "d{depth}-n{}-q{}-{motif}",
+            bytes.len(),
+            state_signature.state_bin
+        ),
+        state_signature,
+    })
 }
 
 fn tensor_data_to_vec<E: Element>(
@@ -904,4 +927,33 @@ fn quantize_state_signal(rolling_norm: f32, values: &[f32]) -> u16 {
     let score = rolling_norm * (1.0 + mean_absolute_value(values));
     let scaled = (score * 4096.0).round();
     scaled.clamp(0.0, u16::MAX as f32) as u16
+}
+
+fn quantize_unsigned_bucket(value: f32, scale: f32) -> u8 {
+    let scaled = (value * scale).round();
+    scaled.clamp(0.0, u8::MAX as f32) as u8
+}
+
+fn quantize_signed_bucket(value: f32, scale: f32, clamp: i8) -> i8 {
+    let scaled = (value * scale).round();
+    scaled.clamp(-(clamp as f32), clamp as f32) as i8
+}
+
+impl StateSignature {
+    fn from_values(values: &[f32]) -> Self {
+        let rolling_norm = normalized_l2(values);
+        let mean_abs = mean_absolute_value(values);
+        let mut prefix_bins = [0; STATE_SIGNATURE_PREFIX_WIDTH];
+        for (index, slot) in prefix_bins.iter_mut().enumerate() {
+            let value = values.get(index).copied().unwrap_or_default();
+            *slot = quantize_signed_bucket(value, 4.0, 7);
+        }
+
+        Self {
+            state_bin: quantize_state_signal(rolling_norm, values),
+            norm_bin: quantize_unsigned_bucket(rolling_norm, 32.0),
+            mean_abs_bin: quantize_unsigned_bucket(mean_abs, 32.0),
+            prefix_bins,
+        }
+    }
 }
