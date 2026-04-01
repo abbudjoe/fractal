@@ -15,6 +15,79 @@ use super::{lexeme::lexical_shape_key, FaceoffIdentityMode, FaceoffLexemeKind, F
 pub const FACEOFF_VOCAB_FORMAT_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PrototypeAdmissionPolicy {
+    pub short_max_distinct_per_thousand: u16,
+    pub medium_max_distinct_per_thousand: u16,
+    pub long_max_distinct_per_thousand: u16,
+    pub short_min_repetition_surplus: usize,
+    pub medium_min_repetition_surplus: usize,
+    pub long_min_repetition_surplus: usize,
+}
+
+impl Default for PrototypeAdmissionPolicy {
+    fn default() -> Self {
+        Self {
+            short_max_distinct_per_thousand: 650,
+            medium_max_distinct_per_thousand: 800,
+            long_max_distinct_per_thousand: 950,
+            short_min_repetition_surplus: 1,
+            medium_min_repetition_surplus: 1,
+            long_min_repetition_surplus: 0,
+        }
+    }
+}
+
+impl PrototypeAdmissionPolicy {
+    fn allows(
+        self,
+        occurrence_count: usize,
+        distinct_text_count: usize,
+        max_byte_len: usize,
+    ) -> bool {
+        let span_class = PrototypeSpanClass::for_byte_len(max_byte_len);
+        let density = distinct_text_density_per_thousand(occurrence_count, distinct_text_count);
+        density <= self.max_distinct_per_thousand(span_class)
+            && occurrence_count.saturating_sub(distinct_text_count)
+                >= self.min_repetition_surplus(span_class)
+    }
+
+    fn max_distinct_per_thousand(self, span_class: PrototypeSpanClass) -> u16 {
+        match span_class {
+            PrototypeSpanClass::Short => self.short_max_distinct_per_thousand,
+            PrototypeSpanClass::Medium => self.medium_max_distinct_per_thousand,
+            PrototypeSpanClass::Long => self.long_max_distinct_per_thousand,
+        }
+    }
+
+    fn min_repetition_surplus(self, span_class: PrototypeSpanClass) -> usize {
+        match span_class {
+            PrototypeSpanClass::Short => self.short_min_repetition_surplus,
+            PrototypeSpanClass::Medium => self.medium_min_repetition_surplus,
+            PrototypeSpanClass::Long => self.long_min_repetition_surplus,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrototypeSpanClass {
+    Short,
+    Medium,
+    Long,
+}
+
+impl PrototypeSpanClass {
+    fn for_byte_len(byte_len: usize) -> Self {
+        if byte_len <= 32 {
+            Self::Short
+        } else if byte_len <= 128 {
+            Self::Medium
+        } else {
+            Self::Long
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FaceoffVocabConfig {
     pub identity_mode: FaceoffIdentityMode,
     pub min_occurrence_count: usize,
@@ -23,6 +96,7 @@ pub struct FaceoffVocabConfig {
     pub min_shape_occurrence_count: usize,
     pub min_shape_doc_count: usize,
     pub min_shape_distinct_text_count: usize,
+    pub prototype_admission_policy: PrototypeAdmissionPolicy,
 }
 
 impl Default for FaceoffVocabConfig {
@@ -35,6 +109,7 @@ impl Default for FaceoffVocabConfig {
             min_shape_occurrence_count: 2,
             min_shape_doc_count: 2,
             min_shape_distinct_text_count: 2,
+            prototype_admission_policy: PrototypeAdmissionPolicy::default(),
         }
     }
 }
@@ -720,6 +795,13 @@ impl PrototypeAggregate {
         {
             return None;
         }
+        if !config.prototype_admission_policy.allows(
+            self.occurrence_count,
+            distinct_text_count,
+            self.max_byte_len,
+        ) {
+            return None;
+        }
 
         Some(PrototypeEntry {
             id: FaceoffTokenId::new(0),
@@ -821,6 +903,14 @@ fn byte_len_bucket(byte_len: usize) -> usize {
 
 fn state_bin_bucket(state_bin: u16) -> u16 {
     state_bin / 16
+}
+
+fn distinct_text_density_per_thousand(occurrence_count: usize, distinct_text_count: usize) -> u16 {
+    if occurrence_count == 0 {
+        return u16::MAX;
+    }
+
+    ((distinct_text_count.saturating_mul(1000)) / occurrence_count).min(u16::MAX as usize) as u16
 }
 
 fn encode_prefix_bins(prefix_bins: &[i8]) -> String {

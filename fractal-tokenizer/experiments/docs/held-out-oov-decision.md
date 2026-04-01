@@ -335,3 +335,43 @@ Updated read:
 - the current line is not yet seaworthy
 - if we continue on this path, the next fix must be prototype precision /
   anti-overcollapse guardrails, not looser matching
+
+## Prototype Precision Guardrails Result
+
+The next empirical step added a dynamic prototype admission policy based on:
+
+- distinct-text density
+- repetition surplus
+- span-size bucket
+
+The goal was to keep the new state-signature prototype gains while filtering the
+obvious false positives on structured JSONL.
+
+Focused regression result:
+
+- all-unique short clusters are rejected
+- repeated short clusters are retained
+
+Held-out legacy bakeoff result for `p1_fractal_hybrid_dyn-state-norm_v2`:
+
+- `exact_motif_hit_docs=1`
+- `prototype_hit_docs=3`
+- `lexical_only_docs=42`
+- `code.rust=0.81`
+- `code.swift=0.90`
+- `docs.spec=0.76`
+- `jsonl.signals=3.45`
+- verdict: `GREEN`
+
+Interpretation:
+
+- the guardrails successfully removed the overcollapse
+- but they did so by erasing almost all of the new structural lift
+- the system effectively fell back to the old pre-guardrail held-out profile
+
+Updated read:
+
+- the first precision gate was too blunt
+- it does not earn progression to adaptive signature granularity
+- if we continue on this control-plane line, the next candidate must be a more
+  targeted precision function rather than a coarse admission cutoff

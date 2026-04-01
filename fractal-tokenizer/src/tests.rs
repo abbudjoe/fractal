@@ -1567,27 +1567,47 @@ fn faceoff_state_signature_prototype_clusters_ignore_lexical_shape() {
     let summaries = vec![
         PrimitiveRunSummary {
             primitive: "manual",
-            produced: 1,
-            tokens: vec![TokenRecord {
-                depth: 2,
-                start: 0,
-                end: "render_home()".len(),
-                text: "render_home()".to_string(),
-                token: "d2-n13-q512-aaaaaaaaaaaaaaaa".to_string(),
-                state_signature: signature,
-            }],
+            produced: 2,
+            tokens: vec![
+                TokenRecord {
+                    depth: 2,
+                    start: 0,
+                    end: "render_home()".len(),
+                    text: "render_home()".to_string(),
+                    token: "d2-n13-q512-aaaaaaaaaaaaaaaa".to_string(),
+                    state_signature: signature,
+                },
+                TokenRecord {
+                    depth: 2,
+                    start: 20,
+                    end: 20 + "render_home()".len(),
+                    text: "render_home()".to_string(),
+                    token: "d2-n13-q512-cccccccccccccccc".to_string(),
+                    state_signature: signature,
+                },
+            ],
         },
         PrimitiveRunSummary {
             primitive: "manual",
-            produced: 1,
-            tokens: vec![TokenRecord {
-                depth: 2,
-                start: 0,
-                end: "AUTH_2026!?".len(),
-                text: "AUTH_2026!?".to_string(),
-                token: "d2-n11-q512-bbbbbbbbbbbbbbbb".to_string(),
-                state_signature: signature,
-            }],
+            produced: 2,
+            tokens: vec![
+                TokenRecord {
+                    depth: 2,
+                    start: 0,
+                    end: "AUTH_2026!?".len(),
+                    text: "AUTH_2026!?".to_string(),
+                    token: "d2-n11-q512-bbbbbbbbbbbbbbbb".to_string(),
+                    state_signature: signature,
+                },
+                TokenRecord {
+                    depth: 2,
+                    start: 20,
+                    end: 20 + "AUTH_2026!?".len(),
+                    text: "AUTH_2026!?".to_string(),
+                    token: "d2-n11-q512-dddddddddddddddd".to_string(),
+                    state_signature: signature,
+                },
+            ],
         },
     ];
 
@@ -1613,13 +1633,84 @@ fn faceoff_state_signature_prototype_clusters_ignore_lexical_shape() {
 }
 
 #[test]
+fn faceoff_prototype_precision_guardrails_reject_all_unique_short_clusters() {
+    let signature = StateSignature {
+        state_bin: 640,
+        norm_bin: 9,
+        mean_abs_bin: 8,
+        prefix_bins: [2, -1, 1, -2, 0, 2],
+    };
+    let summaries = vec![
+        manual_summary_with_signature("render_home()", "aaaaaaaaaaaaaaaa", signature),
+        manual_summary_with_signature("AUTH_2026!?", "bbbbbbbbbbbbbbbb", signature),
+    ];
+
+    let vocab = FaceoffVocab::from_summaries_with_config(
+        summaries.iter(),
+        FaceoffVocabConfig {
+            min_occurrence_count: 2,
+            min_doc_count: 2,
+            max_token_bytes: Some(128),
+            ..FaceoffVocabConfig::default()
+        },
+    )
+    .unwrap();
+
+    assert!(
+        vocab.prototype_entries().is_empty(),
+        "guardrails should reject short clusters where every occurrence is text-unique"
+    );
+}
+
+#[test]
+fn faceoff_prototype_precision_guardrails_keep_repeated_short_clusters() {
+    let signature = StateSignature {
+        state_bin: 640,
+        norm_bin: 9,
+        mean_abs_bin: 8,
+        prefix_bins: [2, -1, 1, -2, 0, 2],
+    };
+    let summaries = vec![
+        manual_summary_with_signature_pair(
+            "render_home()",
+            "aaaaaaaaaaaaaaaa",
+            "render_home()",
+            "bbbbbbbbbbbbbbbb",
+            signature,
+        ),
+        manual_summary_with_signature_pair(
+            "AUTH_2026!?",
+            "cccccccccccccccc",
+            "AUTH_2026!?",
+            "dddddddddddddddd",
+            signature,
+        ),
+    ];
+
+    let vocab = FaceoffVocab::from_summaries_with_config(
+        summaries.iter(),
+        FaceoffVocabConfig {
+            min_occurrence_count: 2,
+            min_doc_count: 2,
+            max_token_bytes: Some(128),
+            ..FaceoffVocabConfig::default()
+        },
+    )
+    .unwrap();
+
+    let prototypes = vocab.prototype_entries();
+    assert_eq!(prototypes.len(), 1);
+    assert_eq!(prototypes[0].distinct_text_count, 2);
+}
+
+#[test]
 fn faceoff_clustered_vocab_recovers_prototype_hits_on_held_out_shape_equivalent_text() {
     let device = Default::default();
     let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
     let induction_a = "fn render_home() {\n    let auth_provider = 2026;\n}\n";
     let induction_b = "fn render_settings() {\n    let oauth_flow = 2027;\n}\n";
     let held_out = "fn render_usage() {\n    let experiments = 2028;\n}\n";
-    let corpus = vec![induction_a, induction_b];
+    let corpus = vec![induction_a, induction_a, induction_b, induction_b];
 
     let vocab = faceoff
         .induce_vocab_from_texts_with_config::<TestBackend>(
@@ -1661,7 +1752,7 @@ fn faceoff_prototype_primary_identity_uses_prototypes_as_the_primary_surface() {
     let induction_a = "fn render_home() {\n    let auth_provider = 2026;\n}\n";
     let induction_b = "fn render_settings() {\n    let oauth_flow = 2027;\n}\n";
     let held_out = "fn render_usage() {\n    let experiments = 2028;\n}\n";
-    let corpus = vec![induction_a, induction_b];
+    let corpus = vec![induction_a, induction_a, induction_b, induction_b];
 
     let vocab = faceoff
         .induce_vocab_from_texts_with_config::<TestBackend>(
@@ -1736,6 +1827,64 @@ fn faceoff_prototype_primary_vocab_persistence_round_trip_is_exact() {
     assert_eq!(vocab.prototype_entries(), loaded.prototype_entries());
     assert!(loaded.entries().is_empty());
     assert!(loaded.shape_entries().is_empty());
+}
+
+fn manual_summary_with_signature(
+    text: &str,
+    digest: &str,
+    state_signature: StateSignature,
+) -> PrimitiveRunSummary {
+    PrimitiveRunSummary {
+        primitive: "manual",
+        produced: 1,
+        tokens: vec![TokenRecord {
+            depth: 2,
+            start: 0,
+            end: text.len(),
+            text: text.to_string(),
+            token: format!("d2-n{}-q{}-{digest}", text.len(), state_signature.state_bin),
+            state_signature,
+        }],
+    }
+}
+
+fn manual_summary_with_signature_pair(
+    left_text: &str,
+    left_digest: &str,
+    right_text: &str,
+    right_digest: &str,
+    state_signature: StateSignature,
+) -> PrimitiveRunSummary {
+    PrimitiveRunSummary {
+        primitive: "manual",
+        produced: 2,
+        tokens: vec![
+            TokenRecord {
+                depth: 2,
+                start: 0,
+                end: left_text.len(),
+                text: left_text.to_string(),
+                token: format!(
+                    "d2-n{}-q{}-{left_digest}",
+                    left_text.len(),
+                    state_signature.state_bin
+                ),
+                state_signature,
+            },
+            TokenRecord {
+                depth: 2,
+                start: left_text.len() + 1,
+                end: left_text.len() + 1 + right_text.len(),
+                text: right_text.to_string(),
+                token: format!(
+                    "d2-n{}-q{}-{right_digest}",
+                    right_text.len(),
+                    state_signature.state_bin
+                ),
+                state_signature,
+            },
+        ],
+    }
 }
 
 #[test]

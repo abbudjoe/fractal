@@ -21,8 +21,8 @@ Candidates are ranked by:
 
 ## Latest Trial Snapshot
 
-Most recent completed trial: state-signature prototype induction on the stable
-legacy control-plane path.
+Most recent completed trial: prototype precision guardrails on top of the
+state-signature prototype surface.
 
 - `BAKEOFF_DOCUMENTS=120`
 - `BAKEOFF_INDUCTION_DOCUMENTS=63`
@@ -33,23 +33,21 @@ legacy control-plane path.
 
 Result:
 
-- held-out byte collapse remains fixed
-- the typed state-signature surface materially increased held-out prototype
-  hits
+- the guardrails removed the structured JSONL overcollapse
+- but they also collapsed the structural gains back toward the old baseline
 - `full` mode on `p1_fractal_hybrid_dyn-state-norm_v2` now shows:
   - `exact_motif_hit_docs=1`
-  - `prototype_hit_docs=29`
-  - `lexical_only_docs=27`
-- `code.rust`, `code.swift`, and `docs.spec` all moved upward
-- `jsonl.signals` overcollapsed badly enough to force a `YELLOW` verdict
+  - `prototype_hit_docs=3`
+  - `lexical_only_docs=42`
+- `code.rust`, `code.swift`, and `docs.spec` all fell back to the old
+  pre-state-signature level
 
 New read:
 
-- this is the first control-plane pass that produced a real held-out structural
-  lift
-- the active problem is no longer absence of prototype hits
-- the active problem is prototype precision and false-positive overcollapse on
-  structured non-log text
+- the first precision gate was too blunt
+- the active problem is now selective precision, not broad recall
+- candidate 2 does not earn a turn until a precision fix preserves more of the
+  state-signature gains
 
 ## Current Baseline
 
@@ -104,7 +102,7 @@ The ranking below applies to **next** frontier candidates. Packaging is now trea
 
 Status:
 
-- `Active`
+- `Tried`
 
 Why it ranks first now:
 
@@ -127,9 +125,37 @@ Expected failure mode:
 
 Decision:
 
-- move here now
+- tried and not promoted
+- do not proceed to candidate 2 yet
 
-### 2. Primitive Comparison Pivot
+### 2. Targeted Prototype Precision
+
+Status:
+
+- `Active`
+
+Why it ranks second now:
+
+- broad admission guardrails removed the JSONL regression
+- but they also erased almost all of the structural gains
+- the next honest move, if we stay on this line, is a narrower precision
+  function instead of a blunt cutoff
+
+Expected upside:
+
+- keep more of the `prototype_hit_docs=29` lift
+- reduce JSONL false positives without dropping back to lexical-only behavior
+
+Expected failure mode:
+
+- another precision pass either stays too permissive or collapses back to the
+  old baseline again
+
+Decision:
+
+- this is now the only control-plane continuation that earns another cycle
+
+### 3. Primitive Comparison Pivot
 
 Status:
 
@@ -157,7 +183,7 @@ Decision:
 
 - keep ready as the next branch if the precision pass fails
 
-### 3. State-Signature Prototype Induction
+### 4. State-Signature Prototype Induction
 
 Status:
 
@@ -185,7 +211,7 @@ Decision:
 - keep the typed state-signature surface
 - do not treat it as seaworthy without precision guardrails
 
-### 4. Boundary-Aware Split For `p1`
+### 5. Boundary-Aware Split For `p1`
 
 Status:
 
@@ -210,7 +236,7 @@ Decision:
 - tried and not promoted
 - do not spend more cycles here before primitive comparison
 
-### 5. Novelty-Aware Frontier
+### 6. Novelty-Aware Frontier
 
 Status:
 
@@ -234,8 +260,9 @@ Decision:
 4. Prototype-primary identity
 5. State-signature prototype induction
 6. Prototype precision guardrails
-7. If still yellow, primitive comparison pivot
-8. If no primitive breaks out, broader tokenizer-architecture pivot
+7. Targeted prototype precision
+8. If still weak, primitive comparison pivot
+9. If no primitive breaks out, broader tokenizer-architecture pivot
 
 ## Promotion Rule
 
