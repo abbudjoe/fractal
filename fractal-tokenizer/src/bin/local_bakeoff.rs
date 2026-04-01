@@ -292,6 +292,7 @@ struct OverlayMetrics {
 enum OverlaySummaryMode {
     Off,
     LocalLineMacro,
+    LocalRecordMacro,
 }
 
 impl OverlaySummaryMode {
@@ -299,6 +300,7 @@ impl OverlaySummaryMode {
         match self {
             Self::Off => "off",
             Self::LocalLineMacro => "local-line-macro",
+            Self::LocalRecordMacro => "local-record-macro",
         }
     }
 
@@ -306,6 +308,7 @@ impl OverlaySummaryMode {
         match self {
             Self::Off => RecursiveOverlayMode::Off,
             Self::LocalLineMacro => RecursiveOverlayMode::LocalLineMacro,
+            Self::LocalRecordMacro => RecursiveOverlayMode::LocalRecordMacro,
         }
     }
 }
@@ -585,7 +588,7 @@ impl Args {
 
 fn print_help() {
     eprintln!(
-        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--corpus-source local|hybrid] [--fawx-root DIR] [--home-state-root DIR] [--hf-datasets-endpoint URL] [--max-review-count N] [--primitive NAME] [--all-primitives] [--fallback-mode full|motif-only] [--identity-mode legacy|prototype-primary] [--prototype-granularity coarse|adaptive] [--split-policy balanced|boundary-aware|syntax-aware] [--substrate raw|lexical] [--local-cache off|exact] [--overlay-mode off|local-line-macro] [--overlay-base-tokenizer LABEL]"
+        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--corpus-source local|hybrid] [--fawx-root DIR] [--home-state-root DIR] [--hf-datasets-endpoint URL] [--max-review-count N] [--primitive NAME] [--all-primitives] [--fallback-mode full|motif-only] [--identity-mode legacy|prototype-primary] [--prototype-granularity coarse|adaptive] [--split-policy balanced|boundary-aware|syntax-aware] [--substrate raw|lexical] [--local-cache off|exact] [--overlay-mode off|local-line-macro|local-record-macro] [--overlay-base-tokenizer LABEL]"
     );
 }
 
@@ -667,8 +670,9 @@ fn parse_overlay_mode(value: &str) -> Result<OverlaySummaryMode, Box<dyn Error>>
     match value {
         "off" => Ok(OverlaySummaryMode::Off),
         "local-line-macro" => Ok(OverlaySummaryMode::LocalLineMacro),
+        "local-record-macro" => Ok(OverlaySummaryMode::LocalRecordMacro),
         other => Err(format!(
-            "unknown overlay mode `{other}`; expected one of: off, local-line-macro"
+            "unknown overlay mode `{other}`; expected one of: off, local-line-macro, local-record-macro"
         )
         .into()),
     }
@@ -3060,6 +3064,14 @@ mod tests {
         assert_eq!(
             parse_overlay_mode("local-line-macro").unwrap(),
             OverlaySummaryMode::LocalLineMacro
+        );
+    }
+
+    #[test]
+    fn parse_overlay_mode_accepts_local_record_macro() {
+        assert_eq!(
+            parse_overlay_mode("local-record-macro").unwrap(),
+            OverlaySummaryMode::LocalRecordMacro
         );
     }
 
