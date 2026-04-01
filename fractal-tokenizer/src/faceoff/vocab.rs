@@ -10,12 +10,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{PrimitiveRunSummary, TokenRecord};
 
-use super::{lexeme::lexical_shape_key, FaceoffLexemeKind, FaceoffTokenId};
+use super::{lexeme::lexical_shape_key, FaceoffIdentityMode, FaceoffLexemeKind, FaceoffTokenId};
 
 pub const FACEOFF_VOCAB_FORMAT_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FaceoffVocabConfig {
+    pub identity_mode: FaceoffIdentityMode,
     pub min_occurrence_count: usize,
     pub min_doc_count: usize,
     pub max_token_bytes: Option<usize>,
@@ -27,6 +28,7 @@ pub struct FaceoffVocabConfig {
 impl Default for FaceoffVocabConfig {
     fn default() -> Self {
         Self {
+            identity_mode: FaceoffIdentityMode::Legacy,
             min_occurrence_count: 1,
             min_doc_count: 1,
             max_token_bytes: None,
@@ -74,6 +76,7 @@ pub struct PrototypeEntry {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FaceoffVocab {
+    identity_mode: FaceoffIdentityMode,
     motif_to_id: BTreeMap<String, FaceoffTokenId>,
     prototype_to_id: BTreeMap<String, FaceoffTokenId>,
     literal_to_id: BTreeMap<String, FaceoffTokenId>,
@@ -107,14 +110,18 @@ impl FaceoffVocab {
 
         for (doc_index, summary) in summaries.into_iter().enumerate() {
             for record in &summary.tokens {
-                let aggregate = aggregates.entry(record.text.clone()).or_default();
-                aggregate.observe(record, doc_index)?;
+                if config.identity_mode == FaceoffIdentityMode::Legacy {
+                    let aggregate = aggregates.entry(record.text.clone()).or_default();
+                    aggregate.observe(record, doc_index)?;
+                }
                 let cluster = prototype_cluster_key(record)?;
                 let aggregate = prototype_aggregates.entry(cluster).or_default();
                 aggregate.observe(record, &record.text, doc_index)?;
-                let shape = lexical_shape_key(&record.text);
-                let aggregate = shape_aggregates.entry(shape).or_default();
-                aggregate.observe(record, &record.text, doc_index)?;
+                if config.identity_mode == FaceoffIdentityMode::Legacy {
+                    let shape = lexical_shape_key(&record.text);
+                    let aggregate = shape_aggregates.entry(shape).or_default();
+                    aggregate.observe(record, &record.text, doc_index)?;
+                }
             }
         }
 
@@ -130,25 +137,35 @@ impl FaceoffVocab {
             .into_iter()
             .filter_map(|(shape, aggregate)| aggregate.into_entry(shape, config))
             .collect::<Vec<_>>();
-        Ok(Self::from_entries(entries, prototype_entries, shape_entries))
+        Ok(Self::from_entries(
+            config.identity_mode,
+            entries,
+            prototype_entries,
+            shape_entries,
+        ))
     }
 
     pub fn from_token_records<'a, I>(records: I) -> Result<Self, FractalError>
     where
         I: IntoIterator<Item = &'a TokenRecord>,
     {
+        let identity_mode = FaceoffVocabConfig::default().identity_mode;
         let mut aggregates = BTreeMap::<String, MotifAggregate>::new();
         let mut prototype_aggregates = BTreeMap::<String, PrototypeAggregate>::new();
         let mut shape_aggregates = BTreeMap::<String, ShapeAggregate>::new();
         for record in records {
-            let aggregate = aggregates.entry(record.text.clone()).or_default();
-            aggregate.observe(record, 0)?;
+            if identity_mode == FaceoffIdentityMode::Legacy {
+                let aggregate = aggregates.entry(record.text.clone()).or_default();
+                aggregate.observe(record, 0)?;
+            }
             let cluster = prototype_cluster_key(record)?;
             let aggregate = prototype_aggregates.entry(cluster).or_default();
             aggregate.observe(record, &record.text, 0)?;
-            let shape = lexical_shape_key(&record.text);
-            let aggregate = shape_aggregates.entry(shape).or_default();
-            aggregate.observe(record, &record.text, 0)?;
+            if identity_mode == FaceoffIdentityMode::Legacy {
+                let shape = lexical_shape_key(&record.text);
+                let aggregate = shape_aggregates.entry(shape).or_default();
+                aggregate.observe(record, &record.text, 0)?;
+            }
         }
         let entries = aggregates
             .into_iter()
@@ -168,11 +185,20 @@ impl FaceoffVocab {
                 aggregate.into_entry(shape, FaceoffVocabConfig::default())
             })
             .collect::<Vec<_>>();
-        Ok(Self::from_entries(entries, prototype_entries, shape_entries))
+        Ok(Self::from_entries(
+            identity_mode,
+            entries,
+            prototype_entries,
+            shape_entries,
+        ))
     }
 
     pub fn motif_count(&self) -> usize {
         self.entries.len() + self.prototype_entries.len() + self.shape_entries.len()
+    }
+
+    pub fn identity_mode(&self) -> FaceoffIdentityMode {
+        self.identity_mode
     }
 
     pub fn entries(&self) -> Vec<VocabEntry> {
@@ -191,7 +217,10 @@ impl FaceoffVocab {
         self.motif_to_id.get(digest).copied()
     }
 
-    pub(crate) fn prototype_id(&self, record: &TokenRecord) -> Result<Option<FaceoffTokenId>, FractalError> {
+    pub(crate) fn prototype_id(
+        &self,
+        record: &TokenRecord,
+    ) -> Result<Option<FaceoffTokenId>, FractalError> {
         let cluster = prototype_cluster_key(record)?;
         Ok(self.prototype_to_id.get(&cluster).copied())
     }
@@ -247,6 +276,7 @@ impl FaceoffVocab {
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), FractalError> {
         let persisted = PersistedFaceoffVocab {
             version: Self::FORMAT_VERSION,
+            identity_mode: self.identity_mode,
             byte_fallback_base: self.byte_fallback_base,
             motifs: self.entries.iter().map(PersistedVocabEntry::from).collect(),
             prototypes: self
@@ -289,6 +319,7 @@ impl FaceoffVocab {
             })?;
         validate_persisted_vocab(&persisted)?;
         Ok(Self::from_entries(
+            persisted.identity_mode,
             persisted
                 .motifs
                 .into_iter()
@@ -337,6 +368,7 @@ impl FaceoffVocab {
     }
 
     fn from_entries(
+        identity_mode: FaceoffIdentityMode,
         mut entries: Vec<VocabEntry>,
         mut prototype_entries: Vec<PrototypeEntry>,
         mut shape_entries: Vec<ShapeEntry>,
@@ -413,11 +445,11 @@ impl FaceoffVocab {
             .iter()
             .map(|entry| (entry.shape.clone(), entry.id))
             .collect::<BTreeMap<_, _>>();
-        let byte_fallback_base = u32::try_from(
-            entries.len() + prototype_entries.len() + shape_entries.len(),
-        )
-            .expect("faceoff vocab motif count should fit within u32");
+        let byte_fallback_base =
+            u32::try_from(entries.len() + prototype_entries.len() + shape_entries.len())
+                .expect("faceoff vocab motif count should fit within u32");
         Self {
+            identity_mode,
             motif_to_id,
             prototype_to_id,
             literal_to_id,
@@ -433,6 +465,8 @@ impl FaceoffVocab {
 #[derive(Debug, Deserialize, Serialize)]
 struct PersistedFaceoffVocab {
     version: u32,
+    #[serde(default)]
+    identity_mode: FaceoffIdentityMode,
     byte_fallback_base: u32,
     motifs: Vec<PersistedVocabEntry>,
     #[serde(default)]
@@ -766,15 +800,12 @@ fn prototype_digest(cluster: &str) -> String {
 }
 
 pub(crate) fn prototype_cluster_key(record: &TokenRecord) -> Result<String, FractalError> {
-    let (prefix, _) = record
-        .token
-        .rsplit_once('-')
-        .ok_or_else(|| {
-            FractalError::InvalidState(format!(
-                "token `{}` is missing digest suffix in expected dX-nY-qZ-digest format",
-                record.token
-            ))
-        })?;
+    let (prefix, _) = record.token.rsplit_once('-').ok_or_else(|| {
+        FractalError::InvalidState(format!(
+            "token `{}` is missing digest suffix in expected dX-nY-qZ-digest format",
+            record.token
+        ))
+    })?;
     let mut depth = None;
     let mut state_bin = None;
     for part in prefix.split('-') {
@@ -811,7 +842,9 @@ pub(crate) fn prototype_cluster_key(record: &TokenRecord) -> Result<String, Frac
     let len_bucket = byte_len_bucket(byte_len);
     let state_bucket = state_bin_bucket(state_bin);
     let shape = lexical_shape_key(&record.text);
-    Ok(format!("d{depth}-lb{len_bucket}-qb{state_bucket}\u{001f}{shape}"))
+    Ok(format!(
+        "d{depth}-lb{len_bucket}-qb{state_bucket}\u{001f}{shape}"
+    ))
 }
 
 fn byte_len_bucket(byte_len: usize) -> usize {

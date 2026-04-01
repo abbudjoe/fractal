@@ -5,10 +5,10 @@ use fractal_primitives_private::{
 };
 use fractal_tokenizer::{
     p1_dynamic_lever_factory, revived_primitive_factories, EncodedDocument, FaceoffChunkLimits,
-    FaceoffEmissionPolicy, FaceoffFallbackMode, FaceoffTokenizer, FaceoffVocab,
-    HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument, MotifReusePolicy,
-    NativeCollationSpec, NativeCompatibilityAdapter, PrimitiveFactory, SplitPolicy,
-    TokenizerConfig,
+    FaceoffEmissionPolicy, FaceoffFallbackMode, FaceoffIdentityMode, FaceoffTokenizer,
+    FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer, ModelFacingBatch,
+    ModelFacingDocument, MotifReusePolicy, NativeCollationSpec, NativeCompatibilityAdapter,
+    PrimitiveFactory, SplitPolicy, TokenizerConfig,
 };
 use serde::Serialize;
 use std::{
@@ -264,6 +264,7 @@ struct Args {
     selected_primitives: Vec<String>,
     all_primitives: bool,
     fallback_mode: FaceoffFallbackMode,
+    identity_mode: FaceoffIdentityMode,
 }
 
 impl Args {
@@ -276,6 +277,7 @@ impl Args {
         let mut selected_primitives = Vec::new();
         let mut all_primitives = false;
         let mut fallback_mode = FaceoffFallbackMode::Full;
+        let mut identity_mode = FaceoffIdentityMode::Legacy;
 
         let mut args = env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -313,6 +315,11 @@ impl Args {
                         &args.next().ok_or("--fallback-mode requires a value")?,
                     )?;
                 }
+                "--identity-mode" => {
+                    identity_mode = parse_identity_mode(
+                        &args.next().ok_or("--identity-mode requires a value")?,
+                    )?;
+                }
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -332,13 +339,14 @@ impl Args {
             selected_primitives,
             all_primitives,
             fallback_mode,
+            identity_mode,
         })
     }
 }
 
 fn print_help() {
     eprintln!(
-        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--fawx-root DIR] [--home-state-root DIR] [--max-review-count N] [--primitive NAME] [--all-primitives] [--fallback-mode full|motif-only]"
+        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--fawx-root DIR] [--home-state-root DIR] [--max-review-count N] [--primitive NAME] [--all-primitives] [--fallback-mode full|motif-only] [--identity-mode legacy|prototype-primary]"
     );
 }
 
@@ -349,6 +357,17 @@ fn parse_fallback_mode(value: &str) -> Result<FaceoffFallbackMode, Box<dyn Error
         other => Err(
             format!("unknown fallback mode `{other}`; expected one of: full, motif-only").into(),
         ),
+    }
+}
+
+fn parse_identity_mode(value: &str) -> Result<FaceoffIdentityMode, Box<dyn Error>> {
+    match value {
+        "legacy" => Ok(FaceoffIdentityMode::Legacy),
+        "prototype-primary" => Ok(FaceoffIdentityMode::PrototypePrimary),
+        other => Err(format!(
+            "unknown identity mode `{other}`; expected one of: legacy, prototype-primary"
+        )
+        .into()),
     }
 }
 
@@ -993,7 +1012,8 @@ fn run_primitive_bakeoff(
     primitive: PrimitiveCandidate,
 ) -> Result<PrimitiveBakeoffRun, Box<dyn Error>> {
     let primitive_name = primitive.name.to_string();
-    let (works, vocab) = build_fractal_documents(corpus, primitive, args.fallback_mode)?;
+    let (works, vocab) =
+        build_fractal_documents(corpus, primitive, args.fallback_mode, args.identity_mode)?;
     let model_results = run_model_bakeoff(&works, model_sources)?;
     let results = merge_results(works, model_results);
     Ok(PrimitiveBakeoffRun {
@@ -1007,6 +1027,7 @@ fn build_fractal_documents(
     corpus: &[CorpusCandidate],
     primitive: PrimitiveCandidate,
     fallback_mode: FaceoffFallbackMode,
+    identity_mode: FaceoffIdentityMode,
 ) -> Result<(Vec<DocumentWork>, FaceoffVocab), Box<dyn Error>> {
     let device = Default::default();
     let tokenizer = FaceoffTokenizer::new(TokenizerConfig {
@@ -1021,10 +1042,14 @@ fn build_fractal_documents(
     if texts.is_empty() {
         return Err("local bakeoff needs at least one induction document".into());
     }
-    let vocab = tokenizer.induce_vocab_from_texts_for_factory::<Backend>(
+    let vocab = tokenizer.induce_vocab_from_texts_for_factory_with_config::<Backend>(
         &texts,
         &device,
         primitive.factory.clone(),
+        FaceoffVocabConfig {
+            identity_mode,
+            ..FaceoffVocabConfig::default()
+        },
     )?;
     let limits = FaceoffChunkLimits::new(DEFAULT_CHUNK_LIMIT_TOKENS, DEFAULT_CHUNK_LIMIT_BYTES);
     let mut works = Vec::with_capacity(corpus.len());
@@ -1282,6 +1307,7 @@ fn print_summary(primitive: &str, results: &[BakeoffRecord], vocab: &FaceoffVoca
     println!("PRIMITIVE_START name={primitive}");
     println!("BAKEOFF_PRIMITIVE={primitive}");
     println!("BAKEOFF_FALLBACK_MODE={}", args.fallback_mode.as_str());
+    println!("BAKEOFF_IDENTITY_MODE={}", args.identity_mode.as_str());
     println!("BAKEOFF_DOCUMENTS={total_docs}");
     println!("BAKEOFF_INDUCTION_DOCUMENTS={induction_docs}");
     println!("BAKEOFF_EVALUATION_DOCUMENTS={}", held_out.len());
@@ -1756,6 +1782,7 @@ mod tests {
             selected_primitives: Vec::new(),
             all_primitives: false,
             fallback_mode: FaceoffFallbackMode::Full,
+            identity_mode: FaceoffIdentityMode::Legacy,
         }
     }
 
@@ -1787,6 +1814,28 @@ mod tests {
             .expect("unknown fallback mode should error")
             .to_string();
         assert!(error.contains("unknown fallback mode `totally-fake`"));
+    }
+
+    #[test]
+    fn parse_identity_mode_defaults_to_legacy() {
+        assert_eq!(base_args().identity_mode, FaceoffIdentityMode::Legacy);
+    }
+
+    #[test]
+    fn parse_identity_mode_accepts_prototype_primary() {
+        assert_eq!(
+            parse_identity_mode("prototype-primary").unwrap(),
+            FaceoffIdentityMode::PrototypePrimary
+        );
+    }
+
+    #[test]
+    fn parse_identity_mode_rejects_unknown_value() {
+        let error = parse_identity_mode("totally-fake")
+            .err()
+            .expect("unknown identity mode should error")
+            .to_string();
+        assert!(error.contains("unknown identity mode `totally-fake`"));
     }
 
     #[test]

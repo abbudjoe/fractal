@@ -232,3 +232,37 @@ After this experiment there are only two honest paths:
    - treat the kill criterion as close to firing
    - stop spending cycles on rescue passes
 
+## Outcome
+
+Status:
+
+- `Tried`
+
+Focused tests passed:
+
+- prototype-primary encoding uses prototypes as the primary surface
+- prototype-primary vocab persistence round-trips with explicit mode
+- faceoff and model-facing suites stayed green
+
+Held-out local bakeoff result for `p1_fractal_hybrid_dyn-state-norm_v2`:
+
+- `exact_motif_hit_docs=0`
+- `prototype_hit_docs=5`
+- `lexical_only_docs=52`
+- `code.rust=0.81`
+- `code.swift=0.90`
+- `docs.spec=0.76`
+- `logs.operational_mixed=1.07`
+- `jsonl.signals=1.19`
+
+Read:
+
+- the prototype-primary contract is technically sound
+- it did not materially improve the held-out code/docs buckets
+- clustered induction plus prototype-primary identity is still not enough to
+  save the current tokenizer control plane on general code/docs
+
+Decision:
+
+- do not proceed to neighborhood matching as the next step
+- pivot to primitive comparison or broader tokenizer-architecture work instead

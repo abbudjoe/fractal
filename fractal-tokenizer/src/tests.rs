@@ -22,10 +22,10 @@ use crate::{
     revived_primitive_factories, tokenizer::p1_dynamic_lever_factory,
     validate_tokenizer_primitive_name, B1FractalGated, B3FractalHierarchical, B4Universal,
     EncodedDocument, EncodedTokenKind, FaceoffChunkLimits, FaceoffEmissionPolicy,
-    FaceoffFallbackMode, FaceoffLexemeKind, FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig,
-    HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument, NativeCollationSpec,
-    NativeCompatibilityAdapter, NativeTokenizer, P1FractalHybrid, P2Mandelbrot,
-    PrimitiveRunSummary, RecursiveTokenizer, TokenRecord, TokenizerConfig,
+    FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLexemeKind, FaceoffTokenizer, FaceoffVocab,
+    FaceoffVocabConfig, HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument,
+    NativeCollationSpec, NativeCompatibilityAdapter, NativeTokenizer, P1FractalHybrid,
+    P2Mandelbrot, PrimitiveRunSummary, RecursiveTokenizer, TokenRecord, TokenizerConfig,
     FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
@@ -1596,6 +1596,90 @@ fn faceoff_clustered_vocab_recovers_prototype_hits_on_held_out_shape_equivalent_
     assert_eq!(encoded.fallback.literal_hits, 0);
     assert_eq!(encoded.fallback.shape_hits, 0);
     assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
+}
+
+#[test]
+fn faceoff_prototype_primary_identity_uses_prototypes_as_the_primary_surface() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let induction_a = "fn render_home() {\n    let auth_provider = 2026;\n}\n";
+    let induction_b = "fn render_settings() {\n    let oauth_flow = 2027;\n}\n";
+    let held_out = "fn render_usage() {\n    let experiments = 2028;\n}\n";
+    let corpus = vec![induction_a, induction_b];
+
+    let vocab = faceoff
+        .induce_vocab_from_texts_with_config::<TestBackend>(
+            &corpus,
+            &device,
+            FaceoffVocabConfig {
+                identity_mode: FaceoffIdentityMode::PrototypePrimary,
+                min_occurrence_count: 2,
+                min_doc_count: 2,
+                max_token_bytes: Some(128),
+                ..FaceoffVocabConfig::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(vocab.identity_mode(), FaceoffIdentityMode::PrototypePrimary);
+    assert!(vocab.entries().is_empty());
+    assert!(vocab.shape_entries().is_empty());
+    assert!(!vocab.prototype_entries().is_empty());
+
+    let encoded = faceoff
+        .encode_text_v2_with_policy_and_fallback_mode::<TestBackend>(
+            held_out,
+            &vocab,
+            &device,
+            FaceoffEmissionPolicy::NoveltyAware,
+            FaceoffFallbackMode::Full,
+        )
+        .unwrap();
+
+    assert_eq!(faceoff.decode_document(&encoded).unwrap(), held_out);
+    assert_eq!(encoded.fallback.exact_motif_hits, 0);
+    assert_eq!(encoded.fallback.literal_hits, 0);
+    assert_eq!(encoded.fallback.shape_hits, 0);
+    assert!(
+        encoded.fallback.prototype_hits > 0,
+        "prototype-primary identity should emit prototype hits as the primary structural surface"
+    );
+    assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
+}
+
+#[test]
+fn faceoff_prototype_primary_vocab_persistence_round_trip_is_exact() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let stress = stress_input();
+    let mixed = mixed_domain_input();
+    let corpus = vec![stress.as_str(), mixed.as_str()];
+    let vocab = faceoff
+        .induce_vocab_from_texts_with_config::<TestBackend>(
+            &corpus,
+            &device,
+            FaceoffVocabConfig {
+                identity_mode: FaceoffIdentityMode::PrototypePrimary,
+                ..FaceoffVocabConfig::default()
+            },
+        )
+        .unwrap();
+    let vocab_path = unique_temp_path("faceoff-vocab-prototype-primary", ".json");
+    if let Some(parent) = vocab_path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+
+    vocab.save_to_file(&vocab_path).unwrap();
+    let loaded = FaceoffVocab::load_from_file(&vocab_path).unwrap();
+
+    assert_eq!(
+        loaded.identity_mode(),
+        FaceoffIdentityMode::PrototypePrimary
+    );
+    assert_eq!(vocab, loaded);
+    assert_eq!(vocab.prototype_entries(), loaded.prototype_entries());
+    assert!(loaded.entries().is_empty());
+    assert!(loaded.shape_entries().is_empty());
 }
 
 #[test]

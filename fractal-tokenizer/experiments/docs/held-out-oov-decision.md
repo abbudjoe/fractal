@@ -231,3 +231,50 @@ Updated read:
 The next decision is carried forward in:
 
 - [prototype-primary-identity-spec.md](./prototype-primary-identity-spec.md)
+
+## Prototype-Primary Identity Result
+
+The next empirical step was to make prototype clusters the primary motif
+identity surface while keeping matching strict:
+
+- prototype membership first
+- recurse to children
+- typed lexical fallback
+- no literal rescue
+- no shape rescue
+- no approximate neighborhood matching
+
+Focused regression results:
+
+- prototype-primary held-out shape-equivalent text recovered prototype hits
+- prototype-primary vocab persistence round-tripped with explicit mode
+- faceoff and model-facing suites stayed green
+
+Held-out local bakeoff result for `p1_fractal_hybrid_dyn-state-norm_v2` in
+`prototype-primary` mode:
+
+- `exact_motif_hit_docs=0`
+- `prototype_hit_docs=5`
+- `lexical_only_docs=52`
+- `code.rust=0.81`
+- `code.swift=0.90`
+- `docs.spec=0.76`
+- `jsonl.signals=1.19`
+- `logs.operational_mixed=1.07`
+- hard-gate failures: `0`
+
+Interpretation:
+
+- the prototype-primary contract is real and technically sound
+- it did **not** materially move the held-out code/docs ceiling
+- clustered induction plus prototype-primary identity still leaves most
+  evaluation documents effectively lexical-only
+
+Updated read:
+
+- the bottleneck is deeper than exact-vs-prototype identity surface alone
+- the current tokenizer control plane still cannot turn primitive state into
+  broadly reusable held-out motifs for code/docs
+- further rescue work should be tightly limited
+- primitive comparison or a more radical tokenizer-architecture pivot is now
+  better justified than additional local rescue tuning

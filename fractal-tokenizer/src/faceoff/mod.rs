@@ -1,4 +1,5 @@
 use fractal_core::error::FractalError;
+use serde::{Deserialize, Serialize};
 
 mod decode;
 mod encode;
@@ -32,6 +33,23 @@ pub enum FaceoffFallbackMode {
     #[default]
     Full,
     MotifOnly,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FaceoffIdentityMode {
+    #[default]
+    Legacy,
+    PrototypePrimary,
+}
+
+impl FaceoffIdentityMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::PrototypePrimary => "prototype-primary",
+        }
+    }
 }
 
 impl FaceoffFallbackMode {

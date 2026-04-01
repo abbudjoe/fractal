@@ -21,9 +21,8 @@ Candidates are ranked by:
 
 ## Latest Trial Snapshot
 
-Most recent completed trial: held-out local bakeoff rerun after clustered
-structural induction over coarse state buckets, length buckets, and lexical
-shape.
+Most recent completed trial: prototype-primary identity on top of clustered
+structural induction.
 
 - `BAKEOFF_DOCUMENTS=120`
 - `BAKEOFF_INDUCTION_DOCUMENTS=63`
@@ -35,25 +34,21 @@ shape.
 Result:
 
 - held-out byte collapse remains fixed
-- clustered induction produced real held-out prototype hits
-- `full` mode on `p1_fractal_hybrid_dyn-state-norm_v2` now shows:
-  - `exact_motif_hit_docs=1`
-  - `prototype_hit_docs=5`
-  - `lexical_only_docs=42`
-- `motif-only` mode still shows:
-  - `exact_motif_hit_docs=1`
+- prototype-primary identity is technically valid and deterministic
+- `full` mode on `p1_fractal_hybrid_dyn-state-norm_v2` shows:
+  - `exact_motif_hit_docs=0`
   - `prototype_hit_docs=5`
   - `lexical_only_docs=52`
-- `jsonl.signals` remains a strong held-out win
-- `code.rust`, `code.swift`, and `docs.spec` are still below native-tokenizer
-  parity
+- `jsonl.signals` remains the only strong held-out win
+- `code.rust`, `code.swift`, and `docs.spec` are unchanged and still below
+  native-tokenizer parity
 
 New read:
 
-- clustered induction is a real but modest lift
-- the active bottleneck is now the primary motif identity surface
-- the next disciplined step is to make prototype identity primary before
-  considering any neighborhood matching
+- clustered induction plus prototype-primary identity is still not enough
+- the active bottleneck is now deeper than the exact-vs-prototype surface
+- the next disciplined step is primitive comparison or tokenizer-architecture
+  pivot work, not more local rescue tuning
 
 ## Current Baseline
 
@@ -104,7 +99,7 @@ The ranking below applies to **next** frontier candidates. Packaging is now trea
 
 ## Ranked Candidates
 
-### 1. Prototype-Primary Identity
+### 1. Primitive Comparison Pivot
 
 Status:
 
@@ -112,53 +107,52 @@ Status:
 
 Why it ranks first now:
 
-- clustered induction (`#2`) produced real prototype hits
-- but prototypes are still acting like a secondary rescue tier
-- held-out code/docs did not materially move while lexical-only behavior stayed
-  dominant
+- the major control-plane rescue passes have now been tried
+- prototype-primary identity did not materially improve held-out code/docs
+- the pipeline is good enough to compare primitives honestly and avoid spending
+  more cycles on local rescue tuning
+
+Expected upside:
+
+- we stop guessing whether this ceiling is specific to `p1`
+- we find out whether another primitive family breaks out under the same honest
+  held-out bakeoff
+
+Expected failure mode:
+
+- no better primitive emerges, which would strengthen the case for a broader
+  tokenizer-architecture pivot
+
+Decision:
+
+- move here now
+
+### 2. Prototype-Primary Identity
+
+Status:
+
+- `Tried`
+
+Why it ranks second now:
+
+- clustered induction produced real prototype hits
+- but making prototypes primary still did not materially move held-out
+  code/docs
+- this was the last clean control-plane rescue pass before pivoting
 
 Expected upside:
 
 - prototype hits become the main structural signal instead of a side effect
-- held-out code/docs may finally move above the current ceiling
-- the next bakeoff will tell us whether this control-plane line still has real
-  headroom
+- held-out code/docs may move above the current ceiling
 
 Expected failure mode:
 
-- prototype hits rise a little but code/docs remain flat
-- which would strongly suggest the kill criterion is approaching
+- prototype hits rise only slightly and code/docs remain flat
 
 Decision:
 
-- move here now
-
-### 2. Primitive Comparison Pivot
-
-Status:
-
-- `Active`
-
-Why it ranks second now:
-
-- the one allowed serious rescue pass for `p1` has now been tried
-- clustered induction still did not materially move the held-out code/docs
-  outcome
-- the experiment pipeline is strong enough to compare primitives honestly
-
-Expected upside:
-
-- we stop guessing whether `p1` is the right primitive
-- we find out whether another primitive fits code/docs better without adding
-  more local `p1` heuristics
-
-Expected failure mode:
-
-- no better primitive emerges, which would force a broader rethink
-
-Decision:
-
-- move here now
+- tried and not promoted
+- do not spend the next cycle here again before broader pivot work
 
 ### 3. Boundary-Aware Split For `p1`
 
@@ -208,8 +202,8 @@ Decision:
 3. Clustered structural induction
 4. Prototype-primary identity
 5. Held-out local bakeoff rerun
-6. If still weak on code/docs, primitive comparison pivot
-7. Hybrid bakeoff implementation
+6. Primitive comparison pivot
+7. If no primitive breaks out, broader tokenizer-architecture pivot
 
 ## Promotion Rule
 
