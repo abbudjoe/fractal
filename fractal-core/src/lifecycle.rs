@@ -828,6 +828,317 @@ impl RuntimeBackendPolicy {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NumericPrecisionKind {
+    BackendDefault,
+    Bf16,
+    Fp32,
+}
+
+impl NumericPrecisionKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BackendDefault => "backend-default",
+            Self::Bf16 => "bf16",
+            Self::Fp32 => "fp32",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrecisionPolicy {
+    pub compute: NumericPrecisionKind,
+    pub optimizer_state: NumericPrecisionKind,
+    pub reduction: NumericPrecisionKind,
+    pub tf32_enabled: bool,
+}
+
+impl Default for PrecisionPolicy {
+    fn default() -> Self {
+        Self::legacy_default()
+    }
+}
+
+impl PrecisionPolicy {
+    pub const fn legacy_default() -> Self {
+        Self {
+            compute: NumericPrecisionKind::BackendDefault,
+            optimizer_state: NumericPrecisionKind::BackendDefault,
+            reduction: NumericPrecisionKind::BackendDefault,
+            tf32_enabled: false,
+        }
+    }
+
+    pub const fn stage0_default() -> Self {
+        Self {
+            compute: NumericPrecisionKind::Bf16,
+            optimizer_state: NumericPrecisionKind::Fp32,
+            reduction: NumericPrecisionKind::Fp32,
+            tf32_enabled: true,
+        }
+    }
+
+    pub fn label(&self) -> String {
+        format!(
+            "compute={} optimizer_state={} reduction={} tf32={}",
+            self.compute.as_str(),
+            self.optimizer_state.as_str(),
+            self.reduction.as_str(),
+            self.tf32_enabled
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        if matches!(self.compute, NumericPrecisionKind::Fp32) && self.tf32_enabled {
+            return Err(FractalError::InvalidConfig(
+                "tf32_enabled only applies when compute precision is backend-default or bf16"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckpointPolicy {
+    pub interval_tokens: Option<usize>,
+    pub keep_latest: bool,
+    pub keep_best: bool,
+    pub keep_final: bool,
+    pub keep_previous: bool,
+}
+
+impl Default for CheckpointPolicy {
+    fn default() -> Self {
+        Self::legacy_default()
+    }
+}
+
+impl CheckpointPolicy {
+    pub const fn legacy_default() -> Self {
+        Self {
+            interval_tokens: None,
+            keep_latest: false,
+            keep_best: false,
+            keep_final: false,
+            keep_previous: false,
+        }
+    }
+
+    pub const fn stage0_default() -> Self {
+        Self {
+            interval_tokens: Some(10_000_000),
+            keep_latest: true,
+            keep_best: true,
+            keep_final: true,
+            keep_previous: true,
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self.interval_tokens {
+            None => "disabled".to_owned(),
+            Some(interval) => format!(
+                "interval_tokens={} retain(latest={},best={},final={},previous={})",
+                interval, self.keep_latest, self.keep_best, self.keep_final, self.keep_previous
+            ),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        if self.interval_tokens == Some(0) {
+            return Err(FractalError::InvalidConfig(
+                "checkpoint interval_tokens must be greater than zero when configured".into(),
+            ));
+        }
+        if self.interval_tokens.is_none()
+            && (self.keep_latest || self.keep_best || self.keep_final || self.keep_previous)
+        {
+            return Err(FractalError::InvalidConfig(
+                "checkpoint retention cannot be enabled when interval_tokens is unset".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvalCadencePolicy {
+    pub perplexity_interval_tokens: Option<usize>,
+    pub stability_interval_tokens: Option<usize>,
+    pub arc_interval_tokens: Option<usize>,
+    pub systems_speed_interval_tokens: Option<usize>,
+    pub final_full_eval: bool,
+}
+
+impl Default for EvalCadencePolicy {
+    fn default() -> Self {
+        Self::legacy_default()
+    }
+}
+
+impl EvalCadencePolicy {
+    pub const fn legacy_default() -> Self {
+        Self {
+            perplexity_interval_tokens: None,
+            stability_interval_tokens: None,
+            arc_interval_tokens: None,
+            systems_speed_interval_tokens: None,
+            final_full_eval: true,
+        }
+    }
+
+    pub const fn stage0_default() -> Self {
+        Self {
+            perplexity_interval_tokens: Some(10_000_000),
+            stability_interval_tokens: Some(10_000_000),
+            arc_interval_tokens: Some(20_000_000),
+            systems_speed_interval_tokens: Some(20_000_000),
+            final_full_eval: true,
+        }
+    }
+
+    pub fn label(&self) -> String {
+        format!(
+            "perplexity={:?} stability={:?} arc={:?} systems_speed={:?} final_full_eval={}",
+            self.perplexity_interval_tokens,
+            self.stability_interval_tokens,
+            self.arc_interval_tokens,
+            self.systems_speed_interval_tokens,
+            self.final_full_eval
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        for (name, interval) in [
+            (
+                "perplexity_interval_tokens",
+                self.perplexity_interval_tokens,
+            ),
+            ("stability_interval_tokens", self.stability_interval_tokens),
+            ("arc_interval_tokens", self.arc_interval_tokens),
+            (
+                "systems_speed_interval_tokens",
+                self.systems_speed_interval_tokens,
+            ),
+        ] {
+            if interval == Some(0) {
+                return Err(FractalError::InvalidConfig(format!(
+                    "{name} must be greater than zero when configured"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResumePolicy {
+    pub resume_on_interrupt: bool,
+    pub restart_on_corruption: bool,
+    pub restart_on_contract_ambiguity: bool,
+}
+
+impl Default for ResumePolicy {
+    fn default() -> Self {
+        Self::legacy_default()
+    }
+}
+
+impl ResumePolicy {
+    pub const fn legacy_default() -> Self {
+        Self {
+            resume_on_interrupt: false,
+            restart_on_corruption: false,
+            restart_on_contract_ambiguity: false,
+        }
+    }
+
+    pub const fn stage0_default() -> Self {
+        Self {
+            resume_on_interrupt: true,
+            restart_on_corruption: true,
+            restart_on_contract_ambiguity: true,
+        }
+    }
+
+    pub fn label(&self) -> String {
+        format!(
+            "resume_on_interrupt={} restart_on_corruption={} restart_on_contract_ambiguity={}",
+            self.resume_on_interrupt,
+            self.restart_on_corruption,
+            self.restart_on_contract_ambiguity
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        if !self.resume_on_interrupt
+            && (self.restart_on_corruption || self.restart_on_contract_ambiguity)
+        {
+            return Err(FractalError::InvalidConfig(
+                "resume restart semantics require resume_on_interrupt to be enabled".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchPolicySpec {
+    pub precision: PrecisionPolicy,
+    pub checkpoint: CheckpointPolicy,
+    pub eval_cadence: EvalCadencePolicy,
+    pub resume: ResumePolicy,
+}
+
+impl Default for LaunchPolicySpec {
+    fn default() -> Self {
+        Self::legacy_default()
+    }
+}
+
+impl LaunchPolicySpec {
+    pub const fn legacy_default() -> Self {
+        Self {
+            precision: PrecisionPolicy::legacy_default(),
+            checkpoint: CheckpointPolicy::legacy_default(),
+            eval_cadence: EvalCadencePolicy::legacy_default(),
+            resume: ResumePolicy::legacy_default(),
+        }
+    }
+
+    pub const fn stage0_default() -> Self {
+        Self {
+            precision: PrecisionPolicy::stage0_default(),
+            checkpoint: CheckpointPolicy::stage0_default(),
+            eval_cadence: EvalCadencePolicy::stage0_default(),
+            resume: ResumePolicy::stage0_default(),
+        }
+    }
+
+    pub fn label(&self) -> String {
+        if *self == Self::legacy_default() {
+            "legacy-default".to_owned()
+        } else {
+            format!(
+                "precision=[{}] checkpoint=[{}] eval=[{}] resume=[{}]",
+                self.precision.label(),
+                self.checkpoint.label(),
+                self.eval_cadence.label(),
+                self.resume.label()
+            )
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        self.precision.validate()?;
+        self.checkpoint.validate()?;
+        self.eval_cadence.validate()?;
+        self.resume.validate()?;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeSurfaceSpec {
     pub eval_backend_policy: EvalBackendPolicy,
@@ -836,6 +1147,7 @@ pub struct RuntimeSurfaceSpec {
     pub buffer_reuse_policy: BufferReusePolicy,
     pub benchmark_mode: BenchmarkMode,
     pub backend_policy: RuntimeBackendPolicy,
+    pub launch_policy: LaunchPolicySpec,
 }
 
 impl Default for RuntimeSurfaceSpec {
@@ -847,6 +1159,7 @@ impl Default for RuntimeSurfaceSpec {
             buffer_reuse_policy: BufferReusePolicy::Disabled,
             benchmark_mode: BenchmarkMode::Leaderboard,
             backend_policy: RuntimeBackendPolicy::ActiveExecutionBackend,
+            launch_policy: LaunchPolicySpec::legacy_default(),
         }
     }
 }
@@ -857,13 +1170,14 @@ impl RuntimeSurfaceSpec {
             "conservative-defaults".to_owned()
         } else {
             format!(
-                "eval_backend={} batching={} execution={} buffer_reuse={} benchmark_mode={} backend_policy={}",
+                "eval_backend={} batching={} execution={} buffer_reuse={} benchmark_mode={} backend_policy={} launch_policy={}",
                 self.eval_backend_policy.as_str(),
                 self.batching_policy.as_str(),
                 self.execution_policy.as_str(),
                 self.buffer_reuse_policy.as_str(),
                 self.benchmark_mode.as_str(),
                 self.backend_policy.as_str(),
+                self.launch_policy.label(),
             )
         }
     }
@@ -1012,6 +1326,11 @@ impl ExperimentSpecTemplate {
                 "experiment optimizer must match the resolved tournament config".into(),
             ));
         }
+        if self.runtime.launch_policy != config.launch_policy {
+            return Err(FractalError::InvalidConfig(
+                "experiment launch policy must match the resolved tournament config".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -1074,6 +1393,7 @@ pub struct TournamentConfig {
     pub arc_eval_batches: Option<usize>,
     pub learning_rate: f64,
     pub optimizer: OptimizerSpec,
+    pub launch_policy: LaunchPolicySpec,
     pub seed: u64,
     pub run_timeout: Option<Duration>,
     pub generator_depth_config: GeneratorDepthConfig,
@@ -1102,6 +1422,7 @@ impl Default for TournamentConfig {
             arc_eval_batches: None,
             learning_rate: 1e-3,
             optimizer: OptimizerSpec::legacy_adam(1e-3),
+            launch_policy: LaunchPolicySpec::legacy_default(),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
@@ -1185,6 +1506,7 @@ impl TournamentConfig {
             ));
         }
         self.optimizer.validate()?;
+        self.launch_policy.validate()?;
         if let Some(run_timeout) = self.run_timeout {
             if run_timeout.is_zero() {
                 return Err(FractalError::InvalidConfig(
@@ -1261,6 +1583,7 @@ impl TournamentConfig {
             arc_eval_batches: None,
             learning_rate: 1e-3,
             optimizer: OptimizerSpec::legacy_adam(1e-3),
+            launch_policy: LaunchPolicySpec::legacy_default(),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
@@ -1289,6 +1612,7 @@ impl TournamentConfig {
             arc_eval_batches: None,
             learning_rate: 1e-3,
             optimizer: OptimizerSpec::legacy_adam(1e-3),
+            launch_policy: LaunchPolicySpec::legacy_default(),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
@@ -1317,6 +1641,7 @@ impl TournamentConfig {
             arc_eval_batches: None,
             learning_rate: 1e-3,
             optimizer: OptimizerSpec::legacy_adam(1e-3),
+            launch_policy: LaunchPolicySpec::legacy_default(),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::polish_top_candidates(),
@@ -1351,6 +1676,7 @@ impl TournamentConfig {
             arc_eval_batches: None,
             learning_rate: 1e-3,
             optimizer: OptimizerSpec::legacy_adam(1e-3),
+            launch_policy: LaunchPolicySpec::legacy_default(),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
@@ -1379,6 +1705,7 @@ impl TournamentConfig {
             arc_eval_batches: None,
             learning_rate: 5e-4,
             optimizer: OptimizerSpec::legacy_adam(5e-4),
+            launch_policy: LaunchPolicySpec::legacy_default(),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
@@ -1415,6 +1742,7 @@ impl TournamentConfig {
             arc_eval_batches: None,
             learning_rate: 1e-3,
             optimizer: OptimizerSpec::legacy_adam(1e-3),
+            launch_policy: LaunchPolicySpec::legacy_default(),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::polish_top_candidates(),
@@ -1447,6 +1775,7 @@ impl TournamentConfig {
             arc_eval_batches: None,
             learning_rate: 1e-3,
             optimizer: OptimizerSpec::legacy_adam(1e-3),
+            launch_policy: LaunchPolicySpec::legacy_default(),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::polish_top_candidates(),
@@ -1475,6 +1804,7 @@ impl TournamentConfig {
             arc_eval_batches: None,
             learning_rate: 1e-3,
             optimizer: OptimizerSpec::legacy_adam(1e-3),
+            launch_policy: LaunchPolicySpec::legacy_default(),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::polish_top_candidates(),
@@ -1516,6 +1846,7 @@ impl TournamentConfig {
             arc_eval_batches: None,
             learning_rate: 1e-3,
             optimizer: OptimizerSpec::legacy_adam(1e-3),
+            launch_policy: LaunchPolicySpec::legacy_default(),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
@@ -1544,6 +1875,7 @@ impl TournamentConfig {
             arc_eval_batches: None,
             learning_rate: 1e-3,
             optimizer: OptimizerSpec::legacy_adam(1e-3),
+            launch_policy: LaunchPolicySpec::legacy_default(),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
@@ -1572,6 +1904,7 @@ impl TournamentConfig {
             arc_eval_batches: None,
             learning_rate: 1e-3,
             optimizer: OptimizerSpec::legacy_adam(1e-3),
+            launch_policy: LaunchPolicySpec::legacy_default(),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::stress_top_candidates(),
@@ -1601,6 +1934,11 @@ impl TournamentConfig {
     pub fn with_optimizer(mut self, optimizer: OptimizerSpec) -> Self {
         self.learning_rate = optimizer.peak_learning_rate;
         self.optimizer = optimizer;
+        self
+    }
+
+    pub fn with_launch_policy(mut self, launch_policy: LaunchPolicySpec) -> Self {
+        self.launch_policy = launch_policy;
         self
     }
 

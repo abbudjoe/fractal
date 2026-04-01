@@ -15,10 +15,11 @@ pub use data_generator::{
 pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
 pub use lifecycle::{
     ArcSourceMode, ArcSourceSpec, ArtifactPolicy, BatchingPolicy, BudgetSpec, BufferReusePolicy,
-    ComparisonAuthority, ComparisonContract, DecisionIntent, EvalBackendPolicy, ExecutionBackend,
-    ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion, ExperimentSpec,
-    ExperimentSpecTemplate, ForwardExecutionPolicy, LaneIntent, LearningRateScheduleKind,
-    LearningRateScheduleSpec, OptimizerKind, OptimizerSpec, PhaseTiming, RunExecutionOutcome,
+    CheckpointPolicy, ComparisonAuthority, ComparisonContract, DecisionIntent, EvalBackendPolicy,
+    EvalCadencePolicy, ExecutionBackend, ExecutionTarget, ExecutionTargetKind, ExperimentId,
+    ExperimentQuestion, ExperimentSpec, ExperimentSpecTemplate, ForwardExecutionPolicy, LaneIntent,
+    LaunchPolicySpec, LearningRateScheduleKind, LearningRateScheduleSpec, NumericPrecisionKind,
+    OptimizerKind, OptimizerSpec, PhaseTiming, PrecisionPolicy, ResumePolicy, RunExecutionOutcome,
     RunManifest, RunOutcomeClass, RunPhase, RunQualityOutcome, RuntimeBackendPolicy,
     RuntimeSurfaceSpec, SpeciesCompletion, SpeciesRunArtifact, SpeciesRunStage,
     TokenizerArtifactSpec, TokenizerBridgeSpec, Tournament, TournamentConfig, TournamentPreset,

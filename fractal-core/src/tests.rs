@@ -27,10 +27,10 @@ use crate::{
     lifecycle::{
         ArtifactPolicy, BudgetSpec, ComparisonContract, DecisionIntent, ExecutionBackend,
         ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
-        ExperimentSpecTemplate, LaneIntent, LearningRateScheduleSpec, OptimizerKind, OptimizerSpec,
-        RunExecutionOutcome, RunOutcomeClass, RunQualityOutcome, RuntimeSurfaceSpec,
-        TokenizerArtifactSpec, Tournament, TournamentConfig, TournamentPreset,
-        TournamentProgressEvent, TournamentSequence, TrainingInputSpec,
+        ExperimentSpecTemplate, LaneIntent, LaunchPolicySpec, LearningRateScheduleSpec,
+        NumericPrecisionKind, OptimizerKind, OptimizerSpec, RunExecutionOutcome, RunOutcomeClass,
+        RunQualityOutcome, RuntimeSurfaceSpec, TokenizerArtifactSpec, Tournament, TournamentConfig,
+        TournamentPreset, TournamentProgressEvent, TournamentSequence, TrainingInputSpec,
     },
     model::FractalModel,
     primitives::complex_square,
@@ -202,6 +202,22 @@ fn default_and_preset_optimizer_contracts_remain_legacy_for_current_tournaments(
 }
 
 #[test]
+fn default_launch_policy_contracts_remain_legacy_for_current_tournaments() {
+    let default_config = TournamentConfig::default();
+    assert_eq!(
+        default_config.launch_policy,
+        LaunchPolicySpec::legacy_default()
+    );
+
+    let fast_test = TournamentPreset::FastTest.config();
+    assert_eq!(fast_test.launch_policy, LaunchPolicySpec::legacy_default());
+    assert_eq!(
+        RuntimeSurfaceSpec::default().launch_policy,
+        LaunchPolicySpec::legacy_default()
+    );
+}
+
+#[test]
 fn stage0_optimizer_contract_is_adamw_with_warmup_cosine_schedule() {
     let optimizer = OptimizerSpec::stage0_adamw();
 
@@ -216,6 +232,50 @@ fn stage0_optimizer_contract_is_adamw_with_warmup_cosine_schedule() {
         optimizer.schedule,
         LearningRateScheduleSpec::warmup_cosine(0.02, 0.1)
     );
+}
+
+#[test]
+fn stage0_launch_policy_contract_matches_stage0_training_plan() {
+    let launch_policy = LaunchPolicySpec::stage0_default();
+
+    assert_eq!(launch_policy.precision.compute, NumericPrecisionKind::Bf16);
+    assert_eq!(
+        launch_policy.precision.optimizer_state,
+        NumericPrecisionKind::Fp32
+    );
+    assert_eq!(
+        launch_policy.precision.reduction,
+        NumericPrecisionKind::Fp32
+    );
+    assert!(launch_policy.precision.tf32_enabled);
+
+    assert_eq!(launch_policy.checkpoint.interval_tokens, Some(10_000_000));
+    assert!(launch_policy.checkpoint.keep_latest);
+    assert!(launch_policy.checkpoint.keep_best);
+    assert!(launch_policy.checkpoint.keep_final);
+    assert!(launch_policy.checkpoint.keep_previous);
+
+    assert_eq!(
+        launch_policy.eval_cadence.perplexity_interval_tokens,
+        Some(10_000_000)
+    );
+    assert_eq!(
+        launch_policy.eval_cadence.stability_interval_tokens,
+        Some(10_000_000)
+    );
+    assert_eq!(
+        launch_policy.eval_cadence.arc_interval_tokens,
+        Some(20_000_000)
+    );
+    assert_eq!(
+        launch_policy.eval_cadence.systems_speed_interval_tokens,
+        Some(20_000_000)
+    );
+    assert!(launch_policy.eval_cadence.final_full_eval);
+
+    assert!(launch_policy.resume.resume_on_interrupt);
+    assert!(launch_policy.resume.restart_on_corruption);
+    assert!(launch_policy.resume.restart_on_contract_ambiguity);
 }
 
 #[test]
@@ -1160,6 +1220,16 @@ fn tokenizer_backed_training_input_rejects_tokenizer_model_mismatch() {
     let error_text = error.to_string();
     assert!(error_text.contains("tokenizer pad_token_id"));
     assert!(error_text.contains("must match model pad_token_id"));
+}
+
+#[test]
+fn experiment_template_rejects_launch_policy_mismatch() {
+    let config = TournamentPreset::FastTest.config();
+    let mut template = test_experiment_template(config.clone());
+    template.runtime.launch_policy = LaunchPolicySpec::stage0_default();
+
+    let error = template.validate_against_config(&config).unwrap_err();
+    assert!(error.to_string().contains("launch policy"));
 }
 
 fn test_variant_name(id: SpeciesId) -> PrimitiveVariantName {

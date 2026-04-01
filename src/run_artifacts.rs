@@ -198,6 +198,7 @@ fn config_json(report: &TournamentRunReport) -> Value {
         "effective_arc_eval_batches": report.config.effective_arc_eval_batches(),
         "learning_rate": report.config.learning_rate,
         "optimizer": optimizer_json(&report.config.optimizer),
+        "launch_policy": launch_policy_json(&report.config.launch_policy),
         "seed": report.config.seed,
         "parallelism": report.config.parallelism,
         "training_input": report
@@ -263,6 +264,7 @@ fn experiment_json(spec: &crate::ExperimentSpec) -> Value {
             "buffer_reuse_policy": spec.runtime.buffer_reuse_policy.as_str(),
             "benchmark_mode": spec.runtime.benchmark_mode.as_str(),
             "backend_policy": spec.runtime.backend_policy.as_str(),
+            "launch_policy": launch_policy_json(&spec.runtime.launch_policy),
             "label": spec.runtime.label(),
         },
         "comparison": comparison_contract_json(&spec.comparison),
@@ -320,6 +322,37 @@ fn training_input_json(spec: &crate::TrainingInputSpec) -> Value {
                 "pad_token_id": tokenizer.pad_token_id,
             })
         }),
+    })
+}
+
+fn launch_policy_json(spec: &crate::LaunchPolicySpec) -> Value {
+    json!({
+        "label": spec.label(),
+        "precision": {
+            "compute": spec.precision.compute.as_str(),
+            "optimizer_state": spec.precision.optimizer_state.as_str(),
+            "reduction": spec.precision.reduction.as_str(),
+            "tf32_enabled": spec.precision.tf32_enabled,
+        },
+        "checkpoint": {
+            "interval_tokens": spec.checkpoint.interval_tokens,
+            "keep_latest": spec.checkpoint.keep_latest,
+            "keep_best": spec.checkpoint.keep_best,
+            "keep_final": spec.checkpoint.keep_final,
+            "keep_previous": spec.checkpoint.keep_previous,
+        },
+        "eval_cadence": {
+            "perplexity_interval_tokens": spec.eval_cadence.perplexity_interval_tokens,
+            "stability_interval_tokens": spec.eval_cadence.stability_interval_tokens,
+            "arc_interval_tokens": spec.eval_cadence.arc_interval_tokens,
+            "systems_speed_interval_tokens": spec.eval_cadence.systems_speed_interval_tokens,
+            "final_full_eval": spec.eval_cadence.final_full_eval,
+        },
+        "resume": {
+            "resume_on_interrupt": spec.resume.resume_on_interrupt,
+            "restart_on_corruption": spec.resume.restart_on_corruption,
+            "restart_on_contract_ambiguity": spec.resume.restart_on_contract_ambiguity,
+        },
     })
 }
 
@@ -560,6 +593,10 @@ mod tests {
             serde_json::Value::String("adam".to_owned())
         );
         assert_eq!(
+            manifest["config"]["launch_policy"]["precision"]["compute"],
+            serde_json::Value::String("backend-default".to_owned())
+        );
+        assert_eq!(
             artifact_json["results"][0]["comparison_authority"],
             serde_json::Value::String("authoritative same-preset".to_owned())
         );
@@ -574,6 +611,11 @@ mod tests {
         assert_eq!(
             artifact_json["results"][0]["experiment"]["optimizer"]["kind"],
             serde_json::Value::String("adam".to_owned())
+        );
+        assert_eq!(
+            artifact_json["results"][0]["experiment"]["runtime"]["launch_policy"]["resume"]
+                ["resume_on_interrupt"],
+            serde_json::Value::Bool(false)
         );
 
         env::remove_var("FRACTAL_RUN_ARTIFACT_DIR");

@@ -731,6 +731,9 @@ fn build_experiment_template(
         .clone()
         .unwrap_or_else(|| format!("evaluate {scope} on {}", preset.name()));
 
+    let mut runtime = options.runtime_surface_spec();
+    runtime.launch_policy = config.launch_policy.clone();
+
     ExperimentSpecTemplate {
         experiment_id: ExperimentId {
             logical_name,
@@ -747,7 +750,7 @@ fn build_experiment_template(
         budget: BudgetSpec::from_config(preset, config),
         optimizer: config.optimizer.clone(),
         training_input: TrainingInputSpec::synthetic(),
-        runtime: options.runtime_surface_spec(),
+        runtime,
         comparison: comparison.clone(),
         execution: ExecutionTarget {
             kind: if std::env::var_os("FRACTAL_RUN_POD_ID").is_some() {
