@@ -31,6 +31,90 @@ pub const STAGE0_CANONICAL_TOKENIZER_REPO_ID: &str = "openlm-research/open_llama
 pub const STAGE0_CANONICAL_TOKENIZER_FILENAME: &str = "tokenizer.model";
 pub const STAGE0_CANONICAL_TOKENIZER_USE_FAST: bool = false;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stage0PadSemantics {
+    pub native_pad_token_id: Option<u32>,
+    pub canonical_model_pad_token_id: u32,
+}
+
+impl Stage0PadSemantics {
+    pub fn canonical_default() -> Self {
+        Self {
+            native_pad_token_id: None,
+            canonical_model_pad_token_id: PAD_TOKEN as u32,
+        }
+    }
+
+    pub fn new(
+        native_pad_token_id: Option<u32>,
+        canonical_model_pad_token_id: u32,
+    ) -> Result<Self, FractalError> {
+        if canonical_model_pad_token_id != PAD_TOKEN as u32 {
+            return Err(FractalError::InvalidConfig(format!(
+                "Stage 0 canonical model pad token {} must match PAD_TOKEN {}",
+                canonical_model_pad_token_id, PAD_TOKEN
+            )));
+        }
+        Ok(Self {
+            native_pad_token_id,
+            canonical_model_pad_token_id,
+        })
+    }
+
+    pub fn from_artifact(
+        artifact: &ResolvedTokenizerArtifact,
+        native_pad_token_id: Option<u32>,
+    ) -> Result<Self, FractalError> {
+        if artifact.spec.pad_token_id != PAD_TOKEN {
+            return Err(FractalError::InvalidConfig(format!(
+                "Stage 0 tokenizer artifact pad token id {} must match canonical PAD_TOKEN {}",
+                artifact.spec.pad_token_id, PAD_TOKEN
+            )));
+        }
+        Self::new(native_pad_token_id, artifact.spec.pad_token_id as u32)
+    }
+
+    pub fn collation_pad_token_id(&self) -> u32 {
+        self.native_pad_token_id
+            .unwrap_or(self.canonical_model_pad_token_id)
+    }
+
+    pub fn uses_canonical_pad_alias(&self) -> bool {
+        self.native_pad_token_id != Some(self.canonical_model_pad_token_id)
+    }
+
+    fn canonicalize_input_from_chunk(
+        &self,
+        chunk: &fractal_tokenizer::NativeCollatedChunk<u32>,
+    ) -> Vec<i64> {
+        let valid_len = chunk.valid_token_count();
+        chunk
+            .padded_tokens
+            .iter()
+            .enumerate()
+            .map(|(index, token)| {
+                if index < valid_len {
+                    *token as i64
+                } else {
+                    self.canonical_model_pad_token_id as i64
+                }
+            })
+            .collect()
+    }
+
+    fn canonicalize_target_from_input(&self, input: &[i64], valid_len: usize) -> Vec<i64> {
+        let mut target = vec![self.canonical_model_pad_token_id as i64; input.len()];
+        if valid_len == 0 {
+            return target;
+        }
+        for index in 0..valid_len.saturating_sub(1) {
+            target[index] = input[index + 1];
+        }
+        target[valid_len - 1] = self.canonical_model_pad_token_id as i64;
+        target
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Stage0SlowTokenizer {
     processor: Arc<SentencePieceProcessor>,
@@ -419,6 +503,7 @@ impl TokenizerBridgeStats {
 #[derive(Clone, Debug)]
 pub struct TokenizerTrainingRuntime<N> {
     pub tokenizer: N,
+    pub pad_semantics: Stage0PadSemantics,
     pub faceoff_vocab_config: FaceoffVocabConfig,
     pub chunk_limits: FaceoffChunkLimits,
     pub native_truncation_policy: NativeTruncationPolicy,
@@ -431,10 +516,16 @@ impl<N> TokenizerTrainingRuntime<N> {
         })?;
         Ok(Self {
             tokenizer,
+            pad_semantics: Stage0PadSemantics::canonical_default(),
             faceoff_vocab_config: FaceoffVocabConfig::default(),
             chunk_limits: FaceoffChunkLimits::new(max_sequence_len.get(), max_sequence_len.get()),
             native_truncation_policy: NativeTruncationPolicy::Reject,
         })
+    }
+
+    pub fn with_pad_semantics(mut self, pad_semantics: Stage0PadSemantics) -> Self {
+        self.pad_semantics = pad_semantics;
+        self
     }
 }
 
@@ -463,7 +554,7 @@ fn validate_stage0_slow_tokenizer_artifact(
 
 pub fn load_stage0_slow_tokenizer(
     artifact: &ResolvedTokenizerArtifact,
-) -> Result<Stage0SlowTokenizer, FractalError> {
+) -> Result<(Stage0SlowTokenizer, Stage0PadSemantics), FractalError> {
     validate_stage0_slow_tokenizer_artifact(artifact)?;
     let tokenizer = Stage0SlowTokenizer::open(Path::new(&artifact.local_path))
         .map_err(|error| FractalError::InvalidState(error.to_string()))?;
@@ -477,18 +568,10 @@ pub fn load_stage0_slow_tokenizer(
         )));
     }
 
-    if let Some(model_pad_id) = tokenizer.model_pad_token_id() {
-        if model_pad_id as usize != artifact.spec.pad_token_id {
-            return Err(FractalError::InvalidConfig(format!(
-                "tokenizer artifact {} reports pad token id {} but slow tokenizer model provides {}",
-                artifact.local_path.display(),
-                artifact.spec.pad_token_id,
-                model_pad_id
-            )));
-        }
-    }
+    let pad_semantics =
+        Stage0PadSemantics::from_artifact(artifact, tokenizer.model_pad_token_id())?;
 
-    Ok(tokenizer)
+    Ok((tokenizer, pad_semantics))
 }
 
 pub fn load_stage0_tokenizer_runtime(
@@ -502,8 +585,9 @@ pub fn load_stage0_tokenizer_runtime(
     FractalError,
 > {
     let artifact = ResolvedTokenizerArtifact::from_training_input(training_input)?;
-    let tokenizer = load_stage0_slow_tokenizer(&artifact)?;
-    let runtime = TokenizerTrainingRuntime::new(tokenizer, max_sequence_len)?;
+    let (tokenizer, pad_semantics) = load_stage0_slow_tokenizer(&artifact)?;
+    let runtime = TokenizerTrainingRuntime::new(tokenizer, max_sequence_len)?
+        .with_pad_semantics(pad_semantics);
     Ok((runtime, artifact))
 }
 
@@ -584,7 +668,7 @@ where
         &vocab,
         &corpus.train_documents,
         config.train_batch_size,
-        training_input,
+        runtime.pad_semantics,
         &runtime.tokenizer,
         &runtime.chunk_limits,
         &runtime.native_truncation_policy,
@@ -595,7 +679,7 @@ where
         &vocab,
         &corpus.eval_documents,
         config.eval_batch_size,
-        training_input,
+        runtime.pad_semantics,
         &runtime.tokenizer,
         &runtime.chunk_limits,
         &runtime.native_truncation_policy,
@@ -827,7 +911,7 @@ fn build_split_batches<B, N>(
     vocab: &fractal_tokenizer::FaceoffVocab,
     documents: &[String],
     batch_size: usize,
-    training_input: &TrainingInputSpec,
+    pad_semantics: Stage0PadSemantics,
     native_tokenizer: &N,
     chunk_limits: &FaceoffChunkLimits,
     truncation_policy: &NativeTruncationPolicy,
@@ -856,27 +940,17 @@ where
         .map_err(native_error_to_state)?;
     let native_collated = native_batch
         .collate(
-            &NativeCollationSpec::new(
-                training_input
-                    .tokenizer
-                    .as_ref()
-                    .ok_or_else(|| {
-                        FractalError::InvalidState(
-                            "tokenizer metadata was unexpectedly missing".into(),
-                        )
-                    })?
-                    .pad_token_id as u32,
-            )
-            .with_max_sequence_len(
-                NonZeroUsize::new(chunk_limits.max_tokens_per_chunk.max(1)).unwrap(),
-            )
-            .with_truncation_policy(*truncation_policy),
+            &NativeCollationSpec::new(pad_semantics.collation_pad_token_id())
+                .with_max_sequence_len(
+                    NonZeroUsize::new(chunk_limits.max_tokens_per_chunk.max(1)).unwrap(),
+                )
+                .with_truncation_policy(*truncation_policy),
         )
         .map_err(|error| FractalError::InvalidState(error.to_string()))?;
 
     let sequences = native_collated
         .chunks()
-        .map(sequence_from_native_chunk)
+        .map(|chunk| sequence_from_native_chunk(chunk, pad_semantics))
         .collect::<Result<Vec<_>, _>>()?;
     let batches = sequences_into_batches::<B>(
         sequences,
@@ -915,22 +989,14 @@ struct SequenceExample {
 
 fn sequence_from_native_chunk(
     chunk: &fractal_tokenizer::NativeCollatedChunk<u32>,
+    pad_semantics: Stage0PadSemantics,
 ) -> Result<SequenceExample, FractalError> {
     let valid_len = chunk.valid_token_count();
-    let input = chunk
-        .padded_tokens
-        .iter()
-        .map(|token| *token as i64)
-        .collect::<Vec<_>>();
+    let input = pad_semantics.canonicalize_input_from_chunk(chunk);
     if input.is_empty() {
         return Err(FractalError::InvalidState(
             "tokenizer-backed chunk produced an empty token sequence".into(),
         ));
-    }
-    let mut target = input.clone();
-    target.rotate_left(1);
-    if let Some(last) = target.last_mut() {
-        *last = PAD_TOKEN as i64;
     }
 
     if valid_len == 0 {
@@ -938,6 +1004,8 @@ fn sequence_from_native_chunk(
             "tokenizer-backed chunk produced zero valid tokens".into(),
         ));
     }
+
+    let target = pad_semantics.canonicalize_target_from_input(&input, valid_len);
 
     Ok(SequenceExample {
         input,
@@ -1039,11 +1107,13 @@ mod tests {
 
     use super::{
         build_tokenizer_backed_batches, load_stage0_tokenizer_runtime,
-        run_tokenizer_backed_species_from_source, ResolvedTokenizerArtifact, TokenizerArtifactSpec,
-        TokenizerTrainingCorpus, TokenizerTrainingCorpusSource, TokenizerTrainingRuntime,
-        STAGE0_CANONICAL_TOKENIZER_FILENAME, STAGE0_CANONICAL_TOKENIZER_REPO_ID,
+        run_tokenizer_backed_species_from_source, ResolvedTokenizerArtifact, Stage0PadSemantics,
+        TokenizerArtifactSpec, TokenizerTrainingCorpus, TokenizerTrainingCorpusSource,
+        TokenizerTrainingRuntime, STAGE0_CANONICAL_TOKENIZER_FILENAME,
+        STAGE0_CANONICAL_TOKENIZER_REPO_ID,
     };
     use fractal_core::registry::take_last_species_run_artifact;
+    use fractal_core::PAD_TOKEN;
     use fractal_tokenizer::NativeTokenizer;
 
     #[derive(Clone, Debug)]
@@ -1407,6 +1477,15 @@ mod tests {
             STAGE0_CANONICAL_TOKENIZER_FILENAME
         );
         assert_eq!(
+            runtime.pad_semantics,
+            Stage0PadSemantics::new(None, PAD_TOKEN as u32).expect("canonical pad semantics")
+        );
+        assert!(runtime.pad_semantics.uses_canonical_pad_alias());
+        assert_eq!(
+            runtime.pad_semantics.collation_pad_token_id(),
+            PAD_TOKEN as u32
+        );
+        assert_eq!(
             tokens,
             vec![8, 465, 10, 947, 41, 10, 170, 168, 110, 28, 20, 143, 4]
         );
@@ -1437,5 +1516,85 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_native_pad_tokenizer_uses_explicit_canonical_pad_alias_in_batches() {
+        let tokenizer_path = build_file_backed_sentencepiece_tokenizer();
+        let resolved_tokenizer =
+            ResolvedTokenizerArtifact::canonical_open_llama_3b_v2(&tokenizer_path, 1_000, 0);
+        let training_input = resolved_tokenizer
+            .clone()
+            .into_training_input("fineweb-stage0-smoke");
+        let (runtime, _) = load_stage0_tokenizer_runtime(&training_input, 32)
+            .expect("slow tokenizer runtime should load");
+
+        let mut config = TournamentPreset::FastTest.config();
+        config.dim = 8;
+        config.levels = 2;
+        config.vocab_size = 1_000;
+        config.max_seq_len = 32;
+        config.max_recursion_depth = 2;
+        config.stability_depth = 1;
+        config.train_batch_size = 1;
+        config.eval_batch_size = 1;
+
+        let corpus = TokenizerTrainingCorpus::new(
+            "fineweb-stage0-smoke",
+            vec!["I saw a girl with a telescope.".to_owned()],
+            vec!["I saw a girl with a telescope.".to_owned()],
+        );
+        let (batches, stats) = build_tokenizer_backed_batches::<fractal_core::CpuTrainBackend, _>(
+            &config,
+            &training_input,
+            &corpus,
+            &runtime,
+            &CandleDevice::Cpu,
+        )
+        .expect("tokenizer-backed batches should build with canonical pad alias");
+
+        let expected_tokens = runtime
+            .tokenizer
+            .tokenize("I saw a girl with a telescope.")
+            .expect("sentencepiece encoding should succeed");
+        let valid_len = expected_tokens.len();
+        let input = batches.train_sentence[0]
+            .input_ids
+            .clone()
+            .into_data()
+            .to_vec::<i64>()
+            .expect("input tensor should flatten");
+        let target = batches.train_sentence[0]
+            .target_ids
+            .clone()
+            .into_data()
+            .to_vec::<i64>()
+            .expect("target tensor should flatten");
+
+        assert!(runtime.pad_semantics.uses_canonical_pad_alias());
+        assert_eq!(runtime.pad_semantics.native_pad_token_id, None);
+        assert_eq!(
+            runtime.pad_semantics.canonical_model_pad_token_id,
+            PAD_TOKEN as u32
+        );
+        assert_eq!(
+            input[..valid_len],
+            expected_tokens
+                .iter()
+                .map(|token| *token as i64)
+                .collect::<Vec<_>>()
+        );
+        assert!(input[valid_len..]
+            .iter()
+            .all(|token| *token == PAD_TOKEN as i64));
+        assert_eq!(target[valid_len - 1], PAD_TOKEN as i64);
+        assert!(target[valid_len..]
+            .iter()
+            .all(|token| *token == PAD_TOKEN as i64));
+        assert_eq!(stats.native_tokens, valid_len * 2);
+
+        if let Some(parent) = tokenizer_path.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
     }
 }
