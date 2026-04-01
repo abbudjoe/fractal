@@ -2,6 +2,7 @@ use std::{
     fmt, fs,
     num::NonZeroUsize,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use burn::tensor::{
@@ -21,14 +22,92 @@ use fractal_core::{
 };
 use fractal_tokenizer::{
     EmbeddingBridgeAdapter, FaceoffChunkLimits, FaceoffTokenizer, FaceoffVocabConfig,
-    HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument, NativeCollationSpec,
-    NativeCompatibilityAdapter, NativeCompatibilityError, NativeTokenizer, NativeTruncationPolicy,
-    TypedEmbeddingBridge,
+    ModelFacingBatch, ModelFacingDocument, NativeCollationSpec, NativeCompatibilityAdapter,
+    NativeCompatibilityError, NativeTokenizer, NativeTruncationPolicy, TypedEmbeddingBridge,
 };
+use sentencepiece::{SentencePieceError, SentencePieceProcessor};
 
 pub const STAGE0_CANONICAL_TOKENIZER_REPO_ID: &str = "openlm-research/open_llama_3b_v2";
-pub const STAGE0_CANONICAL_TOKENIZER_FILENAME: &str = "tokenizer.json";
+pub const STAGE0_CANONICAL_TOKENIZER_FILENAME: &str = "tokenizer.model";
 pub const STAGE0_CANONICAL_TOKENIZER_USE_FAST: bool = false;
+
+#[derive(Clone, Debug)]
+pub struct Stage0SlowTokenizer {
+    processor: Arc<SentencePieceProcessor>,
+}
+
+impl Stage0SlowTokenizer {
+    pub fn open(path: &Path) -> Result<Self, Stage0SlowTokenizerError> {
+        let processor = SentencePieceProcessor::open(path).map_err(|source| {
+            Stage0SlowTokenizerError::Load {
+                path: path.to_path_buf(),
+                reason: source,
+            }
+        })?;
+        Ok(Self {
+            processor: Arc::new(processor),
+        })
+    }
+
+    pub fn vocab_size(&self) -> usize {
+        self.processor.len()
+    }
+
+    pub fn model_pad_token_id(&self) -> Option<u32> {
+        self.processor.pad_id()
+    }
+}
+
+impl NativeTokenizer for Stage0SlowTokenizer {
+    type Token = u32;
+    type Error = Stage0SlowTokenizerError;
+
+    fn tokenize(&self, text: &str) -> Result<Vec<Self::Token>, Self::Error> {
+        self.processor
+            .encode(text)
+            .map(|pieces| pieces.into_iter().map(|piece| piece.id).collect())
+            .map_err(|source| Stage0SlowTokenizerError::Encode {
+                input_preview: text.chars().take(32).collect(),
+                reason: source,
+            })
+    }
+}
+
+#[derive(Debug)]
+pub enum Stage0SlowTokenizerError {
+    Load {
+        path: PathBuf,
+        reason: SentencePieceError,
+    },
+    Encode {
+        input_preview: String,
+        reason: SentencePieceError,
+    },
+}
+
+impl fmt::Display for Stage0SlowTokenizerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Load { path, reason } => {
+                write!(
+                    f,
+                    "failed to load slow Stage 0 tokenizer from {}: {reason}",
+                    path.display()
+                )
+            }
+            Self::Encode {
+                input_preview,
+                reason,
+            } => write!(
+                f,
+                "failed to encode text with slow Stage 0 tokenizer for input {:?}: {reason}",
+                input_preview
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Stage0SlowTokenizerError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TextCorpusFormat {
@@ -200,11 +279,11 @@ impl ResolvedTokenizerArtifact {
     }
 
     pub fn canonical_open_llama_3b_v2(
-        tokenizer_json_path: impl Into<PathBuf>,
+        tokenizer_model_path: impl Into<PathBuf>,
         vocab_size: usize,
         pad_token_id: usize,
     ) -> Self {
-        let local_path = tokenizer_json_path.into();
+        let local_path = tokenizer_model_path.into();
         let tokenizer_filename = local_path
             .file_name()
             .and_then(|name| name.to_str())
@@ -359,11 +438,57 @@ impl<N> TokenizerTrainingRuntime<N> {
     }
 }
 
-pub fn load_native_tokenizer(
+fn validate_stage0_slow_tokenizer_artifact(
     artifact: &ResolvedTokenizerArtifact,
-) -> Result<HuggingFaceNativeTokenizer, FractalError> {
-    HuggingFaceNativeTokenizer::from_file(Path::new(&artifact.local_path))
-        .map_err(|error| FractalError::InvalidState(error.to_string()))
+) -> Result<(), FractalError> {
+    if artifact.repo_id != STAGE0_CANONICAL_TOKENIZER_REPO_ID {
+        return Err(FractalError::InvalidConfig(format!(
+            "Stage 0 canonical tokenizer must use artifact {}, got {}",
+            STAGE0_CANONICAL_TOKENIZER_REPO_ID, artifact.repo_id
+        )));
+    }
+    if artifact.use_fast {
+        return Err(FractalError::InvalidConfig(
+            "Stage 0 canonical tokenizer must use slow-tokenizer semantics".into(),
+        ));
+    }
+    if artifact.tokenizer_filename != STAGE0_CANONICAL_TOKENIZER_FILENAME {
+        return Err(FractalError::InvalidConfig(format!(
+            "Stage 0 canonical tokenizer must resolve {} but found {}",
+            STAGE0_CANONICAL_TOKENIZER_FILENAME, artifact.tokenizer_filename
+        )));
+    }
+    Ok(())
+}
+
+pub fn load_stage0_slow_tokenizer(
+    artifact: &ResolvedTokenizerArtifact,
+) -> Result<Stage0SlowTokenizer, FractalError> {
+    validate_stage0_slow_tokenizer_artifact(artifact)?;
+    let tokenizer = Stage0SlowTokenizer::open(Path::new(&artifact.local_path))
+        .map_err(|error| FractalError::InvalidState(error.to_string()))?;
+
+    if tokenizer.vocab_size() != artifact.spec.vocab_size {
+        return Err(FractalError::InvalidConfig(format!(
+            "tokenizer artifact {} reports vocab size {} but slow tokenizer model provides {}",
+            artifact.local_path.display(),
+            artifact.spec.vocab_size,
+            tokenizer.vocab_size()
+        )));
+    }
+
+    if let Some(model_pad_id) = tokenizer.model_pad_token_id() {
+        if model_pad_id as usize != artifact.spec.pad_token_id {
+            return Err(FractalError::InvalidConfig(format!(
+                "tokenizer artifact {} reports pad token id {} but slow tokenizer model provides {}",
+                artifact.local_path.display(),
+                artifact.spec.pad_token_id,
+                model_pad_id
+            )));
+        }
+    }
+
+    Ok(tokenizer)
 }
 
 pub fn load_stage0_tokenizer_runtime(
@@ -371,13 +496,13 @@ pub fn load_stage0_tokenizer_runtime(
     max_sequence_len: usize,
 ) -> Result<
     (
-        TokenizerTrainingRuntime<HuggingFaceNativeTokenizer>,
+        TokenizerTrainingRuntime<Stage0SlowTokenizer>,
         ResolvedTokenizerArtifact,
     ),
     FractalError,
 > {
     let artifact = ResolvedTokenizerArtifact::from_training_input(training_input)?;
-    let tokenizer = load_native_tokenizer(&artifact)?;
+    let tokenizer = load_stage0_slow_tokenizer(&artifact)?;
     let runtime = TokenizerTrainingRuntime::new(tokenizer, max_sequence_len)?;
     Ok((runtime, artifact))
 }
@@ -889,11 +1014,12 @@ fn native_error_to_state<E: fmt::Display>(error: NativeCompatibilityError<E>) ->
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::{BTreeMap, BTreeSet},
+        collections::BTreeMap,
         env,
         error::Error,
         fmt, fs,
         path::PathBuf,
+        process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -915,14 +1041,10 @@ mod tests {
         build_tokenizer_backed_batches, load_stage0_tokenizer_runtime,
         run_tokenizer_backed_species_from_source, ResolvedTokenizerArtifact, TokenizerArtifactSpec,
         TokenizerTrainingCorpus, TokenizerTrainingCorpusSource, TokenizerTrainingRuntime,
-        STAGE0_CANONICAL_TOKENIZER_REPO_ID,
+        STAGE0_CANONICAL_TOKENIZER_FILENAME, STAGE0_CANONICAL_TOKENIZER_REPO_ID,
     };
     use fractal_core::registry::take_last_species_run_artifact;
     use fractal_tokenizer::NativeTokenizer;
-    use tokenizers::{
-        models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace, PaddingDirection,
-        PaddingParams, PaddingStrategy, Tokenizer,
-    };
 
     #[derive(Clone, Debug)]
     struct ByteTokenizer;
@@ -974,45 +1096,39 @@ mod tests {
         fs::write(path, format!("{body}\n")).unwrap();
     }
 
-    fn build_file_backed_hf_tokenizer(inputs: &[&str]) -> PathBuf {
-        let mut vocab = std::collections::HashMap::<String, u32>::new();
-        vocab.insert("[PAD]".to_owned(), 0);
-        vocab.insert("[UNK]".to_owned(), 1);
+    fn sentencepiece_testdata_model() -> PathBuf {
+        let output = Command::new("cargo")
+            .args(["metadata", "--format-version", "1"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("cargo metadata should run");
+        assert!(
+            output.status.success(),
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("cargo metadata should be valid json");
+        let packages = metadata["packages"]
+            .as_array()
+            .expect("cargo metadata should include packages");
+        let manifest_path = packages
+            .iter()
+            .find(|package| package["name"] == "sentencepiece")
+            .and_then(|package| package["manifest_path"].as_str())
+            .expect("sentencepiece package should be present in cargo metadata");
+        PathBuf::from(manifest_path)
+            .parent()
+            .expect("sentencepiece manifest should have parent")
+            .join("testdata")
+            .join("toy.model")
+    }
 
-        let mut next_id = 2u32;
-        let mut pieces = BTreeSet::<String>::new();
-        for input in inputs {
-            pieces.extend(input.split_whitespace().map(str::to_owned));
-        }
-        for piece in pieces {
-            vocab.insert(piece, next_id);
-            next_id += 1;
-        }
-        while next_id < 32_000 {
-            vocab.insert(format!("token-{next_id}"), next_id);
-            next_id += 1;
-        }
-
-        let model = WordLevel::builder()
-            .vocab(vocab)
-            .unk_token("[UNK]".to_string())
-            .build()
-            .unwrap();
-        let mut tokenizer = Tokenizer::new(model);
-        tokenizer.with_pre_tokenizer(Some(Whitespace {}));
-        tokenizer.with_padding(Some(PaddingParams {
-            strategy: PaddingStrategy::BatchLongest,
-            direction: PaddingDirection::Right,
-            pad_to_multiple_of: None,
-            pad_id: 0,
-            pad_type_id: 0,
-            pad_token: "[PAD]".to_owned(),
-        }));
-
+    fn build_file_backed_sentencepiece_tokenizer() -> PathBuf {
         let dir = unique_temp_path("tokenizer-artifact", "");
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("tokenizer.json");
-        tokenizer.save(&path, false).unwrap();
+        let path = dir.join(STAGE0_CANONICAL_TOKENIZER_FILENAME);
+        fs::copy(sentencepiece_testdata_model(), &path).unwrap();
         path
     }
 
@@ -1029,24 +1145,20 @@ mod tests {
         env::set_var("FRACTAL_RUN_MANIFEST_DIR", &manifest_dir);
 
         let train_documents = [
-            "the quick brown fox jumps over the lazy dog",
-            "recursive primitives keep their own state",
+            "I saw a girl with a telescope.",
+            "I saw a girl with a telescope.",
         ];
-        let eval_documents = ["held out text stays separate"];
+        let eval_documents = ["I saw a girl with a telescope."];
         write_jsonl_corpus(&train_path, &train_documents);
         write_jsonl_corpus(&eval_path, &eval_documents);
-        let tokenizer_path = build_file_backed_hf_tokenizer(&[
-            train_documents[0],
-            train_documents[1],
-            eval_documents[0],
-        ]);
+        let tokenizer_path = build_file_backed_sentencepiece_tokenizer();
         let resolved_tokenizer =
-            ResolvedTokenizerArtifact::canonical_open_llama_3b_v2(&tokenizer_path, 32_000, 0);
+            ResolvedTokenizerArtifact::canonical_open_llama_3b_v2(&tokenizer_path, 1_000, 0);
 
         let mut config = TournamentPreset::FastTest.config();
         config.dim = 8;
         config.levels = 2;
-        config.vocab_size = 32_000;
+        config.vocab_size = 1_000;
         config.max_seq_len = 64;
         config.max_recursion_depth = 2;
         config.stability_depth = 1;
@@ -1103,7 +1215,10 @@ mod tests {
                 .expect("canonical Stage 0 tokenizer runtime loads");
         assert_eq!(loaded_artifact.repo_id, STAGE0_CANONICAL_TOKENIZER_REPO_ID);
         assert_eq!(loaded_artifact.local_path, tokenizer_path);
-        assert_eq!(loaded_artifact.tokenizer_filename, "tokenizer.json");
+        assert_eq!(
+            loaded_artifact.tokenizer_filename,
+            STAGE0_CANONICAL_TOKENIZER_FILENAME
+        );
         assert!(!loaded_artifact.use_fast);
         let device = CandleDevice::Cpu;
 
@@ -1270,5 +1385,57 @@ mod tests {
         assert_eq!(stats.arc_source_mode, ArcSourceMode::SyntheticCanonical);
         assert!(stats.bridge_tokens > 0);
         assert!(stats.native_tokens > 0);
+    }
+
+    #[test]
+    fn stage0_runtime_uses_real_slow_sentencepiece_tokens() {
+        let tokenizer_path = build_file_backed_sentencepiece_tokenizer();
+        let training_input =
+            ResolvedTokenizerArtifact::canonical_open_llama_3b_v2(&tokenizer_path, 1_000, 0)
+                .into_training_input("fineweb-stage0-smoke");
+
+        let (runtime, artifact) = load_stage0_tokenizer_runtime(&training_input, 64)
+            .expect("slow sentencepiece stage0 runtime should load");
+        let tokens = runtime
+            .tokenizer
+            .tokenize("I saw a girl with a telescope.")
+            .expect("slow tokenizer should encode canonical sentence");
+
+        assert_eq!(artifact.repo_id, STAGE0_CANONICAL_TOKENIZER_REPO_ID);
+        assert_eq!(
+            artifact.tokenizer_filename,
+            STAGE0_CANONICAL_TOKENIZER_FILENAME
+        );
+        assert_eq!(
+            tokens,
+            vec![8, 465, 10, 947, 41, 10, 170, 168, 110, 28, 20, 143, 4]
+        );
+
+        if let Some(parent) = tokenizer_path.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn stage0_runtime_rejects_fast_tokenizer_artifact_filename() {
+        let dir = unique_temp_path("tokenizer-artifact-invalid", "");
+        fs::create_dir_all(&dir).unwrap();
+        let invalid_path = dir.join("tokenizer.json");
+        fs::copy(sentencepiece_testdata_model(), &invalid_path).unwrap();
+
+        let training_input =
+            ResolvedTokenizerArtifact::canonical_open_llama_3b_v2(&invalid_path, 1_000, 0)
+                .into_training_input("fineweb-stage0-smoke");
+        let error = load_stage0_tokenizer_runtime(&training_input, 64)
+            .expect_err("stage0 runtime must reject fast-tokenizer artifact filenames");
+
+        assert!(
+            error
+                .to_string()
+                .contains(STAGE0_CANONICAL_TOKENIZER_FILENAME),
+            "unexpected error: {error}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
