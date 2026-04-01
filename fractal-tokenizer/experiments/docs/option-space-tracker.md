@@ -1,0 +1,367 @@
+# Option Space Tracker
+
+This tracker is the single place to see what the tokenizer program has already
+tried, what remains untried, and where the remaining leverage appears to live.
+
+The current evidence says the pipeline is no longer failing at the contract
+floor. The hard gates are good, typed lexical fallback fixed byte collapse, and
+the frontier/emission line has been exhausted. What remains is a missing
+architectural layer for reusable held-out structure.
+
+## Tried By Layer
+
+### Primitive
+
+- `p1_fractal_hybrid_v1`
+- `p1_fractal_hybrid_dyn-state-norm_v2`
+- `b1_fractal_gated_v1`
+- `p2_mandelbrot_v1`
+- `b3_fractal_hierarchical_v1`
+- `b4_universal_v1`
+- `p1_contractive_v1`
+- `p1_fractal_hybrid_composite_v1`
+- `logistic_chaotic_map_v1`
+- `p3_hierarchical_v1`
+- `b2_stable_hierarchical_v1`
+- `ifs_dyn-radius-depth_v1`
+- `generalized_mobius_dyn-jitter-norm_v2`
+- `julia_recursive_escape_v1`
+- `mandelbox_recursive_dyn-escape-radius_v1`
+
+Read:
+
+- the tokenizer-local family found a stable leader in `p1`
+- the broader primitive field did not break away in the honest held-out
+  tokenizer bakeoff
+- primitive choice is therefore not the main remaining lever
+
+### Split / Segmentation
+
+- `boundary-aware` split for `p1`
+
+Read:
+
+- this was the one serious rescue pass on span geometry
+- it did not materially move held-out code/docs
+- segmentation alone is not the missing fix
+
+### Motif Identity
+
+- exact literal motif matching
+- shape-based structural aliases
+- clustered structural induction
+- prototype-primary identity
+- state-signature prototype induction
+- adaptive prototype granularity
+- prototype precision guardrails
+- prototype emission gate
+
+Read:
+
+- state-signature induction finally increased held-out structural hits
+- precision guardrails removed the overcollapse but erased most of the lift
+- adaptive granularity kept some of the lift but still failed the gate
+- selective runtime emission was a field no-op
+- the current bottleneck is upstream of emission
+
+### Fallback / OOV
+
+- typed lexical fallback above bytes
+- compositional recurring-submotif vocab
+- motif-only ablation
+
+Read:
+
+- this is the biggest hard win so far
+- it fixed catastrophic byte collapse on held-out docs
+- it did not by itself create enough reusable held-out structure for code/docs
+
+### Frontier / Emission Policy
+
+- `GreedyKnown`
+- `FinestKnown`
+- `StateAware`
+- `ReuseAware`
+- `NoveltyAware`
+- `SpanLengthAware`
+- `Budgeted`
+- `HybridStructural`
+
+Read:
+
+- `NoveltyAware` is the best frontier policy we found
+- the other policies are useful comparators, but they do not change the
+  held-out ceiling enough to be the next leverage point
+
+### Packaging / Model-Facing
+
+- chunking / model packaging
+- native compatibility adapter
+- HF-backed native tokenizer adapter
+- file-backed pretrained tokenizer smoke tests
+- padding, masking, and multi-document collation
+
+Read:
+
+- the packaging and model-facing stack is validated
+- this layer is not currently the bottleneck
+
+### Evaluation
+
+- local-first bakeoff
+- held-out induction/evaluation split
+- scorecard and red/yellow/green verdicting
+- real pretrained tokenizer integration against multiple model families
+
+Read:
+
+- evaluation is now honest enough to surface the real bottleneck
+- the bakeoff pipeline is doing its job
+
+## Remaining Untried By Layer
+
+### Primitive
+
+- new `v2` follow-ups from the broader primitive board
+- a fresh `logistic_chaotic_map_v2`
+- a fresh `p1_fractal_hybrid_composite_v2`
+- harder confirmation lanes for `p3_hierarchical_v1` and `b2_stable_hierarchical_v1`
+
+Read:
+
+- these are still available as program-level options
+- but the tokenizer evidence so far suggests they are lower leverage than a
+  tokenizer-control-plane shift
+
+### Split / Segmentation
+
+- syntax-aware segmentation
+- AST-aware segmentation for code
+- delimiter-anchored segmentation for docs and logs
+- document-type-specific boundary policy
+
+Read:
+
+- this is the strongest remaining tokenizer-internal structural candidate
+- the earlier boundary-aware split was not enough, but it was still a blunt
+  approximation
+
+### Motif Identity / Held-Out Matching
+
+- signature-neighborhood matching
+- prototype-neighborhood membership
+- context-sensitive motif cache keys
+- document-local motif cache
+
+Read:
+
+- this is the clearest missing architectural opportunity
+- the current system has exact identity, but not enough contextual reuse memory
+
+### Fallback / OOV
+
+- document-local recurrence cache
+- within-document reuse promotion before lexical fallback
+
+Read:
+
+- this is partly a fallback feature and partly a control-plane feature
+- if any local mechanism is still worth trying, this is the one that most
+  directly tests whether contextual memory can rescue held-out code/docs
+
+### Packaging / Model-Facing
+
+- learned embedding bridge into existing LMs
+- actual training or fine-tuning on fractal-tokenized inputs
+
+Read:
+
+- this is important for downstream usefulness
+- it is not the next tokenizer-internal rescue lever
+
+### Evaluation
+
+- hybrid external bakeoff on diversified corpora
+- downstream LM comparison against native tokenization
+- end-to-end task evaluation
+
+Read:
+
+- this is necessary for final truth
+- it is less useful as the next architectural probe than a tokenizer-internal
+  contextual-memory change
+
+## Ranked Remaining Options
+
+### 1. Document-Local Motif Cache
+
+Layer:
+
+- fallback / OOV
+- motif identity
+
+Why it ranks first:
+
+- it tests the most plausible missing architectural opportunity: contextual
+  reuse memory inside a document
+- it can rescue held-out repetition without weakening global exact matching
+- it is the cleanest way to tell whether the tokenizer needs a contextual cache
+  rather than another global heuristic
+
+Expected upside:
+
+- better held-out reuse on code, docs, and logs
+- lower lexical-only dominance on novel but internally repetitive documents
+- a real answer to whether the tokenizer is missing a document-local memory
+  plane
+
+Expected failure mode:
+
+- the cache improves only very local repetition and still does not move the
+  code/docs ceiling
+
+### 2. Syntax-Aware Segmentation
+
+Layer:
+
+- split / segmentation
+
+Why it ranks second:
+
+- the code/docs failure strongly suggests the current span geometry is not
+  aligned with stable reusable units
+- balanced splitting was too blunt
+- syntax-aware boundaries could create much better motif stability
+
+Expected upside:
+
+- more stable recurring spans for code and docs
+- better motif identities without loosening matching rules
+
+Expected failure mode:
+
+- syntax hints still do not create enough cross-document reuse
+
+### 3. Signature-Neighborhood Matching
+
+Layer:
+
+- motif identity / held-out matching
+
+Why it ranks third:
+
+- exact matching has been too brittle
+- a neighborhood/prototype similarity layer could recover held-out structure
+- but it is riskier because false positives can recreate the overcollapse we
+  already fought off
+
+Expected upside:
+
+- more held-out structural hits without requiring literal identity
+
+Expected failure mode:
+
+- selective matching becomes too permissive and collapses non-log buckets again
+
+### 4. Hybrid External Bakeoff
+
+Layer:
+
+- evaluation
+
+Why it ranks fourth:
+
+- we need a diversified truth set before making final claims
+- but this is mostly a measurement move, not a tokenizer rescue move
+
+Expected upside:
+
+- tells us whether the current ceiling is just local-fawx self-similarity
+
+Expected failure mode:
+
+- confirms the same ceiling on wider text without identifying a better internal
+  mechanism
+
+### 5. Learned Embedding Bridge
+
+Layer:
+
+- packaging / model-facing
+
+Why it ranks fifth:
+
+- this may be the right path if the tokenizer is only useful through an adapter
+- but it moves us toward model integration, not tokenizer rescue
+
+Expected upside:
+
+- shows whether the tokenizer can be useful to existing LMs even if raw token
+  counts are not the whole story
+
+Expected failure mode:
+
+- bridge complexity rises before we learn enough about the tokenizer itself
+
+### 6. New Primitive `v2` Follow-Ups
+
+Layer:
+
+- primitive
+
+Why it ranks sixth:
+
+- the honest tokenizer field screen already washed out the current primitive
+  family
+- new variants are still worth keeping alive at the program level, but they are
+  lower leverage than fixing contextual reuse
+
+Expected upside:
+
+- one of the new mutations might break the ceiling in a way the current family
+  cannot
+
+Expected failure mode:
+
+- they cluster at the same held-out profile again, confirming the control plane
+  is the real bottleneck
+
+### 7. End-to-End Downstream LM Evaluation
+
+Layer:
+
+- evaluation
+
+Why it ranks seventh:
+
+- it is the final proof we ultimately need
+- but it is downstream of the tokenizer question we are still trying to solve
+
+Expected upside:
+
+- tells us whether any tokenizer improvement is actually model-useful
+
+Expected failure mode:
+
+- expensive validation before the architecture question is settled
+
+## Architectural Read
+
+The evidence points to a missing contextual reuse plane.
+
+The tokenizer already has:
+
+- a real control plane
+- exact round-trip correctness
+- typed lexical fallback
+- validated packaging and model-facing integration
+
+What it still lacks is a strong way to turn held-out structure into reusable
+document-local or syntax-local motifs without either:
+
+- collapsing to bytes, or
+- overcollapsing structured text
+
+That is why the best first attempt now is a document-local motif cache, with
+syntax-aware segmentation as the next strongest structural probe.
+
