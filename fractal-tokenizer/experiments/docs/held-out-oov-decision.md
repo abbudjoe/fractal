@@ -658,3 +658,7 @@ Updated read:
   truth test
 - this branch is now on the edge of the kill criterion
 - further local rescue heuristics are very unlikely to change the outcome
+
+See also:
+
+- [recursive-tokenizer-postmortem.md](./recursive-tokenizer-postmortem.md)
