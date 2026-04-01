@@ -23,7 +23,7 @@ use crate::{
     validate_tokenizer_primitive_name, B1FractalGated, B3FractalHierarchical, B4Universal,
     EncodedDocument, EncodedTokenKind, FaceoffChunkLimits, FaceoffEmissionPolicy,
     FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLexemeKind, FaceoffLocalCacheMode,
-    FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer,
+    FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer, LocalMacroKind,
     ModelFacingBatch, ModelFacingDocument, NativeCollationSpec, NativeCompatibilityAdapter,
     NativeTokenizer, OverlayDocumentMode, P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary,
     PrototypeGranularityMode, RecursiveOverlayConfig, RecursiveOverlayMode, RecursiveTokenizer,
@@ -731,6 +731,93 @@ That keeps the canonical tokenizer as the real source of truth.\n\
         text,
         canonical.clone(),
         RecursiveOverlayMode::LocalLineMacro,
+        &RecursiveOverlayConfig::default(),
+    );
+
+    assert_eq!(overlay.mode, OverlayDocumentMode::Passthrough);
+    assert!(overlay.macros.is_empty());
+    assert!(overlay.exact_ok());
+    assert_eq!(overlay.overlay_symbol_count(), canonical.token_ids.len());
+}
+
+#[test]
+fn canonical_overlay_record_macros_capture_jsonl_scaffolds_exactly() {
+    let text = "\
+{\"ts\": 1, \"level\": \"info\", \"route\": \"/health\", \"status\": 200, \"req\": \"a1\"}\n\
+{\"ts\": 2, \"level\": \"info\", \"route\": \"/health\", \"status\": 500, \"req\": \"b2\"}\n\
+{\"ts\": 3, \"level\": \"info\", \"route\": \"/health\", \"status\": 200, \"req\": \"c3\"}\n\
+";
+    let tokenizer = build_hf_native_tokenizer(&[text]);
+    let canonical = tokenizer.tokenize_with_byte_offsets(text).unwrap();
+    let overlay = build_recursive_overlay(
+        text,
+        canonical.clone(),
+        RecursiveOverlayMode::LocalRecordMacro,
+        &RecursiveOverlayConfig::default(),
+    );
+
+    assert_eq!(overlay.mode, OverlayDocumentMode::LocalMacro);
+    assert!(overlay.exact_ok());
+    assert_eq!(overlay.expand_token_ids(), canonical.token_ids);
+    assert!(
+        overlay
+            .macros
+            .iter()
+            .any(|entry| entry.kind == LocalMacroKind::RepeatedRecordScaffold),
+        "record-aware mode should create scaffold macros for JSONL-like repeated structure"
+    );
+    assert!(overlay.macro_ref_count() >= 3);
+    assert!(
+        overlay.overlay_symbol_count() < canonical.token_ids.len(),
+        "record-aware overlay should beat the canonical cost on repeated JSONL scaffolds"
+    );
+}
+
+#[test]
+fn canonical_overlay_record_macros_capture_log_scaffolds_exactly() {
+    let text = "\
+2026-04-01T12:00:01Z INFO auth request_id=abc-1 route=/health status=200 latency_ms=11\n\
+2026-04-01T12:00:02Z INFO auth request_id=abc-2 route=/health status=500 latency_ms=14\n\
+2026-04-01T12:00:03Z INFO auth request_id=abc-3 route=/health status=200 latency_ms=09\n\
+";
+    let tokenizer = build_hf_native_tokenizer(&[text]);
+    let canonical = tokenizer.tokenize_with_byte_offsets(text).unwrap();
+    let overlay = build_recursive_overlay(
+        text,
+        canonical.clone(),
+        RecursiveOverlayMode::LocalRecordMacro,
+        &RecursiveOverlayConfig::default(),
+    );
+
+    assert_eq!(overlay.mode, OverlayDocumentMode::LocalMacro);
+    assert!(overlay.exact_ok());
+    assert_eq!(overlay.expand_token_ids(), canonical.token_ids);
+    assert!(
+        overlay
+            .macros
+            .iter()
+            .any(|entry| entry.kind == LocalMacroKind::RepeatedRecordScaffold),
+        "record-aware mode should find repeated log scaffolds without replacing varying values"
+    );
+    assert!(
+        overlay.overlay_symbol_count() < canonical.token_ids.len(),
+        "record-aware overlay should compress repeated log scaffolds"
+    );
+}
+
+#[test]
+fn canonical_overlay_record_mode_stays_conservative_on_prose() {
+    let text = "\
+Each paragraph in this prose sample changes topic and cadence from line to line.\n\
+Nothing here is shaped like a record scaffold with repeatable delimiters or field prefixes.\n\
+The overlay should keep the canonical tokenizer as the source of truth.\n\
+";
+    let tokenizer = build_hf_native_tokenizer(&[text]);
+    let canonical = tokenizer.tokenize_with_byte_offsets(text).unwrap();
+    let overlay = build_recursive_overlay(
+        text,
+        canonical.clone(),
+        RecursiveOverlayMode::LocalRecordMacro,
         &RecursiveOverlayConfig::default(),
     );
 
