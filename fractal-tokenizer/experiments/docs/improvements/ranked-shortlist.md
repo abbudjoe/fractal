@@ -21,20 +21,21 @@ Candidates are ranked by:
 
 ## Latest Trial Snapshot
 
-Most recent completed trial: `Chunking / Model Packaging` on top of `NoveltyAware`.
+Most recent completed trial: held-out local bakeoff scoring on the current
+model-facing stack.
 
-- Stress input:
-  - frontier before packaging: `3` tokens
-  - packaged chunks: `1`
-- Mixed-domain input:
-  - frontier before packaging: `32` tokens
-  - packaged chunks: `4`
-- Round-trip: exact for both
-- Fallback stats: `unknown=0`, `byte=0` for both
+- `BAKEOFF_DOCUMENTS=120`
+- `BAKEOFF_INDUCTION_DOCUMENTS=64`
+- `BAKEOFF_EVALUATION_DOCUMENTS=56`
+- `BAKEOFF_VERDICT=YELLOW`
+- `byte_fallback_docs=56`
+- hard-gate failures: `0`
 
 Result:
 
-- `Chunking / Model Packaging` is lossless and deterministic on the current winning frontier. It packages the `NoveltyAware` frontier into ordered model-sized windows without changing the frontier itself.
+- the earlier local-only `GREEN` does not survive held-out evaluation
+- the active bottleneck is now held-out OOV behavior, not frontier selection
+- the next ranked work should target the OOV contract directly
 
 ## Current Baseline
 
@@ -85,34 +86,80 @@ The ranking below applies to **next** frontier candidates. Packaging is now trea
 
 ## Ranked Candidates
 
-### 1. Novelty-Aware Frontier
+### 1. Typed Lexical Fallback Above Bytes
+
+Status:
+
+- `Proposed`
+
+Why it ranks first now:
+
+- fastest path to stopping total held-out byte collapse
+- preserves meaningful local structure for novel text
+- cleanly complements the existing model-facing contract
+
+Expected upside:
+
+- held-out docs stop degrading immediately to raw bytes
+- model-facing batches retain words, identifiers, numbers, punctuation, and
+  whitespace as typed units
+
+Expected failure mode:
+
+- lexical classes are either too coarse or too fine
+
+Decision:
+
+- implement as the first OOV hardening layer
+
+### 2. Compositional Recurring-Submotif Vocab
+
+Status:
+
+- `Proposed`
+
+Why it ranks second now:
+
+- strongest structural fix for memorization-heavy induction
+- should recover reusable descendant cover on held-out docs
+- pairs naturally with typed lexical fallback
+
+Expected upside:
+
+- held-out docs reuse known internal structure instead of failing at the parent
+  motif boundary
+
+Expected failure mode:
+
+- thresholds either over-admit giant memorized motifs or make the vocab too
+  sparse
+
+Decision:
+
+- implement alongside lexical fallback as the structural recovery layer
+
+### 3. Novelty-Aware Frontier
 
 Status:
 
 - `Tried`
 
-Why it ranks first now:
+Why it still matters:
 
-- still the best frontier policy
-- keeps repeated structure coarse without collapsing mixed-domain text
-- best current basis for packaging and model-facing integration
-
-Expected upside:
-
-- best current compression/detail tradeoff while preserving exact round-trip
-
-Expected failure mode:
-
-- if pushed further, it can become too aggressive on mixed-domain inputs
+- current best frontier policy on benchmark inputs
+- remains the right baseline frontier while OOV behavior is hardened
 
 Decision:
 
-- remains the leading frontier candidate
+- keep as the current frontier baseline, but do not spend the next cycle on
+  new frontier-policy candidates
 
 ## Recommended Trial Order
 
-1. Model packaging integration
-2. Downstream model-facing evaluation
+1. Typed lexical fallback above bytes
+2. Compositional recurring-submotif vocab
+3. Held-out local bakeoff rerun
+4. Hybrid bakeoff implementation
 
 ## Promotion Rule
 
@@ -130,3 +177,4 @@ When a candidate is tried, update:
 1. this shortlist
 2. the candidate’s standalone note
 3. the tracker or experiment report if the result changes the current default
+4. the held-out decision log if the current bottleneck changes again

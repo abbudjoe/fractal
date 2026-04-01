@@ -48,6 +48,17 @@ At the moment:
 - `StateAware` was tried and preserved round-trip, but collapsed back to a coarse one-token frontier
 - `Chunking / Model Packaging` was tried on the current frontier (`NoveltyAware`): 8-token packaging windows preserved exact reconstruction, with stress `3` frontier tokens -> `1` chunk and mixed-domain `32` frontier tokens -> `4` chunks, zero unknown/byte fallback
 - `NoveltyAware` remains the leading adaptive-frontier candidate
-- the next clean step is model-facing integration of the packaged frontier, not a new frontier policy
+- the frontier-policy search is no longer the active bottleneck
+- the first honest held-out local bakeoff invalidated the earlier local-only `GREEN`
+- the next clean step is a held-out-safe OOV contract, not another frontier policy or broader bakeoff coverage
 
 Chunking remains important, and it now has a validated packaging layer on top of the stronger frontier policy.
+
+The decision record for that shift is:
+
+- [Held-Out OOV Decision](../held-out-oov-decision.md)
+
+And the next two architectural specs are:
+
+- [Compositional Motif Vocab Spec](../compositional-motif-vocab-spec.md)
+- [Typed Lexical Fallback Spec](../typed-lexical-fallback-spec.md)
