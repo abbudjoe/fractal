@@ -279,6 +279,18 @@ fn stage0_launch_policy_contract_matches_stage0_training_plan() {
 }
 
 #[test]
+fn precision_policy_allows_tf32_with_fp32_compute_contract() {
+    let policy = crate::lifecycle::PrecisionPolicy {
+        compute: NumericPrecisionKind::Fp32,
+        optimizer_state: NumericPrecisionKind::Fp32,
+        reduction: NumericPrecisionKind::Fp32,
+        tf32_enabled: true,
+    };
+
+    assert!(policy.validate().is_ok());
+}
+
+#[test]
 fn warmup_cosine_schedule_progresses_from_zero_to_floor() {
     let schedule = LearningRateScheduleSpec::warmup_cosine(0.02, 0.1);
     let peak = 2e-4;

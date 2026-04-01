@@ -889,12 +889,6 @@ impl PrecisionPolicy {
     }
 
     pub fn validate(&self) -> Result<(), FractalError> {
-        if matches!(self.compute, NumericPrecisionKind::Fp32) && self.tf32_enabled {
-            return Err(FractalError::InvalidConfig(
-                "tf32_enabled only applies when compute precision is backend-default or bf16"
-                    .into(),
-            ));
-        }
         Ok(())
     }
 }
