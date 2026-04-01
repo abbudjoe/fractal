@@ -114,6 +114,29 @@ Read:
 - the next remaining overhead now looks more like scaffold factorization than
   dead-weight macro admission
 
+Latest `batch_local + factorized definitions` read on
+`codex/shared-overlay-dictionary-impl`:
+
+- overall transport:
+  - `document_local transport_ratio = 1.27`
+  - `batch_local transport_ratio = 1.43`
+  - `document_local definition_overhead_rate = 0.19`
+  - `batch_local definition_overhead_rate = 0.07`
+- target buckets:
+  - `jsonl.signals` median transport ratio `2.27 -> 3.65`
+  - `logs.operational_mixed` median transport ratio `1.54 -> 2.52`
+- exact expansion remains `0` failures
+
+Read:
+
+- exact factorized scaffold dictionaries are the strongest transport-layer win
+  so far in the overlay line
+- this is the first overlay transport pass to clear the `1.40` overall hybrid
+  transport-ratio bar from
+  [shared-overlay-dictionary-spec.md](./shared-overlay-dictionary-spec.md)
+- the architecture is now earning a clear niche advantage on repetitive
+  structured text without broadening risk on the guardrail buckets
+
 ## Tried By Layer
 
 ### Primitive

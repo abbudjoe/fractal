@@ -85,14 +85,34 @@ impl OverlayDictionaryScope {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OverlaySharingPolicy {
     pub min_net_gain_symbols: usize,
+    pub min_factor_tokens: usize,
+    pub max_factor_tokens: usize,
+    pub min_factor_net_gain_symbols: usize,
 }
 
 impl Default for OverlaySharingPolicy {
     fn default() -> Self {
         Self {
             min_net_gain_symbols: 8,
+            min_factor_tokens: 4,
+            max_factor_tokens: 24,
+            min_factor_net_gain_symbols: 8,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SharedMacroDefinitionSegment {
+    TokenSpan { start: usize, len: usize },
+    FactorRef { factor_id: usize, span_len: usize },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SharedFactor {
+    pub factor_id: usize,
+    pub token_ids: Vec<u32>,
+    pub macro_ref_count: usize,
+    pub total_use_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +122,40 @@ pub struct SharedMacro {
     pub token_ids: Vec<u32>,
     pub doc_ref_count: usize,
     pub total_use_count: usize,
+    pub definition_segments: Vec<SharedMacroDefinitionSegment>,
+}
+
+impl SharedMacro {
+    fn definition_symbol_count(&self) -> usize {
+        self.definition_segments
+            .iter()
+            .map(|segment| match segment {
+                SharedMacroDefinitionSegment::TokenSpan { len, .. } => *len,
+                SharedMacroDefinitionSegment::FactorRef { .. } => 1,
+            })
+            .sum()
+    }
+
+    fn referenced_factor_ids(&self) -> BTreeSet<usize> {
+        self.definition_segments
+            .iter()
+            .filter_map(|segment| match segment {
+                SharedMacroDefinitionSegment::TokenSpan { .. } => None,
+                SharedMacroDefinitionSegment::FactorRef { factor_id, .. } => Some(*factor_id),
+            })
+            .collect()
+    }
+
+    fn whole_definition(token_len: usize) -> Vec<SharedMacroDefinitionSegment> {
+        if token_len == 0 {
+            Vec::new()
+        } else {
+            vec![SharedMacroDefinitionSegment::TokenSpan {
+                start: 0,
+                len: token_len,
+            }]
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -187,6 +241,7 @@ impl PackedOverlayDocument {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OverlayPack {
     pub scope: OverlayDictionaryScope,
+    pub shared_factors: Vec<SharedFactor>,
     pub shared_macros: Vec<SharedMacro>,
     pub documents: Vec<PackedOverlayDocument>,
 }
@@ -199,6 +254,8 @@ pub struct OverlayTransportSummary {
     pub transport_symbols: usize,
     pub base_slice_symbols: usize,
     pub macro_ref_symbols: usize,
+    pub macro_body_symbols: usize,
+    pub factor_definition_symbols: usize,
     pub macro_definition_symbols: usize,
 }
 
@@ -281,11 +338,17 @@ impl OverlayPack {
             .iter()
             .map(PackedOverlayDocument::macro_ref_symbol_count)
             .sum::<usize>();
-        let macro_definition_symbols = self
+        let macro_body_symbols = self
             .shared_macros
+            .iter()
+            .map(SharedMacro::definition_symbol_count)
+            .sum::<usize>();
+        let factor_definition_symbols = self
+            .shared_factors
             .iter()
             .map(|entry| entry.token_ids.len())
             .sum::<usize>();
+        let macro_definition_symbols = macro_body_symbols + factor_definition_symbols;
         let transport_symbols = base_slice_symbols + macro_ref_symbols + macro_definition_symbols;
 
         OverlayTransportSummary {
@@ -295,22 +358,45 @@ impl OverlayPack {
             transport_symbols,
             base_slice_symbols,
             macro_ref_symbols,
+            macro_body_symbols,
+            factor_definition_symbols,
             macro_definition_symbols,
         }
     }
 
     pub fn document_transport_views(&self) -> Vec<PackedOverlayDocumentTransport> {
+        let factor_doc_ref_counts = self.factor_doc_ref_counts();
         self.documents
             .iter()
             .map(|document| {
-                let allocated_macro_definition_symbols = document
-                    .referenced_shared_macro_ids()
-                    .into_iter()
-                    .map(|shared_macro_id| {
-                        let entry = &self.shared_macros[shared_macro_id];
-                        entry.token_ids.len() as f64 / entry.doc_ref_count.max(1) as f64
+                let referenced_shared_macro_ids = document.referenced_shared_macro_ids();
+                let referenced_factor_ids = referenced_shared_macro_ids
+                    .iter()
+                    .flat_map(|shared_macro_id| {
+                        self.shared_macros[*shared_macro_id]
+                            .referenced_factor_ids()
+                            .into_iter()
                     })
-                    .sum::<f64>();
+                    .collect::<BTreeSet<_>>();
+                let allocated_macro_definition_symbols = referenced_shared_macro_ids
+                    .iter()
+                    .map(|shared_macro_id| {
+                        let entry = &self.shared_macros[*shared_macro_id];
+                        entry.definition_symbol_count() as f64 / entry.doc_ref_count.max(1) as f64
+                    })
+                    .sum::<f64>()
+                    + referenced_factor_ids
+                        .into_iter()
+                        .map(|factor_id| {
+                            let factor = &self.shared_factors[factor_id];
+                            factor.token_ids.len() as f64
+                                / factor_doc_ref_counts
+                                    .get(&factor_id)
+                                    .copied()
+                                    .unwrap_or(1)
+                                    .max(1) as f64
+                        })
+                        .sum::<f64>();
 
                 PackedOverlayDocumentTransport {
                     canonical_token_count: document.canonical_token_count(),
@@ -339,6 +425,7 @@ impl OverlayPack {
                     token_ids: local_macro.token_ids.clone(),
                     doc_ref_count: 1,
                     total_use_count: local_macro.use_count,
+                    definition_segments: SharedMacro::whole_definition(local_macro.token_ids.len()),
                 });
                 macro_map.insert(local_macro.macro_id, shared_macro_id);
             }
@@ -347,6 +434,7 @@ impl OverlayPack {
 
         Self {
             scope,
+            shared_factors: Vec::new(),
             shared_macros,
             documents: packed_documents,
         }
@@ -378,6 +466,9 @@ impl OverlayPack {
                         token_ids: local_macro.token_ids.clone(),
                         doc_ref_count: 0,
                         total_use_count: 0,
+                        definition_segments: SharedMacro::whole_definition(
+                            local_macro.token_ids.len(),
+                        ),
                     });
                     candidate_id
                 });
@@ -408,10 +499,13 @@ impl OverlayPack {
                     token_ids: candidate.token_ids.clone(),
                     doc_ref_count: candidate.doc_ref_count,
                     total_use_count: candidate.total_use_count,
+                    definition_segments: SharedMacro::whole_definition(candidate.token_ids.len()),
                 });
                 candidate_to_shared.insert(candidate_id, shared_macro_id);
             }
         }
+
+        let shared_factors = factorize_shared_macros(&mut shared_macros, policy);
 
         for (document, candidate_map) in documents.iter().zip(document_candidate_maps.into_iter()) {
             let macro_map = candidate_map
@@ -428,9 +522,29 @@ impl OverlayPack {
 
         Self {
             scope,
+            shared_factors,
             shared_macros,
             documents: packed_documents,
         }
+    }
+
+    fn factor_doc_ref_counts(&self) -> BTreeMap<usize, usize> {
+        let mut counts = BTreeMap::<usize, usize>::new();
+        for document in &self.documents {
+            let referenced_factors = document
+                .referenced_shared_macro_ids()
+                .into_iter()
+                .flat_map(|shared_macro_id| {
+                    self.shared_macros[shared_macro_id]
+                        .referenced_factor_ids()
+                        .into_iter()
+                })
+                .collect::<BTreeSet<_>>();
+            for factor_id in referenced_factors {
+                *counts.entry(factor_id).or_default() += 1;
+            }
+        }
+        counts
     }
 }
 
@@ -446,6 +560,232 @@ fn shared_macro_is_profitable(entry: &SharedMacro, policy: &OverlaySharingPolicy
     let inlined_transport_cost = definition_cost * entry.total_use_count;
     let net_gain_symbols = inlined_transport_cost.saturating_sub(kept_transport_cost);
     net_gain_symbols >= policy.min_net_gain_symbols
+}
+
+fn factorize_shared_macros(
+    shared_macros: &mut [SharedMacro],
+    policy: &OverlaySharingPolicy,
+) -> Vec<SharedFactor> {
+    for entry in shared_macros.iter_mut() {
+        entry.definition_segments = SharedMacro::whole_definition(entry.token_ids.len());
+    }
+
+    if shared_macros.len() < 2
+        || policy.max_factor_tokens < policy.min_factor_tokens
+        || policy.min_factor_net_gain_symbols == usize::MAX
+    {
+        return Vec::new();
+    }
+
+    let candidates = collect_factor_candidates(shared_macros, policy);
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let provisional_factors = candidates
+        .into_iter()
+        .enumerate()
+        .map(|(factor_id, candidate)| SharedFactor {
+            factor_id,
+            token_ids: candidate.token_ids,
+            macro_ref_count: candidate.macro_ref_count,
+            total_use_count: candidate.total_use_count,
+        })
+        .collect::<Vec<_>>();
+
+    apply_factorization(shared_macros, &provisional_factors);
+    let retained_factors =
+        retain_used_profitable_factors(shared_macros, provisional_factors, policy);
+    apply_factorization(shared_macros, &retained_factors);
+    retained_factors
+}
+
+fn collect_factor_candidates(
+    shared_macros: &[SharedMacro],
+    policy: &OverlaySharingPolicy,
+) -> Vec<FactorCandidate> {
+    let mut candidates = BTreeMap::<Vec<u32>, (BTreeSet<usize>, usize)>::new();
+
+    for (macro_index, entry) in shared_macros.iter().enumerate() {
+        let tokens = &entry.token_ids;
+        for start in 0..tokens.len() {
+            let max_len = (tokens.len() - start).min(policy.max_factor_tokens);
+            if max_len < policy.min_factor_tokens {
+                continue;
+            }
+            for len in policy.min_factor_tokens..=max_len {
+                if len == tokens.len() {
+                    continue;
+                }
+                let slice = tokens[start..start + len].to_vec();
+                let entry = candidates.entry(slice).or_insert((BTreeSet::new(), 0));
+                entry.0.insert(macro_index);
+                entry.1 += 1;
+            }
+        }
+    }
+
+    let mut selected = candidates
+        .into_iter()
+        .filter_map(|(token_ids, (macro_hits, total_use_count))| {
+            if macro_hits.len() < 2 || total_use_count < 2 {
+                return None;
+            }
+            let definition_cost = token_ids.len();
+            let factored_transport_cost = definition_cost + total_use_count;
+            let inlined_transport_cost = definition_cost * total_use_count;
+            let net_gain_symbols = inlined_transport_cost.saturating_sub(factored_transport_cost);
+            if net_gain_symbols < policy.min_factor_net_gain_symbols {
+                return None;
+            }
+            Some(FactorCandidate {
+                token_ids,
+                macro_ref_count: macro_hits.len(),
+                total_use_count,
+                net_gain_symbols,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    selected.sort_by(|left, right| {
+        right
+            .net_gain_symbols
+            .cmp(&left.net_gain_symbols)
+            .then_with(|| right.token_ids.len().cmp(&left.token_ids.len()))
+            .then_with(|| left.token_ids.cmp(&right.token_ids))
+    });
+    selected
+}
+
+fn apply_factorization(shared_macros: &mut [SharedMacro], factors: &[SharedFactor]) {
+    for entry in shared_macros.iter_mut() {
+        entry.definition_segments = factorize_macro_definition(&entry.token_ids, factors);
+    }
+}
+
+fn factorize_macro_definition(
+    token_ids: &[u32],
+    factors: &[SharedFactor],
+) -> Vec<SharedMacroDefinitionSegment> {
+    if token_ids.is_empty() || factors.is_empty() {
+        return SharedMacro::whole_definition(token_ids.len());
+    }
+
+    let mut factors_by_len = factors.iter().collect::<Vec<_>>();
+    factors_by_len.sort_by(|left, right| {
+        right
+            .token_ids
+            .len()
+            .cmp(&left.token_ids.len())
+            .then_with(|| left.factor_id.cmp(&right.factor_id))
+    });
+
+    let mut segments = Vec::new();
+    let mut cursor = 0usize;
+    let mut base_start = 0usize;
+
+    while cursor < token_ids.len() {
+        let next_factor = factors_by_len.iter().find(|factor| {
+            let len = factor.token_ids.len();
+            len <= token_ids.len() - cursor
+                && token_ids[cursor..cursor + len] == factor.token_ids[..]
+        });
+
+        if let Some(factor) = next_factor {
+            if base_start < cursor {
+                segments.push(SharedMacroDefinitionSegment::TokenSpan {
+                    start: base_start,
+                    len: cursor - base_start,
+                });
+            }
+            segments.push(SharedMacroDefinitionSegment::FactorRef {
+                factor_id: factor.factor_id,
+                span_len: factor.token_ids.len(),
+            });
+            cursor += factor.token_ids.len();
+            base_start = cursor;
+        } else {
+            cursor += 1;
+        }
+    }
+
+    if base_start < token_ids.len() {
+        segments.push(SharedMacroDefinitionSegment::TokenSpan {
+            start: base_start,
+            len: token_ids.len() - base_start,
+        });
+    }
+
+    segments
+}
+
+fn retain_used_profitable_factors(
+    shared_macros: &mut [SharedMacro],
+    provisional_factors: Vec<SharedFactor>,
+    policy: &OverlaySharingPolicy,
+) -> Vec<SharedFactor> {
+    let mut usage = BTreeMap::<usize, (BTreeSet<usize>, usize)>::new();
+    for (macro_index, entry) in shared_macros.iter().enumerate() {
+        for segment in &entry.definition_segments {
+            if let SharedMacroDefinitionSegment::FactorRef { factor_id, .. } = segment {
+                let entry = usage.entry(*factor_id).or_insert((BTreeSet::new(), 0));
+                entry.0.insert(macro_index);
+                entry.1 += 1;
+            }
+        }
+    }
+
+    let mut old_to_new = BTreeMap::<usize, usize>::new();
+    let mut retained = Vec::<SharedFactor>::new();
+    for factor in provisional_factors {
+        let Some((macro_hits, total_use_count)) = usage.get(&factor.factor_id) else {
+            continue;
+        };
+        if macro_hits.len() < 2 || *total_use_count < 2 {
+            continue;
+        }
+        let definition_cost = factor.token_ids.len();
+        let factored_transport_cost = definition_cost + total_use_count;
+        let inlined_transport_cost = definition_cost * total_use_count;
+        let net_gain_symbols = inlined_transport_cost.saturating_sub(factored_transport_cost);
+        if net_gain_symbols < policy.min_factor_net_gain_symbols {
+            continue;
+        }
+        let new_factor_id = retained.len();
+        old_to_new.insert(factor.factor_id, new_factor_id);
+        retained.push(SharedFactor {
+            factor_id: new_factor_id,
+            token_ids: factor.token_ids,
+            macro_ref_count: macro_hits.len(),
+            total_use_count: *total_use_count,
+        });
+    }
+
+    for entry in shared_macros.iter_mut() {
+        entry.definition_segments = entry
+            .definition_segments
+            .iter()
+            .filter_map(|segment| match segment {
+                SharedMacroDefinitionSegment::TokenSpan { start, len } => {
+                    Some(SharedMacroDefinitionSegment::TokenSpan {
+                        start: *start,
+                        len: *len,
+                    })
+                }
+                SharedMacroDefinitionSegment::FactorRef {
+                    factor_id,
+                    span_len,
+                } => old_to_new.get(factor_id).copied().map(|new_factor_id| {
+                    SharedMacroDefinitionSegment::FactorRef {
+                        factor_id: new_factor_id,
+                        span_len: *span_len,
+                    }
+                }),
+            })
+            .collect();
+    }
+
+    retained
 }
 
 fn pack_document(
@@ -595,6 +935,14 @@ struct MacroCandidate {
     count: usize,
     saved_mass: usize,
     kind: LocalMacroKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FactorCandidate {
+    token_ids: Vec<u32>,
+    macro_ref_count: usize,
+    total_use_count: usize,
+    net_gain_symbols: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

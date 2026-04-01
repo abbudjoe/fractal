@@ -30,7 +30,7 @@ pub use overlay::{
     OverlayDocumentMode, OverlayPack, OverlaySegment, OverlaySharingPolicy,
     OverlayTransportSummary, PackedOverlayDocument, PackedOverlayDocumentTransport,
     PackedOverlaySegment, RecursiveOverlayConfig, RecursiveOverlayDocument, RecursiveOverlayMode,
-    SharedMacro,
+    SharedFactor, SharedMacro, SharedMacroDefinitionSegment,
 };
 pub use primitives::{
     B1FractalGated, B3FractalHierarchical, B4Universal, P1FractalHybrid, P2Mandelbrot,

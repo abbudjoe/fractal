@@ -995,6 +995,7 @@ fn canonical_overlay_batch_local_policy_drops_unprofitable_shared_macros_exactly
         &overlays,
         &OverlaySharingPolicy {
             min_net_gain_symbols: max_net_gain + 1,
+            ..OverlaySharingPolicy::default()
         },
     );
 
@@ -1013,6 +1014,69 @@ fn canonical_overlay_batch_local_policy_drops_unprofitable_shared_macros_exactly
         strict_pack.transport_summary().transport_symbols,
         strict_pack.transport_summary().canonical_tokens,
         "dropping every shared macro should fall back to canonical transport cost"
+    );
+}
+
+#[test]
+fn canonical_overlay_batch_local_factorizes_shared_macro_definitions_exactly() {
+    let text_a = "\
+{\"ts\": 1, \"level\": \"info\", \"route\": \"/health\", \"service\": \"auth\", \"status\": 200, \"req\": \"a1\"}\n\
+{\"ts\": 2, \"level\": \"info\", \"route\": \"/health\", \"service\": \"auth\", \"status\": 500, \"req\": \"b2\"}\n\
+";
+    let text_b = "\
+{\"ts\": 3, \"level\": \"info\", \"route\": \"/ready\", \"service\": \"auth\", \"status\": 200, \"req\": \"c3\"}\n\
+{\"ts\": 4, \"level\": \"info\", \"route\": \"/ready\", \"service\": \"auth\", \"status\": 500, \"req\": \"d4\"}\n\
+";
+    let tokenizer = build_hf_native_tokenizer(&[text_a, text_b]);
+    let overlays = [text_a, text_b]
+        .into_iter()
+        .map(|text| {
+            let canonical = tokenizer.tokenize_with_byte_offsets(text).unwrap();
+            build_recursive_overlay(
+                text,
+                canonical,
+                RecursiveOverlayMode::LocalRecordMacro,
+                &RecursiveOverlayConfig::default(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let unfactored = OverlayPack::from_documents_with_policy(
+        OverlayDictionaryScope::BatchLocal,
+        &overlays,
+        &OverlaySharingPolicy {
+            min_net_gain_symbols: 8,
+            min_factor_tokens: 4,
+            max_factor_tokens: 24,
+            min_factor_net_gain_symbols: usize::MAX,
+        },
+    );
+    let factored = OverlayPack::from_documents(OverlayDictionaryScope::BatchLocal, &overlays);
+
+    assert!(unfactored.exact_ok());
+    assert!(factored.exact_ok());
+    assert!(
+        !unfactored.shared_macros.is_empty(),
+        "the setup should produce shared record scaffolds before factorization"
+    );
+    assert!(
+        factored.shared_factors.len() > 0,
+        "factorization should extract at least one shared definition factor"
+    );
+    let unfactored_summary = unfactored.transport_summary();
+    let factored_summary = factored.transport_summary();
+    assert_eq!(unfactored_summary.factor_definition_symbols, 0);
+    assert!(
+        factored_summary.factor_definition_symbols > 0,
+        "factorized transport should pay some explicit factor-definition cost"
+    );
+    assert!(
+        factored_summary.macro_definition_symbols < unfactored_summary.macro_definition_symbols,
+        "factoring shared subspans should reduce total dictionary-definition cost"
+    );
+    assert!(
+        factored_summary.transport_ratio() > unfactored_summary.transport_ratio(),
+        "factorized shared definitions should improve overall batch-local transport efficiency"
     );
 }
 
