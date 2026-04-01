@@ -93,7 +93,9 @@ impl Default for RunOptions {
 
 impl RunOptions {
     fn ensure_manifest_isolated(&self) -> Result<(), FractalError> {
-        if *self != Self::default() {
+        let mut normalized = self.clone();
+        normalized.backend = None;
+        if normalized != Self::default() {
             return Err(invalid_argument(
                 "--experiment-manifest cannot be combined with other run-shaping flags".to_owned(),
             ));
@@ -199,6 +201,24 @@ impl RunOptions {
             runtime.benchmark_mode = benchmark_mode;
         }
         runtime
+    }
+
+    fn merge_manifest(self, path: &Path) -> Result<Self, FractalError> {
+        let explicit_backend = self.backend;
+        let mut loaded = load_manifest_run_options(path)?;
+        if let Some(explicit_backend) = explicit_backend {
+            if let Some(manifest_backend) = loaded.backend {
+                if manifest_backend != explicit_backend {
+                    return Err(invalid_argument(format!(
+                        "--backend {} conflicts with experiment manifest backend {}",
+                        backend_override_name(explicit_backend),
+                        backend_override_name(manifest_backend),
+                    )));
+                }
+            }
+            loaded.backend = Some(explicit_backend);
+        }
+        Ok(loaded)
     }
 }
 
@@ -373,7 +393,7 @@ where
         "--experiment-manifest" => {
             options.ensure_manifest_isolated()?;
             let value = next_value(args, "--experiment-manifest")?;
-            *options = load_manifest_run_options(Path::new(&value))?;
+            *options = options.clone().merge_manifest(Path::new(&value))?;
             Ok(())
         }
         "--preset" => {
@@ -419,9 +439,23 @@ where
             Ok(())
         }
         "--backend" => {
-            options.ensure_no_manifest_source()?;
             let value = next_value(args, "--backend")?;
-            options.backend = Some(parse_backend(&value)?);
+            let backend = parse_backend(&value)?;
+            if options.manifest_path.is_some() {
+                if let Some(current_backend) = options.backend {
+                    if current_backend != backend {
+                        return Err(invalid_argument(format!(
+                            "--backend {} conflicts with experiment manifest backend {}",
+                            backend_override_name(backend),
+                            backend_override_name(current_backend),
+                        )));
+                    }
+                }
+                options.backend = Some(backend);
+                return Ok(());
+            }
+            options.ensure_no_manifest_source()?;
+            options.backend = Some(backend);
             Ok(())
         }
         "--perplexity-eval-batches" => {
@@ -957,6 +991,15 @@ fn backend_name(backend: &ComputeBackend) -> &'static str {
         #[cfg(feature = "cuda")]
         ComputeBackend::CudaCandle { .. } => "cuda",
         ComputeBackend::MetalWgpu { .. } => "metal",
+    }
+}
+
+fn backend_override_name(backend: BackendOverride) -> &'static str {
+    match backend {
+        BackendOverride::Cpu => "cpu",
+        #[cfg(feature = "cuda")]
+        BackendOverride::Cuda => "cuda",
+        BackendOverride::Metal => "metal",
     }
 }
 
@@ -1570,6 +1613,146 @@ mod tests {
             manifest_path.display().to_string(),
             "--seed".to_owned(),
             "43".to_owned(),
+        ])
+        .unwrap_err();
+
+        assert!(matches!(error, FractalError::InvalidConfig(_)));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_command_allows_backend_before_experiment_manifest() {
+        let root = std::env::temp_dir().join(format!(
+            "fractal-exp-manifest-backend-prefix-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let manifest_path = root.join("winner-bakeoff-s44.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "logical_name": "winner-bakeoff-s44-p1-contractive",
+                "preset": "full-medium-stress",
+                "species": "p1_contractive",
+                "seed": 44,
+                "backend": "cpu"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let command = parse_command(vec![
+            "--backend".to_owned(),
+            "cpu".to_owned(),
+            "--experiment-manifest".to_owned(),
+            manifest_path.display().to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::FullMediumStress)),
+                lane: None,
+                species: Some(SpeciesId::P1Contractive),
+                seed: Some(44),
+                execution_mode: None,
+                parallelism: None,
+                backend: Some(BackendOverride::Cpu),
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: Some(BenchmarkMode::Leaderboard),
+                manifest_path: Some(manifest_path.clone()),
+                logical_name: Some("winner-bakeoff-s44-p1-contractive".to_owned()),
+                question_summary: None,
+                comparison_override: Some(ComparisonContract::authoritative_same_preset()),
+            })
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_command_allows_backend_after_experiment_manifest() {
+        let root = std::env::temp_dir().join(format!(
+            "fractal-exp-manifest-backend-suffix-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let manifest_path = root.join("winner-bakeoff-s45.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "logical_name": "winner-bakeoff-s45-p1-contractive",
+                "preset": "full-medium-stress",
+                "species": "p1_contractive",
+                "seed": 45,
+                "backend": "cpu"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let command = parse_command(vec![
+            "--experiment-manifest".to_owned(),
+            manifest_path.display().to_string(),
+            "--backend".to_owned(),
+            "cpu".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::FullMediumStress)),
+                lane: None,
+                species: Some(SpeciesId::P1Contractive),
+                seed: Some(45),
+                execution_mode: None,
+                parallelism: None,
+                backend: Some(BackendOverride::Cpu),
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: Some(BenchmarkMode::Leaderboard),
+                manifest_path: Some(manifest_path.clone()),
+                logical_name: Some("winner-bakeoff-s45-p1-contractive".to_owned()),
+                question_summary: None,
+                comparison_override: Some(ComparisonContract::authoritative_same_preset()),
+            })
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_command_rejects_conflicting_backend_for_experiment_manifest() {
+        let root = std::env::temp_dir().join(format!(
+            "fractal-exp-manifest-backend-conflict-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let manifest_path = root.join("winner-bakeoff-s46.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "logical_name": "winner-bakeoff-s46-p1-contractive",
+                "preset": "full-medium-stress",
+                "species": "p1_contractive",
+                "seed": 46,
+                "backend": "cpu"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = parse_command(vec![
+            "--backend".to_owned(),
+            "metal".to_owned(),
+            "--experiment-manifest".to_owned(),
+            manifest_path.display().to_string(),
         ])
         .unwrap_err();
 
