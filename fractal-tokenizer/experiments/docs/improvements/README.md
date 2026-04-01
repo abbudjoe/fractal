@@ -57,8 +57,18 @@ Chunking remains important, and it now has a validated packaging layer on top of
 The decision record for that shift is:
 
 - [Held-Out OOV Decision](../held-out-oov-decision.md)
+- [Primitive Kill Criterion](../primitive-kill-criterion.md)
+- [Code/Docs Structural Diagnosis](../code-docs-structural-diagnosis.md)
 
 And the next two architectural specs are:
 
 - [Compositional Motif Vocab Spec](../compositional-motif-vocab-spec.md)
 - [Typed Lexical Fallback Spec](../typed-lexical-fallback-spec.md)
+
+The current decisive rescue spec is:
+
+- [Boundary-Aware Split Spec](../boundary-aware-split-spec.md)
+
+And the explicit stop-and-pivot rule is:
+
+- [Primitive Pivot Plan](../primitive-pivot-plan.md)

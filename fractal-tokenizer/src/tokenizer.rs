@@ -19,12 +19,19 @@ const DEFAULT_LEVELS: usize = 3;
 const TRACKER_REMINDER: &str =
     "Reminder: update docs/tokenizer-tracker.md with the latest tokenizer results.";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitPolicy {
+    Balanced,
+    BoundaryAware,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct TokenizerConfig {
     pub dim: usize,
     pub levels: usize,
     pub max_depth: usize,
     pub seed: u64,
+    pub split_policy: SplitPolicy,
 }
 
 impl Default for TokenizerConfig {
@@ -34,6 +41,7 @@ impl Default for TokenizerConfig {
             levels: DEFAULT_LEVELS,
             max_depth: 6,
             seed: 42,
+            split_policy: SplitPolicy::Balanced,
         }
     }
 }
@@ -210,7 +218,7 @@ impl RecursiveTokenizer {
             return Ok(());
         }
 
-        if let Some(split) = split_point(segment.bytes) {
+        if let Some(split) = split_point(segment.bytes, self.config.split_policy) {
             let (left, right) = segment.bytes.split_at(split);
             self.tokenize_segment(
                 rule,
@@ -551,11 +559,20 @@ fn is_valid_lever_segment(lever: &str) -> bool {
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
 }
 
-fn split_point(bytes: &[u8]) -> Option<usize> {
+fn split_point(bytes: &[u8], policy: SplitPolicy) -> Option<usize> {
     if bytes.len() <= 1 {
         return None;
     }
 
+    let fallback = balanced_split_point(bytes);
+    if policy == SplitPolicy::Balanced {
+        return fallback;
+    }
+
+    boundary_aware_split_point(bytes).or(fallback)
+}
+
+fn balanced_split_point(bytes: &[u8]) -> Option<usize> {
     let mid = bytes.len() / 2;
     let mut best = None;
     for index in 1..bytes.len() {
@@ -568,6 +585,58 @@ fn split_point(bytes: &[u8]) -> Option<usize> {
     }
 
     Some(best.map(|(index, _)| index).unwrap_or(mid.max(1)))
+}
+
+fn boundary_aware_split_point(bytes: &[u8]) -> Option<usize> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    if text.len() <= 1 {
+        return None;
+    }
+
+    let midpoint = text.len() / 2;
+    let min_child_len = 1usize;
+    let mut best: Option<(u8, usize, usize)> = None;
+
+    for (index, _) in text.char_indices().skip(1) {
+        if index <= min_child_len || text.len().saturating_sub(index) <= min_child_len {
+            continue;
+        }
+        let boundary = classify_boundary(text, index)?;
+        let distance = midpoint.abs_diff(index);
+        let candidate = (boundary, distance, index);
+        if best.is_none_or(|current| candidate < current) {
+            best = Some(candidate);
+        }
+    }
+
+    best.map(|(_, _, index)| index)
+}
+
+fn classify_boundary(text: &str, index: usize) -> Option<u8> {
+    let prev = text[..index].chars().next_back()?;
+    let next = text[index..].chars().next()?;
+
+    if text[..index].ends_with("\n\n") || text[index..].starts_with("\n\n") {
+        return Some(0);
+    }
+    if prev == '\n' || next == '\n' {
+        return Some(1);
+    }
+    if is_structural_punctuation(prev) || is_structural_punctuation(next) {
+        return Some(2);
+    }
+    if prev.is_whitespace() || next.is_whitespace() {
+        return Some(3);
+    }
+
+    None
+}
+
+fn is_structural_punctuation(value: char) -> bool {
+    matches!(
+        value,
+        ';' | ':' | ',' | '.' | '{' | '}' | '(' | ')' | '[' | ']' | '#'
+    )
 }
 
 fn segment_features<B: Backend>(bytes: &[u8], dim: usize, device: &B::Device) -> Tensor<B, 2> {
@@ -640,6 +709,53 @@ fn tensor_data_to_vec<E: Element>(
 ) -> Result<Vec<E>, FractalError> {
     data.to_vec::<E>()
         .map_err(|err| FractalError::InvalidState(format!("failed to extract {label}: {err:?}")))
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::{split_point, SplitPolicy};
+
+    #[test]
+    fn boundary_aware_split_prefers_newline_boundaries() {
+        let input = "AAAAAAAAAAAA\n\nBBBBBBBBBBBB";
+        let split = split_point(input.as_bytes(), SplitPolicy::BoundaryAware).unwrap();
+        let prev = input[..split].chars().next_back().unwrap_or('\0');
+        let next = input[split..].chars().next().unwrap_or('\0');
+
+        assert!(prev == '\n' || next == '\n');
+    }
+
+    #[test]
+    fn boundary_aware_split_prefers_code_structure_over_midpoint() {
+        let input =
+            "fn_render_home_identifier_longtail(){AUTH_PROVIDER_2026=1;\nprintln!(\"ok\");\n}\n";
+        let boundary = split_point(input.as_bytes(), SplitPolicy::BoundaryAware).unwrap();
+        let prev = input[..boundary].chars().next_back().unwrap_or('\0');
+        let next = input[boundary..].chars().next().unwrap_or('\0');
+
+        assert!(
+            matches!(prev, '\n' | '{' | ';' | ')' | ':')
+                || matches!(next, '\n' | '{' | ';' | '(' | ':')
+        );
+    }
+
+    #[test]
+    fn boundary_aware_split_falls_back_when_no_boundary_exists() {
+        let input = "abcdefghij";
+        let balanced = split_point(input.as_bytes(), SplitPolicy::Balanced).unwrap();
+        let boundary = split_point(input.as_bytes(), SplitPolicy::BoundaryAware).unwrap();
+
+        assert_eq!(balanced, boundary);
+    }
+
+    #[test]
+    fn split_point_preserves_utf8_boundaries() {
+        let input = "🙂alpha\nbeta語";
+        let split = split_point(input.as_bytes(), SplitPolicy::BoundaryAware).unwrap();
+
+        assert!(std::str::from_utf8(&input.as_bytes()[..split]).is_ok());
+        assert!(std::str::from_utf8(&input.as_bytes()[split..]).is_ok());
+    }
 }
 
 #[allow(dead_code)]

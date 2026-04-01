@@ -138,9 +138,48 @@ The next phase is successful if a rerun of the held-out bakeoff shows:
 - exact round-trip remains perfect
 - UTF-8 and collation guarantees remain intact
 
+## Follow-Up Inspection And New Read
+
+After the first OOV hardening pass landed, deeper inspection showed a second
+structural flaw:
+
+- the so-called compositional vocab was still keyed by exact `record.text`
+- that meant held-out generalization still depended mainly on exact literal
+  recurrence
+- typed lexical fallback prevented byte collapse, but could not create real
+  structural reuse on its own
+
+The next rescue hypothesis was therefore:
+
+- keep typed lexical fallback as the safety floor
+- change motif identity so that held-out spans can match recurring lexical
+  shapes, not only exact induction literals
+
+## First Result After Structural Shape Aliases
+
+Held-out local bakeoff after adding shape-based structural aliases:
+
+- `byte_fallback_docs=0`
+- `motif_hit_docs=15/57`
+- `shape_hit_docs=15/57`
+
+Bucket read:
+
+- `jsonl.signals` improved materially and became a strong held-out win
+- `logs.operational_mixed` stayed a modest win
+- `code.rust`, `code.swift`, and `docs.spec` remained below native-tokenizer
+  parity and were still dominated by lexical fallback
+
+Interpretation:
+
+- structural aliasing is a real improvement
+- it is not yet sufficient to save the primitive on general held-out code/docs
+- the kill criterion remains active
+
 ## Follow-On Specs
 
 This decision is carried forward in:
 
+- [primitive-kill-criterion.md](./primitive-kill-criterion.md)
 - [compositional-motif-vocab-spec.md](./compositional-motif-vocab-spec.md)
 - [typed-lexical-fallback-spec.md](./typed-lexical-fallback-spec.md)

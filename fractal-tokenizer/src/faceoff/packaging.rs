@@ -186,8 +186,10 @@ mod tests {
             tokens,
             fallback: FaceoffFallbackStats {
                 motif_hits: 0,
+                shape_hits: 0,
                 unknown_motifs: 0,
                 recursed_to_children: 0,
+                lexical_fallback_tokens: 0,
                 byte_fallback_tokens: bytes.len(),
             },
         };

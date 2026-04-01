@@ -5,15 +5,17 @@ use fractal_core::error::FractalError;
 use crate::{PrimitiveRunSummary, TokenRecord};
 
 use super::{
-    vocab::token_digest, EncodedDocument, EncodedToken, EncodedTokenKind, FaceoffEmissionPolicy,
-    FaceoffLexemeKind, FaceoffVocab,
+    lexeme::scan_lexemes, vocab::token_digest, EncodedDocument, EncodedToken, EncodedTokenKind,
+    FaceoffEmissionPolicy, FaceoffVocab,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FaceoffFallbackStats {
     pub motif_hits: usize,
+    pub shape_hits: usize,
     pub unknown_motifs: usize,
     pub recursed_to_children: usize,
+    pub lexical_fallback_tokens: usize,
     pub byte_fallback_tokens: usize,
 }
 
@@ -110,6 +112,30 @@ fn encode_node(
         return Ok(());
     }
 
+    if let Some(id) = vocab.shape_id_for_text(literal) {
+        if should_recurse_known {
+            stats.recursed_to_children += 1;
+            for child in &children {
+                encode_node(child, tree, input, vocab, policy, encoded, stats)?;
+            }
+            return Ok(());
+        }
+
+        stats.motif_hits += 1;
+        stats.shape_hits += 1;
+        encoded.push(EncodedToken {
+            id,
+            kind: EncodedTokenKind::Motif {
+                digest: vocab.motif_digest(id).unwrap_or(digest).to_owned(),
+            },
+            depth: record.depth,
+            start: record.start,
+            end: record.end,
+            bytes: input[record.start..record.end].to_vec(),
+        });
+        return Ok(());
+    }
+
     stats.unknown_motifs += 1;
     if children_cover_parent {
         stats.recursed_to_children += 1;
@@ -141,6 +167,7 @@ fn emit_lexical_or_byte_fallback(
                 end: lexeme.end,
                 bytes: lexeme.bytes,
             });
+            stats.lexical_fallback_tokens += 1;
         }
         return;
     }
@@ -158,116 +185,6 @@ fn emit_lexical_or_byte_fallback(
         });
         stats.byte_fallback_tokens += 1;
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct LexemeSpan {
-    kind: FaceoffLexemeKind,
-    start: usize,
-    end: usize,
-    bytes: Vec<u8>,
-}
-
-fn scan_lexemes(text: &str, absolute_start: usize) -> Vec<LexemeSpan> {
-    let mut spans = Vec::new();
-    let mut offset = 0usize;
-
-    while offset < text.len() {
-        let next = consume_lexeme(text, offset);
-        spans.push(LexemeSpan {
-            kind: next.0,
-            start: absolute_start + offset,
-            end: absolute_start + next.1,
-            bytes: text.as_bytes()[offset..next.1].to_vec(),
-        });
-        offset = next.1;
-    }
-
-    spans
-}
-
-fn consume_lexeme(text: &str, start: usize) -> (FaceoffLexemeKind, usize) {
-    let ch = text[start..].chars().next().unwrap_or('\0');
-    if ch == '\n' {
-        return (
-            FaceoffLexemeKind::NewlineIndent,
-            consume_newline_indent(text, start),
-        );
-    }
-    if ch.is_whitespace() {
-        return (
-            FaceoffLexemeKind::Whitespace,
-            consume_while(text, start, |value| value.is_whitespace() && value != '\n'),
-        );
-    }
-    if ch.is_ascii_digit() {
-        return (
-            FaceoffLexemeKind::Number,
-            consume_while(text, start, |value| value.is_ascii_digit()),
-        );
-    }
-    if is_identifier_start(ch) {
-        let end = consume_while(text, start, is_identifier_continue);
-        let kind = if text[start..end]
-            .chars()
-            .all(|value| value.is_alphabetic() && !value.is_uppercase())
-        {
-            FaceoffLexemeKind::Word
-        } else {
-            FaceoffLexemeKind::Identifier
-        };
-        return (kind, end);
-    }
-    if is_punctuation(ch) {
-        return (
-            FaceoffLexemeKind::Punctuation,
-            consume_while(text, start, is_punctuation),
-        );
-    }
-    (
-        FaceoffLexemeKind::SymbolRun,
-        consume_while(text, start, |value| {
-            !value.is_whitespace() && !value.is_alphanumeric() && !is_punctuation(value)
-        }),
-    )
-}
-
-fn consume_newline_indent(text: &str, start: usize) -> usize {
-    let after_newline = start + '\n'.len_utf8();
-    consume_while(text, after_newline, |value| matches!(value, ' ' | '\t'))
-}
-
-fn consume_while(text: &str, start: usize, predicate: impl Fn(char) -> bool) -> usize {
-    let mut end = start;
-    for (offset, ch) in text[start..].char_indices() {
-        if !predicate(ch) {
-            break;
-        }
-        end = start + offset + ch.len_utf8();
-    }
-    end.max(
-        start
-            + text[start..]
-                .chars()
-                .next()
-                .map(char::len_utf8)
-                .unwrap_or(0),
-    )
-}
-
-fn is_identifier_start(value: char) -> bool {
-    value.is_alphabetic() || value == '_'
-}
-
-fn is_identifier_continue(value: char) -> bool {
-    value.is_alphanumeric() || value == '_'
-}
-
-fn is_punctuation(value: char) -> bool {
-    matches!(
-        value,
-        '.' | ',' | ';' | ':' | '!' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\''
-    )
 }
 
 fn should_recurse_known(
@@ -573,7 +490,9 @@ fn motif_reuse_count(
 
 #[cfg(test)]
 mod tests {
-    use super::{scan_lexemes, FaceoffLexemeKind};
+    use crate::FaceoffLexemeKind;
+
+    use super::super::lexeme::scan_lexemes;
 
     #[test]
     fn scan_lexemes_is_deterministic_for_typed_ascii_atoms() {

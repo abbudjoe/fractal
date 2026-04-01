@@ -89,7 +89,10 @@ impl BridgeBatch {
     {
         let mut documents = Vec::with_capacity(batch.len());
         for (document_index, document) in batch.documents().iter().enumerate() {
-            documents.push(BridgeDocument::from_model_document(document_index, document)?);
+            documents.push(BridgeDocument::from_model_document(
+                document_index,
+                document,
+            )?);
         }
         Ok(Self { documents })
     }
@@ -226,8 +229,8 @@ impl BridgeDocument {
 mod tests {
     use super::*;
     use crate::{
-        EncodedDocument, EncodedToken, FaceoffChunk, FaceoffChunkedDocument,
-        FaceoffFallbackStats, FaceoffTokenId,
+        EncodedDocument, EncodedToken, FaceoffChunk, FaceoffChunkedDocument, FaceoffFallbackStats,
+        FaceoffTokenId,
     };
 
     fn encoded_token(
@@ -279,8 +282,10 @@ mod tests {
             ],
             fallback: FaceoffFallbackStats {
                 motif_hits: 2,
+                shape_hits: 0,
                 unknown_motifs: 0,
                 recursed_to_children: 1,
+                lexical_fallback_tokens: 0,
                 byte_fallback_tokens: 0,
             },
         };
@@ -351,12 +356,17 @@ mod tests {
         assert_eq!(token.start, 0);
         assert_eq!(token.end, 2);
         assert_eq!(token.span_len, 2);
-        assert_eq!(bridge.documents[0].fallback, FaceoffFallbackStats {
-            motif_hits: 2,
-            unknown_motifs: 0,
-            recursed_to_children: 1,
-            byte_fallback_tokens: 0,
-        });
+        assert_eq!(
+            bridge.documents[0].fallback,
+            FaceoffFallbackStats {
+                motif_hits: 2,
+                shape_hits: 0,
+                unknown_motifs: 0,
+                recursed_to_children: 1,
+                lexical_fallback_tokens: 0,
+                byte_fallback_tokens: 0,
+            }
+        );
     }
 
     #[test]

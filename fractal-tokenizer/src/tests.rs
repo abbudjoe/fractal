@@ -1407,6 +1407,7 @@ fn faceoff_vocab_config_filters_one_off_large_motifs() {
                 min_occurrence_count: 2,
                 min_doc_count: 2,
                 max_token_bytes: Some(512),
+                ..FaceoffVocabConfig::default()
             },
         )
         .unwrap();
@@ -1445,6 +1446,7 @@ fn faceoff_vocab_recover_descendant_cover_on_held_out_input() {
                 min_occurrence_count: 2,
                 min_doc_count: 2,
                 max_token_bytes: Some(512),
+                ..FaceoffVocabConfig::default()
             },
         )
         .unwrap();
@@ -1461,6 +1463,42 @@ fn faceoff_vocab_recover_descendant_cover_on_held_out_input() {
         encoded.fallback.byte_fallback_tokens < held_out.len(),
         "held-out recovery should not devolve to all-byte fallback"
     );
+}
+
+#[test]
+fn faceoff_vocab_recovers_held_out_shape_aliases() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let induction_a = "fn render_home() {\n    let auth_provider = 2026;\n}\n";
+    let induction_b = "fn render_settings() {\n    let oauth_flow = 2027;\n}\n";
+    let held_out = "fn render_usage() {\n    let experiments = 2028;\n}\n";
+    let corpus = vec![induction_a, induction_b];
+
+    let vocab = faceoff
+        .induce_vocab_from_texts_with_config::<TestBackend>(
+            &corpus,
+            &device,
+            FaceoffVocabConfig {
+                min_occurrence_count: 2,
+                min_doc_count: 2,
+                max_token_bytes: Some(128),
+                ..FaceoffVocabConfig::default()
+            },
+        )
+        .unwrap();
+
+    assert!(!vocab.shape_entries().is_empty());
+
+    let encoded = faceoff
+        .encode_text_v2::<TestBackend>(held_out, &vocab, &device)
+        .unwrap();
+
+    assert_eq!(faceoff.decode_document(&encoded).unwrap(), held_out);
+    assert!(
+        encoded.fallback.shape_hits > 0,
+        "held-out shape-equivalent text should recover at least one shape-based structural hit"
+    );
+    assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
 }
 
 #[test]

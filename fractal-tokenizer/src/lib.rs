@@ -9,7 +9,7 @@ mod tokenizer;
 pub use faceoff::{
     EncodedDocument, EncodedToken, EncodedTokenKind, FaceoffChunk, FaceoffChunkLimits,
     FaceoffChunkedDocument, FaceoffEmissionPolicy, FaceoffFallbackStats, FaceoffLexemeKind,
-    FaceoffTokenId, FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, VocabEntry,
+    FaceoffTokenId, FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, ShapeEntry, VocabEntry,
     FACEOFF_VOCAB_FORMAT_VERSION,
 };
 pub use model_face::{
@@ -25,7 +25,8 @@ pub use primitives::{
 };
 pub use tokenizer::{
     revived_primitive_factories, tokenizer_tracker_reminder, validate_tokenizer_primitive_name,
-    PrimitiveFactory, PrimitiveRunSummary, RecursiveTokenizer, TokenRecord, TokenizerConfig,
+    PrimitiveFactory, PrimitiveRunSummary, RecursiveTokenizer, SplitPolicy, TokenRecord,
+    TokenizerConfig,
 };
 
 #[cfg(test)]

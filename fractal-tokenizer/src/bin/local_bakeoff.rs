@@ -2,7 +2,7 @@ use burn::backend::Candle;
 use fractal_tokenizer::{
     EncodedDocument, FaceoffChunkLimits, FaceoffEmissionPolicy, FaceoffTokenizer, FaceoffVocab,
     HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument, NativeCollationSpec,
-    NativeCompatibilityAdapter,
+    NativeCompatibilityAdapter, SplitPolicy, TokenizerConfig,
 };
 use serde::Serialize;
 use std::{
@@ -81,8 +81,10 @@ struct FractalMetrics {
     avg_chars_per_frontier_token: f64,
     motif_reuse_count: usize,
     fallback_motif_hits: usize,
+    fallback_shape_hits: usize,
     fallback_unknown_motifs: usize,
     fallback_recursed_to_children: usize,
+    fallback_lexical_fallback_tokens: usize,
     fallback_byte_fallback_tokens: usize,
     roundtrip_ok: bool,
     chunk_utf8_ok: bool,
@@ -773,7 +775,10 @@ fn build_fractal_documents(
     _args: &Args,
 ) -> Result<(Vec<DocumentWork>, FaceoffVocab), Box<dyn Error>> {
     let device = Default::default();
-    let tokenizer = FaceoffTokenizer::new(Default::default());
+    let tokenizer = FaceoffTokenizer::new(TokenizerConfig {
+        split_policy: SplitPolicy::BoundaryAware,
+        ..TokenizerConfig::default()
+    });
     let texts = corpus
         .iter()
         .filter(|candidate| candidate.corpus.split == CorpusSplit::Induction)
@@ -813,8 +818,10 @@ fn build_fractal_documents(
                 / encoded.tokens.len().max(1) as f64,
             motif_reuse_count,
             fallback_motif_hits: encoded.fallback.motif_hits,
+            fallback_shape_hits: encoded.fallback.shape_hits,
             fallback_unknown_motifs: encoded.fallback.unknown_motifs,
             fallback_recursed_to_children: encoded.fallback.recursed_to_children,
+            fallback_lexical_fallback_tokens: encoded.fallback.lexical_fallback_tokens,
             fallback_byte_fallback_tokens: encoded.fallback.byte_fallback_tokens,
             roundtrip_ok,
             chunk_utf8_ok,
@@ -1020,6 +1027,7 @@ fn print_summary(results: &[BakeoffRecord], vocab: &FaceoffVocab, args: &Args) {
     println!("BAKEOFF_EVALUATION_FRONTIER_TOKENS={held_out_frontier}");
     println!("BAKEOFF_VOCAB_MOTIFS={}", vocab.motif_count());
     println!("BAKEOFF_OUTPUT_DIR={}", args.output_dir.display());
+    println!("BAKEOFF_SPLIT_POLICY=boundary_aware");
     println!("BAKEOFF_VERDICT_SCOPE=evaluation");
 
     let verdict = summarize_verdict(results);
@@ -1574,8 +1582,10 @@ mod tests {
                 avg_chars_per_frontier_token: 10.0,
                 motif_reuse_count,
                 fallback_motif_hits: 0,
+                fallback_shape_hits: 0,
                 fallback_unknown_motifs: 0,
                 fallback_recursed_to_children: 0,
+                fallback_lexical_fallback_tokens: 0,
                 fallback_byte_fallback_tokens: byte_fallback_tokens,
                 roundtrip_ok,
                 chunk_utf8_ok,

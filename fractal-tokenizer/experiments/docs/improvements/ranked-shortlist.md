@@ -21,21 +21,32 @@ Candidates are ranked by:
 
 ## Latest Trial Snapshot
 
-Most recent completed trial: held-out local bakeoff scoring on the current
-model-facing stack.
+Most recent completed trial: held-out local bakeoff rerun after typed lexical
+fallback, compositional vocab hardening, and structural shape aliases.
 
 - `BAKEOFF_DOCUMENTS=120`
-- `BAKEOFF_INDUCTION_DOCUMENTS=64`
-- `BAKEOFF_EVALUATION_DOCUMENTS=56`
-- `BAKEOFF_VERDICT=YELLOW`
-- `byte_fallback_docs=56`
+- `BAKEOFF_INDUCTION_DOCUMENTS=63`
+- `BAKEOFF_EVALUATION_DOCUMENTS=57`
+- `BAKEOFF_VERDICT=GREEN`
+- `byte_fallback_docs=0`
 - hard-gate failures: `0`
 
 Result:
 
-- the earlier local-only `GREEN` does not survive held-out evaluation
-- the active bottleneck is now held-out OOV behavior, not frontier selection
-- the next ranked work should target the OOV contract directly
+- held-out byte collapse is fixed
+- shape-based structural aliases produced real held-out motif hits
+- `jsonl.signals` became a strong held-out win
+- `code.rust`, `code.swift`, and `docs.spec` are still below native-tokenizer
+  parity
+- the active bottleneck is now held-out structural generalization on code/docs,
+  not frontier selection and not raw OOV collapse
+
+New read:
+
+- code/docs are now failing mainly because they are almost entirely lexicalized
+- the most plausible remaining rescue path is boundary-aware segmentation
+- after that, the repo should pivot to comparing other primitives instead of
+  continuing local `p1` patching
 
 ## Current Baseline
 
@@ -86,57 +97,56 @@ The ranking below applies to **next** frontier candidates. Packaging is now trea
 
 ## Ranked Candidates
 
-### 1. Typed Lexical Fallback Above Bytes
+### 1. Primitive Comparison Pivot
 
 Status:
 
-- `Proposed`
+- `Active`
 
 Why it ranks first now:
 
-- fastest path to stopping total held-out byte collapse
-- preserves meaningful local structure for novel text
-- cleanly complements the existing model-facing contract
+- the one allowed serious rescue pass for `p1` has now been tried
+- it did not materially move the held-out code/docs outcome
+- the experiment pipeline is strong enough to compare primitives honestly
 
 Expected upside:
 
-- held-out docs stop degrading immediately to raw bytes
-- model-facing batches retain words, identifiers, numbers, punctuation, and
-  whitespace as typed units
+- we stop guessing whether `p1` is the right primitive
+- we find out whether another primitive fits code/docs better without adding
+  more local `p1` heuristics
 
 Expected failure mode:
 
-- lexical classes are either too coarse or too fine
+- no better primitive emerges, which would force a broader rethink
 
 Decision:
 
-- implement as the first OOV hardening layer
+- move here now
 
-### 2. Compositional Recurring-Submotif Vocab
+### 2. Boundary-Aware Split For `p1`
 
 Status:
 
-- `Proposed`
+- `Tried`
 
 Why it ranks second now:
 
-- strongest structural fix for memorization-heavy induction
-- should recover reusable descendant cover on held-out docs
-- pairs naturally with typed lexical fallback
+- it was the strongest remaining structural rescue hypothesis for code/docs
+- it directly targeted span-geometry mismatch instead of more fallback tuning
 
 Expected upside:
 
-- held-out docs reuse known internal structure instead of failing at the parent
-  motif boundary
+- code/docs would recover materially more structural hits
+- lexical fallback would stop fully dominating code/docs
 
 Expected failure mode:
 
-- thresholds either over-admit giant memorized motifs or make the vocab too
-  sparse
+- no material change on held-out code/docs
 
 Decision:
 
-- implement alongside lexical fallback as the structural recovery layer
+- tried and not promoted
+- do not spend more cycles here before primitive comparison
 
 ### 3. Novelty-Aware Frontier
 
@@ -159,7 +169,8 @@ Decision:
 1. Typed lexical fallback above bytes
 2. Compositional recurring-submotif vocab
 3. Held-out local bakeoff rerun
-4. Hybrid bakeoff implementation
+4. If still weak on code/docs, primitive comparison pivot
+5. Hybrid bakeoff implementation
 
 ## Promotion Rule
 

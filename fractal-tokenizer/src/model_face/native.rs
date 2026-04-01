@@ -157,16 +157,11 @@ pub struct NativeCollationSpec<T> {
 }
 
 /// Whether overflow should be rejected or truncated to the configured cap.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NativeTruncationPolicy {
+    #[default]
     Reject,
     Truncate,
-}
-
-impl Default for NativeTruncationPolicy {
-    fn default() -> Self {
-        Self::Reject
-    }
 }
 
 impl<T> NativeCollationSpec<T> {
