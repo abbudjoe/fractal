@@ -6,7 +6,7 @@ use crate::{PrimitiveRunSummary, TokenRecord};
 
 use super::{
     vocab::token_digest, EncodedDocument, EncodedToken, EncodedTokenKind, FaceoffEmissionPolicy,
-    FaceoffVocab,
+    FaceoffLexemeKind, FaceoffVocab,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -119,7 +119,33 @@ fn encode_node(
         return Ok(());
     }
 
-    for (offset, value) in input[record.start..record.end].iter().copied().enumerate() {
+    emit_lexical_or_byte_fallback(record, input, vocab, encoded, stats);
+    Ok(())
+}
+
+fn emit_lexical_or_byte_fallback(
+    record: &TokenRecord,
+    input: &[u8],
+    vocab: &FaceoffVocab,
+    encoded: &mut Vec<EncodedToken>,
+    stats: &mut FaceoffFallbackStats,
+) {
+    let span = &input[record.start..record.end];
+    if let Ok(text) = std::str::from_utf8(span) {
+        for lexeme in scan_lexemes(text, record.start) {
+            encoded.push(EncodedToken {
+                id: vocab.lexical_id(lexeme.kind),
+                kind: EncodedTokenKind::Lexical { kind: lexeme.kind },
+                depth: record.depth,
+                start: lexeme.start,
+                end: lexeme.end,
+                bytes: lexeme.bytes,
+            });
+        }
+        return;
+    }
+
+    for (offset, value) in span.iter().copied().enumerate() {
         let start = record.start + offset;
         let end = start + 1;
         encoded.push(EncodedToken {
@@ -132,7 +158,116 @@ fn encode_node(
         });
         stats.byte_fallback_tokens += 1;
     }
-    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LexemeSpan {
+    kind: FaceoffLexemeKind,
+    start: usize,
+    end: usize,
+    bytes: Vec<u8>,
+}
+
+fn scan_lexemes(text: &str, absolute_start: usize) -> Vec<LexemeSpan> {
+    let mut spans = Vec::new();
+    let mut offset = 0usize;
+
+    while offset < text.len() {
+        let next = consume_lexeme(text, offset);
+        spans.push(LexemeSpan {
+            kind: next.0,
+            start: absolute_start + offset,
+            end: absolute_start + next.1,
+            bytes: text.as_bytes()[offset..next.1].to_vec(),
+        });
+        offset = next.1;
+    }
+
+    spans
+}
+
+fn consume_lexeme(text: &str, start: usize) -> (FaceoffLexemeKind, usize) {
+    let ch = text[start..].chars().next().unwrap_or('\0');
+    if ch == '\n' {
+        return (
+            FaceoffLexemeKind::NewlineIndent,
+            consume_newline_indent(text, start),
+        );
+    }
+    if ch.is_whitespace() {
+        return (
+            FaceoffLexemeKind::Whitespace,
+            consume_while(text, start, |value| value.is_whitespace() && value != '\n'),
+        );
+    }
+    if ch.is_ascii_digit() {
+        return (
+            FaceoffLexemeKind::Number,
+            consume_while(text, start, |value| value.is_ascii_digit()),
+        );
+    }
+    if is_identifier_start(ch) {
+        let end = consume_while(text, start, is_identifier_continue);
+        let kind = if text[start..end]
+            .chars()
+            .all(|value| value.is_alphabetic() && !value.is_uppercase())
+        {
+            FaceoffLexemeKind::Word
+        } else {
+            FaceoffLexemeKind::Identifier
+        };
+        return (kind, end);
+    }
+    if is_punctuation(ch) {
+        return (
+            FaceoffLexemeKind::Punctuation,
+            consume_while(text, start, is_punctuation),
+        );
+    }
+    (
+        FaceoffLexemeKind::SymbolRun,
+        consume_while(text, start, |value| {
+            !value.is_whitespace() && !value.is_alphanumeric() && !is_punctuation(value)
+        }),
+    )
+}
+
+fn consume_newline_indent(text: &str, start: usize) -> usize {
+    let after_newline = start + '\n'.len_utf8();
+    consume_while(text, after_newline, |value| matches!(value, ' ' | '\t'))
+}
+
+fn consume_while(text: &str, start: usize, predicate: impl Fn(char) -> bool) -> usize {
+    let mut end = start;
+    for (offset, ch) in text[start..].char_indices() {
+        if !predicate(ch) {
+            break;
+        }
+        end = start + offset + ch.len_utf8();
+    }
+    end.max(
+        start
+            + text[start..]
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or(0),
+    )
+}
+
+fn is_identifier_start(value: char) -> bool {
+    value.is_alphabetic() || value == '_'
+}
+
+fn is_identifier_continue(value: char) -> bool {
+    value.is_alphanumeric() || value == '_'
+}
+
+fn is_punctuation(value: char) -> bool {
+    matches!(
+        value,
+        '.' | ',' | ';' | ':' | '!' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\''
+    )
 }
 
 fn should_recurse_known(
@@ -434,4 +569,46 @@ fn motif_reuse_count(
 ) -> Option<usize> {
     let digest = token_digest(&record.token).ok()?;
     digest_counts.get(digest).copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{scan_lexemes, FaceoffLexemeKind};
+
+    #[test]
+    fn scan_lexemes_is_deterministic_for_typed_ascii_atoms() {
+        let input = "AuthProvider 2026-03-31 ::git-push{ x }\n    next_line";
+
+        let first = scan_lexemes(input, 0);
+        let second = scan_lexemes(input, 0);
+
+        assert_eq!(first, second);
+        assert!(first
+            .iter()
+            .any(|span| span.kind == FaceoffLexemeKind::Identifier));
+        assert!(first
+            .iter()
+            .any(|span| span.kind == FaceoffLexemeKind::Number));
+        assert!(first
+            .iter()
+            .any(|span| span.kind == FaceoffLexemeKind::Whitespace));
+        assert!(first
+            .iter()
+            .any(|span| span.kind == FaceoffLexemeKind::NewlineIndent));
+    }
+
+    #[test]
+    fn scan_lexemes_preserves_utf8_boundaries() {
+        let input = "こんにちは 世界\n🙂 signal";
+        let spans = scan_lexemes(input, 0);
+
+        assert_eq!(
+            spans.iter().map(|span| span.bytes.len()).sum::<usize>(),
+            input.len()
+        );
+        for span in spans {
+            let text = std::str::from_utf8(&span.bytes).unwrap();
+            assert!(!text.is_empty());
+        }
+    }
 }

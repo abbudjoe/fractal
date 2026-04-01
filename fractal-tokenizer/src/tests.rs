@@ -21,11 +21,12 @@ use tokio::{process::Command as TokioCommand, runtime::Builder as TokioRuntimeBu
 use crate::{
     revived_primitive_factories, tokenizer::p1_dynamic_lever_factory,
     validate_tokenizer_primitive_name, B1FractalGated, B3FractalHierarchical, B4Universal,
-    EncodedDocument, EncodedTokenKind, FaceoffChunkLimits, FaceoffEmissionPolicy, FaceoffTokenizer,
-    FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer, ModelFacingBatch,
-    ModelFacingDocument, NativeCollationSpec, NativeCompatibilityAdapter, NativeTokenizer,
-    P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary, RecursiveTokenizer, TokenRecord,
-    TokenizerConfig, FACEOFF_VOCAB_FORMAT_VERSION,
+    EncodedDocument, EncodedTokenKind, FaceoffChunkLimits, FaceoffEmissionPolicy,
+    FaceoffLexemeKind, FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig,
+    HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument, NativeCollationSpec,
+    NativeCompatibilityAdapter, NativeTokenizer, P1FractalHybrid, P2Mandelbrot,
+    PrimitiveRunSummary, RecursiveTokenizer, TokenRecord, TokenizerConfig,
+    FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -1596,7 +1597,53 @@ fn faceoff_fallback_activates_with_partial_vocab() {
     assert_eq!(decoded, stress);
     assert!(encoded.fallback.unknown_motifs > 0);
     assert!(encoded.fallback.recursed_to_children > 0);
-    assert!(encoded.fallback.byte_fallback_tokens > 0);
+    assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
+    assert!(encoded
+        .tokens
+        .iter()
+        .any(|token| matches!(token.kind, EncodedTokenKind::Lexical { .. })));
+}
+
+#[test]
+fn faceoff_lexical_fallback_classifies_typed_atoms_deterministically() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let input = "AuthProvider 2026-03-31 ::git-push{ x }\n    next_line";
+    let partial_vocab = FaceoffVocab::from_token_records([].iter()).unwrap();
+
+    let first = faceoff
+        .encode_text_v2::<TestBackend>(input, &partial_vocab, &device)
+        .unwrap();
+    let second = faceoff
+        .encode_text_v2::<TestBackend>(input, &partial_vocab, &device)
+        .unwrap();
+
+    assert_eq!(faceoff.decode_document(&first).unwrap(), input);
+    assert_eq!(first, second);
+    assert!(first.tokens.iter().any(|token| matches!(
+        token.kind,
+        EncodedTokenKind::Lexical {
+            kind: FaceoffLexemeKind::Identifier
+        }
+    )));
+    assert!(first.tokens.iter().any(|token| matches!(
+        token.kind,
+        EncodedTokenKind::Lexical {
+            kind: FaceoffLexemeKind::Number
+        }
+    )));
+    assert!(first.tokens.iter().any(|token| matches!(
+        token.kind,
+        EncodedTokenKind::Lexical {
+            kind: FaceoffLexemeKind::Whitespace
+        }
+    )));
+    assert!(first.tokens.iter().any(|token| matches!(
+        token.kind,
+        EncodedTokenKind::Lexical {
+            kind: FaceoffLexemeKind::NewlineIndent
+        }
+    )));
 }
 
 #[test]

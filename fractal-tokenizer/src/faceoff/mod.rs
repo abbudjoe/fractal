@@ -36,9 +36,35 @@ impl FaceoffTokenId {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FaceoffLexemeKind {
+    Word,
+    Identifier,
+    Number,
+    Whitespace,
+    NewlineIndent,
+    Punctuation,
+    SymbolRun,
+}
+
+impl FaceoffLexemeKind {
+    pub(crate) fn stable_index(self) -> u32 {
+        match self {
+            Self::Word => 0,
+            Self::Identifier => 1,
+            Self::Number => 2,
+            Self::Whitespace => 3,
+            Self::NewlineIndent => 4,
+            Self::Punctuation => 5,
+            Self::SymbolRun => 6,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EncodedTokenKind {
     Motif { digest: String },
+    Lexical { kind: FaceoffLexemeKind },
     Byte { value: u8 },
 }
 

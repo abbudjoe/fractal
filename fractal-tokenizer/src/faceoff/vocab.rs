@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{PrimitiveRunSummary, TokenRecord};
 
-use super::FaceoffTokenId;
+use super::{FaceoffLexemeKind, FaceoffTokenId};
 
 pub const FACEOFF_VOCAB_FORMAT_VERSION: u32 = 2;
 
@@ -126,6 +126,10 @@ impl FaceoffVocab {
 
     pub fn byte_id(&self, value: u8) -> FaceoffTokenId {
         FaceoffTokenId::new(self.byte_fallback_base + u32::from(value))
+    }
+
+    pub fn lexical_id(&self, kind: FaceoffLexemeKind) -> FaceoffTokenId {
+        FaceoffTokenId::new(self.byte_fallback_base + 256 + kind.stable_index())
     }
 
     pub fn decode_byte_id(&self, id: FaceoffTokenId) -> Option<u8> {

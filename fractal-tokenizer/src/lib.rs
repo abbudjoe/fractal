@@ -8,8 +8,9 @@ mod tokenizer;
 
 pub use faceoff::{
     EncodedDocument, EncodedToken, EncodedTokenKind, FaceoffChunk, FaceoffChunkLimits,
-    FaceoffChunkedDocument, FaceoffEmissionPolicy, FaceoffFallbackStats, FaceoffTokenId,
-    FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, VocabEntry, FACEOFF_VOCAB_FORMAT_VERSION,
+    FaceoffChunkedDocument, FaceoffEmissionPolicy, FaceoffFallbackStats, FaceoffLexemeKind,
+    FaceoffTokenId, FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, VocabEntry,
+    FACEOFF_VOCAB_FORMAT_VERSION,
 };
 pub use model_face::{
     BridgeBatch, BridgeDocument, BridgeFeatureChunk, BridgeFeatureToken, EmbeddingBridgeAdapter,
