@@ -10,9 +10,8 @@ use fractal_tokenizer::{
     FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer,
     ModelFacingBatch, ModelFacingDocument, MotifReusePolicy, NativeCollationSpec,
     NativeCompatibilityAdapter, OverlayBatchPackingStrategy, OverlayDictionaryScope, OverlayPack,
-    OverlaySharingPolicy,
-    PrimitiveFactory, PrototypeGranularityMode, RecursiveOverlayConfig, RecursiveOverlayMode,
-    SplitPolicy, TokenizerConfig, TokenizerSubstrateMode,
+    OverlaySharingPolicy, PrimitiveFactory, PrototypeGranularityMode, RecursiveOverlayConfig,
+    RecursiveOverlayMode, SplitPolicy, TokenizerConfig, TokenizerSubstrateMode,
 };
 use reqwest::blocking::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -3355,8 +3354,7 @@ mod tests {
     #[test]
     fn parse_overlay_mode_rejects_unknown_value() {
         let error = parse_overlay_mode("totally-fake")
-            .err()
-            .expect("unknown overlay mode should error")
+            .expect_err("unknown overlay mode should error")
             .to_string();
         assert!(error.contains("unknown overlay mode `totally-fake`"));
     }

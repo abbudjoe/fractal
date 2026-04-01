@@ -14,6 +14,7 @@ The active post-postmortem pivot is now:
 
 - [canonical-tokenizer-recursive-overlay-spec.md](./canonical-tokenizer-recursive-overlay-spec.md)
 - [shared-overlay-dictionary-spec.md](./shared-overlay-dictionary-spec.md)
+- [overlay-model-facing-transport-spec.md](./overlay-model-facing-transport-spec.md)
 
 This is intentionally **not** another attempt to rescue recursion as the
 primary tokenizer substrate.
@@ -160,6 +161,30 @@ Read:
 - this makes batch packing look more like a runtime scheduling concern than a
   representation-layer bottleneck
 
+Latest `model-facing overlay transport` read on
+`codex/shared-overlay-dictionary-impl`:
+
+- new typed adapter surface:
+  - `OverlayModelFacingDocument`
+  - `OverlayModelFacingBatch`
+  - `OverlayTransportConfig`
+  - `OverlayTransportAdapter`
+  - `OverlayTransportBatch`
+- validation:
+  - invalid overlays are rejected before batching
+  - prepared overlay transport batches expand exactly back to canonical token
+    ids
+  - packing config is preserved explicitly in the prepared batch
+- exactness remains `0` failures in focused transport tests
+
+Read:
+
+- this is the first real model-facing seam for the overlay line
+- `overlay.rs` still owns discovery and packing, while `model_face` now owns a
+  typed adapter layer over that transport
+- this moves the overlay line from shadow-only analysis toward runtime
+  integration without inventing a second tokenizer ABI
+
 ## Tried By Layer
 
 ### Primitive
@@ -257,11 +282,14 @@ Read:
 - HF-backed native tokenizer adapter
 - file-backed pretrained tokenizer smoke tests
 - padding, masking, and multi-document collation
+- typed overlay transport adapter over canonical token ids
 
 Read:
 
 - the packaging and model-facing stack is validated
-- this layer is not currently the bottleneck
+- the new remaining question is no longer whether overlay transport can be
+  typed cleanly; it is how much runtime value we can extract from that typed
+  transport without adding dead weight
 
 ### Evaluation
 

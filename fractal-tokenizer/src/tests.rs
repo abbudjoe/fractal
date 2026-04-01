@@ -24,13 +24,14 @@ use crate::{
     validate_tokenizer_primitive_name, B1FractalGated, B3FractalHierarchical, B4Universal,
     EncodedDocument, EncodedTokenKind, FaceoffChunkLimits, FaceoffEmissionPolicy,
     FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLexemeKind, FaceoffLocalCacheMode,
-    FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer,
-    LocalMacroKind, ModelFacingBatch, ModelFacingDocument, NativeCollationSpec,
-    NativeCompatibilityAdapter, NativeTokenizer, OverlayBatchPackingStrategy,
-    OverlayDictionaryScope, OverlayDocumentMode, OverlayPack, OverlaySharingPolicy,
-    P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary, PrototypeGranularityMode,
-    RecursiveOverlayConfig, RecursiveOverlayMode, RecursiveTokenizer, StateSignature, TokenRecord,
-    TokenizerConfig, TokenizerSubstrateMode, FACEOFF_VOCAB_FORMAT_VERSION,
+    FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer, LocalMacroKind,
+    ModelFacingBatch, ModelFacingDocument, NativeCollationSpec, NativeCompatibilityAdapter,
+    NativeTokenizer, OverlayBatchPackingStrategy, OverlayDictionaryScope, OverlayDocumentMode,
+    OverlayModelFacingBatch, OverlayModelFacingDocument, OverlayPack, OverlaySharingPolicy,
+    OverlayTransportAdapter, OverlayTransportConfig, P1FractalHybrid, P2Mandelbrot,
+    PrimitiveRunSummary, PrototypeGranularityMode, RecursiveOverlayConfig,
+    RecursiveOverlayDocument, RecursiveOverlayMode, RecursiveTokenizer, StateSignature,
+    TokenRecord, TokenizerConfig, TokenizerSubstrateMode, FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -1060,7 +1061,7 @@ fn canonical_overlay_batch_local_factorizes_shared_macro_definitions_exactly() {
         "the setup should produce shared record scaffolds before factorization"
     );
     assert!(
-        factored.shared_factors.len() > 0,
+        !factored.shared_factors.is_empty(),
         "factorization should extract at least one shared definition factor"
     );
     let unfactored_summary = unfactored.transport_summary();
@@ -1141,6 +1142,127 @@ fn canonical_overlay_structure_aware_batch_packing_beats_sequential_fixed_packs(
         structure_aware.summary().definition_overhead_rate()
             < sequential.summary().definition_overhead_rate(),
         "structure-aware packing should amortize dictionary-definition cost better than naive sequential packing"
+    );
+}
+
+#[test]
+fn overlay_model_facing_document_rejects_inexact_overlay() {
+    let invalid_overlay = RecursiveOverlayDocument {
+        canonical: crate::CanonicalTokenization {
+            token_ids: vec![11, 22],
+            offsets: vec![(0, 1), (1, 2)],
+        },
+        mode: OverlayDocumentMode::LocalMacro,
+        macros: vec![crate::LocalMacro {
+            macro_id: 0,
+            kind: LocalMacroKind::RepeatedLine,
+            token_ids: vec![11, 11],
+            use_count: 1,
+        }],
+        segments: vec![crate::OverlaySegment::MacroRef {
+            macro_id: 0,
+            span_len: 2,
+        }],
+    };
+
+    let error = OverlayModelFacingDocument::new(invalid_overlay)
+        .expect_err("inexact overlay should be rejected by the model-facing wrapper");
+    assert!(
+        error
+            .to_string()
+            .contains("overlay model-facing document must expand back"),
+        "expected overlay model-facing validation error, got {error}"
+    );
+}
+
+#[test]
+fn overlay_transport_adapter_prepares_exact_batch_local_transport() {
+    let text_a = "\
+{\"ts\": 1, \"level\": \"info\", \"route\": \"/health\", \"service\": \"auth\", \"status\": 200, \"req\": \"a1\"}\n\
+{\"ts\": 2, \"level\": \"info\", \"route\": \"/health\", \"service\": \"auth\", \"status\": 500, \"req\": \"a2\"}\n\
+";
+    let text_b = "\
+{\"ts\": 3, \"level\": \"info\", \"route\": \"/health\", \"service\": \"auth\", \"status\": 200, \"req\": \"b1\"}\n\
+{\"ts\": 4, \"level\": \"info\", \"route\": \"/health\", \"service\": \"auth\", \"status\": 500, \"req\": \"b2\"}\n\
+";
+    let tokenizer = build_hf_native_tokenizer(&[text_a, text_b]);
+    let overlays = [text_a, text_b]
+        .into_iter()
+        .map(|text| {
+            let canonical = tokenizer.tokenize_with_byte_offsets(text).unwrap();
+            let overlay = build_recursive_overlay(
+                text,
+                canonical,
+                RecursiveOverlayMode::LocalRecordMacro,
+                &RecursiveOverlayConfig::default(),
+            );
+            OverlayModelFacingDocument::new(overlay).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let batch = OverlayModelFacingBatch::new(overlays);
+    let adapter = OverlayTransportAdapter::new(OverlayTransportConfig::default());
+
+    let prepared = adapter.prepare_batch(&batch).unwrap();
+    let document_local = OverlayPack::from_documents(
+        OverlayDictionaryScope::DocumentLocal,
+        &batch
+            .documents()
+            .iter()
+            .map(|document| document.overlay().clone())
+            .collect::<Vec<_>>(),
+    );
+
+    assert!(prepared.exact_ok());
+    assert_eq!(prepared.summary().docs, batch.len());
+    assert_eq!(prepared.summary().pack_count, 1);
+    assert!(
+        prepared.summary().transport_ratio() > document_local.transport_summary().transport_ratio(),
+        "batch-local model-facing transport should amortize shared definitions better than document-local packing"
+    );
+    assert_eq!(prepared.document_views().len(), batch.len());
+}
+
+#[test]
+fn overlay_transport_adapter_respects_packing_config() {
+    let text_a = "\
+2026-04-01T12:00:01Z INFO auth request_id=abc-1 route=/ready status=200 latency_ms=11\n\
+2026-04-01T12:00:02Z INFO auth request_id=abc-2 route=/ready status=500 latency_ms=14\n\
+";
+    let text_b = "\
+2026-04-01T12:01:01Z INFO auth request_id=def-1 route=/ready status=200 latency_ms=09\n\
+2026-04-01T12:01:02Z INFO auth request_id=def-2 route=/ready status=500 latency_ms=13\n\
+";
+    let tokenizer = build_hf_native_tokenizer(&[text_a, text_b]);
+    let batch = OverlayModelFacingBatch::new(
+        [text_a, text_b]
+            .into_iter()
+            .map(|text| {
+                let canonical = tokenizer.tokenize_with_byte_offsets(text).unwrap();
+                let overlay = build_recursive_overlay(
+                    text,
+                    canonical,
+                    RecursiveOverlayMode::LocalRecordMacro,
+                    &RecursiveOverlayConfig::default(),
+                );
+                OverlayModelFacingDocument::new(overlay).unwrap()
+            })
+            .collect(),
+    );
+    let config = OverlayTransportConfig {
+        max_pack_docs: std::num::NonZeroUsize::new(1).unwrap(),
+        strategy: OverlayBatchPackingStrategy::StructureAware,
+        ..OverlayTransportConfig::default()
+    };
+    let adapter = OverlayTransportAdapter::new(config.clone());
+
+    let prepared = adapter.prepare_batch(&batch).unwrap();
+
+    assert!(prepared.exact_ok());
+    assert_eq!(prepared.config(), &config);
+    assert_eq!(prepared.summary().pack_count, 2);
+    assert_eq!(
+        prepared.pack().strategy,
+        OverlayBatchPackingStrategy::StructureAware
     );
 }
 

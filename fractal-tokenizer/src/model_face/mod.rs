@@ -5,6 +5,7 @@ use crate::faceoff::{EncodedDocument, FaceoffChunkLimits, FaceoffChunkedDocument
 mod batch;
 mod bridge;
 mod native;
+mod overlay;
 mod traits;
 
 pub use batch::ModelFacingBatch;
@@ -14,12 +15,15 @@ pub use bridge::{
 };
 pub use native::{
     CanonicalPadSemantics, CanonicalTokenization, HuggingFaceNativeTokenizer,
-    HuggingFaceNativeTokenizerError,
-    ModelFacingDocumentView, NativeCollatedBatch, NativeCollatedChunk, NativeCollatedDocument,
-    NativeCollationError, NativeCollationSpec, NativeCompatibilityAdapter,
-    NativeCompatibilityBatch, NativeCompatibilityError, NativeTokenizedBatch, NativeTokenizedChunk,
-    NativeTokenizedDocument, NativeTokenizer, NativeTruncationPolicy, SlowSentencePieceTokenizer,
-    SlowSentencePieceTokenizerError,
+    HuggingFaceNativeTokenizerError, ModelFacingDocumentView, NativeCollatedBatch,
+    NativeCollatedChunk, NativeCollatedDocument, NativeCollationError, NativeCollationSpec,
+    NativeCompatibilityAdapter, NativeCompatibilityBatch, NativeCompatibilityError,
+    NativeTokenizedBatch, NativeTokenizedChunk, NativeTokenizedDocument, NativeTokenizer,
+    NativeTruncationPolicy, SlowSentencePieceTokenizer, SlowSentencePieceTokenizerError,
+};
+pub use overlay::{
+    OverlayModelFacingBatch, OverlayModelFacingDocument, OverlayTransportAdapter,
+    OverlayTransportBatch, OverlayTransportConfig,
 };
 pub use traits::{ModelAdapter, ModelBatch};
 

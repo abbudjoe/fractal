@@ -16,13 +16,14 @@ pub use faceoff::{
 };
 pub use model_face::{
     BridgeBatch, BridgeDocument, BridgeFeatureChunk, BridgeFeatureToken, CanonicalPadSemantics,
-    CanonicalTokenization,
-    EmbeddingBridgeAdapter, HuggingFaceNativeTokenizer, HuggingFaceNativeTokenizerError,
-    ModelAdapter, ModelBatch, ModelFacingBatch, ModelFacingDocument, NativeCollatedBatch,
-    NativeCollatedChunk, NativeCollatedDocument, NativeCollationError, NativeCollationSpec,
-    NativeCompatibilityAdapter, NativeCompatibilityBatch, NativeCompatibilityError,
-    NativeTokenizedBatch, NativeTokenizedChunk, NativeTokenizedDocument, NativeTokenizer,
-    NativeTruncationPolicy, SlowSentencePieceTokenizer, SlowSentencePieceTokenizerError,
+    CanonicalTokenization, EmbeddingBridgeAdapter, HuggingFaceNativeTokenizer,
+    HuggingFaceNativeTokenizerError, ModelAdapter, ModelBatch, ModelFacingBatch,
+    ModelFacingDocument, NativeCollatedBatch, NativeCollatedChunk, NativeCollatedDocument,
+    NativeCollationError, NativeCollationSpec, NativeCompatibilityAdapter,
+    NativeCompatibilityBatch, NativeCompatibilityError, NativeTokenizedBatch, NativeTokenizedChunk,
+    NativeTokenizedDocument, NativeTokenizer, NativeTruncationPolicy, OverlayModelFacingBatch,
+    OverlayModelFacingDocument, OverlayTransportAdapter, OverlayTransportBatch,
+    OverlayTransportConfig, SlowSentencePieceTokenizer, SlowSentencePieceTokenizerError,
     TypedEmbeddingBridge,
 };
 pub use overlay::{
