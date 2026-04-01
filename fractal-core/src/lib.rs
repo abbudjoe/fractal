@@ -9,13 +9,27 @@ pub mod router;
 pub mod rule_trait;
 pub mod state;
 
-pub use data_generator::{SimpleHierarchicalGenerator, TaskFamily, TokenBatch, PAD_TOKEN};
+pub use data_generator::{
+    GeneratorDepthConfig, SimpleHierarchicalGenerator, TaskFamily, TokenBatch, PAD_TOKEN,
+};
 pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
-pub use lifecycle::{Tournament, TournamentConfig, TournamentPreset, TournamentSequence};
+pub use lifecycle::{
+    ArcSourceMode, ArcSourceSpec, ArtifactPolicy, BatchingPolicy, BudgetSpec, BufferReusePolicy,
+    ComparisonAuthority, ComparisonContract, DecisionIntent, EvalBackendPolicy, ExecutionBackend,
+    ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion, ExperimentSpec,
+    ExperimentSpecTemplate, ForwardExecutionPolicy, LaneIntent, LearningRateScheduleKind,
+    LearningRateScheduleSpec, OptimizerKind, OptimizerSpec, PhaseTiming, RunExecutionOutcome,
+    RunManifest, RunOutcomeClass, RunPhase, RunQualityOutcome, RuntimeBackendPolicy,
+    RuntimeSurfaceSpec, SpeciesCompletion, SpeciesRunArtifact, SpeciesRunStage,
+    TokenizerArtifactSpec, TokenizerBridgeSpec, Tournament, TournamentConfig, TournamentPreset,
+    TournamentProgressEvent, TournamentReporter, TournamentRunArtifact, TournamentSequence,
+    TrainingInputMode, TrainingInputSpec, VariantSpec,
+};
 pub use model::FractalModel;
 pub use registry::{
-    ComputeBackend, CpuBackend, CpuTrainBackend, ExecutionMode, MetalBackend, MetalTrainBackend,
-    SpeciesDefinition, SpeciesId,
+    is_valid_primitive_variant_name, run_species_with_batches, ComputeBackend, CpuBackend,
+    CpuTrainBackend, ExecutionMode, MetalBackend, MetalTrainBackend, PrimitiveVariantName,
+    SpeciesDefinition, SpeciesId, TrainingBatchSet,
 };
 pub use router::EarlyExitRouter;
 pub use state::{FractalState, StateLayout};

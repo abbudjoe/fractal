@@ -5,8 +5,11 @@ use burn::{
 };
 
 use crate::{
-    data_generator::TokenBatch, error::FractalError, router::EarlyExitRouter,
-    rule_trait::FractalRule, state::FractalState,
+    data_generator::TokenBatch,
+    error::FractalError,
+    router::EarlyExitRouter,
+    rule_trait::{ApplyContext, FractalRule},
+    state::FractalState,
 };
 
 #[derive(Module, Debug)]
@@ -112,8 +115,15 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
     ) -> Result<FractalState<B>, FractalError> {
         let depth_limit = force_depth.unwrap_or(self.max_recursion_depth);
         if !use_router {
-            for _ in 0..depth_limit {
-                state = self.rule.apply(&state, &x)?;
+            for depth_index in 0..depth_limit {
+                state = self.rule.apply(
+                    &state,
+                    &x,
+                    ApplyContext {
+                        depth: depth_index + 1,
+                        max_depth: depth_limit,
+                    },
+                )?;
             }
             return Ok(state);
         }
@@ -125,8 +135,15 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
             &device,
         );
 
-        for _ in 0..depth_limit {
-            let next_state = self.rule.apply(&state, &x)?;
+        for depth_index in 0..depth_limit {
+            let next_state = self.rule.apply(
+                &state,
+                &x,
+                ApplyContext {
+                    depth: depth_index + 1,
+                    max_depth: depth_limit,
+                },
+            )?;
             state = state.batch_mask_where(active_mask.clone(), next_state)?;
             let exit_mask = self.router.exit_mask(state.readout());
             active_mask = (active_mask.clone().int() * exit_mask.bool_not().int()).greater_elem(0);

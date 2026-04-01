@@ -1,0 +1,13 @@
+{
+  "logical_name": "canonical-systems-speed-s43-p1-fractal-hybrid",
+  "question_summary": "measure the frozen systems-speed benchmark row for p1_fractal_hybrid_v1 on seed 43",
+  "preset": "full-medium-stress",
+  "species": "p1_fractal_hybrid",
+  "seed": 43,
+  "backend": "cuda",
+  "execution_mode": "sequential",
+  "parallelism": 1,
+  "comparison": "authoritative_same_preset",
+  "benchmark_mode": "systems-speed",
+  "expected_branch": "codex/runpod-cuda-next-tournament"
+}

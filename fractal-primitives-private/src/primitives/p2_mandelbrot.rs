@@ -6,10 +6,12 @@ use burn::{
 
 use fractal_core::{
     error::FractalError,
-    primitives::{complex_square, gated_sigmoid_clamped},
-    rule_trait::FractalRule,
+    primitives::{complex_square, gated_sigmoid},
+    rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
 };
+
+use crate::primitives::{clamp_max_by_row, row_l2_norm};
 
 #[derive(Module, Debug)]
 pub struct P2Mandelbrot<B: Backend> {
@@ -34,11 +36,18 @@ impl<B: Backend> FractalRule<B> for P2Mandelbrot<B> {
         &self,
         state: &FractalState<B>,
         x: &Tensor<B, 2>,
+        _context: ApplyContext,
     ) -> Result<FractalState<B>, FractalError> {
-        let state = state.complex()?;
-        let g = gated_sigmoid_clamped(self.g_proj.forward(x.clone()));
-        let c = self.c_proj.forward(x.clone());
-        Ok(FractalState::Complex(g * complex_square(state) + c))
+        let previous_state = state.complex()?;
+        let clamp_val = gated_sigmoid(row_l2_norm(previous_state.clone()))
+            .mul_scalar(-0.225)
+            .add_scalar(0.9)
+            .repeat(&[1, self.hidden_dim * 2]);
+        let g = clamp_max_by_row(gated_sigmoid(self.g_proj.forward(x.clone())), clamp_val);
+        let c_t = self.c_proj.forward(x.clone());
+        let next = g * complex_square(previous_state) + c_t;
+
+        Ok(FractalState::Complex(next))
     }
 
     fn name(&self) -> &'static str {

@@ -1,10 +1,27 @@
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
 use fractal::{
     aggregate_results,
     error::FractalError,
-    lifecycle::{Tournament, TournamentConfig, TournamentPreset, TournamentSequence},
-    registry::{ComputeBackend, ExecutionMode},
-    species_registry,
+    lifecycle::{
+        ArtifactPolicy, BenchmarkMode, BudgetSpec, ComparisonContract, DecisionIntent,
+        ExecutionBackend, ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
+        ExperimentSpecTemplate, LaneIntent, RunExecutionOutcome, RuntimeSurfaceSpec,
+        SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig, TournamentPreset,
+        TournamentProgressEvent, TournamentReporter, TournamentSequence, TrainingInputSpec,
+    },
+    persist_run_artifacts, primitive_tracker_reminder_lines,
+    registry::{ComputeBackend, ExecutionMode, SpeciesId},
+    species_registry_for_lane, species_registry_for_species, TournamentLane, TournamentRunReport,
 };
+use serde::Deserialize;
 
 fn main() -> Result<(), FractalError> {
     match parse_command(std::env::args().skip(1))? {
@@ -34,32 +51,77 @@ enum BackendOverride {
     #[cfg(feature = "cuda")]
     Cuda,
     Metal,
-    Mlx,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RunOptions {
     selection: Option<RunSelection>,
+    lane: Option<TournamentLane>,
+    species: Option<SpeciesId>,
     seed: Option<u64>,
     execution_mode: Option<ExecutionMode>,
+    parallelism: Option<usize>,
     backend: Option<BackendOverride>,
+    perplexity_eval_batches: Option<usize>,
+    arc_eval_batches: Option<usize>,
+    benchmark_mode: Option<BenchmarkMode>,
+    manifest_path: Option<PathBuf>,
+    logical_name: Option<String>,
+    question_summary: Option<String>,
+    comparison_override: Option<ComparisonContract>,
 }
 
 impl Default for RunOptions {
     fn default() -> Self {
         Self {
             selection: None,
+            lane: None,
+            species: None,
             seed: None,
             execution_mode: None,
+            parallelism: None,
             backend: None,
+            perplexity_eval_batches: None,
+            arc_eval_batches: None,
+            benchmark_mode: None,
+            manifest_path: None,
+            logical_name: None,
+            question_summary: None,
+            comparison_override: None,
         }
     }
 }
 
 impl RunOptions {
+    fn ensure_manifest_isolated(&self) -> Result<(), FractalError> {
+        let mut normalized = self.clone();
+        normalized.backend = None;
+        if normalized != Self::default() {
+            return Err(invalid_argument(
+                "--experiment-manifest cannot be combined with other run-shaping flags".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_no_manifest_source(&self) -> Result<(), FractalError> {
+        if self.manifest_path.is_some() {
+            return Err(invalid_argument(
+                "--experiment-manifest must be the only run-shaping input".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     fn selection(&self) -> RunSelection {
-        self.selection
-            .unwrap_or(RunSelection::Preset(TournamentPreset::Default))
+        self.selection.unwrap_or_else(|| {
+            let preset = if self.species.is_some() {
+                TournamentPreset::CandidateStress
+            } else {
+                self.lane.unwrap_or(TournamentLane::All).default_preset()
+            };
+            RunSelection::Preset(preset)
+        })
     }
 
     fn set_selection(&mut self, selection: RunSelection) -> Result<(), FractalError> {
@@ -71,6 +133,42 @@ impl RunOptions {
         Ok(())
     }
 
+    fn set_lane(&mut self, lane: TournamentLane) -> Result<(), FractalError> {
+        if self.species.is_some() {
+            return Err(invalid_argument(
+                "choose either --lane or --species, not both".to_owned(),
+            ));
+        }
+        if self.lane.replace(lane).is_some() {
+            return Err(invalid_argument(
+                "choose one --lane value for a run".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn set_species(&mut self, species: SpeciesId) -> Result<(), FractalError> {
+        if self.lane.is_some() {
+            return Err(invalid_argument(
+                "choose either --lane or --species, not both".to_owned(),
+            ));
+        }
+        if self.species.replace(species).is_some() {
+            return Err(invalid_argument(
+                "choose one --species value for a run".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn lane(&self) -> TournamentLane {
+        self.lane.unwrap_or(TournamentLane::All)
+    }
+
+    fn species(&self) -> Option<SpeciesId> {
+        self.species
+    }
+
     fn config_for(&self, preset: TournamentPreset) -> TournamentConfig {
         let mut config = preset.config();
         if let Some(seed) = self.seed {
@@ -79,11 +177,187 @@ impl RunOptions {
         if let Some(execution_mode) = self.execution_mode {
             config.execution_mode = execution_mode;
         }
+        if let Some(parallelism) = self.parallelism {
+            config.parallelism = parallelism;
+        }
         if let Some(backend) = self.backend {
             config.execution_backend = backend.into();
         }
+        if let Some(perplexity_eval_batches) = self.perplexity_eval_batches {
+            config.perplexity_eval_batches = Some(perplexity_eval_batches);
+        }
+        if let Some(arc_eval_batches) = self.arc_eval_batches {
+            config.arc_eval_batches = Some(arc_eval_batches);
+        }
         config
     }
+
+    fn comparison_for(&self, fallback: ComparisonContract) -> ComparisonContract {
+        self.comparison_override.clone().unwrap_or(fallback)
+    }
+
+    fn runtime_surface_spec(&self) -> RuntimeSurfaceSpec {
+        let mut runtime = RuntimeSurfaceSpec::default();
+        if let Some(benchmark_mode) = self.benchmark_mode {
+            runtime.benchmark_mode = benchmark_mode;
+        }
+        runtime
+    }
+
+    fn merge_manifest(self, path: &Path) -> Result<Self, FractalError> {
+        let explicit_backend = self.backend;
+        let mut loaded = load_manifest_run_options(path)?;
+        if let Some(explicit_backend) = explicit_backend {
+            if let Some(manifest_backend) = loaded.backend {
+                if manifest_backend != explicit_backend {
+                    return Err(invalid_argument(format!(
+                        "--backend {} conflicts with experiment manifest backend {}",
+                        backend_override_name(explicit_backend),
+                        backend_override_name(manifest_backend),
+                    )));
+                }
+            }
+            loaded.backend = Some(explicit_backend);
+        }
+        Ok(loaded)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExperimentManifestFile {
+    logical_name: String,
+    #[serde(default)]
+    question_summary: Option<String>,
+    preset: String,
+    #[serde(default)]
+    lane: Option<String>,
+    #[serde(default)]
+    species: Option<String>,
+    #[serde(default)]
+    seed: Option<u64>,
+    #[serde(default)]
+    execution_mode: Option<String>,
+    #[serde(default)]
+    parallelism: Option<usize>,
+    #[serde(default)]
+    backend: Option<String>,
+    #[serde(default)]
+    perplexity_eval_batches: Option<usize>,
+    #[serde(default)]
+    arc_eval_batches: Option<usize>,
+    #[serde(default)]
+    comparison: Option<String>,
+    #[serde(default)]
+    benchmark_mode: Option<String>,
+    #[serde(default)]
+    expected_branch: Option<String>,
+    #[serde(default)]
+    expected_commit_sha: Option<String>,
+}
+
+impl ExperimentManifestFile {
+    fn into_run_options(self, path: &Path) -> Result<RunOptions, FractalError> {
+        if self.logical_name.trim().is_empty() {
+            return Err(invalid_argument(format!(
+                "experiment manifest {} must define a non-empty logical_name",
+                path.display()
+            )));
+        }
+        if self.lane.is_some() && self.species.is_some() {
+            return Err(invalid_argument(format!(
+                "experiment manifest {} must choose either lane or species, not both",
+                path.display()
+            )));
+        }
+
+        validate_manifest_identity(path, &self.expected_branch, &self.expected_commit_sha)?;
+
+        Ok(RunOptions {
+            selection: Some(RunSelection::Preset(parse_preset(&self.preset)?)),
+            lane: self.lane.as_deref().map(parse_lane).transpose()?,
+            species: self.species.as_deref().map(parse_species).transpose()?,
+            seed: self.seed,
+            execution_mode: self
+                .execution_mode
+                .as_deref()
+                .map(parse_execution_mode)
+                .transpose()?,
+            parallelism: self.parallelism,
+            backend: self.backend.as_deref().map(parse_backend).transpose()?,
+            perplexity_eval_batches: self.perplexity_eval_batches,
+            arc_eval_batches: self.arc_eval_batches,
+            benchmark_mode: Some(parse_benchmark_mode(
+                self.benchmark_mode.as_deref().unwrap_or("leaderboard"),
+            )?),
+            manifest_path: Some(path.to_path_buf()),
+            logical_name: Some(self.logical_name),
+            question_summary: self.question_summary,
+            comparison_override: Some(parse_comparison_name(
+                self.comparison
+                    .as_deref()
+                    .unwrap_or("authoritative_same_preset"),
+            )?),
+        })
+    }
+}
+
+fn load_manifest_run_options(path: &Path) -> Result<RunOptions, FractalError> {
+    let content = fs::read_to_string(path)
+        .map_err(|error| invalid_argument(format!("failed to read {}: {error}", path.display())))?;
+    let manifest: ExperimentManifestFile = serde_json::from_str(&content).map_err(|error| {
+        invalid_argument(format!(
+            "failed to parse experiment manifest {}: {error}",
+            path.display()
+        ))
+    })?;
+    manifest.into_run_options(path)
+}
+
+fn validate_manifest_identity(
+    path: &Path,
+    expected_branch: &Option<String>,
+    expected_commit_sha: &Option<String>,
+) -> Result<(), FractalError> {
+    if let Some(expected_branch) = expected_branch {
+        let current_branch = detect_git_ref("FRACTAL_BRANCH", &["rev-parse", "--abbrev-ref", "HEAD"])
+            .ok_or_else(|| {
+                invalid_argument(format!(
+                    "experiment manifest {} requires branch {}, but the current branch could not be detected",
+                    path.display(),
+                    expected_branch
+                ))
+            })?;
+        if current_branch != *expected_branch {
+            return Err(invalid_argument(format!(
+                "experiment manifest {} requires branch {}, found {}",
+                path.display(),
+                expected_branch,
+                current_branch
+            )));
+        }
+    }
+
+    if let Some(expected_commit_sha) = expected_commit_sha {
+        let current_commit = detect_git_ref("FRACTAL_COMMIT_SHA", &["rev-parse", "HEAD"])
+            .ok_or_else(|| {
+                invalid_argument(format!(
+                    "experiment manifest {} requires commit {}, but the current commit could not be detected",
+                    path.display(),
+                    expected_commit_sha
+                ))
+            })?;
+        if current_commit != *expected_commit_sha {
+            return Err(invalid_argument(format!(
+                "experiment manifest {} requires commit {}, found {}",
+                path.display(),
+                expected_commit_sha,
+                current_commit
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 impl From<BackendOverride> for ComputeBackend {
@@ -93,7 +367,6 @@ impl From<BackendOverride> for ComputeBackend {
             #[cfg(feature = "cuda")]
             BackendOverride::Cuda => ComputeBackend::cuda_default(),
             BackendOverride::Metal => ComputeBackend::metal_default(),
-            BackendOverride::Mlx => ComputeBackend::mlx_default(),
         }
     }
 }
@@ -118,29 +391,91 @@ where
     I: Iterator<Item = String>,
 {
     match arg.as_str() {
+        "--experiment-manifest" => {
+            options.ensure_manifest_isolated()?;
+            let value = next_value(args, "--experiment-manifest")?;
+            *options = options.clone().merge_manifest(Path::new(&value))?;
+            Ok(())
+        }
         "--preset" => {
+            options.ensure_no_manifest_source()?;
             let value = next_value(args, "--preset")?;
             options.set_selection(RunSelection::Preset(parse_preset(&value)?))?;
             Ok(())
         }
         "--sequence" => {
+            options.ensure_no_manifest_source()?;
             let value = next_value(args, "--sequence")?;
             options.set_selection(RunSelection::Sequence(parse_sequence(&value)?))?;
             Ok(())
         }
+        "--lane" => {
+            options.ensure_no_manifest_source()?;
+            let value = next_value(args, "--lane")?;
+            options.set_lane(parse_lane(&value)?)?;
+            Ok(())
+        }
+        "--species" => {
+            options.ensure_no_manifest_source()?;
+            let value = next_value(args, "--species")?;
+            options.set_species(parse_species(&value)?)?;
+            Ok(())
+        }
         "--seed" => {
+            options.ensure_no_manifest_source()?;
             let value = next_value(args, "--seed")?;
             options.seed = Some(parse_seed(&value)?);
             Ok(())
         }
         "--mode" => {
+            options.ensure_no_manifest_source()?;
             let value = next_value(args, "--mode")?;
             options.execution_mode = Some(parse_execution_mode(&value)?);
             Ok(())
         }
+        "--parallelism" => {
+            options.ensure_no_manifest_source()?;
+            let value = next_value(args, "--parallelism")?;
+            options.parallelism = Some(parse_parallelism(&value)?);
+            Ok(())
+        }
         "--backend" => {
             let value = next_value(args, "--backend")?;
-            options.backend = Some(parse_backend(&value)?);
+            let backend = parse_backend(&value)?;
+            if options.manifest_path.is_some() {
+                if let Some(current_backend) = options.backend {
+                    if current_backend != backend {
+                        return Err(invalid_argument(format!(
+                            "--backend {} conflicts with experiment manifest backend {}",
+                            backend_override_name(backend),
+                            backend_override_name(current_backend),
+                        )));
+                    }
+                }
+                options.backend = Some(backend);
+                return Ok(());
+            }
+            options.ensure_no_manifest_source()?;
+            options.backend = Some(backend);
+            Ok(())
+        }
+        "--perplexity-eval-batches" => {
+            options.ensure_no_manifest_source()?;
+            let value = next_value(args, "--perplexity-eval-batches")?;
+            options.perplexity_eval_batches =
+                Some(parse_positive_usize(&value, "--perplexity-eval-batches")?);
+            Ok(())
+        }
+        "--arc-eval-batches" => {
+            options.ensure_no_manifest_source()?;
+            let value = next_value(args, "--arc-eval-batches")?;
+            options.arc_eval_batches = Some(parse_positive_usize(&value, "--arc-eval-batches")?);
+            Ok(())
+        }
+        "--benchmark-mode" => {
+            options.ensure_no_manifest_source()?;
+            let value = next_value(args, "--benchmark-mode")?;
+            options.benchmark_mode = Some(parse_benchmark_mode(&value)?);
             Ok(())
         }
         _ => Err(invalid_argument(format!("unknown argument: {arg}"))),
@@ -160,7 +495,23 @@ fn parse_preset(value: &str) -> Result<TournamentPreset, FractalError> {
         "default" => Ok(TournamentPreset::Default),
         "fast-test" => Ok(TournamentPreset::FastTest),
         "research-medium" => Ok(TournamentPreset::ResearchMedium),
+        "challenger-lane" => Ok(TournamentPreset::ChallengerLane),
+        "minimal-baseline" => Ok(TournamentPreset::MinimalBaseline),
+        "minimal-stress-lane" | "minimal_stress_lane" => Ok(TournamentPreset::MinimalStressLane),
+        "minimal-proving-ground" => Ok(TournamentPreset::MinimalProvingGround),
+        "proving-ground-baseline" | "proving_ground_baseline" => {
+            Ok(TournamentPreset::ProvingGroundBaseline)
+        }
+        "bullpen-polish" => Ok(TournamentPreset::BullpenPolish),
+        "lighter-intermediate-stress" | "lighter_intermediate_stress" => {
+            Ok(TournamentPreset::LighterIntermediateStress)
+        }
+        "intermediate-stress" => Ok(TournamentPreset::IntermediateStress),
+        "full-medium-stress" | "full_medium_stress" => Ok(TournamentPreset::FullMediumStress),
+        "medium-stress" => Ok(TournamentPreset::MediumStress),
         "pressure-test" => Ok(TournamentPreset::PressureTest),
+        "candidate-stress" => Ok(TournamentPreset::CandidateStress),
+        "generation-four" => Ok(TournamentPreset::GenerationFour),
         _ => Err(invalid_argument(format!("unknown preset: {value}"))),
     }
 }
@@ -178,6 +529,23 @@ fn parse_seed(value: &str) -> Result<u64, FractalError> {
         .map_err(|_| invalid_argument(format!("invalid seed: {value}")))
 }
 
+fn parse_lane(value: &str) -> Result<TournamentLane, FractalError> {
+    match value {
+        "all" => Ok(TournamentLane::All),
+        "baseline" => Ok(TournamentLane::Baseline),
+        "challenger" | "bullpen" => Ok(TournamentLane::Challenger),
+        "proving-ground" | "squaring" => Ok(TournamentLane::ProvingGround),
+        "leader" => Ok(TournamentLane::Leader),
+        _ => Err(invalid_argument(format!("unknown lane: {value}"))),
+    }
+}
+
+fn parse_species(value: &str) -> Result<SpeciesId, FractalError> {
+    value
+        .parse::<SpeciesId>()
+        .map_err(|_| invalid_argument(format!("unknown species: {value}")))
+}
+
 fn parse_execution_mode(value: &str) -> Result<ExecutionMode, FractalError> {
     match value {
         "sequential" => Ok(ExecutionMode::Sequential),
@@ -186,21 +554,83 @@ fn parse_execution_mode(value: &str) -> Result<ExecutionMode, FractalError> {
     }
 }
 
+fn parse_parallelism(value: &str) -> Result<usize, FractalError> {
+    parse_positive_usize(value, "--parallelism")
+}
+
+fn parse_positive_usize(value: &str, flag: &str) -> Result<usize, FractalError> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| invalid_argument(format!("invalid value for {flag}: {value}")))?;
+    if parsed == 0 {
+        return Err(invalid_argument(format!(
+            "{flag} must be greater than zero"
+        )));
+    }
+    Ok(parsed)
+}
+
 fn parse_backend(value: &str) -> Result<BackendOverride, FractalError> {
     match value {
         "cpu" => Ok(BackendOverride::Cpu),
         #[cfg(feature = "cuda")]
         "cuda" => Ok(BackendOverride::Cuda),
         "metal" => Ok(BackendOverride::Metal),
-        "mlx" => Ok(BackendOverride::Mlx),
         _ => Err(invalid_argument(format!("unknown backend: {value}"))),
+    }
+}
+
+fn parse_benchmark_mode(value: &str) -> Result<BenchmarkMode, FractalError> {
+    match value {
+        "leaderboard" => Ok(BenchmarkMode::Leaderboard),
+        "systems-speed" | "systems_speed" => Ok(BenchmarkMode::SystemsSpeed),
+        _ => Err(invalid_argument(format!("unknown benchmark mode: {value}"))),
+    }
+}
+
+fn parse_comparison_name(value: &str) -> Result<ComparisonContract, FractalError> {
+    match value {
+        "authoritative_same_preset" | "authoritative same-preset" => {
+            Ok(ComparisonContract::authoritative_same_preset())
+        }
+        "advisory_mixed_preset" | "advisory mixed-preset" => {
+            Ok(ComparisonContract::advisory_mixed_preset())
+        }
+        "advisory_same_preset" | "advisory same-preset" => Ok(ComparisonContract {
+            authority: fractal::ComparisonAuthority::Advisory,
+            requires_same_preset: true,
+            requires_same_runtime_surfaces: true,
+            requires_frozen_commit: false,
+            requires_same_backend: true,
+        }),
+        "authoritative_mixed_preset" | "authoritative mixed-preset" => Ok(ComparisonContract {
+            authority: fractal::ComparisonAuthority::Authoritative,
+            requires_same_preset: false,
+            requires_same_runtime_surfaces: true,
+            requires_frozen_commit: true,
+            requires_same_backend: true,
+        }),
+        _ => Err(invalid_argument(format!(
+            "unknown comparison contract: {value}"
+        ))),
     }
 }
 
 fn run_options(options: &RunOptions) -> Result<(), FractalError> {
     match options.selection() {
-        RunSelection::Preset(preset) => run_preset(options, preset),
-        RunSelection::Sequence(sequence) => run_sequence(options, sequence),
+        RunSelection::Preset(preset) => run_preset(
+            options,
+            preset,
+            options.comparison_for(ComparisonContract::authoritative_same_preset()),
+        ),
+        RunSelection::Sequence(sequence) => {
+            if options.manifest_path.is_some() {
+                return Err(invalid_argument(
+                    "experiment manifests cannot use sequence mode".to_owned(),
+                ));
+            }
+            run_sequence(options, sequence)
+        }
     }
 }
 
@@ -209,40 +639,301 @@ fn run_sequence(options: &RunOptions, sequence: TournamentSequence) -> Result<()
         if index > 0 {
             println!();
         }
-        run_preset(options, preset)?;
+        run_preset(options, preset, ComparisonContract::advisory_mixed_preset())?;
     }
     Ok(())
 }
 
-fn run_preset(options: &RunOptions, preset: TournamentPreset) -> Result<(), FractalError> {
-    let config = options.config_for(preset);
-    print_header(preset, &config);
-    let tournament = Tournament::new(config)?;
-    let results = aggregate_results(tournament.run_generation(species_registry())?);
-    print_results(results);
+fn run_preset(
+    options: &RunOptions,
+    preset: TournamentPreset,
+    comparison: ComparisonContract,
+) -> Result<(), FractalError> {
+    let lane = options.lane();
+    let species = options.species();
+    let base_config = options.config_for(preset);
+    let config = base_config
+        .clone()
+        .with_experiment(build_experiment_template(
+            preset,
+            lane,
+            species,
+            &comparison,
+            &base_config,
+            options,
+        ));
+    print_header(preset, lane, species, &config, &comparison);
+    let tournament = Tournament::new(config.clone())?;
+    let reporter: Arc<dyn TournamentReporter> = Arc::new(StdoutProgressReporter);
+    let species = if let Some(species) = species {
+        species_registry_for_species(species)
+    } else {
+        species_registry_for_lane(lane)
+    };
+    let artifact = tournament.run_generation_artifacts(&species, Some(reporter))?;
+    let results = aggregate_results(
+        artifact
+            .species
+            .iter()
+            .filter_map(|record| record.metrics.clone())
+            .collect::<Vec<_>>(),
+    );
+    let report = TournamentRunReport::new(
+        preset,
+        lane,
+        comparison,
+        config,
+        species,
+        results,
+        artifact,
+        BTreeMap::new(),
+    );
+    let persisted = persist_run_artifacts(&report)?;
+    print_results(&report);
+    print_failures(&report);
+    print_primitive_tracker_reminder(&report);
+    println!(
+        "artifacts={} manifest={}",
+        persisted.artifact_path.display(),
+        persisted.manifest_path.display()
+    );
+    ensure_successful_execution(&report)?;
     Ok(())
 }
 
-fn print_header(preset: TournamentPreset, config: &TournamentConfig) {
+fn build_experiment_template(
+    preset: TournamentPreset,
+    lane: TournamentLane,
+    species: Option<SpeciesId>,
+    comparison: &ComparisonContract,
+    config: &TournamentConfig,
+    options: &RunOptions,
+) -> ExperimentSpecTemplate {
+    let run_id = std::env::var("FRACTAL_RUN_ID").unwrap_or_else(|_| {
+        format!(
+            "{}-{}-{}",
+            current_unix_ms(),
+            preset.name(),
+            species
+                .map(|species| species.as_str().to_owned())
+                .unwrap_or_else(|| lane.name().to_owned())
+        )
+    });
+    let scope = species
+        .map(|species| format!("species={species}"))
+        .unwrap_or_else(|| format!("lane={}", lane.name()));
+    let logical_name = options
+        .logical_name
+        .clone()
+        .unwrap_or_else(|| format!("{}-{}", preset.name(), scope.replace('=', "-")));
+    let question_summary = options
+        .question_summary
+        .clone()
+        .unwrap_or_else(|| format!("evaluate {scope} on {}", preset.name()));
+
+    ExperimentSpecTemplate {
+        experiment_id: ExperimentId {
+            logical_name,
+            run_id,
+            branch: detect_git_ref("FRACTAL_BRANCH", &["rev-parse", "--abbrev-ref", "HEAD"]),
+            commit_sha: detect_git_ref("FRACTAL_COMMIT_SHA", &["rev-parse", "HEAD"]),
+            created_at_unix_ms: current_unix_ms(),
+        },
+        question: ExperimentQuestion {
+            summary: question_summary,
+            lane_intent: lane_intent_for_preset(preset),
+            decision_intent: decision_intent_for_contract(comparison),
+        },
+        budget: BudgetSpec::from_config(preset, config),
+        optimizer: config.optimizer.clone(),
+        training_input: TrainingInputSpec::synthetic(),
+        runtime: options.runtime_surface_spec(),
+        comparison: comparison.clone(),
+        execution: ExecutionTarget {
+            kind: if std::env::var_os("FRACTAL_RUN_POD_ID").is_some() {
+                ExecutionTargetKind::RunPod
+            } else {
+                ExecutionTargetKind::Local
+            },
+            backend: ExecutionBackend::from_compute_backend(&config.execution_backend),
+            execution_mode: config.execution_mode,
+            pod_id: std::env::var("FRACTAL_RUN_POD_ID").ok(),
+            wrapper_timeout_seconds: std::env::var("FRACTAL_WRAPPER_TIMEOUT_SECONDS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok()),
+        },
+        artifacts: ArtifactPolicy::default(),
+    }
+}
+
+fn lane_intent_for_preset(preset: TournamentPreset) -> LaneIntent {
+    match preset {
+        TournamentPreset::FastTest
+        | TournamentPreset::Default
+        | TournamentPreset::ResearchMedium
+        | TournamentPreset::ChallengerLane => LaneIntent::Benchmark,
+        TournamentPreset::MinimalProvingGround
+        | TournamentPreset::ProvingGroundBaseline
+        | TournamentPreset::BullpenPolish => LaneIntent::Bullpen,
+        TournamentPreset::MinimalBaseline
+        | TournamentPreset::MinimalStressLane
+        | TournamentPreset::LighterIntermediateStress
+        | TournamentPreset::IntermediateStress
+        | TournamentPreset::CandidateStress => LaneIntent::Validation,
+        TournamentPreset::FullMediumStress
+        | TournamentPreset::MediumStress
+        | TournamentPreset::PressureTest
+        | TournamentPreset::GenerationFour => LaneIntent::Winner,
+    }
+}
+
+fn decision_intent_for_contract(comparison: &ComparisonContract) -> DecisionIntent {
+    if comparison.is_authoritative_same_preset() {
+        DecisionIntent::Promote
+    } else {
+        DecisionIntent::Benchmark
+    }
+}
+
+fn current_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn detect_git_ref(env_var: &str, args: &[&str]) -> Option<String> {
+    if let Ok(value) = std::env::var(env_var) {
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+
+    let output = Command::new("git").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+fn print_header(
+    preset: TournamentPreset,
+    lane: TournamentLane,
+    species: Option<SpeciesId>,
+    config: &TournamentConfig,
+    comparison: &ComparisonContract,
+) {
     println!("== {} ==", preset.name());
+    let scope = species
+        .map(|species| format!("species={species}"))
+        .unwrap_or_else(|| format!("lane={}", lane.name()));
     println!(
-        "backend={} mode={} seed={} dim={} levels={} seq={} depth={} batch={} train_steps={} eval_batches={}",
+        "{} backend={} mode={} parallelism={} seed={} dim={} levels={} seq={} depth={} stability_depth={} train_batch={} eval_batch={} train_steps={} eval_batches={} perplexity_eval_batches={} arc_eval_batches={}",
+        scope,
         backend_name(&config.execution_backend),
         execution_mode_name(config.execution_mode),
+        config.parallelism,
         config.seed,
         config.dim,
         config.levels,
         config.max_seq_len,
         config.max_recursion_depth,
-        config.batch_size,
+        config.stability_depth,
+        config.train_batch_size,
+        config.eval_batch_size,
         config.train_steps_per_species,
         config.eval_batches_per_family,
+        config.effective_perplexity_eval_batches(),
+        config.effective_arc_eval_batches(),
     );
+    println!(
+        "comparison={} runtime={}",
+        comparison.label(),
+        config
+            .experiment
+            .as_ref()
+            .map(|experiment| experiment.runtime.label())
+            .unwrap_or_else(|| RuntimeSurfaceSpec::default().label())
+    );
+    if !config.species_overrides.is_empty() {
+        println!(
+            "temporary_overrides={}",
+            config
+                .species_overrides
+                .iter()
+                .map(format_species_override)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     println!("rank  species                  stability  perplexity  arc_acc  tok/s   fitness");
 }
 
-fn print_results(results: Vec<fractal::RankedSpeciesResult>) {
-    for result in results {
+fn format_species_override(
+    override_config: &fractal_core::lifecycle::SpeciesPresetOverride,
+) -> String {
+    let mut fields = Vec::new();
+    if let Some(train_batch_size) = override_config.train_batch_size {
+        fields.push(format!("train_batch={train_batch_size}"));
+    }
+    if let Some(eval_batch_size) = override_config.eval_batch_size {
+        fields.push(format!("eval_batch={eval_batch_size}"));
+    }
+    if let Some(train_steps_per_species) = override_config.train_steps_per_species {
+        fields.push(format!("train_steps={train_steps_per_species}"));
+    }
+    if let Some(max_recursion_depth) = override_config.max_recursion_depth {
+        fields.push(format!("depth={max_recursion_depth}"));
+    }
+    if let Some(stability_depth) = override_config.stability_depth {
+        fields.push(format!("stability_depth={stability_depth}"));
+    }
+
+    format!("{}({})", override_config.species, fields.join(" "))
+}
+
+struct StdoutProgressReporter;
+
+impl TournamentReporter for StdoutProgressReporter {
+    fn on_event(&self, event: TournamentProgressEvent) {
+        match event {
+            TournamentProgressEvent::SpeciesStarted(stage) => print_species_started(&stage),
+            TournamentProgressEvent::SpeciesCompleted(completion) => {
+                print_species_completed(&completion)
+            }
+        }
+    }
+}
+
+fn print_species_started(stage: &SpeciesRunStage) {
+    println!(
+        "[start {}/{}] {}",
+        stage.ordinal, stage.total, stage.species
+    );
+}
+
+fn print_species_completed(completion: &SpeciesCompletion) {
+    println!(
+        "[done  {}/{}] {} elapsed={:.1}s stability={:.2} perplexity={:.2} arc={:.2} tok/s={:.0}",
+        completion.stage.ordinal,
+        completion.stage.total,
+        completion.stage.species,
+        completion.elapsed.as_secs_f64(),
+        completion.metrics.grad_norm_depth_20,
+        completion.metrics.long_context_perplexity,
+        completion.metrics.arc_accuracy,
+        completion.metrics.tokens_per_sec,
+    );
+}
+
+fn print_results(report: &TournamentRunReport) {
+    for result in &report.results {
         println!(
             "{:<5} {:<24} {:<10.2} {:<11.2} {:<8.2} {:<7.0} {:.2}",
             result.rank,
@@ -256,13 +947,70 @@ fn print_results(results: Vec<fractal::RankedSpeciesResult>) {
     }
 }
 
+fn print_failures(report: &TournamentRunReport) {
+    for record in &report.artifact.species {
+        if matches!(record.execution_outcome, RunExecutionOutcome::Success) {
+            continue;
+        }
+        println!(
+            "failure {:<24} outcome={} error={}",
+            report.variant_name_for(record.stage.species),
+            outcome_label(record.outcome_class()),
+            record.error.as_deref().unwrap_or("unknown error")
+        );
+    }
+}
+
+fn print_primitive_tracker_reminder(report: &TournamentRunReport) {
+    for line in primitive_tracker_reminder_lines(report) {
+        println!("{line}");
+    }
+}
+
+fn ensure_successful_execution(report: &TournamentRunReport) -> Result<(), FractalError> {
+    if let Some(record) = report
+        .artifact
+        .species
+        .iter()
+        .find(|record| !matches!(record.execution_outcome, RunExecutionOutcome::Success))
+    {
+        return Err(FractalError::InvalidState(format!(
+            "species {} failed with {:?}: {}",
+            record.stage.species,
+            record.outcome_class(),
+            record.error.as_deref().unwrap_or("unknown error")
+        )));
+    }
+    Ok(())
+}
+
+fn outcome_label(outcome: fractal::RunOutcomeClass) -> &'static str {
+    match outcome {
+        fractal::RunOutcomeClass::Success => "success",
+        fractal::RunOutcomeClass::TrainTimeout => "train-timeout",
+        fractal::RunOutcomeClass::EvalConstrained => "eval-constrained",
+        fractal::RunOutcomeClass::NumericFailure => "numeric-failure",
+        fractal::RunOutcomeClass::LowSignal => "low-signal",
+        fractal::RunOutcomeClass::RuntimeCost => "runtime-cost",
+        fractal::RunOutcomeClass::InfraFailure => "infra-failure",
+    }
+}
+
 fn backend_name(backend: &ComputeBackend) -> &'static str {
     match backend {
         ComputeBackend::CpuCandle => "cpu",
         #[cfg(feature = "cuda")]
         ComputeBackend::CudaCandle { .. } => "cuda",
         ComputeBackend::MetalWgpu { .. } => "metal",
-        ComputeBackend::Mlx { .. } => "mlx",
+    }
+}
+
+fn backend_override_name(backend: BackendOverride) -> &'static str {
+    match backend {
+        BackendOverride::Cpu => "cpu",
+        #[cfg(feature = "cuda")]
+        BackendOverride::Cuda => "cuda",
+        BackendOverride::Metal => "metal",
     }
 }
 
@@ -281,27 +1029,52 @@ fn print_usage() {
     println!("Usage: cargo run --example tournament -- [options]");
     println!();
     println!("Options:");
-    println!("  --preset <default|fast-test|research-medium|pressure-test>");
+    println!(
+        "  --preset <default|fast-test|research-medium|challenger-lane|minimal-baseline|minimal-stress-lane|minimal-proving-ground|proving-ground-baseline|bullpen-polish|lighter-intermediate-stress|intermediate-stress|full-medium-stress|medium-stress|pressure-test|candidate-stress|generation-four>"
+    );
     println!("  --sequence <first-run>");
+    println!("  --lane <all|baseline|challenger|bullpen|proving-ground|squaring|leader>");
+    println!("  --species <species-id>");
     println!("  --seed <u64>");
     println!("  --mode <sequential|parallel>");
+    println!("  --parallelism <usize>");
+    println!("  --perplexity-eval-batches <usize>");
+    println!("  --arc-eval-batches <usize>");
+    println!("  --benchmark-mode <leaderboard|systems-speed>");
+    println!("  --experiment-manifest <path>");
     #[cfg(feature = "cuda")]
-    println!("  --backend <cpu|cuda|metal|mlx>");
+    println!("  --backend <cpu|cuda|metal>");
     #[cfg(not(feature = "cuda"))]
-    println!("  --backend <cpu|metal|mlx>");
+    println!("  --backend <cpu|metal>");
     println!("  --help");
     println!();
     println!("Examples:");
     println!("  cargo run --example tournament -- --preset fast-test");
-    println!("  cargo run --release --example tournament -- --preset research-medium");
+    println!("  cargo run --release --example tournament -- --preset minimal-baseline");
+    println!("  cargo run --release --example tournament -- --preset minimal-stress-lane");
+    println!("  cargo run --release --example tournament -- --preset lighter-intermediate-stress");
+    println!("  cargo run --release --example tournament -- --preset intermediate-stress");
+    println!("  cargo run --release --example tournament -- --preset full-medium-stress");
+    println!("  cargo run --release --example tournament -- --preset medium-stress");
+    println!(
+        "  cargo run --release --example tournament -- --preset proving-ground-baseline --species mandelbox_recursive"
+    );
+    println!("  cargo run --release --example tournament -- --lane baseline");
+    println!("  cargo run --release --example tournament -- --lane bullpen");
+    println!("  cargo run --release --example tournament -- --lane proving-ground");
+    println!("  cargo run --release --example tournament -- --species generalized_mobius");
+    println!("  cargo run --release --example tournament -- --preset research-medium --mode parallel --parallelism 4");
     #[cfg(feature = "cuda")]
-    println!("  cargo run --release --features cuda --example tournament -- --backend cuda");
+    println!(
+        "  cargo run --release --features cuda --example tournament -- --lane leader --mode sequential"
+    );
     println!("  cargo run --release --example tournament -- --sequence first-run");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn parse_command_uses_default_preset_when_no_args() {
@@ -315,10 +1088,14 @@ mod tests {
         let command = parse_command(vec![
             "--sequence".to_owned(),
             "first-run".to_owned(),
+            "--lane".to_owned(),
+            "baseline".to_owned(),
             "--seed".to_owned(),
             "43".to_owned(),
             "--mode".to_owned(),
             "parallel".to_owned(),
+            "--parallelism".to_owned(),
+            "3".to_owned(),
             "--backend".to_owned(),
             "cpu".to_owned(),
         ])
@@ -328,30 +1105,52 @@ mod tests {
             command,
             CliCommand::Run(RunOptions {
                 selection: Some(RunSelection::Sequence(TournamentSequence::FirstRun)),
+                lane: Some(TournamentLane::Baseline),
+                species: None,
                 seed: Some(43),
                 execution_mode: Some(ExecutionMode::Parallel),
+                parallelism: Some(3),
                 backend: Some(BackendOverride::Cpu),
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
             })
         );
     }
 
     #[test]
-    fn parse_command_accepts_mlx_backend_override() {
+    fn parse_command_accepts_proving_ground_baseline_preset() {
         let command = parse_command(vec![
             "--preset".to_owned(),
-            "fast-test".to_owned(),
-            "--backend".to_owned(),
-            "mlx".to_owned(),
+            "proving-ground-baseline".to_owned(),
+            "--species".to_owned(),
+            "mandelbox_recursive".to_owned(),
         ])
         .unwrap();
 
         assert_eq!(
             command,
             CliCommand::Run(RunOptions {
-                selection: Some(RunSelection::Preset(TournamentPreset::FastTest)),
+                selection: Some(RunSelection::Preset(
+                    TournamentPreset::ProvingGroundBaseline
+                )),
+                lane: None,
+                species: Some(SpeciesId::MandelboxRecursive),
                 seed: None,
                 execution_mode: None,
-                backend: Some(BackendOverride::Mlx),
+                parallelism: None,
+                backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
             })
         );
     }
@@ -371,9 +1170,19 @@ mod tests {
             command,
             CliCommand::Run(RunOptions {
                 selection: Some(RunSelection::Preset(TournamentPreset::FastTest)),
+                lane: None,
+                species: None,
                 seed: None,
                 execution_mode: None,
+                parallelism: None,
                 backend: Some(BackendOverride::Cuda),
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
             })
         );
     }
@@ -403,5 +1212,562 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, FractalError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn parse_command_accepts_generation_four_preset() {
+        let command =
+            parse_command(vec!["--preset".to_owned(), "generation-four".to_owned()]).unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::GenerationFour)),
+                lane: None,
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_minimal_proving_ground_preset() {
+        let command = parse_command(vec![
+            "--preset".to_owned(),
+            "minimal-proving-ground".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::MinimalProvingGround)),
+                lane: None,
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_minimal_baseline_preset() {
+        let command =
+            parse_command(vec!["--preset".to_owned(), "minimal-baseline".to_owned()]).unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::MinimalBaseline)),
+                lane: None,
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_medium_stress_preset() {
+        let command =
+            parse_command(vec!["--preset".to_owned(), "medium-stress".to_owned()]).unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::MediumStress)),
+                lane: None,
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_intermediate_stress_preset() {
+        let command = parse_command(vec![
+            "--preset".to_owned(),
+            "intermediate-stress".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::IntermediateStress)),
+                lane: None,
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_challenger_lane_preset() {
+        let command =
+            parse_command(vec!["--preset".to_owned(), "challenger-lane".to_owned()]).unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::ChallengerLane)),
+                lane: None,
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_lane_only_and_uses_lane_default_preset() {
+        let command = parse_command(vec!["--lane".to_owned(), "challenger".to_owned()]).unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: None,
+                lane: Some(TournamentLane::Challenger),
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_proving_ground_lane_alias() {
+        let command = parse_command(vec!["--lane".to_owned(), "squaring".to_owned()]).unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: None,
+                lane: Some(TournamentLane::ProvingGround),
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_species_only_and_uses_species_default_preset() {
+        let command = parse_command(vec![
+            "--species".to_owned(),
+            "generalized_mobius".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: None,
+                lane: None,
+                species: Some(SpeciesId::GeneralizedMobius),
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_rejects_lane_and_species_together() {
+        let error = parse_command(vec![
+            "--lane".to_owned(),
+            "bullpen".to_owned(),
+            "--species".to_owned(),
+            "ifs".to_owned(),
+        ])
+        .unwrap_err();
+
+        assert!(matches!(error, FractalError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn parse_command_rejects_zero_parallelism() {
+        let error = parse_command(vec![
+            "--preset".to_owned(),
+            "fast-test".to_owned(),
+            "--parallelism".to_owned(),
+            "0".to_owned(),
+        ])
+        .unwrap_err();
+
+        assert!(matches!(error, FractalError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn parse_command_accepts_explicit_eval_budget_overrides() {
+        let command = parse_command(vec![
+            "--preset".to_owned(),
+            "minimal-stress-lane".to_owned(),
+            "--perplexity-eval-batches".to_owned(),
+            "1".to_owned(),
+            "--arc-eval-batches".to_owned(),
+            "3".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::MinimalStressLane)),
+                lane: None,
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+                perplexity_eval_batches: Some(1),
+                arc_eval_batches: Some(3),
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_accepts_benchmark_mode_override() {
+        let command = parse_command(vec![
+            "--preset".to_owned(),
+            "full-medium-stress".to_owned(),
+            "--benchmark-mode".to_owned(),
+            "systems-speed".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::FullMediumStress)),
+                lane: None,
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: Some(BenchmarkMode::SystemsSpeed),
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_loads_experiment_manifest() {
+        let root =
+            std::env::temp_dir().join(format!("fractal-exp-manifest-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let manifest_path = root.join("winner-bakeoff-s42.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "logical_name": "winner-bakeoff-s42-p1-fractal-hybrid",
+                "question_summary": "rerun the frozen winner bakeoff row for p1_fractal_hybrid_v1",
+                "preset": "full-medium-stress",
+                "species": "p1_fractal_hybrid",
+                "seed": 42,
+                "backend": "cpu",
+                "execution_mode": "sequential",
+                "parallelism": 1,
+                "comparison": "authoritative_same_preset",
+                "benchmark_mode": "leaderboard"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let command = parse_command(vec![
+            "--experiment-manifest".to_owned(),
+            manifest_path.display().to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::FullMediumStress)),
+                lane: None,
+                species: Some(SpeciesId::P1FractalHybrid),
+                seed: Some(42),
+                execution_mode: Some(ExecutionMode::Sequential),
+                parallelism: Some(1),
+                backend: Some(BackendOverride::Cpu),
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: Some(BenchmarkMode::Leaderboard),
+                manifest_path: Some(manifest_path.clone()),
+                logical_name: Some("winner-bakeoff-s42-p1-fractal-hybrid".to_owned()),
+                question_summary: Some(
+                    "rerun the frozen winner bakeoff row for p1_fractal_hybrid_v1".to_owned(),
+                ),
+                comparison_override: Some(ComparisonContract::authoritative_same_preset()),
+            })
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_command_rejects_manifest_mixed_with_flags() {
+        let root =
+            std::env::temp_dir().join(format!("fractal-exp-manifest-mixed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let manifest_path = root.join("winner-bakeoff-s43.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "logical_name": "winner-bakeoff-s43-p1-contractive",
+                "preset": "full-medium-stress",
+                "species": "p1_contractive"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = parse_command(vec![
+            "--experiment-manifest".to_owned(),
+            manifest_path.display().to_string(),
+            "--seed".to_owned(),
+            "43".to_owned(),
+        ])
+        .unwrap_err();
+
+        assert!(matches!(error, FractalError::InvalidConfig(_)));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_command_allows_backend_before_experiment_manifest() {
+        let root = std::env::temp_dir().join(format!(
+            "fractal-exp-manifest-backend-prefix-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let manifest_path = root.join("winner-bakeoff-s44.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "logical_name": "winner-bakeoff-s44-p1-contractive",
+                "preset": "full-medium-stress",
+                "species": "p1_contractive",
+                "seed": 44,
+                "backend": "cpu"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let command = parse_command(vec![
+            "--backend".to_owned(),
+            "cpu".to_owned(),
+            "--experiment-manifest".to_owned(),
+            manifest_path.display().to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::FullMediumStress)),
+                lane: None,
+                species: Some(SpeciesId::P1Contractive),
+                seed: Some(44),
+                execution_mode: None,
+                parallelism: None,
+                backend: Some(BackendOverride::Cpu),
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: Some(BenchmarkMode::Leaderboard),
+                manifest_path: Some(manifest_path.clone()),
+                logical_name: Some("winner-bakeoff-s44-p1-contractive".to_owned()),
+                question_summary: None,
+                comparison_override: Some(ComparisonContract::authoritative_same_preset()),
+            })
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_command_allows_backend_after_experiment_manifest() {
+        let root = std::env::temp_dir().join(format!(
+            "fractal-exp-manifest-backend-suffix-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let manifest_path = root.join("winner-bakeoff-s45.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "logical_name": "winner-bakeoff-s45-p1-contractive",
+                "preset": "full-medium-stress",
+                "species": "p1_contractive",
+                "seed": 45,
+                "backend": "cpu"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let command = parse_command(vec![
+            "--experiment-manifest".to_owned(),
+            manifest_path.display().to_string(),
+            "--backend".to_owned(),
+            "cpu".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::FullMediumStress)),
+                lane: None,
+                species: Some(SpeciesId::P1Contractive),
+                seed: Some(45),
+                execution_mode: None,
+                parallelism: None,
+                backend: Some(BackendOverride::Cpu),
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: Some(BenchmarkMode::Leaderboard),
+                manifest_path: Some(manifest_path.clone()),
+                logical_name: Some("winner-bakeoff-s45-p1-contractive".to_owned()),
+                question_summary: None,
+                comparison_override: Some(ComparisonContract::authoritative_same_preset()),
+            })
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_command_rejects_conflicting_backend_for_experiment_manifest() {
+        let root = std::env::temp_dir().join(format!(
+            "fractal-exp-manifest-backend-conflict-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let manifest_path = root.join("winner-bakeoff-s46.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "logical_name": "winner-bakeoff-s46-p1-contractive",
+                "preset": "full-medium-stress",
+                "species": "p1_contractive",
+                "seed": 46,
+                "backend": "cpu"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = parse_command(vec![
+            "--backend".to_owned(),
+            "metal".to_owned(),
+            "--experiment-manifest".to_owned(),
+            manifest_path.display().to_string(),
+        ])
+        .unwrap_err();
+
+        assert!(matches!(error, FractalError::InvalidConfig(_)));
+        let _ = fs::remove_dir_all(&root);
     }
 }

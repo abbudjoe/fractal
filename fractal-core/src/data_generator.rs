@@ -32,6 +32,7 @@ const GRID_EVAL_MAX_DEPTH: usize = 5;
 pub enum TaskFamily {
     RecursiveSentence,
     ArcGrid,
+    TokenizerBackedText,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -47,6 +48,7 @@ pub struct GeneratorConfig {
     pub train_examples_per_family: usize,
     pub eval_examples_per_family: usize,
     pub seed: u64,
+    pub depth_config: GeneratorDepthConfig,
 }
 
 impl Default for GeneratorConfig {
@@ -57,12 +59,72 @@ impl Default for GeneratorConfig {
             train_examples_per_family: 96,
             eval_examples_per_family: 32,
             seed: 42,
+            depth_config: GeneratorDepthConfig::default(),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GeneratorDepthConfig {
+    pub sentence_train_max_depth: usize,
+    pub sentence_eval_min_depth: usize,
+    pub sentence_eval_max_depth: usize,
+    pub grid_train_max_depth: usize,
+    pub grid_eval_min_depth: usize,
+    pub grid_eval_max_depth: usize,
+}
+
+impl Default for GeneratorDepthConfig {
+    fn default() -> Self {
+        Self {
+            sentence_train_max_depth: SENTENCE_TRAIN_MAX_DEPTH,
+            sentence_eval_min_depth: SENTENCE_EVAL_MIN_DEPTH,
+            sentence_eval_max_depth: SENTENCE_EVAL_MAX_DEPTH,
+            grid_train_max_depth: GRID_TRAIN_MAX_DEPTH,
+            grid_eval_min_depth: GRID_EVAL_MIN_DEPTH,
+            grid_eval_max_depth: GRID_EVAL_MAX_DEPTH,
+        }
+    }
+}
+
+impl GeneratorDepthConfig {
+    pub fn polish_top_candidates() -> Self {
+        Self {
+            sentence_train_max_depth: 8,
+            sentence_eval_min_depth: 9,
+            sentence_eval_max_depth: 10,
+            ..Self::default()
+        }
+    }
+
+    pub fn stress_top_candidates() -> Self {
+        Self {
+            sentence_train_max_depth: 10,
+            sentence_eval_min_depth: 11,
+            sentence_eval_max_depth: 12,
+            ..Self::default()
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        validate_depth_bounds("sentence training depth", 1, self.sentence_train_max_depth)?;
+        validate_depth_bounds(
+            "sentence eval depth",
+            self.sentence_eval_min_depth,
+            self.sentence_eval_max_depth,
+        )?;
+        validate_depth_bounds("grid training depth", 1, self.grid_train_max_depth)?;
+        validate_depth_bounds(
+            "grid eval depth",
+            self.grid_eval_min_depth,
+            self.grid_eval_max_depth,
+        )
     }
 }
 
 impl GeneratorConfig {
     pub fn validate(&self) -> Result<(), FractalError> {
+        self.depth_config.validate()?;
         if self.vocab_size < MIN_VOCAB_SIZE {
             return Err(FractalError::InvalidConfig(format!(
                 "vocab_size must be at least {MIN_VOCAB_SIZE} to encode reserved tokens"
@@ -92,14 +154,28 @@ impl GeneratorConfig {
 
 #[derive(Clone, Debug)]
 pub struct RawExample {
-    pub tokens: Vec<i64>,
+    pub token_len: usize,
+    pub input_tokens: Vec<i64>,
+    pub target_tokens: Vec<i64>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TokenBatch<B: Backend> {
     pub input_ids: Tensor<B, 2, Int>,
     pub target_ids: Tensor<B, 2, Int>,
+    pub token_count: usize,
     pub family: TaskFamily,
+}
+
+impl<B: Backend> TokenBatch<B> {
+    pub fn to_device(self, device: &B::Device) -> Self {
+        Self {
+            input_ids: self.input_ids.to_device(device),
+            target_ids: self.target_ids.to_device(device),
+            token_count: self.token_count,
+            family: self.family,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -119,21 +195,24 @@ impl SimpleHierarchicalGenerator {
 
         let sentence_train_schedule = train_depth_schedule(
             config.max_seq_len,
-            SENTENCE_TRAIN_MAX_DEPTH,
+            config.depth_config.sentence_train_max_depth,
             sentence_token_budget,
         )?;
-        let grid_train_schedule =
-            train_depth_schedule(config.max_seq_len, GRID_TRAIN_MAX_DEPTH, grid_token_budget)?;
+        let grid_train_schedule = train_depth_schedule(
+            config.max_seq_len,
+            config.depth_config.grid_train_max_depth,
+            grid_token_budget,
+        )?;
         let sentence_eval_schedule = eval_depth_schedule(
             config.max_seq_len,
-            SENTENCE_EVAL_MIN_DEPTH,
-            SENTENCE_EVAL_MAX_DEPTH,
+            config.depth_config.sentence_eval_min_depth,
+            config.depth_config.sentence_eval_max_depth,
             sentence_token_budget,
         )?;
         let grid_eval_schedule = eval_depth_schedule(
             config.max_seq_len,
-            GRID_EVAL_MIN_DEPTH,
-            GRID_EVAL_MAX_DEPTH,
+            config.depth_config.grid_eval_min_depth,
+            config.depth_config.grid_eval_max_depth,
             grid_token_budget,
         )?;
 
@@ -141,24 +220,28 @@ impl SimpleHierarchicalGenerator {
             &mut train_rng,
             config.train_examples_per_family,
             sentence_train_schedule,
+            config.max_seq_len,
             build_sentence_tokens,
         );
         let train_grids = build_examples(
             &mut train_rng,
             config.train_examples_per_family,
             grid_train_schedule,
+            config.max_seq_len,
             build_grid_tokens,
         );
         let eval_sentences = build_examples(
             &mut eval_rng,
             config.eval_examples_per_family,
             sentence_eval_schedule,
+            config.max_seq_len,
             build_sentence_tokens,
         );
         let eval_grids = build_examples(
             &mut eval_rng,
             config.eval_examples_per_family,
             grid_eval_schedule,
+            config.max_seq_len,
             build_grid_tokens,
         );
 
@@ -201,12 +284,28 @@ impl SimpleHierarchicalGenerator {
             .collect()
     }
 
+    pub fn train_batches_for<B: Backend>(
+        &self,
+        family: TaskFamily,
+        batch_size: usize,
+        device: &B::Device,
+    ) -> Result<Vec<TokenBatch<B>>, FractalError> {
+        let total = self.batch_count(family, DatasetSplit::Train, batch_size);
+        (0..total)
+            .map(|index| self.batch_for(family, DatasetSplit::Train, index, batch_size, device))
+            .collect()
+    }
+
     pub fn max_tokens_for(&self, family: TaskFamily, split: DatasetSplit) -> usize {
         self.dataset(family, split)
             .iter()
-            .map(|example| example.tokens.len())
+            .map(|example| example.token_len)
             .max()
             .unwrap_or_default()
+    }
+
+    pub fn batch_count(&self, family: TaskFamily, split: DatasetSplit, batch_size: usize) -> usize {
+        self.dataset(family, split).len().div_ceil(batch_size)
     }
 
     fn dataset(&self, family: TaskFamily, split: DatasetSplit) -> &[RawExample] {
@@ -215,6 +314,9 @@ impl SimpleHierarchicalGenerator {
             (TaskFamily::RecursiveSentence, DatasetSplit::Eval) => &self.eval_sentences,
             (TaskFamily::ArcGrid, DatasetSplit::Train) => &self.train_grids,
             (TaskFamily::ArcGrid, DatasetSplit::Eval) => &self.eval_grids,
+            (TaskFamily::TokenizerBackedText, _) => unreachable!(
+                "tokenizer-backed text batches are supplied externally and are not generated here"
+            ),
         }
     }
 
@@ -229,39 +331,31 @@ impl SimpleHierarchicalGenerator {
         let seq_len = self.config.max_seq_len;
         let mut input_flat = Vec::with_capacity(batch_size * seq_len);
         let mut target_flat = Vec::with_capacity(batch_size * seq_len);
+        let mut token_count = 0usize;
 
         for offset in 0..batch_size {
             let example = &dataset[(start + offset) % dataset.len()];
-            if example.tokens.len() > seq_len {
+            if example.token_len > seq_len {
                 return Err(FractalError::InvalidState(format!(
                     "example length {} exceeds configured max_seq_len {}",
-                    example.tokens.len(),
-                    seq_len
+                    example.token_len, seq_len
                 )));
             }
-            let mut padded = vec![PAD_TOKEN as i64; seq_len];
-            for (index, token) in example.tokens.iter().enumerate() {
-                padded[index] = *token;
-            }
-
-            let mut shifted = padded.clone();
-            shifted.rotate_left(1);
-            if let Some(last) = shifted.last_mut() {
-                *last = PAD_TOKEN as i64;
-            }
-
             input_flat.extend(
-                padded
+                example
+                    .input_tokens
                     .iter()
                     .copied()
                     .map(|token| token.elem::<B::IntElem>()),
             );
             target_flat.extend(
-                shifted
+                example
+                    .target_tokens
                     .iter()
                     .copied()
                     .map(|token| token.elem::<B::IntElem>()),
             );
+            token_count += example.token_len;
         }
 
         let input_ids = Tensor::<B, 2, Int>::from_data(
@@ -276,6 +370,7 @@ impl SimpleHierarchicalGenerator {
         Ok(TokenBatch {
             input_ids,
             target_ids,
+            token_count,
             family,
         })
     }
@@ -314,13 +409,44 @@ fn build_examples(
     rng: &mut StdRng,
     count: usize,
     schedule: DepthSchedule,
+    max_seq_len: usize,
     builder: fn(&mut StdRng, usize) -> Vec<i64>,
 ) -> Vec<RawExample> {
     (0..count)
-        .map(|index| RawExample {
-            tokens: builder(rng, schedule.depth_for(index)),
-        })
+        .map(|index| prepare_example(builder(rng, schedule.depth_for(index)), max_seq_len))
         .collect()
+}
+
+fn prepare_example(tokens: Vec<i64>, max_seq_len: usize) -> RawExample {
+    let token_len = tokens.len();
+    let mut input_tokens = vec![PAD_TOKEN as i64; max_seq_len];
+    input_tokens[..token_len].copy_from_slice(&tokens);
+
+    let mut target_tokens = input_tokens.clone();
+    target_tokens.rotate_left(1);
+    if let Some(last) = target_tokens.last_mut() {
+        *last = PAD_TOKEN as i64;
+    }
+
+    RawExample {
+        token_len,
+        input_tokens,
+        target_tokens,
+    }
+}
+
+fn validate_depth_bounds(
+    label: &'static str,
+    min_depth: usize,
+    max_depth: usize,
+) -> Result<(), FractalError> {
+    if min_depth == 0 || max_depth == 0 || min_depth > max_depth {
+        return Err(FractalError::InvalidConfig(format!(
+            "{label} must define a valid positive range, got {min_depth}..={max_depth}"
+        )));
+    }
+
+    Ok(())
 }
 
 fn ensure_examples_fit(
@@ -330,11 +456,11 @@ fn ensure_examples_fit(
 ) -> Result<(), FractalError> {
     if let Some(example) = dataset
         .iter()
-        .find(|example| example.tokens.len() > max_seq_len)
+        .find(|example| example.token_len > max_seq_len)
     {
         return Err(FractalError::InvalidConfig(format!(
             "{label} example length {} exceeds max_seq_len {max_seq_len}",
-            example.tokens.len()
+            example.token_len
         )));
     }
 

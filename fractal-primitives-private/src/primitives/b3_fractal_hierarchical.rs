@@ -6,14 +6,15 @@ use burn::{
 
 use fractal_core::{
     error::FractalError,
-    primitives::{complex_square, gated_sigmoid, gated_sigmoid_clamped},
-    rule_trait::FractalRule,
+    primitives::{complex_square, gated_sigmoid},
+    rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
 };
 
+use crate::primitives::depth_fraction;
+
 #[derive(Module, Debug)]
 pub struct B3FractalHierarchical<B: Backend> {
-    pub g_proj: Linear<B>,
     pub c_proj: Linear<B>,
     pub gamma_proj: Linear<B>,
     pub compressor: Linear<B>,
@@ -25,7 +26,6 @@ impl<B: Backend> B3FractalHierarchical<B> {
     pub fn new(hidden_dim: usize, levels: usize, device: &B::Device) -> Self {
         let complex_dim = hidden_dim * 2;
         Self {
-            g_proj: LinearConfig::new(hidden_dim, complex_dim).init(device),
             c_proj: LinearConfig::new(hidden_dim, complex_dim).init(device),
             gamma_proj: LinearConfig::new(hidden_dim, complex_dim).init(device),
             compressor: LinearConfig::new(complex_dim, complex_dim).init(device),
@@ -40,18 +40,18 @@ impl<B: Backend> FractalRule<B> for B3FractalHierarchical<B> {
         &self,
         state: &FractalState<B>,
         x: &Tensor<B, 2>,
+        context: ApplyContext,
     ) -> Result<FractalState<B>, FractalError> {
         let state = state.hierarchical_complex_checked(self.levels, self.hidden_dim)?;
         let [batch, levels, width] = state.dims();
-
-        let g = gated_sigmoid_clamped(self.g_proj.forward(x.clone()));
-        let c = self.c_proj.forward(x.clone());
+        let c_t = self.c_proj.forward(x.clone());
         let gamma = gated_sigmoid(self.gamma_proj.forward(x.clone()));
+        let radius = 0.98 - 0.03 * depth_fraction(context);
 
         let mut next_levels: Vec<Tensor<B, 2>> = Vec::with_capacity(levels);
         for level in 0..levels {
-            let prev = state.clone().narrow(1, level, 1).reshape([batch, width]);
-            let mut next = g.clone() * complex_square(prev) + c.clone();
+            let previous_state = state.clone().narrow(1, level, 1).reshape([batch, width]);
+            let mut next = complex_square(previous_state).mul_scalar(radius) + c_t.clone();
             if level > 0 {
                 next =
                     next + gamma.clone() * self.compressor.forward(next_levels[level - 1].clone());

@@ -7,9 +7,11 @@ use burn::{
 use fractal_core::{
     error::FractalError,
     primitives::{complex_square, gated_sigmoid, one_minus},
-    rule_trait::FractalRule,
+    rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
 };
+
+use crate::primitives::norm_based_residual_alpha;
 
 #[derive(Module, Debug)]
 pub struct B4Universal<B: Backend> {
@@ -40,24 +42,25 @@ impl<B: Backend> FractalRule<B> for B4Universal<B> {
         &self,
         state: &FractalState<B>,
         x: &Tensor<B, 2>,
+        _context: ApplyContext,
     ) -> Result<FractalState<B>, FractalError> {
         let state = state.hierarchical_complex_checked(self.levels, self.hidden_dim)?;
         let [batch, levels, width] = state.dims();
-
         let g = gated_sigmoid(self.g_proj.forward(x.clone()));
-        let c = self.c_proj.forward(x.clone());
+        let c_t = self.c_proj.forward(x.clone());
         let gamma = gated_sigmoid(self.gamma_proj.forward(x.clone()));
 
         let mut next_levels: Vec<Tensor<B, 2>> = Vec::with_capacity(levels);
         for level in 0..levels {
-            let prev = state.clone().narrow(1, level, 1).reshape([batch, width]);
-            let base = g.clone() * (complex_square(prev.clone()) + c.clone())
-                + one_minus(g.clone()) * prev;
-            let next = if level == 0 {
-                base
-            } else {
-                base + gamma.clone() * self.compressor.forward(next_levels[level - 1].clone())
-            };
+            let previous_state = state.clone().narrow(1, level, 1).reshape([batch, width]);
+            let mut base = g.clone() * (complex_square(previous_state.clone()) + c_t.clone())
+                + one_minus(g.clone()) * previous_state.clone();
+            if level > 0 {
+                base =
+                    base + gamma.clone() * self.compressor.forward(next_levels[level - 1].clone());
+            }
+            let alpha = norm_based_residual_alpha(previous_state.clone(), width);
+            let next = alpha.clone() * base + one_minus(alpha) * previous_state;
             next_levels.push(next);
         }
 

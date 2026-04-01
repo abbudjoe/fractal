@@ -7,7 +7,7 @@ use burn::{
 use fractal_core::{
     error::FractalError,
     primitives::gated_sigmoid,
-    rule_trait::FractalRule,
+    rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
 };
 
@@ -41,6 +41,7 @@ impl<B: Backend> FractalRule<B> for P3Hierarchical<B> {
         &self,
         state: &FractalState<B>,
         x: &Tensor<B, 2>,
+        _context: ApplyContext,
     ) -> Result<FractalState<B>, FractalError> {
         let state = state.hierarchical_checked(self.levels, self.hidden_dim)?;
         let [batch, levels, width] = state.dims();
