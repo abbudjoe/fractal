@@ -245,7 +245,7 @@ def run_dirs() -> list[RunRecord]:
     records: list[RunRecord] = []
     if not results_root.exists():
         return records
-    for wrapper_path in sorted(results_root.glob("*/metadata/wrapper-manifest.json")):
+    for wrapper_path in sorted(results_root.glob("**/metadata/wrapper-manifest.json")):
         run_dir = wrapper_path.parent.parent
         wrapper, wrapper_error = load_json(wrapper_path)
         records.append(
@@ -313,22 +313,32 @@ def infer_identity(record: RunRecord) -> ExperimentIdentity:
     runtime = wrapper.get("runtime") if isinstance(wrapper.get("runtime"), dict) else {}
     build = wrapper.get("build") if isinstance(wrapper.get("build"), dict) else {}
     args = runtime.get("tournament_args")
-    if not isinstance(args, list):
-        args = []
-    logical_id, logical_name = resolve_spec(
-        [str(arg) for arg in args],
-        branch_value=str(build.get("branch") or ""),
-        commit_value=str(build.get("commit_sha") or ""),
-        timeout_seconds=parse_int(str(runtime.get("run_timeout_seconds"))) or 0,
-    )
+    if isinstance(args, list) and args:
+        logical_id, logical_name = resolve_spec(
+            [str(arg) for arg in args],
+            branch_value=str(build.get("branch") or ""),
+            commit_value=str(build.get("commit_sha") or ""),
+            timeout_seconds=parse_int(str(runtime.get("run_timeout_seconds"))) or 0,
+        )
+        return ExperimentIdentity(
+            logical_id=logical_id,
+            logical_name=logical_name,
+            attempt_id=str(wrapper.get("run_id") or record.run_id),
+            attempt_index=None,
+            created_at=str(wrapper.get("started_at") or "") or None,
+            started_at=str(wrapper.get("started_at") or "") or None,
+            source="legacy-cli",
+        )
+
+    fallback_run_id = str(wrapper.get("run_id") or record.run_id)
     return ExperimentIdentity(
-        logical_id=logical_id,
-        logical_name=logical_name,
-        attempt_id=str(wrapper.get("run_id") or record.run_id),
+        logical_id=f"legacy:{sanitize(fallback_run_id)}",
+        logical_name=fallback_run_id,
+        attempt_id=fallback_run_id,
         attempt_index=None,
         created_at=str(wrapper.get("started_at") or "") or None,
         started_at=str(wrapper.get("started_at") or "") or None,
-        source="inferred",
+        source="legacy-missing-metadata",
     )
 
 

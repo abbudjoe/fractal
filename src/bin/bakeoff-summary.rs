@@ -1030,10 +1030,16 @@ fn build_ledger_entries(loaded: &LoadedRows) -> Vec<LedgerEntry> {
             .then_with(|| left.run_id.cmp(&right.run_id))
     });
 
-    let mut previous: Option<LedgerEntry> = None;
+    let mut previous_by_stream: BTreeMap<(String, String, String), LedgerEntry> = BTreeMap::new();
     for entry in &mut entries {
-        entry.change_axis = classify_change_axis(entry, previous.as_ref()).to_owned();
-        previous = Some(entry.clone());
+        let stream_key = (
+            entry.benchmark_mode.as_str().to_owned(),
+            entry.preset.clone(),
+            entry.runtime_surface_policy.clone(),
+        );
+        entry.change_axis =
+            classify_change_axis(entry, previous_by_stream.get(&stream_key)).to_owned();
+        previous_by_stream.insert(stream_key, entry.clone());
     }
 
     entries
@@ -1202,7 +1208,10 @@ impl RunMetadata {
         remote_manifest: Option<&RunControlManifest>,
         artifact: Option<&RunArtifactFile>,
     ) -> Self {
-        let experiment = artifact
+        let explicit_experiment = wrapper_manifest
+            .and_then(|manifest| manifest.experiment.as_ref())
+            .or_else(|| remote_manifest.and_then(|manifest| manifest.experiment.as_ref()));
+        let artifact_experiment = artifact
             .and_then(|artifact| artifact.results.first())
             .and_then(|record| record.experiment.as_ref())
             .or_else(|| {
@@ -1210,27 +1219,44 @@ impl RunMetadata {
                     .and_then(|artifact| artifact.manifest.as_ref())
                     .and_then(|manifest| manifest.experiments.first())
             });
-        let seed = wrapper_manifest
-            .and_then(extract_seed)
+
+        let seed = explicit_experiment
+            .and_then(|experiment| experiment.resolved.as_ref())
+            .and_then(|resolved| resolved.seed)
+            .or_else(|| wrapper_manifest.and_then(extract_seed))
             .or_else(|| remote_manifest.and_then(extract_seed))
             .or_else(|| {
                 artifact
                     .and_then(|artifact| artifact.manifest.as_ref())
                     .and_then(|manifest| manifest.config.seed)
             });
-        let preset = artifact
-            .and_then(|artifact| artifact.manifest.as_ref())
-            .and_then(|manifest| manifest.preset.clone())
+        let preset = explicit_experiment
+            .and_then(|experiment| experiment.resolved.as_ref())
+            .and_then(|resolved| resolved.preset.clone())
+            .or_else(|| {
+                artifact
+                    .and_then(|artifact| artifact.manifest.as_ref())
+                    .and_then(|manifest| manifest.preset.clone())
+            })
             .or_else(|| remote_manifest.and_then(|manifest| manifest.preset.clone()))
-            .or_else(|| wrapper_manifest.and_then(|manifest| manifest.preset_from_args()));
-        let lane = artifact
-            .and_then(|artifact| artifact.manifest.as_ref())
-            .and_then(|manifest| manifest.lane.clone())
+            .or_else(|| wrapper_manifest.and_then(|manifest| manifest.preset.clone()));
+        let lane = explicit_experiment
+            .and_then(|experiment| experiment.resolved.as_ref())
+            .and_then(|resolved| resolved.lane.clone())
+            .or_else(|| {
+                artifact
+                    .and_then(|artifact| artifact.manifest.as_ref())
+                    .and_then(|manifest| manifest.lane.clone())
+            })
             .or_else(|| remote_manifest.and_then(|manifest| manifest.lane.clone()))
-            .or_else(|| wrapper_manifest.and_then(|manifest| manifest.lane_from_args()));
-        let comparison = artifact
-            .and_then(|artifact| artifact.manifest.as_ref())
-            .and_then(|manifest| manifest.comparison_contract())
+            .or_else(|| wrapper_manifest.and_then(|manifest| manifest.lane.clone()));
+        let comparison = explicit_experiment
+            .and_then(|experiment| experiment.comparison_contract())
+            .or_else(|| {
+                artifact
+                    .and_then(|artifact| artifact.manifest.as_ref())
+                    .and_then(|manifest| manifest.comparison_contract())
+            })
             .or_else(|| remote_manifest.and_then(|manifest| manifest.comparison_contract()));
         let runtime_surface_policy = artifact
             .and_then(|artifact| artifact.manifest.as_ref())
@@ -1238,18 +1264,34 @@ impl RunMetadata {
             .or_else(|| {
                 remote_manifest.and_then(|manifest| manifest.runtime_surface_policy.clone())
             });
-        let benchmark_mode = experiment
-            .and_then(ArtifactExperimentRecord::benchmark_mode)
+        let benchmark_mode = explicit_experiment
+            .and_then(|experiment| experiment.benchmark_mode())
+            .or_else(|| artifact_experiment.and_then(ArtifactExperimentRecord::benchmark_mode))
             .unwrap_or(BenchmarkMode::Leaderboard);
-        let logical_name = experiment
+        let logical_name = explicit_experiment
             .and_then(|experiment| experiment.experiment_id.as_ref())
-            .and_then(|id| id.logical_name.clone());
-        let question_summary = experiment
+            .and_then(|id| id.logical_name.clone())
+            .or_else(|| {
+                artifact_experiment
+                    .and_then(|experiment| experiment.experiment_id.as_ref())
+                    .and_then(|id| id.logical_name.clone())
+            });
+        let question_summary = explicit_experiment
             .and_then(|experiment| experiment.question.as_ref())
-            .and_then(|question| question.summary.clone());
-        let commit_sha = experiment
+            .and_then(|question| question.summary.clone())
+            .or_else(|| {
+                artifact_experiment
+                    .and_then(|experiment| experiment.question.as_ref())
+                    .and_then(|question| question.summary.clone())
+            });
+        let commit_sha = explicit_experiment
             .and_then(|experiment| experiment.experiment_id.as_ref())
             .and_then(|id| id.commit_sha.clone())
+            .or_else(|| {
+                artifact_experiment
+                    .and_then(|experiment| experiment.experiment_id.as_ref())
+                    .and_then(|id| id.commit_sha.clone())
+            })
             .or_else(|| {
                 remote_manifest
                     .and_then(|manifest| manifest.build.as_ref())
@@ -1260,17 +1302,27 @@ impl RunMetadata {
                     .and_then(|manifest| manifest.build.as_ref())
                     .and_then(|build| build.commit_sha.clone())
             });
-        let created_at_unix_ms = experiment
+        let created_at_unix_ms = explicit_experiment
             .and_then(|experiment| experiment.experiment_id.as_ref())
             .and_then(|id| id.created_at_unix_ms)
+            .or_else(|| {
+                artifact_experiment
+                    .and_then(|experiment| experiment.experiment_id.as_ref())
+                    .and_then(|id| id.created_at_unix_ms)
+            })
             .or_else(|| {
                 artifact
                     .and_then(|artifact| artifact.manifest.as_ref())
                     .and_then(|manifest| manifest.generated_at_unix_ms)
             });
-        let backend = experiment
+        let backend = explicit_experiment
             .and_then(|experiment| experiment.execution.as_ref())
             .and_then(|execution| execution.backend.clone())
+            .or_else(|| {
+                artifact_experiment
+                    .and_then(|experiment| experiment.execution.as_ref())
+                    .and_then(|execution| execution.backend.clone())
+            })
             .or_else(|| {
                 artifact
                     .and_then(|artifact| artifact.manifest.as_ref())
@@ -1286,9 +1338,16 @@ impl RunMetadata {
                     .and_then(|manifest| manifest.pod.as_ref())
                     .and_then(|pod| pod.id.clone())
             });
-        let species = wrapper_manifest
-            .and_then(|manifest| manifest.species_from_args())
-            .or_else(|| remote_manifest.and_then(|manifest| manifest.species_from_args()))
+        let species = explicit_experiment
+            .and_then(|experiment| experiment.variant.as_ref())
+            .and_then(|variant| variant.species.as_deref())
+            .and_then(|species| species.parse().ok())
+            .or_else(|| {
+                artifact_experiment
+                    .and_then(|experiment| experiment.variant.as_ref())
+                    .and_then(|variant| variant.species.as_deref())
+                    .and_then(|species| species.parse().ok())
+            })
             .or_else(|| {
                 artifact
                     .and_then(|artifact| artifact.results.first())
@@ -1299,10 +1358,28 @@ impl RunMetadata {
                             .and_then(|value| value.parse().ok())
                     })
             });
-        let variant_name = species.map(species_variant_name);
-        let run_id = artifact
-            .and_then(|artifact| artifact.manifest.as_ref())
-            .and_then(|manifest| manifest.run_id.clone())
+        let variant_name = explicit_experiment
+            .and_then(|experiment| experiment.variant.as_ref())
+            .and_then(|variant| variant.variant_name.clone())
+            .or_else(|| {
+                artifact_experiment
+                    .and_then(|experiment| experiment.variant.as_ref())
+                    .and_then(|variant| variant.variant_name.clone())
+            })
+            .or_else(|| species.map(species_variant_name));
+        let run_id = explicit_experiment
+            .and_then(|experiment| experiment.experiment_id.as_ref())
+            .and_then(|id| id.run_id.clone())
+            .or_else(|| {
+                artifact_experiment
+                    .and_then(|experiment| experiment.experiment_id.as_ref())
+                    .and_then(|id| id.run_id.clone())
+            })
+            .or_else(|| {
+                artifact
+                    .and_then(|artifact| artifact.manifest.as_ref())
+                    .and_then(|manifest| manifest.run_id.clone())
+            })
             .or_else(|| remote_manifest.and_then(|manifest| manifest.run_id.clone()))
             .or_else(|| wrapper_manifest.and_then(|manifest| manifest.run_id.clone()))
             .unwrap_or_else(|| {
@@ -1460,6 +1537,7 @@ struct LedgerEntry {
 #[allow(dead_code)]
 struct RunControlManifest {
     run_id: Option<String>,
+    experiment: Option<RunControlExperimentRecord>,
     status: Option<String>,
     exit_code: Option<i64>,
     started_at: Option<String>,
@@ -1482,31 +1560,86 @@ struct RunControlManifest {
 }
 
 impl RunControlManifest {
-    fn preset_from_args(&self) -> Option<String> {
-        self.runtime
-            .as_ref()
-            .and_then(|runtime| extract_arg(&runtime.tournament_args, "--preset"))
-    }
-
-    fn lane_from_args(&self) -> Option<String> {
-        self.runtime
-            .as_ref()
-            .and_then(|runtime| extract_arg(&runtime.tournament_args, "--lane"))
-    }
-
-    fn species_from_args(&self) -> Option<SpeciesId> {
-        self.runtime
-            .as_ref()
-            .and_then(|runtime| extract_arg(&runtime.tournament_args, "--species"))
-            .and_then(|species| species.parse().ok())
-    }
-
     fn comparison_contract(&self) -> Option<ComparisonContract> {
         parse_comparison_contract(
             self.comparison_contract.as_ref(),
             self.comparison_authority.as_deref(),
         )
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
+struct RunControlExperimentRecord {
+    experiment_id: Option<RunControlExperimentIdRecord>,
+    question: Option<RunControlQuestionRecord>,
+    variant: Option<RunControlVariantRecord>,
+    runtime: Option<RunControlRuntimeSurfaceRecord>,
+    comparison: Option<ComparisonContractRecord>,
+    execution: Option<RunControlExecutionRecord>,
+    resolved: Option<RunControlResolvedRecord>,
+}
+
+impl RunControlExperimentRecord {
+    fn comparison_contract(&self) -> Option<ComparisonContract> {
+        parse_comparison_contract(self.comparison.as_ref(), None)
+    }
+
+    fn benchmark_mode(&self) -> Option<BenchmarkMode> {
+        self.runtime
+            .as_ref()
+            .and_then(|runtime| runtime.benchmark_mode.as_deref())
+            .and_then(parse_benchmark_mode_label)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
+struct RunControlExperimentIdRecord {
+    logical_name: Option<String>,
+    run_id: Option<String>,
+    branch: Option<String>,
+    commit_sha: Option<String>,
+    created_at_unix_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
+struct RunControlQuestionRecord {
+    summary: Option<String>,
+    lane_intent: Option<String>,
+    decision_intent: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
+struct RunControlVariantRecord {
+    species: Option<String>,
+    variant_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
+struct RunControlExecutionRecord {
+    backend: Option<String>,
+    execution_mode: Option<String>,
+    pod_id: Option<String>,
+    wrapper_timeout_seconds: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
+struct RunControlResolvedRecord {
+    lane: Option<String>,
+    preset: Option<String>,
+    sequence: Option<String>,
+    seed: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -1830,16 +1963,6 @@ fn extract_seed(manifest: &RunControlManifest) -> Option<u64> {
     manifest.config.seed
 }
 
-fn extract_arg(args: &[String], flag: &str) -> Option<String> {
-    args.windows(2).find_map(|window| {
-        if window[0] == flag {
-            Some(window[1].clone())
-        } else {
-            None
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1859,13 +1982,47 @@ mod tests {
             std::env::temp_dir().join(format!("fractal-bakeoff-summary-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
 
-        let completed = root.join("20260331T000000Z_seed42");
+        let completed = root.join("logical-winner").join("20260331T000000Z_seed42");
         write_json(
             &completed.join("metadata/wrapper-manifest.json"),
             serde_json::json!({
                 "run_id": "completed-run",
-                "runtime": { "tournament_args": ["--preset", "full-medium-stress", "--species", "p1_contractive", "--seed", "42"] },
-                "pod": { "id": "pod-42", "name": "fractal-winner-bakeoff-s42-a100" }
+                "pod": { "id": "pod-42", "name": "fractal-winner-bakeoff-s42-a100" },
+                "experiment": {
+                    "experiment_id": {
+                        "logical_name": "winner-bakeoff",
+                        "run_id": "completed-run",
+                        "commit_sha": "abc123",
+                        "created_at_unix_ms": 123
+                    },
+                    "question": {
+                        "summary": "compare winner-lane variants"
+                    },
+                    "variant": {
+                        "species": "p1_contractive",
+                        "variant_name": "p1_contractive_v1"
+                    },
+                    "runtime": {
+                        "benchmark_mode": "leaderboard",
+                        "backend": "cuda",
+                        "label": "authoritative-same-preset"
+                    },
+                    "comparison": {
+                        "authority": "authoritative",
+                        "requires_same_preset": true,
+                        "requires_same_runtime_surfaces": true,
+                        "requires_frozen_commit": true,
+                        "requires_same_backend": true
+                    },
+                    "execution": {
+                        "backend": "cuda"
+                    },
+                    "resolved": {
+                        "lane": "leader",
+                        "preset": "full-medium-stress",
+                        "seed": 42
+                    }
+                }
             }),
         );
         write_json(
@@ -1912,14 +2069,48 @@ mod tests {
             }),
         );
 
-        let pending = root.join("20260331T000001Z_seed43");
+        let pending = root.join("logical-winner").join("20260331T000001Z_seed43");
         write_json(
             &pending.join("metadata/wrapper-manifest.json"),
             serde_json::json!({
                 "run_id": "pending-run",
                 "status": "running",
-                "runtime": { "tournament_args": ["--preset", "full-medium-stress", "--species", "p1_fractal_hybrid", "--seed", "43"] },
-                "pod": { "id": "pod-43", "name": "fractal-winner-bakeoff-s43-a100" }
+                "pod": { "id": "pod-43", "name": "fractal-winner-bakeoff-s43-a100" },
+                "experiment": {
+                    "experiment_id": {
+                        "logical_name": "winner-bakeoff",
+                        "run_id": "pending-run",
+                        "commit_sha": "abc123",
+                        "created_at_unix_ms": 456
+                    },
+                    "question": {
+                        "summary": "compare winner-lane variants"
+                    },
+                    "variant": {
+                        "species": "p1_fractal_hybrid",
+                        "variant_name": "p1_fractal_hybrid_v1"
+                    },
+                    "runtime": {
+                        "benchmark_mode": "leaderboard",
+                        "backend": "cuda",
+                        "label": "authoritative-same-preset"
+                    },
+                    "comparison": {
+                        "authority": "authoritative",
+                        "requires_same_preset": true,
+                        "requires_same_runtime_surfaces": true,
+                        "requires_frozen_commit": true,
+                        "requires_same_backend": true
+                    },
+                    "execution": {
+                        "backend": "cuda"
+                    },
+                    "resolved": {
+                        "lane": "leader",
+                        "preset": "full-medium-stress",
+                        "seed": 43
+                    }
+                }
             }),
         );
 
@@ -1971,12 +2162,46 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&root);
 
-        let completed = root.join("20260331T000002Z_speed42");
+        let completed = root.join("logical-speed").join("20260331T000002Z_speed42");
         write_json(
             &completed.join("metadata/wrapper-manifest.json"),
             serde_json::json!({
                 "run_id": "speed-run",
-                "runtime": { "tournament_args": ["--preset", "full-medium-stress", "--species", "p1_fractal_hybrid", "--seed", "42"] }
+                "experiment": {
+                    "experiment_id": {
+                        "logical_name": "systems-speed-p1-fractal-hybrid",
+                        "run_id": "speed-run",
+                        "commit_sha": "abc123",
+                        "created_at_unix_ms": 123
+                    },
+                    "question": {
+                        "summary": "measure systems throughput only"
+                    },
+                    "variant": {
+                        "species": "p1_fractal_hybrid",
+                        "variant_name": "p1_fractal_hybrid_v1"
+                    },
+                    "runtime": {
+                        "benchmark_mode": "systems-speed",
+                        "backend": "cuda",
+                        "label": "systems-speed"
+                    },
+                    "comparison": {
+                        "authority": "authoritative",
+                        "requires_same_preset": true,
+                        "requires_same_runtime_surfaces": true,
+                        "requires_frozen_commit": true,
+                        "requires_same_backend": true
+                    },
+                    "execution": {
+                        "backend": "cuda"
+                    },
+                    "resolved": {
+                        "lane": "leader",
+                        "preset": "full-medium-stress",
+                        "seed": 42
+                    }
+                }
             }),
         );
         write_json(
@@ -2035,12 +2260,48 @@ mod tests {
             std::env::temp_dir().join(format!("fractal-ledger-summary-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
 
-        let completed = root.join("20260331T000003Z_ledger42");
+        let completed = root
+            .join("logical-ledger")
+            .join("20260331T000003Z_ledger42");
         write_json(
             &completed.join("metadata/wrapper-manifest.json"),
             serde_json::json!({
                 "run_id": "ledger-run",
-                "runtime": { "tournament_args": ["--preset", "full-medium-stress", "--species", "p1_contractive", "--seed", "42"] }
+                "experiment": {
+                    "experiment_id": {
+                        "logical_name": "winner-bakeoff-p1-contractive",
+                        "run_id": "ledger-run",
+                        "commit_sha": "def456",
+                        "created_at_unix_ms": 456
+                    },
+                    "question": {
+                        "summary": "rerun frozen winner benchmark"
+                    },
+                    "variant": {
+                        "species": "p1_contractive",
+                        "variant_name": "p1_contractive_v1"
+                    },
+                    "runtime": {
+                        "benchmark_mode": "leaderboard",
+                        "backend": "cuda",
+                        "label": "authoritative-same-preset"
+                    },
+                    "comparison": {
+                        "authority": "authoritative",
+                        "requires_same_preset": true,
+                        "requires_same_runtime_surfaces": true,
+                        "requires_frozen_commit": true,
+                        "requires_same_backend": true
+                    },
+                    "execution": {
+                        "backend": "cuda"
+                    },
+                    "resolved": {
+                        "lane": "leader",
+                        "preset": "full-medium-stress",
+                        "seed": 42
+                    }
+                }
             }),
         );
         write_json(

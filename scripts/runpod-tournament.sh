@@ -36,8 +36,8 @@ Notes:
   - Newly created pods are stopped automatically after the run unless --keep-pod is set.
   - Existing pods are left running unless --stop-after-run is set.
   - After every run, the wrapper preserves the remote log plus any manifest/artifact files
-    under .runpod-local-logs/runpod-results/<run-id>/, with the synced remote tree in
-    `remote/` and a wrapper manifest in `metadata/wrapper-manifest.json`.
+    under .runpod-local-logs/runpod-results/<logical-id>/<attempt-id>/, with the synced remote
+    tree in `remote/` and a wrapper manifest in `metadata/wrapper-manifest.json`.
   - Wrapper manifests now record Experiment Interface v1-style identity:
     logical experiment id/name stay stable across retries, while each attempt gets a new run id.
   - Tournament arguments after "--" are passed to the cached release example binary as:
@@ -694,7 +694,7 @@ identity = resolve_spec(
 earliest_created_at: datetime | None = parse_timestamp(started_at)
 attempt_count = 0
 if results_root.exists():
-    for wrapper_path in sorted(results_root.glob("*/metadata/wrapper-manifest.json")):
+    for wrapper_path in sorted(results_root.glob("**/metadata/wrapper-manifest.json")):
         try:
             manifest = json.loads(wrapper_path.read_text())
         except Exception:
@@ -757,8 +757,9 @@ prepare_run_preservation() {
     RUN_STARTED_AT="$started_at"
     RUN_RESULTS_ROOT="${REPO_ROOT}/.runpod-local-logs/runpod-results"
     RUN_EXPERIMENT_CONTEXT_JSON="$(build_experiment_context)"
+    RUN_LOGICAL_ID="$(printf '%s' "$RUN_EXPERIMENT_CONTEXT_JSON" | json_value "experiment_id.logical_id")"
     RUN_ID="$(printf '%s' "$RUN_EXPERIMENT_CONTEXT_JSON" | json_value "experiment_id.attempt_id")"
-    RUN_RESULT_DIR="${RUN_RESULTS_ROOT}/${RUN_ID}"
+    RUN_RESULT_DIR="${RUN_RESULTS_ROOT}/${RUN_LOGICAL_ID}/${RUN_ID}"
     RUN_RESULT_REMOTE_DIR="${RUN_RESULT_DIR}/remote"
     RUN_RESULT_METADATA_DIR="${RUN_RESULT_DIR}/metadata"
     RUN_RESULT_MANIFEST="${RUN_RESULT_METADATA_DIR}/wrapper-manifest.json"
