@@ -10,7 +10,8 @@ pub use faceoff::{
     EncodedDocument, EncodedToken, EncodedTokenKind, FaceoffChunk, FaceoffChunkLimits,
     FaceoffChunkedDocument, FaceoffEmissionPolicy, FaceoffFallbackMode, FaceoffFallbackStats,
     FaceoffIdentityMode, FaceoffLexemeKind, FaceoffTokenId, FaceoffTokenizer, FaceoffVocab,
-    FaceoffVocabConfig, PrototypeEntry, ShapeEntry, VocabEntry, FACEOFF_VOCAB_FORMAT_VERSION,
+    FaceoffVocabConfig, PrototypeAdmissionPolicy, PrototypeEntry, ShapeEntry, VocabEntry,
+    FACEOFF_VOCAB_FORMAT_VERSION,
 };
 pub use model_face::{
     BridgeBatch, BridgeDocument, BridgeFeatureChunk, BridgeFeatureToken, EmbeddingBridgeAdapter,
