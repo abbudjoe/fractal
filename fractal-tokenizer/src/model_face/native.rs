@@ -17,6 +17,13 @@ pub struct HuggingFaceNativeTokenizer {
     tokenizer: tokenizers::Tokenizer,
 }
 
+/// Canonical token ids plus byte offsets from a production tokenizer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalTokenization {
+    pub token_ids: Vec<u32>,
+    pub offsets: Vec<(usize, usize)>,
+}
+
 impl HuggingFaceNativeTokenizer {
     pub fn new(tokenizer: tokenizers::Tokenizer) -> Self {
         Self { tokenizer }
@@ -36,6 +43,25 @@ impl HuggingFaceNativeTokenizer {
 
     pub fn into_inner(self) -> tokenizers::Tokenizer {
         self.tokenizer
+    }
+
+    pub fn tokenize_with_byte_offsets(
+        &self,
+        text: &str,
+    ) -> Result<CanonicalTokenization, HuggingFaceNativeTokenizerError> {
+        let encoding = self.tokenizer.encode(text, false).map_err(|source| {
+            HuggingFaceNativeTokenizerError::Encode {
+                reason: source.to_string(),
+            }
+        })?;
+        Ok(CanonicalTokenization {
+            token_ids: encoding.get_ids().to_vec(),
+            offsets: encoding
+                .get_offsets()
+                .iter()
+                .map(|(start, end)| (*start, *end))
+                .collect(),
+        })
     }
 }
 
@@ -608,12 +634,7 @@ impl NativeTokenizer for HuggingFaceNativeTokenizer {
     type Error = HuggingFaceNativeTokenizerError;
 
     fn tokenize(&self, text: &str) -> Result<Vec<Self::Token>, Self::Error> {
-        let encoding = self.tokenizer.encode(text, false).map_err(|source| {
-            HuggingFaceNativeTokenizerError::Encode {
-                reason: source.to_string(),
-            }
-        })?;
-        Ok(encoding.get_ids().to_vec())
+        Ok(self.tokenize_with_byte_offsets(text)?.token_ids)
     }
 }
 
