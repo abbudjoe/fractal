@@ -423,9 +423,18 @@ pub fn take_last_species_run_artifact() -> Option<SpeciesRunArtifact> {
 #[derive(Clone, Debug)]
 pub struct TrainingBatchSet<B: AutodiffBackend> {
     pub train_sentence: Vec<TokenBatch<B>>,
-    pub train_arc: Vec<TokenBatch<B>>,
+    pub train_arc: Option<Vec<TokenBatch<B>>>,
     pub eval_sentence: Vec<TokenBatch<B>>,
     pub eval_arc: Vec<TokenBatch<B>>,
+}
+
+impl<B: AutodiffBackend> TrainingBatchSet<B> {
+    pub fn train_batches_for_step(&self, step: usize) -> &[TokenBatch<B>] {
+        match (&self.train_arc, step % 2) {
+            (Some(train_arc), 1) => train_arc,
+            _ => &self.train_sentence,
+        }
+    }
 }
 
 fn record_species_run_artifact(artifact: SpeciesRunArtifact) {
@@ -607,11 +616,7 @@ where
                 ));
             }
         }
-        let train_batches = if step % 2 == 0 {
-            &batches.train_sentence
-        } else {
-            &batches.train_arc
-        };
+        let train_batches = batches.train_batches_for_step(step);
         if train_batches.is_empty() {
             phase_timings.push(phase_timing(
                 RunPhase::Train,
@@ -920,11 +925,11 @@ fn prepare_batches_for_run<B: AutodiffBackend>(
             config.train_batch_size,
             device,
         )?,
-        train_arc: generator.train_batches_for::<B>(
+        train_arc: Some(generator.train_batches_for::<B>(
             TaskFamily::ArcGrid,
             config.train_batch_size,
             device,
-        )?,
+        )?),
         eval_sentence: generator.eval_batches_for::<B>(
             TaskFamily::RecursiveSentence,
             config.eval_batch_size,
@@ -959,11 +964,13 @@ fn prepare_candle_batches_for_run(
             config.train_batch_size,
             &staging_device,
         )?),
-        train_arc: move_batches(generator.train_batches_for::<CpuTrainBackend>(
-            TaskFamily::ArcGrid,
-            config.train_batch_size,
-            &staging_device,
-        )?),
+        train_arc: Some(move_batches(
+            generator.train_batches_for::<CpuTrainBackend>(
+                TaskFamily::ArcGrid,
+                config.train_batch_size,
+                &staging_device,
+            )?,
+        )),
         eval_sentence: move_batches(generator.eval_batches_for::<CpuTrainBackend>(
             TaskFamily::RecursiveSentence,
             config.eval_batch_size,

@@ -233,7 +233,7 @@ where
         device,
     )?;
 
-    let arc_batches = build_canonical_arc_batches::<B>(config, device)?;
+    let arc_eval_batches = build_canonical_arc_eval_batches::<B>(config, device)?;
 
     let stats = TokenizerBridgeStats::new(
         training_input,
@@ -253,9 +253,9 @@ where
     Ok((
         TrainingBatchSet {
             train_sentence: train.batches.clone(),
-            train_arc: arc_batches.train_arc,
+            train_arc: None,
             eval_sentence: eval.batches.clone(),
-            eval_arc: arc_batches.eval_arc,
+            eval_arc: arc_eval_batches,
         },
         stats,
     ))
@@ -336,10 +336,10 @@ where
     Ok((metrics, stats))
 }
 
-fn build_canonical_arc_batches<B: AutodiffBackend>(
+fn build_canonical_arc_eval_batches<B: AutodiffBackend>(
     config: &fractal_core::TournamentConfig,
     device: &B::Device,
-) -> Result<TrainingBatchSet<B>, FractalError> {
+) -> Result<Vec<TokenBatch<B>>, FractalError> {
     let generator = SimpleHierarchicalGenerator::new(GeneratorConfig {
         vocab_size: config.vocab_size,
         max_seq_len: config.max_seq_len,
@@ -349,21 +349,12 @@ fn build_canonical_arc_batches<B: AutodiffBackend>(
         depth_config: config.generator_depth_config,
     })?;
 
-    Ok(TrainingBatchSet {
-        train_sentence: Vec::new(),
-        train_arc: generator.train_batches_for::<B>(
-            TaskFamily::ArcGrid,
-            config.train_batch_size,
-            device,
-        )?,
-        eval_sentence: Vec::new(),
-        eval_arc: generator.eval_batches_for::<B>(
-            TaskFamily::ArcGrid,
-            config.eval_batch_size,
-            config.effective_arc_eval_batches(),
-            device,
-        )?,
-    })
+    generator.eval_batches_for::<B>(
+        TaskFamily::ArcGrid,
+        config.eval_batch_size,
+        config.effective_arc_eval_batches(),
+        device,
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -715,6 +706,7 @@ mod tests {
             bridge_stats.arc_source_mode,
             ArcSourceMode::SyntheticCanonical
         );
+        assert!(bridge_stats.bridge_enabled);
         let artifact = take_last_species_run_artifact()
             .expect("tokenizer-backed stage0 smoke run records an artifact");
         assert_eq!(
@@ -738,6 +730,14 @@ mod tests {
                 .mode,
             ArcSourceMode::SyntheticCanonical
         );
+        assert!(artifact
+            .manifest
+            .experiment
+            .as_ref()
+            .expect("experiment recorded")
+            .training_input
+            .tokenizer
+            .is_some());
 
         let report = TournamentRunReport::new(
             TournamentPreset::FastTest,
@@ -829,7 +829,7 @@ mod tests {
             batches.eval_sentence[0].family,
             TaskFamily::TokenizerBackedText
         );
-        assert_eq!(batches.train_arc[0].family, TaskFamily::ArcGrid);
+        assert!(batches.train_arc.is_none());
         assert_eq!(batches.eval_arc[0].family, TaskFamily::ArcGrid);
         assert_eq!(
             stats.training_input_mode,
