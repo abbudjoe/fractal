@@ -269,6 +269,8 @@ One record per document:
 ```json
 {
   "id": "logs-server-0001",
+  "source_family": "local_fawx",
+  "split": "induction",
   "bucket": "logs.repetition_heavy",
   "source_path": "/Users/joseph/.fawx/server.log",
   "start_line": 1200,
@@ -282,6 +284,8 @@ One record per document:
 Required fields:
 
 - `id`
+- `source_family`
+- `split`
 - `bucket`
 - `source_path`
 - `start_line`
@@ -294,6 +298,14 @@ Optional later fields:
 
 - `source_sha256`
 - `sampling_note`
+
+Current local runner rule:
+
+- every record carries `source_family=local_fawx`
+- every record is assigned deterministically to `split=induction` or
+  `split=evaluation`
+- vocab induction uses only the induction split
+- verdicts and scorecards are computed on the evaluation split only
 
 ## Bakeoff Comparisons
 
@@ -350,6 +362,14 @@ Recommended path:
 
 One result record per document, with nested per-model native metrics.
 
+The current runner also prints:
+
+- induction/evaluation document counts
+- evaluation-only hard-gate counts
+- `FAMILY_SUMMARY` rows
+- evaluation-only `BUCKET_SUMMARY` rows
+- evaluation-only verdict reasons
+
 ## Pass/Fail Gates
 
 The first local-first bakeoff passes if:
@@ -371,7 +391,9 @@ Immediate stop conditions:
 
 ## Scorecard
 
-This bakeoff should be judged in layers, not by one number.
+This bakeoff should be judged in layers, not by one number, and the judgment
+should be applied to the held-out evaluation split rather than the induction
+split.
 
 ### Hard Gates
 
@@ -395,8 +417,8 @@ The bucket-level read should use medians plus manual review of outliers.
 | `logs.repetition_heavy` | strong, ideally `>= 5x` median vs native; top docs often `>= 10x` | clearly nonzero is fine | weak compression or fallback spikes |
 | `logs.operational_mixed` | moderate to strong, ideally `>= 2x` median | some reuse is fine | chaotic reuse on unrelated spans |
 | `jsonl.signals` / `jsonl.journal` | moderate, about `1.5x` to `3x` | low to moderate | high reuse on structurally different records |
-| `code.rust` / `code.swift` | modest, about `1.1x` to `3x` | mostly low | very high compression with high reuse |
-| `docs.spec` / `docs.prose` | modest, about `1.1x` to `3x` | mostly low | overcollapse or unusually huge ratios |
+| `code.rust` / `code.swift` | modest, about `1.1x` to `3x` | mostly low | very high held-out compression or high reuse |
+| `docs.spec` / `docs.prose` | modest, about `1.1x` to `3x` | mostly low | overcollapse or unusually huge held-out ratios |
 
 ### Run-Level Verdict
 
@@ -408,7 +430,8 @@ The bakeoff should emit a simple red/yellow/green verdict.
   - hard gates pass, but the run is not yet healthy enough to trust
   - examples:
     - weak compression on `logs.repetition_heavy`
-    - suspiciously high reuse on non-log buckets
+    - suspiciously high reuse on held-out non-log buckets
+    - extreme held-out compression on non-log buckets
     - byte fallback appears on ordinary local UTF-8 text
 - `GREEN`
   - hard gates pass
@@ -428,11 +451,11 @@ The runner should print enough summary detail to explain the verdict:
 
 After the run, manually inspect:
 
-1. top `20` highest compression-ratio documents
-2. top `20` lowest compression-ratio documents
-3. all documents with non-zero `byte_fallback_tokens`
-4. all documents with suspiciously high `motif_reuse_count` outside log-heavy buckets
-5. all documents with unusually high chunk counts
+1. top `20` highest compression-ratio evaluation documents
+2. top `20` lowest compression-ratio evaluation documents
+3. all evaluation documents with non-zero `byte_fallback_tokens`
+4. all evaluation documents with suspiciously high `motif_reuse_count` outside log-heavy buckets
+5. all evaluation documents with unusually high chunk counts
 
 ## Expected Outcome
 
@@ -444,15 +467,16 @@ sense, we should see:
 - code/docs compress modestly without overcollapse
 - multilingual and Unicode-bearing text remain lossless and UTF-8-safe
 
-## Next Step After This Spec
+## Current Runner Status
 
-The next implementation step should be a local-only corpus builder + bakeoff
-runner that:
+The local-only runner now exists and currently:
 
-1. materializes the `120`-document corpus JSONL
-2. runs the fractal + native tokenizer comparisons
-3. writes local JSONL results
-4. emits a compact summary table plus a worst-case review list
+1. materializes the local corpus JSONL
+2. assigns each document to `induction` or `evaluation`
+3. induces vocab from induction docs only
+4. runs the fractal + native tokenizer comparisons
+5. writes local JSONL results
+6. emits evaluation-scoped summary rows and verdicts
 
-That runner should stay local-only and should not commit any sampled corpus
-content.
+The next methodological step after this local held-out mode is the hybrid
+bakeoff with external source families.

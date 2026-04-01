@@ -33,6 +33,7 @@ const JSONL_BUCKET_TARGET: usize = 24;
 const CODE_BUCKET_TARGET: usize = 36;
 const DOCS_BUCKET_TARGET: usize = 24;
 const OVERSAMPLE_FACTOR: usize = 2;
+const WINDOW_SPLIT_GROUP_SIZE: usize = 3;
 const HELD_OUT_NONLOG_CAUTION_RATIO: f64 = 20.0;
 const HELD_OUT_NONLOG_CAUTION_REUSE: usize = 2;
 
@@ -113,6 +114,7 @@ struct BakeoffRecord {
 #[derive(Clone, Debug)]
 struct CorpusCandidate {
     corpus: CorpusDocument,
+    split_group_key: String,
 }
 
 #[derive(Clone, Debug)]
@@ -302,6 +304,20 @@ fn build_corpus(args: &Args) -> Result<Vec<CorpusCandidate>, Box<dyn Error>> {
     }
 
     assign_local_splits(&mut deduped);
+    let induction_docs = deduped
+        .iter()
+        .filter(|candidate| candidate.corpus.split == CorpusSplit::Induction)
+        .count();
+    let evaluation_docs = deduped
+        .iter()
+        .filter(|candidate| candidate.corpus.split == CorpusSplit::Evaluation)
+        .count();
+    if induction_docs == 0 || evaluation_docs == 0 {
+        return Err(format!(
+            "local bakeoff requires both induction and evaluation documents (induction={induction_docs}, evaluation={evaluation_docs})"
+        )
+        .into());
+    }
     Ok(deduped)
 }
 
@@ -311,16 +327,24 @@ fn assign_local_splits(candidates: &mut [CorpusCandidate]) {
         per_bucket
             .entry(candidate.corpus.bucket.clone())
             .or_default()
-            .entry(candidate.corpus.source_path.clone())
+            .entry(candidate.split_group_key.clone())
             .or_default()
             .push(index);
     }
 
     for source_groups in per_bucket.into_values() {
+        let mut grouped = source_groups.into_iter().collect::<Vec<_>>();
+        grouped.sort_by(|left, right| {
+            right
+                .1
+                .len()
+                .cmp(&left.1.len())
+                .then_with(|| left.0.cmp(&right.0))
+        });
+
         let mut induction_docs = 0usize;
         let mut evaluation_docs = 0usize;
-
-        for indices in source_groups.into_values() {
+        for (_, indices) in grouped {
             let split = if induction_docs <= evaluation_docs {
                 induction_docs += indices.len();
                 CorpusSplit::Induction
@@ -562,10 +586,15 @@ fn line_window_documents(
     while start < lines.len() && docs.len() < max_windows {
         let end = (start + window_lines).min(lines.len());
         let slice = lines[start..end].join("");
+        let split_group = format!(
+            "{}#group-{:04}",
+            source_path.display(),
+            (window_index - 1) / WINDOW_SPLIT_GROUP_SIZE
+        );
         docs.push(CorpusCandidate {
-        corpus: build_corpus_document(
-            format!(
-                "{}-{}-{:016x}-{:04}",
+            corpus: build_corpus_document(
+                format!(
+                    "{}-{}-{:016x}-{:04}",
                     prefix,
                     source_path
                         .file_stem()
@@ -573,15 +602,16 @@ fn line_window_documents(
                         .unwrap_or("source"),
                     fnv1a64(&source_path.to_string_lossy()),
                     window_index
-            ),
-            bucket.to_string(),
-            SourceFamily::LocalFawx,
-            CorpusSplit::Induction,
-            source_path.to_string_lossy().to_string(),
-            start + 1,
-            end,
+                ),
+                bucket.to_string(),
+                SourceFamily::LocalFawx,
+                CorpusSplit::Induction,
+                source_path.to_string_lossy().to_string(),
+                start + 1,
+                end,
                 slice,
             ),
+            split_group_key: split_group,
         });
         start = end;
         window_index += 1;
@@ -615,6 +645,7 @@ fn whole_file_candidate(
             line_count(text),
             text.to_string(),
         ),
+        split_group_key: source_path.to_string_lossy().to_string(),
     }
 }
 
@@ -643,6 +674,7 @@ fn prefix_file_document(
             end_line,
             slice,
         ),
+        split_group_key: source_path.to_string_lossy().to_string(),
     }
 }
 
@@ -1178,6 +1210,19 @@ fn summarize_families(results: &[BakeoffRecord]) -> Vec<FamilySummary> {
 
 fn summarize_verdict(results: &[BakeoffRecord]) -> VerdictSummary {
     let results = held_out_records(results);
+    if results.is_empty() {
+        return VerdictSummary {
+            verdict: BakeoffVerdict::Red,
+            roundtrip_failures: 0,
+            chunk_utf8_failures: 0,
+            collation_failures: 0,
+            byte_fallback_docs: 0,
+            suspicious_nonlog_overcollapse_docs: 0,
+            weak_log_buckets: 0,
+            reasons: vec!["evaluation_docs=0".to_string()],
+        };
+    }
+
     let roundtrip_failures = results
         .iter()
         .filter(|record| !record.fractal.roundtrip_ok)
@@ -1208,9 +1253,7 @@ fn summarize_verdict(results: &[BakeoffRecord]) -> VerdictSummary {
     let bucket_summaries = summarize_buckets(&results);
     let weak_log_buckets = bucket_summaries
         .iter()
-        .filter(|bucket| {
-            bucket.bucket == "logs.repetition_heavy" && bucket.median_best_ratio < 5.0
-        })
+        .filter(|bucket| bucket.bucket == "logs.repetition_heavy" && bucket.median_best_ratio < 5.0)
         .count();
 
     let mut reasons = Vec::new();
@@ -1357,6 +1400,7 @@ mod tests {
                 1,
                 format!("{label}-{idx}"),
             ),
+            split_group_key: "/tmp/source".to_string(),
         };
 
         let mut out = Vec::new();
@@ -1414,6 +1458,7 @@ mod tests {
                     10,
                     "fn a() {}\n".to_string(),
                 ),
+                split_group_key: "/tmp/a.rs".to_string(),
             },
             CorpusCandidate {
                 corpus: build_corpus_document(
@@ -1426,6 +1471,7 @@ mod tests {
                     20,
                     "fn b() {}\n".to_string(),
                 ),
+                split_group_key: "/tmp/a.rs".to_string(),
             },
             CorpusCandidate {
                 corpus: build_corpus_document(
@@ -1438,6 +1484,7 @@ mod tests {
                     10,
                     "fn c() {}\n".to_string(),
                 ),
+                split_group_key: "/tmp/b.rs".to_string(),
             },
         ];
 
@@ -1445,6 +1492,38 @@ mod tests {
 
         assert_eq!(candidates[0].corpus.split, candidates[1].corpus.split);
         assert_ne!(candidates[0].corpus.split, candidates[2].corpus.split);
+    }
+
+    #[test]
+    fn assign_local_splits_balances_window_groups() {
+        let mut candidates = (0..8)
+            .map(|index| CorpusCandidate {
+                corpus: build_corpus_document(
+                    format!("logs-{index}"),
+                    "logs.repetition_heavy".to_string(),
+                    SourceFamily::LocalFawx,
+                    CorpusSplit::Induction,
+                    "/tmp/server.log".to_string(),
+                    index + 1,
+                    index + 1,
+                    format!("line-{index}\n"),
+                ),
+                split_group_key: format!("/tmp/server.log#group-{}", index / 2),
+            })
+            .collect::<Vec<_>>();
+
+        assign_local_splits(&mut candidates);
+
+        let induction = candidates
+            .iter()
+            .filter(|candidate| candidate.corpus.split == CorpusSplit::Induction)
+            .count();
+        let evaluation = candidates.len() - induction;
+
+        assert_eq!(induction, 4);
+        assert_eq!(evaluation, 4);
+        assert_eq!(candidates[0].corpus.split, candidates[1].corpus.split);
+        assert_eq!(candidates[2].corpus.split, candidates[3].corpus.split);
     }
 
     fn fake_record(
@@ -1561,7 +1640,10 @@ mod tests {
             ),
         ];
 
-        assert_eq!(summarize_verdict(&weak_logs).verdict, BakeoffVerdict::Yellow);
+        assert_eq!(
+            summarize_verdict(&weak_logs).verdict,
+            BakeoffVerdict::Yellow
+        );
         assert_eq!(
             summarize_verdict(&suspicious_nonlogs).verdict,
             BakeoffVerdict::Yellow
@@ -1647,7 +1729,32 @@ mod tests {
         let verdict = summarize_verdict(&results);
 
         assert_eq!(verdict.verdict, BakeoffVerdict::Green);
-        assert!(verdict.reasons.iter().any(|reason| reason == "hard_gates_clear"));
+        assert!(verdict
+            .reasons
+            .iter()
+            .any(|reason| reason == "hard_gates_clear"));
+    }
+
+    #[test]
+    fn verdict_is_red_without_evaluation_docs() {
+        let results = vec![fake_record(
+            "logs.repetition_heavy",
+            8.0,
+            1,
+            true,
+            true,
+            true,
+            0,
+            CorpusSplit::Induction,
+        )];
+
+        let verdict = summarize_verdict(&results);
+
+        assert_eq!(verdict.verdict, BakeoffVerdict::Red);
+        assert!(verdict
+            .reasons
+            .iter()
+            .any(|reason| reason == "evaluation_docs=0"));
     }
 
     #[test]
