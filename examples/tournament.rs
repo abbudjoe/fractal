@@ -31,7 +31,7 @@ use fractal_core::registry::cuda_device;
 use fractal_core::registry::{
     cpu_device, initialize_metal_runtime, take_last_species_run_artifact,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 fn main() -> Result<(), FractalError> {
@@ -261,14 +261,14 @@ struct ExperimentManifestFile {
     expected_commit_sha: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct ManifestQuestionOverrides {
     lane_intent: Option<LaneIntent>,
     decision_intent: Option<DecisionIntent>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct ManifestConfigOverrides {
     seed: Option<u64>,
@@ -398,7 +398,7 @@ impl ManifestConfigOverrides {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct ExperimentManifestV2Spec {
     question: ManifestQuestionOverrides,
@@ -411,7 +411,7 @@ struct ExperimentManifestV2Spec {
     artifacts: Option<ArtifactPolicy>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ExperimentManifestFileV2 {
     logical_name: String,
@@ -1002,7 +1002,84 @@ fn prepare_stage0_assets(options: &RunOptions) -> Result<(), FractalError> {
         "Materialized Stage 0 bridge vocab artifact at {}",
         output_path.display()
     );
+    let frozen_manifest_path = materialize_frozen_manifest_v2(manifest_path, &manifest)?;
+    println!(
+        "Materialized frozen Stage 0 manifest at {}",
+        frozen_manifest_path.display()
+    );
     Ok(())
+}
+
+fn current_git_commit_sha() -> Result<String, FractalError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .map_err(|error| {
+            invalid_argument(format!("failed to resolve current git commit sha: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(invalid_argument(format!(
+            "failed to resolve current git commit sha: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let sha = String::from_utf8(output.stdout).map_err(|error| {
+        invalid_argument(format!(
+            "git rev-parse returned non-utf8 output for current commit sha: {error}"
+        ))
+    })?;
+    let sha = sha.trim().to_owned();
+    if sha.is_empty() {
+        return Err(invalid_argument(
+            "git rev-parse returned an empty current commit sha".to_owned(),
+        ));
+    }
+    Ok(sha)
+}
+
+fn resolve_frozen_manifest_output_path(manifest: &ExperimentManifestFileV2) -> PathBuf {
+    if let Some(root) = std::env::var_os("FRACTAL_RUN_MANIFEST_DIR") {
+        PathBuf::from(root).join(format!("{}.frozen.json", manifest.logical_name))
+    } else {
+        std::env::temp_dir()
+            .join("fractal-prepared-manifests")
+            .join(format!("{}.frozen.json", manifest.logical_name))
+    }
+}
+
+fn materialize_frozen_manifest_v2(
+    source_path: &Path,
+    manifest: &ExperimentManifestFileV2,
+) -> Result<PathBuf, FractalError> {
+    let mut frozen = manifest.clone();
+    frozen.expected_commit_sha = Some(current_git_commit_sha()?);
+    let output_path = resolve_frozen_manifest_output_path(&frozen);
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            invalid_argument(format!(
+                "failed to create frozen manifest directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    fs::write(
+        &output_path,
+        serde_json::to_vec_pretty(&frozen).map_err(|error| {
+            invalid_argument(format!(
+                "failed to serialize frozen manifest for {}: {error}",
+                source_path.display()
+            ))
+        })?,
+    )
+    .map_err(|error| {
+        invalid_argument(format!(
+            "failed to write frozen manifest for {} to {}: {error}",
+            source_path.display(),
+            output_path.display()
+        ))
+    })?;
+    Ok(output_path)
 }
 
 fn run_sequence(options: &RunOptions, sequence: TournamentSequence) -> Result<(), FractalError> {
@@ -2705,6 +2782,7 @@ mod tests {
     fn prepare_stage0_assets_materializes_bridge_vocab_from_manifest_v2() {
         let _env_lock = MANIFEST_ENV_MUTEX.lock().unwrap();
         let guard = TestEnvGuard::new("fractal-stage0-prepare");
+        let manifest_output_dir = guard.path().join("prepared-manifests");
         let train_path = guard.path().join("train.jsonl");
         let eval_path = guard.path().join("eval.jsonl");
         let tokenizer_path = build_file_backed_sentencepiece_tokenizer(guard.path());
@@ -2803,6 +2881,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        std::env::set_var("FRACTAL_RUN_MANIFEST_DIR", &manifest_output_dir);
 
         let command = parse_command(vec![
             "--prepare-stage0-assets".to_owned(),
@@ -2821,6 +2900,15 @@ mod tests {
         let vocab = FaceoffVocab::load_from_file(&bridge_vocab_path)
             .expect("prepared bridge vocab should load");
         assert!(!vocab.entries().is_empty());
+        let frozen_manifest_path =
+            manifest_output_dir.join("stage0-canary-prepare-s42-p1-contractive.frozen.json");
+        assert!(frozen_manifest_path.is_file());
+        let frozen_manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&frozen_manifest_path).unwrap()).unwrap();
+        assert_eq!(
+            frozen_manifest["expected_commit_sha"].as_str(),
+            Some(current_git_commit_sha().expect("current git commit should resolve").as_str())
+        );
     }
 
     #[test]
