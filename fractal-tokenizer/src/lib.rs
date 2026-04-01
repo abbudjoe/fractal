@@ -28,6 +28,7 @@ pub use tokenizer::{
     p1_dynamic_lever_factory, revived_primitive_factories, tokenizer_tracker_reminder,
     validate_tokenizer_primitive_name, MotifReusePolicy, PrimitiveFactory, PrimitiveRunSummary,
     RecursiveTokenizer, SplitPolicy, StateSignature, TokenRecord, TokenizerConfig,
+    TokenizerSubstrateMode,
 };
 
 #[cfg(test)]

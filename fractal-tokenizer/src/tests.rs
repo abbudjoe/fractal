@@ -26,7 +26,8 @@ use crate::{
     FaceoffVocabConfig, HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument,
     NativeCollationSpec, NativeCompatibilityAdapter, NativeTokenizer, P1FractalHybrid,
     P2Mandelbrot, PrimitiveRunSummary, PrototypeGranularityMode, RecursiveTokenizer,
-    StateSignature, TokenRecord, TokenizerConfig, FACEOFF_VOCAB_FORMAT_VERSION,
+    StateSignature, TokenRecord, TokenizerConfig, TokenizerSubstrateMode,
+    FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -2223,6 +2224,92 @@ fn faceoff_unicode_heavy_roundtrip_is_exact() {
     assert!(encoded.tokens.len() > 1);
     assert_eq!(encoded.fallback.unknown_motifs, 0);
     assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
+}
+
+#[test]
+fn faceoff_lexical_substrate_token_boundaries_align_to_lexeme_boundaries() {
+    let device = Default::default();
+    let input = "fn render_home_screen(auth_provider: AuthProvider) {\n    let oauth_flow = 2027;\n    println!(\"ok\");\n}\n";
+    let tokenizer = RecursiveTokenizer::new(TokenizerConfig {
+        max_depth: 4,
+        split_policy: crate::SplitPolicy::BoundaryAware,
+        substrate_mode: TokenizerSubstrateMode::LexicalAtoms,
+        ..TokenizerConfig::default()
+    });
+    let summary = tokenizer
+        .run_factory(input, &device, p1_dynamic_lever_factory::<TestBackend>())
+        .unwrap();
+
+    assert!(!summary.tokens.is_empty());
+    let identifiers = [
+        "render_home_screen",
+        "auth_provider",
+        "AuthProvider",
+        "oauth_flow",
+    ]
+    .into_iter()
+    .map(|needle| {
+        let start = input.find(needle).unwrap();
+        let end = start + needle.len();
+        (start, end)
+    })
+    .collect::<Vec<_>>();
+
+    for record in &summary.tokens {
+        for (start, end) in &identifiers {
+            assert!(
+                record.start <= *start || record.start >= *end,
+                "token start {} fell inside identifier span {}..{}",
+                record.start,
+                start,
+                end
+            );
+            assert!(
+                record.end <= *start || record.end >= *end,
+                "token end {} fell inside identifier span {}..{}",
+                record.end,
+                start,
+                end
+            );
+        }
+    }
+}
+
+#[test]
+fn faceoff_lexical_substrate_summary_is_deterministic() {
+    let device = Default::default();
+    let input = "## Title\n- item_one\n- item_two\n\npub fn render_settings(auth_provider: AuthProvider) -> Result<()> {\n    Ok(())\n}\n";
+    let tokenizer = RecursiveTokenizer::new(TokenizerConfig {
+        max_depth: 4,
+        split_policy: crate::SplitPolicy::BoundaryAware,
+        substrate_mode: TokenizerSubstrateMode::LexicalAtoms,
+        ..TokenizerConfig::default()
+    });
+
+    let first = tokenizer
+        .run_factory(input, &device, p1_dynamic_lever_factory::<TestBackend>())
+        .unwrap();
+    let second = tokenizer
+        .run_factory(input, &device, p1_dynamic_lever_factory::<TestBackend>())
+        .unwrap();
+
+    assert_eq!(
+        digest_sequences(&[first.clone()]),
+        digest_sequences(&[second.clone()])
+    );
+    assert_eq!(first.tokens.len(), second.tokens.len());
+    assert_eq!(
+        first
+            .tokens
+            .iter()
+            .map(|record| (&record.start, &record.end))
+            .collect::<Vec<_>>(),
+        second
+            .tokens
+            .iter()
+            .map(|record| (&record.start, &record.end))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

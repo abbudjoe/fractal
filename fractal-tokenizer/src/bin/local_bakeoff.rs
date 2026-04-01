@@ -9,6 +9,7 @@ use fractal_tokenizer::{
     FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer, ModelFacingBatch,
     ModelFacingDocument, MotifReusePolicy, NativeCollationSpec, NativeCompatibilityAdapter,
     PrimitiveFactory, PrototypeGranularityMode, SplitPolicy, TokenizerConfig,
+    TokenizerSubstrateMode,
 };
 use serde::Serialize;
 use std::{
@@ -266,6 +267,7 @@ struct Args {
     fallback_mode: FaceoffFallbackMode,
     identity_mode: FaceoffIdentityMode,
     prototype_granularity: PrototypeGranularityMode,
+    substrate_mode: TokenizerSubstrateMode,
 }
 
 impl Args {
@@ -280,6 +282,7 @@ impl Args {
         let mut fallback_mode = FaceoffFallbackMode::Full;
         let mut identity_mode = FaceoffIdentityMode::Legacy;
         let mut prototype_granularity = PrototypeGranularityMode::Coarse;
+        let mut substrate_mode = TokenizerSubstrateMode::RawBytes;
 
         let mut args = env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -329,6 +332,10 @@ impl Args {
                             .ok_or("--prototype-granularity requires a value")?,
                     )?;
                 }
+                "--substrate" => {
+                    substrate_mode =
+                        parse_substrate_mode(&args.next().ok_or("--substrate requires a value")?)?;
+                }
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -350,13 +357,14 @@ impl Args {
             fallback_mode,
             identity_mode,
             prototype_granularity,
+            substrate_mode,
         })
     }
 }
 
 fn print_help() {
     eprintln!(
-        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--fawx-root DIR] [--home-state-root DIR] [--max-review-count N] [--primitive NAME] [--all-primitives] [--fallback-mode full|motif-only] [--identity-mode legacy|prototype-primary] [--prototype-granularity coarse|adaptive]"
+        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--fawx-root DIR] [--home-state-root DIR] [--max-review-count N] [--primitive NAME] [--all-primitives] [--fallback-mode full|motif-only] [--identity-mode legacy|prototype-primary] [--prototype-granularity coarse|adaptive] [--substrate raw|lexical]"
     );
 }
 
@@ -389,6 +397,16 @@ fn parse_prototype_granularity(value: &str) -> Result<PrototypeGranularityMode, 
             "unknown prototype granularity `{other}`; expected one of: coarse, adaptive"
         )
         .into()),
+    }
+}
+
+fn parse_substrate_mode(value: &str) -> Result<TokenizerSubstrateMode, Box<dyn Error>> {
+    match value {
+        "raw" => Ok(TokenizerSubstrateMode::RawBytes),
+        "lexical" => Ok(TokenizerSubstrateMode::LexicalAtoms),
+        other => {
+            Err(format!("unknown substrate mode `{other}`; expected one of: raw, lexical").into())
+        }
     }
 }
 
@@ -1039,6 +1057,7 @@ fn run_primitive_bakeoff(
         args.fallback_mode,
         args.identity_mode,
         args.prototype_granularity,
+        args.substrate_mode,
     )?;
     let model_results = run_model_bakeoff(&works, model_sources)?;
     let results = merge_results(works, model_results);
@@ -1055,10 +1074,12 @@ fn build_fractal_documents(
     fallback_mode: FaceoffFallbackMode,
     identity_mode: FaceoffIdentityMode,
     prototype_granularity: PrototypeGranularityMode,
+    substrate_mode: TokenizerSubstrateMode,
 ) -> Result<(Vec<DocumentWork>, FaceoffVocab), Box<dyn Error>> {
     let device = Default::default();
     let tokenizer = FaceoffTokenizer::new(TokenizerConfig {
         split_policy: SplitPolicy::BoundaryAware,
+        substrate_mode,
         ..TokenizerConfig::default()
     });
     let texts = corpus
@@ -1341,6 +1362,13 @@ fn print_summary(primitive: &str, results: &[BakeoffRecord], vocab: &FaceoffVoca
         match args.prototype_granularity {
             PrototypeGranularityMode::Coarse => "coarse",
             PrototypeGranularityMode::Adaptive => "adaptive",
+        }
+    );
+    println!(
+        "BAKEOFF_SUBSTRATE={}",
+        match args.substrate_mode {
+            TokenizerSubstrateMode::RawBytes => "raw",
+            TokenizerSubstrateMode::LexicalAtoms => "lexical",
         }
     );
     println!("BAKEOFF_DOCUMENTS={total_docs}");
@@ -1819,6 +1847,7 @@ mod tests {
             fallback_mode: FaceoffFallbackMode::Full,
             identity_mode: FaceoffIdentityMode::Legacy,
             prototype_granularity: PrototypeGranularityMode::Coarse,
+            substrate_mode: TokenizerSubstrateMode::RawBytes,
         }
     }
 
@@ -1897,6 +1926,28 @@ mod tests {
             .expect("unknown prototype granularity should error")
             .to_string();
         assert!(error.contains("unknown prototype granularity `totally-fake`"));
+    }
+
+    #[test]
+    fn parse_substrate_defaults_to_raw() {
+        assert_eq!(base_args().substrate_mode, TokenizerSubstrateMode::RawBytes);
+    }
+
+    #[test]
+    fn parse_substrate_accepts_lexical() {
+        assert_eq!(
+            parse_substrate_mode("lexical").unwrap(),
+            TokenizerSubstrateMode::LexicalAtoms
+        );
+    }
+
+    #[test]
+    fn parse_substrate_rejects_unknown_value() {
+        let error = parse_substrate_mode("totally-fake")
+            .err()
+            .expect("unknown substrate mode should error")
+            .to_string();
+        assert!(error.contains("unknown substrate mode `totally-fake`"));
     }
 
     #[test]

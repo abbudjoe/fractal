@@ -13,7 +13,10 @@ use fractal_core::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{B1FractalGated, B3FractalHierarchical, B4Universal, P1FractalHybrid, P2Mandelbrot};
+use crate::{
+    B1FractalGated, B3FractalHierarchical, B4Universal, FaceoffLexemeKind, P1FractalHybrid,
+    P2Mandelbrot,
+};
 
 const DEFAULT_LEVELS: usize = 3;
 const TRACKER_REMINDER: &str =
@@ -25,6 +28,13 @@ pub enum SplitPolicy {
     BoundaryAware,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TokenizerSubstrateMode {
+    #[default]
+    RawBytes,
+    LexicalAtoms,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct TokenizerConfig {
     pub dim: usize,
@@ -32,6 +42,7 @@ pub struct TokenizerConfig {
     pub max_depth: usize,
     pub seed: u64,
     pub split_policy: SplitPolicy,
+    pub substrate_mode: TokenizerSubstrateMode,
 }
 
 impl Default for TokenizerConfig {
@@ -42,6 +53,7 @@ impl Default for TokenizerConfig {
             max_depth: 6,
             seed: 42,
             split_policy: SplitPolicy::Balanced,
+            substrate_mode: TokenizerSubstrateMode::RawBytes,
         }
     }
 }
@@ -123,6 +135,20 @@ struct Segment<'a> {
     depth: usize,
 }
 
+#[derive(Clone, Copy)]
+struct AtomSegment {
+    start_index: usize,
+    end_index: usize,
+    depth: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AtomSpan {
+    kind: FaceoffLexemeKind,
+    start: usize,
+    end: usize,
+}
+
 #[derive(Clone)]
 struct SeenMotif {
     depth: usize,
@@ -160,20 +186,46 @@ impl RecursiveTokenizer {
         let state = FractalState::zeros(rule.state_layout(), 1, rule.hidden_dim(), device)?;
         let mut tokens = Vec::new();
         let mut motifs = MotifRegistry::default();
-        let root = Segment {
-            bytes: text.as_bytes(),
-            start: 0,
-            depth: 0,
-        };
-        self.tokenize_segment(
-            rule,
-            state,
-            root,
-            &mut tokens,
-            &mut motifs,
-            motif_reuse,
-            device,
-        )?;
+        match self.config.substrate_mode {
+            TokenizerSubstrateMode::RawBytes => {
+                let root = Segment {
+                    bytes: text.as_bytes(),
+                    start: 0,
+                    depth: 0,
+                };
+                self.tokenize_segment(
+                    rule,
+                    state,
+                    root,
+                    &mut tokens,
+                    &mut motifs,
+                    motif_reuse,
+                    device,
+                )?;
+            }
+            TokenizerSubstrateMode::LexicalAtoms => {
+                let atoms = scan_atom_spans(text);
+                if atoms.is_empty() {
+                    return Ok(tokens);
+                }
+                let root = AtomSegment {
+                    start_index: 0,
+                    end_index: atoms.len(),
+                    depth: 0,
+                };
+                self.tokenize_atom_segment(
+                    rule,
+                    state,
+                    &atoms,
+                    text,
+                    root,
+                    &mut tokens,
+                    &mut motifs,
+                    motif_reuse,
+                    device,
+                )?;
+            }
+        }
         Ok(tokens)
     }
 
@@ -269,6 +321,202 @@ impl RecursiveTokenizer {
 
         Ok(())
     }
+
+    fn tokenize_atom_segment<B: Backend>(
+        &self,
+        rule: &dyn FractalRule<B>,
+        state: FractalState<B>,
+        atoms: &[AtomSpan],
+        text: &str,
+        segment: AtomSegment,
+        tokens: &mut Vec<TokenRecord>,
+        motifs: &mut MotifRegistry,
+        motif_reuse: MotifReusePolicy,
+        device: &B::Device,
+    ) -> Result<(), FractalError> {
+        if segment.start_index >= segment.end_index || segment.end_index > atoms.len() {
+            return Ok(());
+        }
+
+        let atom_slice = &atoms[segment.start_index..segment.end_index];
+        let byte_start = atom_slice.first().map(|atom| atom.start).unwrap_or(0);
+        let byte_end = atom_slice.last().map(|atom| atom.end).unwrap_or(byte_start);
+        if byte_end > text.len() || byte_start > byte_end {
+            return Err(FractalError::InvalidState(format!(
+                "atom segment span {}..{} is out of bounds for input length {}",
+                byte_start,
+                byte_end,
+                text.len()
+            )));
+        }
+
+        let bytes = &text.as_bytes()[byte_start..byte_end];
+        let features = atom_segment_features::<B>(atom_slice, self.config.dim, device);
+        let next_state = rule.apply(
+            &state,
+            &features,
+            ApplyContext {
+                depth: segment.depth,
+                max_depth: self.config.max_depth,
+            },
+        )?;
+        let summary = summarize_readout(
+            &next_state.readout(),
+            bytes,
+            segment.depth,
+            motifs,
+            motif_reuse,
+        )?;
+        tokens.push(TokenRecord {
+            depth: segment.depth,
+            start: byte_start,
+            end: byte_end,
+            text: text[byte_start..byte_end].to_string(),
+            token: summary.token,
+            state_signature: summary.state_signature,
+        });
+
+        if segment.depth + 1 >= self.config.max_depth || atom_slice.len() <= 1 {
+            return Ok(());
+        }
+
+        if let Some(split) = atom_split_point(atom_slice, self.config.split_policy) {
+            let absolute_split = segment.start_index + split;
+            self.tokenize_atom_segment(
+                rule,
+                next_state.clone(),
+                atoms,
+                text,
+                AtomSegment {
+                    start_index: segment.start_index,
+                    end_index: absolute_split,
+                    depth: segment.depth + 1,
+                },
+                tokens,
+                motifs,
+                motif_reuse,
+                device,
+            )?;
+            self.tokenize_atom_segment(
+                rule,
+                next_state,
+                atoms,
+                text,
+                AtomSegment {
+                    start_index: absolute_split,
+                    end_index: segment.end_index,
+                    depth: segment.depth + 1,
+                },
+                tokens,
+                motifs,
+                motif_reuse,
+                device,
+            )?;
+        }
+
+        Ok(())
+    }
+}
+
+fn scan_atom_spans(text: &str) -> Vec<AtomSpan> {
+    let mut spans = Vec::new();
+    let mut offset = 0usize;
+
+    while offset < text.len() {
+        let (kind, end) = consume_atom_span(text, offset);
+        spans.push(AtomSpan {
+            kind,
+            start: offset,
+            end,
+        });
+        offset = end;
+    }
+
+    spans
+}
+
+fn consume_atom_span(text: &str, start: usize) -> (FaceoffLexemeKind, usize) {
+    let ch = text[start..].chars().next().unwrap_or('\0');
+    if ch == '\n' {
+        return (
+            FaceoffLexemeKind::NewlineIndent,
+            consume_newline_indent_atom(text, start),
+        );
+    }
+    if ch.is_whitespace() {
+        return (
+            FaceoffLexemeKind::Whitespace,
+            consume_atom_while(text, start, |value| value.is_whitespace() && value != '\n'),
+        );
+    }
+    if ch.is_ascii_digit() {
+        return (
+            FaceoffLexemeKind::Number,
+            consume_atom_while(text, start, |value| value.is_ascii_digit()),
+        );
+    }
+    if is_identifier_start(ch) {
+        let end = consume_atom_while(text, start, is_identifier_continue);
+        let kind = if text[start..end]
+            .chars()
+            .all(|value| value.is_alphabetic() && !value.is_uppercase())
+        {
+            FaceoffLexemeKind::Word
+        } else {
+            FaceoffLexemeKind::Identifier
+        };
+        return (kind, end);
+    }
+    if is_atom_punctuation(ch) {
+        return (
+            FaceoffLexemeKind::Punctuation,
+            consume_atom_while(text, start, is_atom_punctuation),
+        );
+    }
+    (
+        FaceoffLexemeKind::SymbolRun,
+        consume_atom_while(text, start, |value| {
+            !value.is_whitespace() && !value.is_alphanumeric() && !is_atom_punctuation(value)
+        }),
+    )
+}
+
+fn consume_atom_while(text: &str, start: usize, predicate: impl Fn(char) -> bool) -> usize {
+    let mut end = start;
+    for (offset, ch) in text[start..].char_indices() {
+        if !predicate(ch) {
+            break;
+        }
+        end = start + offset + ch.len_utf8();
+    }
+    end.max(
+        start
+            + text[start..]
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or(0),
+    )
+}
+
+fn consume_newline_indent_atom(text: &str, start: usize) -> usize {
+    let after_newline = start + '\n'.len_utf8();
+    consume_atom_while(text, after_newline, |value| matches!(value, ' ' | '\t'))
+}
+
+fn is_identifier_start(value: char) -> bool {
+    value.is_alphabetic() || value == '_'
+}
+
+fn is_identifier_continue(value: char) -> bool {
+    value.is_alphanumeric() || value == '_'
+}
+
+fn is_atom_punctuation(value: char) -> bool {
+    matches!(
+        value,
+        '.' | ',' | ';' | ':' | '!' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\''
+    )
 }
 
 pub fn revived_primitive_factories<B: Backend>() -> [PrimitiveFactory<B>; 5] {
@@ -591,6 +839,19 @@ fn split_point(bytes: &[u8], policy: SplitPolicy) -> Option<usize> {
     boundary_aware_split_point(bytes).or(fallback)
 }
 
+fn atom_split_point(atoms: &[AtomSpan], policy: SplitPolicy) -> Option<usize> {
+    if atoms.len() <= 1 {
+        return None;
+    }
+
+    let fallback = Some((atoms.len() / 2).max(1));
+    if policy == SplitPolicy::Balanced {
+        return fallback;
+    }
+
+    atom_boundary_aware_split_point(atoms).or(fallback)
+}
+
 fn balanced_split_point(bytes: &[u8]) -> Option<usize> {
     let mid = bytes.len() / 2;
     let mut best = None;
@@ -604,6 +865,26 @@ fn balanced_split_point(bytes: &[u8]) -> Option<usize> {
     }
 
     Some(best.map(|(index, _)| index).unwrap_or(mid.max(1)))
+}
+
+fn atom_boundary_aware_split_point(atoms: &[AtomSpan]) -> Option<usize> {
+    if atoms.len() <= 1 {
+        return None;
+    }
+
+    let midpoint = atoms.len() / 2;
+    let mut best: Option<(u8, usize, usize)> = None;
+
+    for index in 1..atoms.len() {
+        let boundary = classify_atom_boundary(&atoms[index - 1], &atoms[index]);
+        let distance = midpoint.abs_diff(index);
+        let candidate = (boundary, distance, index);
+        if best.is_none_or(|current| candidate < current) {
+            best = Some(candidate);
+        }
+    }
+
+    best.map(|(_, _, index)| index)
 }
 
 fn boundary_aware_split_point(bytes: &[u8]) -> Option<usize> {
@@ -629,6 +910,26 @@ fn boundary_aware_split_point(bytes: &[u8]) -> Option<usize> {
     }
 
     best.map(|(_, _, index)| index)
+}
+
+fn classify_atom_boundary(left: &AtomSpan, right: &AtomSpan) -> u8 {
+    if left.kind == FaceoffLexemeKind::NewlineIndent
+        && right.kind == FaceoffLexemeKind::NewlineIndent
+    {
+        return 0;
+    }
+    if left.kind == FaceoffLexemeKind::NewlineIndent
+        || right.kind == FaceoffLexemeKind::NewlineIndent
+    {
+        return 1;
+    }
+    if left.kind == FaceoffLexemeKind::Punctuation || right.kind == FaceoffLexemeKind::Punctuation {
+        return 2;
+    }
+    if left.kind == FaceoffLexemeKind::Whitespace || right.kind == FaceoffLexemeKind::Whitespace {
+        return 3;
+    }
+    4
 }
 
 fn classify_boundary(text: &str, index: usize) -> Option<u8> {
@@ -695,6 +996,63 @@ fn segment_features<B: Backend>(bytes: &[u8], dim: usize, device: &B::Device) ->
         features[dim - 3] = whitespace / len;
         features[dim - 2] = punctuation / len;
         features[dim - 1] = uppercase / len;
+    }
+
+    Tensor::from_data(TensorData::new(features, [1, dim]), device)
+}
+
+fn atom_segment_features<B: Backend>(
+    atoms: &[AtomSpan],
+    dim: usize,
+    device: &B::Device,
+) -> Tensor<B, 2> {
+    let mut features = vec![0.0f32; dim];
+    if atoms.is_empty() {
+        return Tensor::zeros([1, dim], device);
+    }
+
+    let atom_count = atoms.len() as f32;
+    let byte_len = atoms
+        .iter()
+        .map(|atom| atom.end.saturating_sub(atom.start))
+        .sum::<usize>() as f32;
+    let transition_count = atoms.len().saturating_sub(1) as f32;
+
+    for atom in atoms {
+        let kind_bucket = atom.kind.stable_index() as usize;
+        if kind_bucket < dim {
+            features[kind_bucket] += 1.0 / atom_count;
+        }
+    }
+
+    if dim > 8 {
+        let transition_buckets = dim - 8;
+        for window in atoms.windows(2) {
+            let pair_index =
+                (window[0].kind.stable_index() * 16 + window[1].kind.stable_index()) as usize;
+            let bucket = 7 + (pair_index % transition_buckets);
+            features[bucket] += 1.0 / transition_count.max(1.0);
+        }
+    }
+
+    if dim >= 4 {
+        features[dim - 4] = atom_count / dim.max(1) as f32;
+        features[dim - 3] = byte_len / dim.max(1) as f32;
+        features[dim - 2] = atoms
+            .iter()
+            .filter(|atom| atom.kind == FaceoffLexemeKind::NewlineIndent)
+            .count() as f32
+            / atom_count;
+        features[dim - 1] = atoms
+            .iter()
+            .filter(|atom| {
+                matches!(
+                    atom.kind,
+                    FaceoffLexemeKind::Punctuation | FaceoffLexemeKind::SymbolRun
+                )
+            })
+            .count() as f32
+            / atom_count;
     }
 
     Tensor::from_data(TensorData::new(features, [1, dim]), device)
