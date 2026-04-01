@@ -6,8 +6,8 @@ use std::{
 };
 
 use fractal::{
-    species_registry_for_species, ComparisonAuthority, ComparisonContract, SpeciesId,
-    SpeciesRawMetrics,
+    lifecycle::BenchmarkMode, species_registry_for_species, ComparisonAuthority,
+    ComparisonContract, SpeciesId, SpeciesRawMetrics,
 };
 use fractal_eval_private::aggregate_results;
 use serde::Deserialize;
@@ -23,7 +23,7 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let args = CliArgs::parse(std::env::args().skip(1))?;
-    let output = summarize_root(&args.root)?;
+    let output = summarize_root(&args.root, args.report)?;
     print!("{output}");
     Ok(())
 }
@@ -31,11 +31,13 @@ fn run() -> Result<(), String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliArgs {
     root: PathBuf,
+    report: ReportKind,
 }
 
 impl CliArgs {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut root = PathBuf::from(DEFAULT_ROOT);
+        let mut report = ReportKind::Leaderboard;
         let mut saw_help = false;
         let mut iter = args.peekable();
 
@@ -46,6 +48,12 @@ impl CliArgs {
                         .next()
                         .ok_or_else(|| "--root requires a path argument".to_owned())?;
                     root = PathBuf::from(value);
+                }
+                "--report" => {
+                    let value = iter
+                        .next()
+                        .ok_or_else(|| "--report requires a value".to_owned())?;
+                    report = ReportKind::parse(&value)?;
                 }
                 "--help" | "-h" => {
                     saw_help = true;
@@ -59,7 +67,7 @@ impl CliArgs {
             std::process::exit(0);
         }
 
-        Ok(Self { root })
+        Ok(Self { root, report })
     }
 }
 
@@ -67,13 +75,56 @@ fn usage() -> String {
     let mut output = String::new();
     let _ = writeln!(
         output,
-        "Usage: cargo run --bin bakeoff-summary -- [--root <path>]"
+        "Usage: cargo run --bin bakeoff-summary -- [--root <path>] [--report <leaderboard|systems-speed|ledger>]"
     );
     let _ = writeln!(output, "Default root: {DEFAULT_ROOT}");
     output
 }
 
-fn summarize_root(root: &Path) -> Result<String, String> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReportKind {
+    Leaderboard,
+    SystemsSpeed,
+    Ledger,
+}
+
+impl ReportKind {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "leaderboard" => Ok(Self::Leaderboard),
+            "systems-speed" | "systems_speed" => Ok(Self::SystemsSpeed),
+            "ledger" => Ok(Self::Ledger),
+            _ => Err(format!("unknown report kind: {value}")),
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Leaderboard => "Bakeoff Summary",
+            Self::SystemsSpeed => "Systems-Speed Summary",
+            Self::Ledger => "Experiment Ledger",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LoadedRows {
+    scanned_root: PathBuf,
+    completed: Vec<CompletedRow>,
+    failures: Vec<FailureRow>,
+    pending: Vec<PendingRow>,
+}
+
+fn summarize_root(root: &Path, report: ReportKind) -> Result<String, String> {
+    let loaded = load_rows(root)?;
+    match report {
+        ReportKind::Leaderboard => summarize_leaderboard(&loaded),
+        ReportKind::SystemsSpeed => summarize_systems_speed(&loaded),
+        ReportKind::Ledger => summarize_ledger(&loaded),
+    }
+}
+
+fn load_rows(root: &Path) -> Result<LoadedRows, String> {
     let mut scanned_root = root.to_path_buf();
     let mut run_dirs = discover_run_dirs(&scanned_root)?;
     if run_dirs.is_empty() && root.ends_with("runpod-results") {
@@ -89,23 +140,47 @@ fn summarize_root(root: &Path) -> Result<String, String> {
         runs.push(load_run(&run_dir)?);
     }
 
-    let completed = dedupe_completed_rows(
-        runs.iter()
-            .flat_map(|run| run.completed_rows.iter().cloned())
+    Ok(LoadedRows {
+        scanned_root,
+        completed: dedupe_completed_rows(
+            runs.iter()
+                .flat_map(|run| run.completed_rows.iter().cloned())
+                .collect(),
+        ),
+        failures: runs
+            .iter()
+            .flat_map(|run| run.failed_rows.iter().cloned())
             .collect(),
-    );
-    let failures: Vec<_> = runs
+        pending: runs
+            .iter()
+            .flat_map(|run| run.pending_rows.iter().cloned())
+            .collect(),
+    })
+}
+
+fn summarize_leaderboard(loaded: &LoadedRows) -> Result<String, String> {
+    let completed: Vec<_> = loaded
+        .completed
         .iter()
-        .flat_map(|run| run.failed_rows.iter().cloned())
+        .filter(|row| row.benchmark_mode == BenchmarkMode::Leaderboard)
+        .cloned()
         .collect();
-    let pending: Vec<_> = runs
+    let failures: Vec<_> = loaded
+        .failures
         .iter()
-        .flat_map(|run| run.pending_rows.iter().cloned())
+        .filter(|row| row.benchmark_mode == BenchmarkMode::Leaderboard)
+        .cloned()
+        .collect();
+    let pending: Vec<_> = loaded
+        .pending
+        .iter()
+        .filter(|row| row.benchmark_mode == BenchmarkMode::Leaderboard)
+        .cloned()
         .collect();
 
     let mut output = String::new();
-    writeln!(output, "Bakeoff Summary").unwrap();
-    writeln!(output, "root: {}", scanned_root.display()).unwrap();
+    writeln!(output, "{}", ReportKind::Leaderboard.title()).unwrap();
+    writeln!(output, "root: {}", loaded.scanned_root.display()).unwrap();
     writeln!(output, "completed rows: {}", completed.len()).unwrap();
     writeln!(output, "failure rows: {}", failures.len()).unwrap();
     writeln!(output, "pending runs: {}", pending.len()).unwrap();
@@ -198,6 +273,86 @@ fn summarize_root(root: &Path) -> Result<String, String> {
     Ok(output)
 }
 
+fn summarize_systems_speed(loaded: &LoadedRows) -> Result<String, String> {
+    let completed: Vec<_> = loaded
+        .completed
+        .iter()
+        .filter(|row| row.benchmark_mode == BenchmarkMode::SystemsSpeed)
+        .cloned()
+        .collect();
+    let failures: Vec<_> = loaded
+        .failures
+        .iter()
+        .filter(|row| row.benchmark_mode == BenchmarkMode::SystemsSpeed)
+        .cloned()
+        .collect();
+    let pending: Vec<_> = loaded
+        .pending
+        .iter()
+        .filter(|row| row.benchmark_mode == BenchmarkMode::SystemsSpeed)
+        .cloned()
+        .collect();
+
+    let mut output = String::new();
+    writeln!(output, "{}", ReportKind::SystemsSpeed.title()).unwrap();
+    writeln!(output, "root: {}", loaded.scanned_root.display()).unwrap();
+    writeln!(output, "completed rows: {}", completed.len()).unwrap();
+    writeln!(output, "failure rows: {}", failures.len()).unwrap();
+    writeln!(output, "pending runs: {}", pending.len()).unwrap();
+
+    let aggregates = aggregate_rows(completed.clone());
+    writeln!(output).unwrap();
+    writeln!(output, "Aggregate systems-speed leaderboard:").unwrap();
+    if aggregates.is_empty() {
+        writeln!(output, "(none yet)").unwrap();
+    } else {
+        for ((preset, runtime_surface_policy), mut rows) in aggregates {
+            rows.sort_by(|left, right| {
+                right
+                    .tok_s
+                    .partial_cmp(&left.tok_s)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        right
+                            .fitness
+                            .partial_cmp(&left.fitness)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+            writeln!(output, "preset={preset} | runtime={runtime_surface_policy}").unwrap();
+            output.push_str(&render_aggregate_table(&rows));
+            writeln!(output).unwrap();
+        }
+    }
+
+    if !failures.is_empty() {
+        writeln!(output, "systems-speed failures").unwrap();
+        output.push_str(&render_failure_table(&failures));
+        writeln!(output).unwrap();
+    }
+    if !pending.is_empty() {
+        writeln!(output, "systems-speed pending").unwrap();
+        output.push_str(&render_pending_table(&pending));
+    }
+
+    Ok(output)
+}
+
+fn summarize_ledger(loaded: &LoadedRows) -> Result<String, String> {
+    let ledger = build_ledger_entries(loaded);
+    let mut output = String::new();
+    writeln!(output, "{}", ReportKind::Ledger.title()).unwrap();
+    writeln!(output, "root: {}", loaded.scanned_root.display()).unwrap();
+    writeln!(output, "entries: {}", ledger.len()).unwrap();
+    writeln!(output).unwrap();
+    if ledger.is_empty() {
+        writeln!(output, "(none yet)").unwrap();
+    } else {
+        output.push_str(&render_ledger_table(&ledger));
+    }
+    Ok(output)
+}
+
 fn discover_run_dirs(root: &Path) -> Result<BTreeSet<PathBuf>, String> {
     let mut run_dirs = BTreeSet::new();
     if !root.exists() {
@@ -277,6 +432,12 @@ fn load_run(run_dir: &Path) -> Result<RunSummary, String> {
                         lane: metadata.lane.clone(),
                         comparison: metadata.comparison.clone(),
                         runtime_surface_policy: metadata.runtime_surface_policy.clone(),
+                        benchmark_mode: metadata.benchmark_mode,
+                        logical_name: metadata.logical_name.clone(),
+                        question_summary: metadata.question_summary.clone(),
+                        commit_sha: metadata.commit_sha.clone(),
+                        created_at_unix_ms: metadata.created_at_unix_ms,
+                        backend: metadata.backend.clone(),
                         variant_name: record
                             .variant_name
                             .clone()
@@ -302,6 +463,41 @@ fn load_run(run_dir: &Path) -> Result<RunSummary, String> {
                         .runtime_surface_policy
                         .clone()
                         .or_else(|| metadata.runtime_surface_policy.clone()),
+                    benchmark_mode: record
+                        .experiment
+                        .as_ref()
+                        .and_then(ArtifactExperimentRecord::benchmark_mode)
+                        .unwrap_or(metadata.benchmark_mode),
+                    logical_name: record
+                        .experiment
+                        .as_ref()
+                        .and_then(|experiment| experiment.experiment_id.as_ref())
+                        .and_then(|id| id.logical_name.clone())
+                        .or_else(|| metadata.logical_name.clone()),
+                    question_summary: record
+                        .experiment
+                        .as_ref()
+                        .and_then(|experiment| experiment.question.as_ref())
+                        .and_then(|question| question.summary.clone())
+                        .or_else(|| metadata.question_summary.clone()),
+                    commit_sha: record
+                        .experiment
+                        .as_ref()
+                        .and_then(|experiment| experiment.experiment_id.as_ref())
+                        .and_then(|id| id.commit_sha.clone())
+                        .or_else(|| metadata.commit_sha.clone()),
+                    created_at_unix_ms: record
+                        .experiment
+                        .as_ref()
+                        .and_then(|experiment| experiment.experiment_id.as_ref())
+                        .and_then(|id| id.created_at_unix_ms)
+                        .or(metadata.created_at_unix_ms),
+                    backend: record
+                        .experiment
+                        .as_ref()
+                        .and_then(|experiment| experiment.execution.as_ref())
+                        .and_then(|execution| execution.backend.clone())
+                        .or_else(|| metadata.backend.clone()),
                     variant_name: record
                         .variant_name
                         .clone()
@@ -330,6 +526,12 @@ fn load_run(run_dir: &Path) -> Result<RunSummary, String> {
                 lane: metadata.lane.clone(),
                 comparison: metadata.comparison.clone(),
                 runtime_surface_policy: metadata.runtime_surface_policy.clone(),
+                benchmark_mode: metadata.benchmark_mode,
+                logical_name: metadata.logical_name.clone(),
+                question_summary: metadata.question_summary.clone(),
+                commit_sha: metadata.commit_sha.clone(),
+                created_at_unix_ms: metadata.created_at_unix_ms,
+                backend: metadata.backend.clone(),
                 variant_name: metadata.variant_name.clone(),
                 species: metadata.species,
                 outcome: "infra-failure".to_owned(),
@@ -346,6 +548,12 @@ fn load_run(run_dir: &Path) -> Result<RunSummary, String> {
                 lane: metadata.lane.clone(),
                 comparison: metadata.comparison.clone(),
                 runtime_surface_policy: metadata.runtime_surface_policy.clone(),
+                benchmark_mode: metadata.benchmark_mode,
+                logical_name: metadata.logical_name.clone(),
+                question_summary: metadata.question_summary.clone(),
+                commit_sha: metadata.commit_sha.clone(),
+                created_at_unix_ms: metadata.created_at_unix_ms,
+                backend: metadata.backend.clone(),
                 variant_name: metadata.variant_name.clone(),
                 species: metadata.species,
                 status: manifest
@@ -363,6 +571,12 @@ fn load_run(run_dir: &Path) -> Result<RunSummary, String> {
             lane: metadata.lane.clone(),
             comparison: metadata.comparison.clone(),
             runtime_surface_policy: metadata.runtime_surface_policy.clone(),
+            benchmark_mode: metadata.benchmark_mode,
+            logical_name: metadata.logical_name.clone(),
+            question_summary: metadata.question_summary.clone(),
+            commit_sha: metadata.commit_sha.clone(),
+            created_at_unix_ms: metadata.created_at_unix_ms,
+            backend: metadata.backend.clone(),
             variant_name: metadata.variant_name.clone(),
             species: metadata.species,
             status: wrapper_manifest
@@ -439,6 +653,41 @@ fn completed_row_from_artifact(
             .or_else(|| manifest.and_then(|manifest| manifest.runtime_surface_policy.clone()))
             .or_else(|| metadata.runtime_surface_policy.clone())
             .unwrap_or_else(|| "conservative-defaults".to_owned()),
+        benchmark_mode: record
+            .experiment
+            .as_ref()
+            .and_then(ArtifactExperimentRecord::benchmark_mode)
+            .unwrap_or(metadata.benchmark_mode),
+        logical_name: record
+            .experiment
+            .as_ref()
+            .and_then(|experiment| experiment.experiment_id.as_ref())
+            .and_then(|id| id.logical_name.clone())
+            .or_else(|| metadata.logical_name.clone()),
+        question_summary: record
+            .experiment
+            .as_ref()
+            .and_then(|experiment| experiment.question.as_ref())
+            .and_then(|question| question.summary.clone())
+            .or_else(|| metadata.question_summary.clone()),
+        commit_sha: record
+            .experiment
+            .as_ref()
+            .and_then(|experiment| experiment.experiment_id.as_ref())
+            .and_then(|id| id.commit_sha.clone())
+            .or_else(|| metadata.commit_sha.clone()),
+        created_at_unix_ms: record
+            .experiment
+            .as_ref()
+            .and_then(|experiment| experiment.experiment_id.as_ref())
+            .and_then(|id| id.created_at_unix_ms)
+            .or(metadata.created_at_unix_ms),
+        backend: record
+            .experiment
+            .as_ref()
+            .and_then(|experiment| experiment.execution.as_ref())
+            .and_then(|execution| execution.backend.clone())
+            .or_else(|| metadata.backend.clone()),
         variant_name,
         species,
         rank: result.rank,
@@ -458,8 +707,10 @@ fn species_variant_name(species: SpeciesId) -> String {
 }
 
 fn dedupe_completed_rows(mut rows: Vec<CompletedRow>) -> Vec<CompletedRow> {
-    let mut best_by_key: BTreeMap<(Option<u64>, String, String, String, String), CompletedRow> =
-        BTreeMap::new();
+    let mut best_by_key: BTreeMap<
+        (Option<u64>, String, String, String, String, String),
+        CompletedRow,
+    > = BTreeMap::new();
     for row in rows.drain(..) {
         let key = (
             row.seed,
@@ -467,6 +718,7 @@ fn dedupe_completed_rows(mut rows: Vec<CompletedRow>) -> Vec<CompletedRow> {
             row.variant_name.clone(),
             row.comparison.label().to_owned(),
             row.runtime_surface_policy.clone(),
+            row.benchmark_mode.as_str().to_owned(),
         );
         best_by_key
             .entry(key)
@@ -660,6 +912,163 @@ fn render_pending_table(rows: &[PendingRow]) -> String {
     )
 }
 
+fn render_ledger_table(rows: &[LedgerEntry]) -> String {
+    let rows = rows
+        .iter()
+        .map(|row| {
+            vec![
+                row.when.clone(),
+                row.change_axis.clone(),
+                row.variant_name.clone(),
+                row.preset.clone(),
+                row.benchmark_mode.as_str().to_owned(),
+                row.outcome.clone(),
+                row.fitness
+                    .map(|value| format!("{value:.2}"))
+                    .unwrap_or_else(|| "-".to_owned()),
+                row.tok_s
+                    .map(|value| format!("{value:.0}"))
+                    .unwrap_or_else(|| "-".to_owned()),
+                row.commit_sha.clone().unwrap_or_else(|| "-".to_owned()),
+                row.logical_name.clone().unwrap_or_else(|| "-".to_owned()),
+                row.question_summary
+                    .clone()
+                    .unwrap_or_else(|| "-".to_owned()),
+            ]
+        })
+        .collect::<Vec<_>>();
+    render_table(
+        &[
+            "when",
+            "change",
+            "variant",
+            "preset",
+            "benchmark_mode",
+            "outcome",
+            "fitness",
+            "tok/s",
+            "commit",
+            "logical_name",
+            "question",
+        ],
+        &rows,
+    )
+}
+
+fn build_ledger_entries(loaded: &LoadedRows) -> Vec<LedgerEntry> {
+    let mut entries = Vec::new();
+    for row in &loaded.completed {
+        entries.push(LedgerEntry {
+            when_unix_ms: row.created_at_unix_ms.unwrap_or(0),
+            when: ledger_when(row.created_at_unix_ms, &row.run_id),
+            run_id: row.run_id.clone(),
+            logical_name: row.logical_name.clone(),
+            question_summary: row.question_summary.clone(),
+            variant_name: row.variant_name.clone(),
+            preset: row.preset.clone(),
+            benchmark_mode: row.benchmark_mode,
+            runtime_surface_policy: row.runtime_surface_policy.clone(),
+            commit_sha: row.commit_sha.clone(),
+            outcome: "success".to_owned(),
+            fitness: Some(row.fitness),
+            tok_s: Some(row.tok_s),
+            change_axis: String::new(),
+        });
+    }
+    for row in &loaded.failures {
+        entries.push(LedgerEntry {
+            when_unix_ms: row.created_at_unix_ms.unwrap_or(0),
+            when: ledger_when(row.created_at_unix_ms, &row.run_id),
+            run_id: row.run_id.clone(),
+            logical_name: row.logical_name.clone(),
+            question_summary: row.question_summary.clone(),
+            variant_name: row
+                .variant_name
+                .clone()
+                .unwrap_or_else(|| "(unknown)".to_owned()),
+            preset: row.preset.clone().unwrap_or_else(|| "(unknown)".to_owned()),
+            benchmark_mode: row.benchmark_mode,
+            runtime_surface_policy: row
+                .runtime_surface_policy
+                .clone()
+                .unwrap_or_else(|| "(unknown)".to_owned()),
+            commit_sha: row.commit_sha.clone(),
+            outcome: row.outcome.clone(),
+            fitness: None,
+            tok_s: None,
+            change_axis: String::new(),
+        });
+    }
+    for row in &loaded.pending {
+        entries.push(LedgerEntry {
+            when_unix_ms: row.created_at_unix_ms.unwrap_or(0),
+            when: ledger_when(row.created_at_unix_ms, &row.run_id),
+            run_id: row.run_id.clone(),
+            logical_name: row.logical_name.clone(),
+            question_summary: row.question_summary.clone(),
+            variant_name: row
+                .variant_name
+                .clone()
+                .unwrap_or_else(|| "(unknown)".to_owned()),
+            preset: row.preset.clone().unwrap_or_else(|| "(unknown)".to_owned()),
+            benchmark_mode: row.benchmark_mode,
+            runtime_surface_policy: row
+                .runtime_surface_policy
+                .clone()
+                .unwrap_or_else(|| "(unknown)".to_owned()),
+            commit_sha: row.commit_sha.clone(),
+            outcome: format!("pending:{}", row.status),
+            fitness: None,
+            tok_s: None,
+            change_axis: String::new(),
+        });
+    }
+
+    entries.sort_by(|left, right| {
+        left.when_unix_ms
+            .cmp(&right.when_unix_ms)
+            .then_with(|| left.run_id.cmp(&right.run_id))
+    });
+
+    let mut previous: Option<LedgerEntry> = None;
+    for entry in &mut entries {
+        entry.change_axis = classify_change_axis(entry, previous.as_ref()).to_owned();
+        previous = Some(entry.clone());
+    }
+
+    entries
+}
+
+fn classify_change_axis(current: &LedgerEntry, previous: Option<&LedgerEntry>) -> &'static str {
+    let Some(previous) = previous else {
+        return "new";
+    };
+    if current.outcome == "infra-failure" {
+        return "infra";
+    }
+    if current.variant_name != previous.variant_name {
+        return "primitive";
+    }
+    if current.benchmark_mode != previous.benchmark_mode
+        || current.runtime_surface_policy != previous.runtime_surface_policy
+    {
+        return "runtime";
+    }
+    if current.preset != previous.preset {
+        return "budget";
+    }
+    if current.commit_sha != previous.commit_sha {
+        return "infra";
+    }
+    "repeat"
+}
+
+fn ledger_when(timestamp: Option<u64>, run_id: &str) -> String {
+    timestamp
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| run_id.to_owned())
+}
+
 fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {
     let mut widths = headers
         .iter()
@@ -703,6 +1112,14 @@ fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {
 
 fn pad_cell(value: &str, width: usize) -> String {
     format!("{value:<width$}", width = width)
+}
+
+fn parse_benchmark_mode_label(value: &str) -> Option<BenchmarkMode> {
+    match value {
+        "leaderboard" => Some(BenchmarkMode::Leaderboard),
+        "systems-speed" | "systems_speed" => Some(BenchmarkMode::SystemsSpeed),
+        _ => None,
+    }
 }
 
 fn read_json<T>(path: &Path) -> Result<Option<T>, String>
@@ -767,6 +1184,12 @@ struct RunMetadata {
     lane: Option<String>,
     comparison: Option<ComparisonContract>,
     runtime_surface_policy: Option<String>,
+    benchmark_mode: BenchmarkMode,
+    logical_name: Option<String>,
+    question_summary: Option<String>,
+    commit_sha: Option<String>,
+    created_at_unix_ms: Option<u64>,
+    backend: Option<String>,
     pod_id: Option<String>,
     species: Option<SpeciesId>,
     variant_name: Option<String>,
@@ -779,6 +1202,14 @@ impl RunMetadata {
         remote_manifest: Option<&RunControlManifest>,
         artifact: Option<&RunArtifactFile>,
     ) -> Self {
+        let experiment = artifact
+            .and_then(|artifact| artifact.results.first())
+            .and_then(|record| record.experiment.as_ref())
+            .or_else(|| {
+                artifact
+                    .and_then(|artifact| artifact.manifest.as_ref())
+                    .and_then(|manifest| manifest.experiments.first())
+            });
         let seed = wrapper_manifest
             .and_then(extract_seed)
             .or_else(|| remote_manifest.and_then(extract_seed))
@@ -807,6 +1238,46 @@ impl RunMetadata {
             .or_else(|| {
                 remote_manifest.and_then(|manifest| manifest.runtime_surface_policy.clone())
             });
+        let benchmark_mode = experiment
+            .and_then(ArtifactExperimentRecord::benchmark_mode)
+            .unwrap_or(BenchmarkMode::Leaderboard);
+        let logical_name = experiment
+            .and_then(|experiment| experiment.experiment_id.as_ref())
+            .and_then(|id| id.logical_name.clone());
+        let question_summary = experiment
+            .and_then(|experiment| experiment.question.as_ref())
+            .and_then(|question| question.summary.clone());
+        let commit_sha = experiment
+            .and_then(|experiment| experiment.experiment_id.as_ref())
+            .and_then(|id| id.commit_sha.clone())
+            .or_else(|| {
+                remote_manifest
+                    .and_then(|manifest| manifest.build.as_ref())
+                    .and_then(|build| build.commit_sha.clone())
+            })
+            .or_else(|| {
+                wrapper_manifest
+                    .and_then(|manifest| manifest.build.as_ref())
+                    .and_then(|build| build.commit_sha.clone())
+            });
+        let created_at_unix_ms = experiment
+            .and_then(|experiment| experiment.experiment_id.as_ref())
+            .and_then(|id| id.created_at_unix_ms)
+            .or_else(|| {
+                artifact
+                    .and_then(|artifact| artifact.manifest.as_ref())
+                    .and_then(|manifest| manifest.generated_at_unix_ms)
+            });
+        let backend = experiment
+            .and_then(|experiment| experiment.execution.as_ref())
+            .and_then(|execution| execution.backend.clone())
+            .or_else(|| {
+                artifact
+                    .and_then(|artifact| artifact.manifest.as_ref())
+                    .and_then(|manifest| manifest.backend.clone())
+            })
+            .or_else(|| remote_manifest.and_then(|manifest| manifest.backend.clone()))
+            .or_else(|| wrapper_manifest.and_then(|manifest| manifest.backend.clone()));
         let pod_id = wrapper_manifest
             .and_then(|manifest| manifest.pod.as_ref())
             .and_then(|pod| pod.id.clone())
@@ -848,6 +1319,12 @@ impl RunMetadata {
             lane,
             comparison,
             runtime_surface_policy,
+            benchmark_mode,
+            logical_name,
+            question_summary,
+            commit_sha,
+            created_at_unix_ms,
+            backend,
             pod_id,
             species,
             variant_name,
@@ -864,6 +1341,12 @@ struct CompletedRow {
     lane: Option<String>,
     comparison: ComparisonContract,
     runtime_surface_policy: String,
+    benchmark_mode: BenchmarkMode,
+    logical_name: Option<String>,
+    question_summary: Option<String>,
+    commit_sha: Option<String>,
+    created_at_unix_ms: Option<u64>,
+    backend: Option<String>,
     variant_name: String,
     species: SpeciesId,
     rank: usize,
@@ -883,6 +1366,12 @@ struct FailureRow {
     lane: Option<String>,
     comparison: Option<ComparisonContract>,
     runtime_surface_policy: Option<String>,
+    benchmark_mode: BenchmarkMode,
+    logical_name: Option<String>,
+    question_summary: Option<String>,
+    commit_sha: Option<String>,
+    created_at_unix_ms: Option<u64>,
+    backend: Option<String>,
     variant_name: Option<String>,
     species: Option<SpeciesId>,
     outcome: String,
@@ -911,6 +1400,12 @@ struct PendingRow {
     lane: Option<String>,
     comparison: Option<ComparisonContract>,
     runtime_surface_policy: Option<String>,
+    benchmark_mode: BenchmarkMode,
+    logical_name: Option<String>,
+    question_summary: Option<String>,
+    commit_sha: Option<String>,
+    created_at_unix_ms: Option<u64>,
+    backend: Option<String>,
     variant_name: Option<String>,
     species: Option<SpeciesId>,
     status: String,
@@ -940,6 +1435,24 @@ struct RankedResult {
     perplexity: f64,
     arc: f64,
     tok_s: f64,
+}
+
+#[derive(Clone, Debug)]
+struct LedgerEntry {
+    when_unix_ms: u64,
+    when: String,
+    run_id: String,
+    logical_name: Option<String>,
+    question_summary: Option<String>,
+    variant_name: String,
+    preset: String,
+    benchmark_mode: BenchmarkMode,
+    runtime_surface_policy: String,
+    commit_sha: Option<String>,
+    outcome: String,
+    fitness: Option<f64>,
+    tok_s: Option<f64>,
+    change_axis: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -1070,6 +1583,7 @@ struct RunArtifactFile {
 #[allow(dead_code)]
 struct RunManifestFile {
     run_id: Option<String>,
+    generated_at_unix_ms: Option<u64>,
     comparison_authority: Option<String>,
     comparison_contract: Option<ComparisonContractRecord>,
     runtime_surface_policy: Option<String>,
@@ -1081,6 +1595,7 @@ struct RunManifestFile {
     timeout_seconds: Option<f64>,
     wrapper_timeout_seconds: Option<u64>,
     config: RunConfigRecord,
+    experiments: Vec<ArtifactExperimentRecord>,
 }
 
 impl RunManifestFile {
@@ -1138,13 +1653,64 @@ struct ComparisonContractRecord {
 #[serde(default)]
 #[allow(dead_code)]
 struct ArtifactExperimentRecord {
+    experiment_id: Option<ArtifactExperimentIdRecord>,
+    question: Option<ArtifactQuestionRecord>,
+    runtime: Option<ArtifactRuntimeSurfaceRecord>,
     comparison: Option<ComparisonContractRecord>,
+    execution: Option<ArtifactExecutionRecord>,
 }
 
 impl ArtifactExperimentRecord {
     fn comparison_contract(&self) -> Option<ComparisonContract> {
         parse_comparison_contract(self.comparison.as_ref(), None)
     }
+
+    fn benchmark_mode(&self) -> Option<BenchmarkMode> {
+        self.runtime
+            .as_ref()
+            .and_then(|runtime| runtime.benchmark_mode.as_deref())
+            .and_then(parse_benchmark_mode_label)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(default)]
+struct ArtifactExperimentIdRecord {
+    logical_name: Option<String>,
+    run_id: Option<String>,
+    branch: Option<String>,
+    commit_sha: Option<String>,
+    created_at_unix_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(default)]
+struct ArtifactQuestionRecord {
+    summary: Option<String>,
+    lane_intent: Option<String>,
+    decision_intent: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(default)]
+struct ArtifactRuntimeSurfaceRecord {
+    eval_backend_policy: Option<String>,
+    batching_policy: Option<String>,
+    execution_policy: Option<String>,
+    buffer_reuse_policy: Option<String>,
+    benchmark_mode: Option<String>,
+    backend_policy: Option<String>,
+    label: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(default)]
+struct ArtifactExecutionRecord {
+    kind: Option<String>,
+    backend: Option<String>,
+    execution_mode: Option<String>,
+    pod_id: Option<String>,
+    wrapper_timeout_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -1357,7 +1923,7 @@ mod tests {
             }),
         );
 
-        let output = summarize_root(&root).unwrap();
+        let output = summarize_root(&root, ReportKind::Leaderboard).unwrap();
         assert!(output.contains("Per-seed leaderboards:"));
         assert!(output.contains("p1_contractive_v1"));
         assert!(output.contains("Aggregate authoritative leaderboard:"));
@@ -1377,6 +1943,12 @@ mod tests {
             lane: Some("leader".to_owned()),
             comparison: ComparisonContract::authoritative_same_preset(),
             runtime_surface_policy: "conservative-defaults".to_owned(),
+            benchmark_mode: BenchmarkMode::Leaderboard,
+            logical_name: Some("winner-bakeoff".to_owned()),
+            question_summary: Some("compare winner-lane variants".to_owned()),
+            commit_sha: Some("abc123".to_owned()),
+            created_at_unix_ms: Some(123),
+            backend: Some("cuda".to_owned()),
             variant_name: "p1_contractive_v1".to_owned(),
             species: SpeciesId::P1Contractive,
             rank: 1,
@@ -1389,5 +1961,134 @@ mod tests {
         let key = RunGroupKey::from_row(&row);
         assert_eq!(key.seed_label(), "42");
         assert_eq!(key.comparison_label(), "authoritative same-preset");
+    }
+
+    #[test]
+    fn summarize_root_supports_systems_speed_report() {
+        let root = std::env::temp_dir().join(format!(
+            "fractal-systems-speed-summary-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+
+        let completed = root.join("20260331T000002Z_speed42");
+        write_json(
+            &completed.join("metadata/wrapper-manifest.json"),
+            serde_json::json!({
+                "run_id": "speed-run",
+                "runtime": { "tournament_args": ["--preset", "full-medium-stress", "--species", "p1_fractal_hybrid", "--seed", "42"] }
+            }),
+        );
+        write_json(
+            &completed.join("artifacts/tournament-run-artifact.json"),
+            serde_json::json!({
+                "manifest": {
+                    "run_id": "speed-run",
+                    "runtime_surface_policy": "eval_backend=shared_backend batching=padded execution=simple-loop buffer_reuse=disabled benchmark_mode=systems-speed backend_policy=active-execution-backend",
+                    "preset": "full-medium-stress",
+                    "lane": "leader",
+                    "config": { "seed": 42 }
+                },
+                "results": [
+                    {
+                        "variant_name": "p1_fractal_hybrid_v1",
+                        "species": "p1_fractal_hybrid",
+                        "outcome_class": "success",
+                        "experiment": {
+                            "experiment_id": {
+                                "logical_name": "systems-speed-p1-fractal-hybrid",
+                                "commit_sha": "abc123",
+                                "created_at_unix_ms": 123
+                            },
+                            "question": {
+                                "summary": "measure systems throughput only"
+                            },
+                            "runtime": {
+                                "benchmark_mode": "systems-speed"
+                            }
+                        },
+                        "ranked_result": {
+                            "rank": 1,
+                            "fitness": 0.55,
+                            "stability_score": 0.45,
+                            "long_context_perplexity": 1.60,
+                            "arc_accuracy": 0.70,
+                            "tokens_per_sec": 321.0
+                        }
+                    }
+                ]
+            }),
+        );
+
+        let output = summarize_root(&root, ReportKind::SystemsSpeed).unwrap();
+        assert!(output.contains("Systems-Speed Summary"));
+        assert!(output.contains("Aggregate systems-speed leaderboard:"));
+        assert!(output.contains("p1_fractal_hybrid_v1"));
+        assert!(output.contains("321"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn summarize_root_supports_ledger_report() {
+        let root =
+            std::env::temp_dir().join(format!("fractal-ledger-summary-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+
+        let completed = root.join("20260331T000003Z_ledger42");
+        write_json(
+            &completed.join("metadata/wrapper-manifest.json"),
+            serde_json::json!({
+                "run_id": "ledger-run",
+                "runtime": { "tournament_args": ["--preset", "full-medium-stress", "--species", "p1_contractive", "--seed", "42"] }
+            }),
+        );
+        write_json(
+            &completed.join("artifacts/tournament-run-artifact.json"),
+            serde_json::json!({
+                "manifest": {
+                    "run_id": "ledger-run",
+                    "preset": "full-medium-stress",
+                    "lane": "leader",
+                    "config": { "seed": 42 }
+                },
+                "results": [
+                    {
+                        "variant_name": "p1_contractive_v1",
+                        "species": "p1_contractive",
+                        "outcome_class": "success",
+                        "experiment": {
+                            "experiment_id": {
+                                "logical_name": "winner-bakeoff-p1-contractive",
+                                "commit_sha": "def456",
+                                "created_at_unix_ms": 456
+                            },
+                            "question": {
+                                "summary": "rerun frozen winner benchmark"
+                            },
+                            "runtime": {
+                                "benchmark_mode": "leaderboard"
+                            }
+                        },
+                        "ranked_result": {
+                            "rank": 1,
+                            "fitness": 0.65,
+                            "stability_score": 0.45,
+                            "long_context_perplexity": 1.54,
+                            "arc_accuracy": 0.79,
+                            "tokens_per_sec": 5.0
+                        }
+                    }
+                ]
+            }),
+        );
+
+        let output = summarize_root(&root, ReportKind::Ledger).unwrap();
+        assert!(output.contains("Experiment Ledger"));
+        assert!(output.contains("winner-bakeoff-p1-contractive"));
+        assert!(output.contains("rerun frozen winner benchmark"));
+        assert!(output.contains("success"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

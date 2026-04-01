@@ -325,12 +325,14 @@ impl BufferReusePolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BenchmarkMode {
     Leaderboard,
+    SystemsSpeed,
 }
 
 impl BenchmarkMode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Leaderboard => "leaderboard",
+            Self::SystemsSpeed => "systems-speed",
         }
     }
 }

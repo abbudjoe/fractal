@@ -1,0 +1,13 @@
+{
+  "logical_name": "canonical-winner-bakeoff-s44-p1-contractive",
+  "question_summary": "rerun the frozen scientific winner bakeoff row for p1_contractive_v1 on seed 44",
+  "preset": "full-medium-stress",
+  "species": "p1_contractive",
+  "seed": 44,
+  "backend": "cuda",
+  "execution_mode": "sequential",
+  "parallelism": 1,
+  "comparison": "authoritative_same_preset",
+  "benchmark_mode": "leaderboard",
+  "expected_branch": "codex/runpod-cuda-next-tournament"
+}

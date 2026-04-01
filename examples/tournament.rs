@@ -1,6 +1,8 @@
-use std::sync::Arc;
 use std::{
+    fs,
+    path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -8,8 +10,8 @@ use fractal::{
     aggregate_results,
     error::FractalError,
     lifecycle::{
-        ArtifactPolicy, BudgetSpec, ComparisonContract, DecisionIntent, ExecutionBackend,
-        ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
+        ArtifactPolicy, BenchmarkMode, BudgetSpec, ComparisonContract, DecisionIntent,
+        ExecutionBackend, ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
         ExperimentSpecTemplate, LaneIntent, RunExecutionOutcome, RuntimeSurfaceSpec,
         SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig, TournamentPreset,
         TournamentProgressEvent, TournamentReporter, TournamentSequence,
@@ -18,6 +20,7 @@ use fractal::{
     registry::{ComputeBackend, ExecutionMode, SpeciesId},
     species_registry_for_lane, species_registry_for_species, TournamentLane, TournamentRunReport,
 };
+use serde::Deserialize;
 
 fn main() -> Result<(), FractalError> {
     match parse_command(std::env::args().skip(1))? {
@@ -60,6 +63,11 @@ struct RunOptions {
     backend: Option<BackendOverride>,
     perplexity_eval_batches: Option<usize>,
     arc_eval_batches: Option<usize>,
+    benchmark_mode: Option<BenchmarkMode>,
+    manifest_path: Option<PathBuf>,
+    logical_name: Option<String>,
+    question_summary: Option<String>,
+    comparison_override: Option<ComparisonContract>,
 }
 
 impl Default for RunOptions {
@@ -74,11 +82,34 @@ impl Default for RunOptions {
             backend: None,
             perplexity_eval_batches: None,
             arc_eval_batches: None,
+            benchmark_mode: None,
+            manifest_path: None,
+            logical_name: None,
+            question_summary: None,
+            comparison_override: None,
         }
     }
 }
 
 impl RunOptions {
+    fn ensure_manifest_isolated(&self) -> Result<(), FractalError> {
+        if *self != Self::default() {
+            return Err(invalid_argument(
+                "--experiment-manifest cannot be combined with other run-shaping flags".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_no_manifest_source(&self) -> Result<(), FractalError> {
+        if self.manifest_path.is_some() {
+            return Err(invalid_argument(
+                "--experiment-manifest must be the only run-shaping input".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     fn selection(&self) -> RunSelection {
         self.selection.unwrap_or_else(|| {
             let preset = if self.species.is_some() {
@@ -157,6 +188,155 @@ impl RunOptions {
         }
         config
     }
+
+    fn comparison_for(&self, fallback: ComparisonContract) -> ComparisonContract {
+        self.comparison_override.clone().unwrap_or(fallback)
+    }
+
+    fn runtime_surface_spec(&self) -> RuntimeSurfaceSpec {
+        let mut runtime = RuntimeSurfaceSpec::default();
+        if let Some(benchmark_mode) = self.benchmark_mode {
+            runtime.benchmark_mode = benchmark_mode;
+        }
+        runtime
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExperimentManifestFile {
+    logical_name: String,
+    #[serde(default)]
+    question_summary: Option<String>,
+    preset: String,
+    #[serde(default)]
+    lane: Option<String>,
+    #[serde(default)]
+    species: Option<String>,
+    #[serde(default)]
+    seed: Option<u64>,
+    #[serde(default)]
+    execution_mode: Option<String>,
+    #[serde(default)]
+    parallelism: Option<usize>,
+    #[serde(default)]
+    backend: Option<String>,
+    #[serde(default)]
+    perplexity_eval_batches: Option<usize>,
+    #[serde(default)]
+    arc_eval_batches: Option<usize>,
+    #[serde(default)]
+    comparison: Option<String>,
+    #[serde(default)]
+    benchmark_mode: Option<String>,
+    #[serde(default)]
+    expected_branch: Option<String>,
+    #[serde(default)]
+    expected_commit_sha: Option<String>,
+}
+
+impl ExperimentManifestFile {
+    fn into_run_options(self, path: &Path) -> Result<RunOptions, FractalError> {
+        if self.logical_name.trim().is_empty() {
+            return Err(invalid_argument(format!(
+                "experiment manifest {} must define a non-empty logical_name",
+                path.display()
+            )));
+        }
+        if self.lane.is_some() && self.species.is_some() {
+            return Err(invalid_argument(format!(
+                "experiment manifest {} must choose either lane or species, not both",
+                path.display()
+            )));
+        }
+
+        validate_manifest_identity(path, &self.expected_branch, &self.expected_commit_sha)?;
+
+        Ok(RunOptions {
+            selection: Some(RunSelection::Preset(parse_preset(&self.preset)?)),
+            lane: self.lane.as_deref().map(parse_lane).transpose()?,
+            species: self.species.as_deref().map(parse_species).transpose()?,
+            seed: self.seed,
+            execution_mode: self
+                .execution_mode
+                .as_deref()
+                .map(parse_execution_mode)
+                .transpose()?,
+            parallelism: self.parallelism,
+            backend: self.backend.as_deref().map(parse_backend).transpose()?,
+            perplexity_eval_batches: self.perplexity_eval_batches,
+            arc_eval_batches: self.arc_eval_batches,
+            benchmark_mode: Some(parse_benchmark_mode(
+                self.benchmark_mode.as_deref().unwrap_or("leaderboard"),
+            )?),
+            manifest_path: Some(path.to_path_buf()),
+            logical_name: Some(self.logical_name),
+            question_summary: self.question_summary,
+            comparison_override: Some(parse_comparison_name(
+                self.comparison
+                    .as_deref()
+                    .unwrap_or("authoritative_same_preset"),
+            )?),
+        })
+    }
+}
+
+fn load_manifest_run_options(path: &Path) -> Result<RunOptions, FractalError> {
+    let content = fs::read_to_string(path)
+        .map_err(|error| invalid_argument(format!("failed to read {}: {error}", path.display())))?;
+    let manifest: ExperimentManifestFile = serde_json::from_str(&content).map_err(|error| {
+        invalid_argument(format!(
+            "failed to parse experiment manifest {}: {error}",
+            path.display()
+        ))
+    })?;
+    manifest.into_run_options(path)
+}
+
+fn validate_manifest_identity(
+    path: &Path,
+    expected_branch: &Option<String>,
+    expected_commit_sha: &Option<String>,
+) -> Result<(), FractalError> {
+    if let Some(expected_branch) = expected_branch {
+        let current_branch = detect_git_ref("FRACTAL_BRANCH", &["rev-parse", "--abbrev-ref", "HEAD"])
+            .ok_or_else(|| {
+                invalid_argument(format!(
+                    "experiment manifest {} requires branch {}, but the current branch could not be detected",
+                    path.display(),
+                    expected_branch
+                ))
+            })?;
+        if current_branch != *expected_branch {
+            return Err(invalid_argument(format!(
+                "experiment manifest {} requires branch {}, found {}",
+                path.display(),
+                expected_branch,
+                current_branch
+            )));
+        }
+    }
+
+    if let Some(expected_commit_sha) = expected_commit_sha {
+        let current_commit = detect_git_ref("FRACTAL_COMMIT_SHA", &["rev-parse", "HEAD"])
+            .ok_or_else(|| {
+                invalid_argument(format!(
+                    "experiment manifest {} requires commit {}, but the current commit could not be detected",
+                    path.display(),
+                    expected_commit_sha
+                ))
+            })?;
+        if current_commit != *expected_commit_sha {
+            return Err(invalid_argument(format!(
+                "experiment manifest {} requires commit {}, found {}",
+                path.display(),
+                expected_commit_sha,
+                current_commit
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 impl From<BackendOverride> for ComputeBackend {
@@ -190,55 +370,77 @@ where
     I: Iterator<Item = String>,
 {
     match arg.as_str() {
+        "--experiment-manifest" => {
+            options.ensure_manifest_isolated()?;
+            let value = next_value(args, "--experiment-manifest")?;
+            *options = load_manifest_run_options(Path::new(&value))?;
+            Ok(())
+        }
         "--preset" => {
+            options.ensure_no_manifest_source()?;
             let value = next_value(args, "--preset")?;
             options.set_selection(RunSelection::Preset(parse_preset(&value)?))?;
             Ok(())
         }
         "--sequence" => {
+            options.ensure_no_manifest_source()?;
             let value = next_value(args, "--sequence")?;
             options.set_selection(RunSelection::Sequence(parse_sequence(&value)?))?;
             Ok(())
         }
         "--lane" => {
+            options.ensure_no_manifest_source()?;
             let value = next_value(args, "--lane")?;
             options.set_lane(parse_lane(&value)?)?;
             Ok(())
         }
         "--species" => {
+            options.ensure_no_manifest_source()?;
             let value = next_value(args, "--species")?;
             options.set_species(parse_species(&value)?)?;
             Ok(())
         }
         "--seed" => {
+            options.ensure_no_manifest_source()?;
             let value = next_value(args, "--seed")?;
             options.seed = Some(parse_seed(&value)?);
             Ok(())
         }
         "--mode" => {
+            options.ensure_no_manifest_source()?;
             let value = next_value(args, "--mode")?;
             options.execution_mode = Some(parse_execution_mode(&value)?);
             Ok(())
         }
         "--parallelism" => {
+            options.ensure_no_manifest_source()?;
             let value = next_value(args, "--parallelism")?;
             options.parallelism = Some(parse_parallelism(&value)?);
             Ok(())
         }
         "--backend" => {
+            options.ensure_no_manifest_source()?;
             let value = next_value(args, "--backend")?;
             options.backend = Some(parse_backend(&value)?);
             Ok(())
         }
         "--perplexity-eval-batches" => {
+            options.ensure_no_manifest_source()?;
             let value = next_value(args, "--perplexity-eval-batches")?;
             options.perplexity_eval_batches =
                 Some(parse_positive_usize(&value, "--perplexity-eval-batches")?);
             Ok(())
         }
         "--arc-eval-batches" => {
+            options.ensure_no_manifest_source()?;
             let value = next_value(args, "--arc-eval-batches")?;
             options.arc_eval_batches = Some(parse_positive_usize(&value, "--arc-eval-batches")?);
+            Ok(())
+        }
+        "--benchmark-mode" => {
+            options.ensure_no_manifest_source()?;
+            let value = next_value(args, "--benchmark-mode")?;
+            options.benchmark_mode = Some(parse_benchmark_mode(&value)?);
             Ok(())
         }
         _ => Err(invalid_argument(format!("unknown argument: {arg}"))),
@@ -343,14 +545,57 @@ fn parse_backend(value: &str) -> Result<BackendOverride, FractalError> {
     }
 }
 
+fn parse_benchmark_mode(value: &str) -> Result<BenchmarkMode, FractalError> {
+    match value {
+        "leaderboard" => Ok(BenchmarkMode::Leaderboard),
+        "systems-speed" | "systems_speed" => Ok(BenchmarkMode::SystemsSpeed),
+        _ => Err(invalid_argument(format!("unknown benchmark mode: {value}"))),
+    }
+}
+
+fn parse_comparison_name(value: &str) -> Result<ComparisonContract, FractalError> {
+    match value {
+        "authoritative_same_preset" | "authoritative same-preset" => {
+            Ok(ComparisonContract::authoritative_same_preset())
+        }
+        "advisory_mixed_preset" | "advisory mixed-preset" => {
+            Ok(ComparisonContract::advisory_mixed_preset())
+        }
+        "advisory_same_preset" | "advisory same-preset" => Ok(ComparisonContract {
+            authority: fractal::ComparisonAuthority::Advisory,
+            requires_same_preset: true,
+            requires_same_runtime_surfaces: true,
+            requires_frozen_commit: false,
+            requires_same_backend: true,
+        }),
+        "authoritative_mixed_preset" | "authoritative mixed-preset" => Ok(ComparisonContract {
+            authority: fractal::ComparisonAuthority::Authoritative,
+            requires_same_preset: false,
+            requires_same_runtime_surfaces: true,
+            requires_frozen_commit: true,
+            requires_same_backend: true,
+        }),
+        _ => Err(invalid_argument(format!(
+            "unknown comparison contract: {value}"
+        ))),
+    }
+}
+
 fn run_options(options: &RunOptions) -> Result<(), FractalError> {
     match options.selection() {
         RunSelection::Preset(preset) => run_preset(
             options,
             preset,
-            ComparisonContract::authoritative_same_preset(),
+            options.comparison_for(ComparisonContract::authoritative_same_preset()),
         ),
-        RunSelection::Sequence(sequence) => run_sequence(options, sequence),
+        RunSelection::Sequence(sequence) => {
+            if options.manifest_path.is_some() {
+                return Err(invalid_argument(
+                    "experiment manifests cannot use sequence mode".to_owned(),
+                ));
+            }
+            run_sequence(options, sequence)
+        }
     }
 }
 
@@ -380,6 +625,7 @@ fn run_preset(
             species,
             &comparison,
             &base_config,
+            options,
         ));
     print_header(preset, lane, species, &config, &comparison);
     let tournament = Tournament::new(config.clone())?;
@@ -418,6 +664,7 @@ fn build_experiment_template(
     species: Option<SpeciesId>,
     comparison: &ComparisonContract,
     config: &TournamentConfig,
+    options: &RunOptions,
 ) -> ExperimentSpecTemplate {
     let run_id = std::env::var("FRACTAL_RUN_ID").unwrap_or_else(|_| {
         format!(
@@ -432,22 +679,30 @@ fn build_experiment_template(
     let scope = species
         .map(|species| format!("species={species}"))
         .unwrap_or_else(|| format!("lane={}", lane.name()));
+    let logical_name = options
+        .logical_name
+        .clone()
+        .unwrap_or_else(|| format!("{}-{}", preset.name(), scope.replace('=', "-")));
+    let question_summary = options
+        .question_summary
+        .clone()
+        .unwrap_or_else(|| format!("evaluate {scope} on {}", preset.name()));
 
     ExperimentSpecTemplate {
         experiment_id: ExperimentId {
-            logical_name: format!("{}-{}", preset.name(), scope.replace('=', "-")),
+            logical_name,
             run_id,
             branch: detect_git_ref("FRACTAL_BRANCH", &["rev-parse", "--abbrev-ref", "HEAD"]),
             commit_sha: detect_git_ref("FRACTAL_COMMIT_SHA", &["rev-parse", "HEAD"]),
             created_at_unix_ms: current_unix_ms(),
         },
         question: ExperimentQuestion {
-            summary: format!("evaluate {scope} on {}", preset.name()),
+            summary: question_summary,
             lane_intent: lane_intent_for_preset(preset),
             decision_intent: decision_intent_for_contract(comparison),
         },
         budget: BudgetSpec::from_config(preset, config),
-        runtime: RuntimeSurfaceSpec::default(),
+        runtime: options.runtime_surface_spec(),
         comparison: comparison.clone(),
         execution: ExecutionTarget {
             kind: if std::env::var_os("FRACTAL_RUN_POD_ID").is_some() {
@@ -731,6 +986,8 @@ fn print_usage() {
     println!("  --parallelism <usize>");
     println!("  --perplexity-eval-batches <usize>");
     println!("  --arc-eval-batches <usize>");
+    println!("  --benchmark-mode <leaderboard|systems-speed>");
+    println!("  --experiment-manifest <path>");
     #[cfg(feature = "cuda")]
     println!("  --backend <cpu|cuda|metal>");
     #[cfg(not(feature = "cuda"))]
@@ -763,6 +1020,7 @@ fn print_usage() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn parse_command_uses_default_preset_when_no_args() {
@@ -801,6 +1059,11 @@ mod tests {
                 backend: Some(BackendOverride::Cpu),
                 perplexity_eval_batches: None,
                 arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
             })
         );
     }
@@ -829,6 +1092,11 @@ mod tests {
                 backend: None,
                 perplexity_eval_batches: None,
                 arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
             })
         );
     }
@@ -856,6 +1124,11 @@ mod tests {
                 backend: Some(BackendOverride::Cuda),
                 perplexity_eval_batches: None,
                 arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
             })
         );
     }
@@ -904,6 +1177,11 @@ mod tests {
                 backend: None,
                 perplexity_eval_batches: None,
                 arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
             })
         );
     }
@@ -928,6 +1206,11 @@ mod tests {
                 backend: None,
                 perplexity_eval_batches: None,
                 arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
             })
         );
     }
@@ -949,6 +1232,11 @@ mod tests {
                 backend: None,
                 perplexity_eval_batches: None,
                 arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
             })
         );
     }
@@ -970,6 +1258,11 @@ mod tests {
                 backend: None,
                 perplexity_eval_batches: None,
                 arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
             })
         );
     }
@@ -994,6 +1287,11 @@ mod tests {
                 backend: None,
                 perplexity_eval_batches: None,
                 arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
             })
         );
     }
@@ -1015,6 +1313,11 @@ mod tests {
                 backend: None,
                 perplexity_eval_batches: None,
                 arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
             })
         );
     }
@@ -1035,6 +1338,11 @@ mod tests {
                 backend: None,
                 perplexity_eval_batches: None,
                 arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
             })
         );
     }
@@ -1055,6 +1363,11 @@ mod tests {
                 backend: None,
                 perplexity_eval_batches: None,
                 arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
             })
         );
     }
@@ -1079,6 +1392,11 @@ mod tests {
                 backend: None,
                 perplexity_eval_batches: None,
                 arc_eval_batches: None,
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
             })
         );
     }
@@ -1133,7 +1451,129 @@ mod tests {
                 backend: None,
                 perplexity_eval_batches: Some(1),
                 arc_eval_batches: Some(3),
+                benchmark_mode: None,
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
             })
         );
+    }
+
+    #[test]
+    fn parse_command_accepts_benchmark_mode_override() {
+        let command = parse_command(vec![
+            "--preset".to_owned(),
+            "full-medium-stress".to_owned(),
+            "--benchmark-mode".to_owned(),
+            "systems-speed".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::FullMediumStress)),
+                lane: None,
+                species: None,
+                seed: None,
+                execution_mode: None,
+                parallelism: None,
+                backend: None,
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: Some(BenchmarkMode::SystemsSpeed),
+                manifest_path: None,
+                logical_name: None,
+                question_summary: None,
+                comparison_override: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_loads_experiment_manifest() {
+        let root =
+            std::env::temp_dir().join(format!("fractal-exp-manifest-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let manifest_path = root.join("winner-bakeoff-s42.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "logical_name": "winner-bakeoff-s42-p1-fractal-hybrid",
+                "question_summary": "rerun the frozen winner bakeoff row for p1_fractal_hybrid_v1",
+                "preset": "full-medium-stress",
+                "species": "p1_fractal_hybrid",
+                "seed": 42,
+                "backend": "cpu",
+                "execution_mode": "sequential",
+                "parallelism": 1,
+                "comparison": "authoritative_same_preset",
+                "benchmark_mode": "leaderboard"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let command = parse_command(vec![
+            "--experiment-manifest".to_owned(),
+            manifest_path.display().to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Run(RunOptions {
+                selection: Some(RunSelection::Preset(TournamentPreset::FullMediumStress)),
+                lane: None,
+                species: Some(SpeciesId::P1FractalHybrid),
+                seed: Some(42),
+                execution_mode: Some(ExecutionMode::Sequential),
+                parallelism: Some(1),
+                backend: Some(BackendOverride::Cpu),
+                perplexity_eval_batches: None,
+                arc_eval_batches: None,
+                benchmark_mode: Some(BenchmarkMode::Leaderboard),
+                manifest_path: Some(manifest_path.clone()),
+                logical_name: Some("winner-bakeoff-s42-p1-fractal-hybrid".to_owned()),
+                question_summary: Some(
+                    "rerun the frozen winner bakeoff row for p1_fractal_hybrid_v1".to_owned(),
+                ),
+                comparison_override: Some(ComparisonContract::authoritative_same_preset()),
+            })
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_command_rejects_manifest_mixed_with_flags() {
+        let root =
+            std::env::temp_dir().join(format!("fractal-exp-manifest-mixed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let manifest_path = root.join("winner-bakeoff-s43.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "logical_name": "winner-bakeoff-s43-p1-contractive",
+                "preset": "full-medium-stress",
+                "species": "p1_contractive"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = parse_command(vec![
+            "--experiment-manifest".to_owned(),
+            manifest_path.display().to_string(),
+            "--seed".to_owned(),
+            "43".to_owned(),
+        ])
+        .unwrap_err();
+
+        assert!(matches!(error, FractalError::InvalidConfig(_)));
+        let _ = fs::remove_dir_all(&root);
     }
 }

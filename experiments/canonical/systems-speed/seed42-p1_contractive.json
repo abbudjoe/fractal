@@ -1,0 +1,13 @@
+{
+  "logical_name": "canonical-systems-speed-s42-p1-contractive",
+  "question_summary": "measure the frozen systems-speed benchmark row for p1_contractive_v1 on seed 42",
+  "preset": "full-medium-stress",
+  "species": "p1_contractive",
+  "seed": 42,
+  "backend": "cuda",
+  "execution_mode": "sequential",
+  "parallelism": 1,
+  "comparison": "authoritative_same_preset",
+  "benchmark_mode": "systems-speed",
+  "expected_branch": "codex/runpod-cuda-next-tournament"
+}
