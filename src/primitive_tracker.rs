@@ -59,6 +59,7 @@ mod tests {
 
     use super::primitive_tracker_reminder_lines;
     use crate::{species_registry_for_species, TournamentRunReport};
+    use fractal_core::lifecycle::TrainingRuntimeArtifact;
     use fractal_core::{
         ComparisonContract, PhaseTiming, RankedSpeciesResult, RunExecutionOutcome, RunManifest,
         RunPhase, RunQualityOutcome, SpeciesId, SpeciesRunArtifact, SpeciesRunStage,
@@ -104,6 +105,7 @@ mod tests {
                         completed: 1,
                         total: 1,
                     }],
+                    training_runtime: TrainingRuntimeArtifact::default(),
                     execution_outcome: RunExecutionOutcome::Success,
                     quality_outcome: RunQualityOutcome::Clean,
                     error: None,

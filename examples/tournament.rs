@@ -295,6 +295,7 @@ struct ManifestConfigOverrides {
     train_batch_size: Option<usize>,
     eval_batch_size: Option<usize>,
     train_steps_per_species: Option<usize>,
+    train_token_budget: Option<usize>,
     eval_batches_per_family: Option<usize>,
     perplexity_eval_batches: Option<usize>,
     arc_eval_batches: Option<usize>,
@@ -341,6 +342,14 @@ impl ManifestConfigOverrides {
             self.train_steps_per_species,
             "train_steps_per_species",
         )?;
+        if let Some(train_token_budget) = self.train_token_budget {
+            if train_token_budget == 0 {
+                return Err(invalid_argument(
+                    "manifest v2 train_token_budget must be greater than zero".to_owned(),
+                ));
+            }
+            config.train_token_budget = Some(train_token_budget);
+        }
         apply_positive_override(
             &mut config.eval_batches_per_family,
             self.eval_batches_per_family,
@@ -2481,6 +2490,7 @@ mod tests {
                         "train_batch_size": 1,
                         "eval_batch_size": 1,
                         "train_steps_per_species": 1,
+                        "train_token_budget": 1,
                         "eval_batches_per_family": 1,
                         "perplexity_eval_batches": 1,
                         "arc_eval_batches": 1,
@@ -2550,17 +2560,17 @@ mod tests {
                                 "tf32_enabled": true
                             },
                             "checkpoint": {
-                                "interval_tokens": 10000000,
+                                "interval_tokens": 1,
                                 "keep_latest": true,
                                 "keep_best": true,
                                 "keep_final": true,
                                 "keep_previous": true
                             },
                             "eval_cadence": {
-                                "perplexity_interval_tokens": 10000000,
-                                "stability_interval_tokens": 10000000,
-                                "arc_interval_tokens": 20000000,
-                                "systems_speed_interval_tokens": 20000000,
+                                "perplexity_interval_tokens": 1,
+                                "stability_interval_tokens": 1,
+                                "arc_interval_tokens": 1,
+                                "systems_speed_interval_tokens": 1,
                                 "final_full_eval": true
                             },
                             "resume": {
@@ -2631,8 +2641,54 @@ mod tests {
             serde_json::Value::String("low-signal".to_owned())
         );
         assert_eq!(
+            persisted_artifact["manifest"]["config"]["train_token_budget"],
+            serde_json::Value::Number(1usize.into())
+        );
+        assert_eq!(
             persisted_artifact["results"][0]["tokenizer_bridge"]["training_input_mode"],
             serde_json::Value::String("tokenizer-backed-text".to_owned())
+        );
+        let runtime = &persisted_artifact["results"][0]["training_runtime"];
+        assert_eq!(
+            runtime["target_train_tokens"],
+            serde_json::Value::Number(1usize.into())
+        );
+        assert_eq!(
+            runtime["completed_steps"],
+            serde_json::Value::Number(1usize.into())
+        );
+        assert_eq!(
+            runtime["resumed_from_checkpoint"],
+            serde_json::Value::Bool(false)
+        );
+        assert!(
+            runtime["train_tokens_seen"]
+                .as_u64()
+                .expect("train token count should be recorded")
+                >= 1
+        );
+        assert!(
+            runtime["checkpoints"]
+                .as_array()
+                .expect("checkpoint list should be present")
+                .len()
+                >= 3
+        );
+        assert!(
+            runtime["interim_evaluations"]
+                .as_array()
+                .expect("interim eval list should be present")
+                .len()
+                >= 1
+        );
+
+        run_options(&options).expect("rerunning manifest should resume cleanly");
+
+        let resumed_artifact: serde_json::Value =
+            serde_json::from_slice(&fs::read(&persisted_artifact_path).unwrap()).unwrap();
+        assert_eq!(
+            resumed_artifact["results"][0]["training_runtime"]["resumed_from_checkpoint"],
+            serde_json::Value::Bool(true)
         );
         assert_eq!(
             persisted_artifact["results"][0]["tokenizer_bridge"]["corpus_name"],

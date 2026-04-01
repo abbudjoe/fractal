@@ -174,6 +174,7 @@ pub fn run_ranked_generation_with_reporter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fractal_core::lifecycle::TrainingRuntimeArtifact;
     use fractal_core::{
         ComparisonContract, PhaseTiming, RunExecutionOutcome, RunManifest, RunPhase,
         RunQualityOutcome, SpeciesRunArtifact, SpeciesRunStage, TournamentRunArtifact,
@@ -302,6 +303,7 @@ mod tests {
                     completed: 1,
                     total: 1,
                 }],
+                training_runtime: TrainingRuntimeArtifact::default(),
                 execution_outcome: RunExecutionOutcome::Success,
                 quality_outcome: RunQualityOutcome::Clean,
                 error: None,

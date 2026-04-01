@@ -786,6 +786,7 @@ pub struct BudgetSpec {
     pub train_batch_size: usize,
     pub eval_batch_size: usize,
     pub train_steps_per_species: usize,
+    pub train_token_budget: Option<usize>,
     pub eval_batches_per_family: usize,
     pub perplexity_eval_batches: usize,
     pub arc_eval_batches: usize,
@@ -803,6 +804,7 @@ impl BudgetSpec {
             train_batch_size: config.train_batch_size,
             eval_batch_size: config.eval_batch_size,
             train_steps_per_species: config.train_steps_per_species,
+            train_token_budget: config.train_token_budget,
             eval_batches_per_family: config.eval_batches_per_family,
             perplexity_eval_batches: config.effective_perplexity_eval_batches(),
             arc_eval_batches: config.effective_arc_eval_batches(),
@@ -818,6 +820,7 @@ impl BudgetSpec {
             && self.train_batch_size == config.train_batch_size
             && self.eval_batch_size == config.eval_batch_size
             && self.train_steps_per_species == config.train_steps_per_species
+            && self.train_token_budget == config.train_token_budget
             && self.eval_batches_per_family == config.eval_batches_per_family
             && self.perplexity_eval_batches == config.effective_perplexity_eval_batches()
             && self.arc_eval_batches == config.effective_arc_eval_batches()
@@ -1108,6 +1111,11 @@ impl EvalCadencePolicy {
                     "{name} must be greater than zero when configured"
                 )));
             }
+        }
+        if !self.final_full_eval {
+            return Err(FractalError::InvalidConfig(
+                "final_full_eval=false is not yet supported by the runtime".into(),
+            ));
         }
         Ok(())
     }
@@ -1422,6 +1430,7 @@ pub struct SpeciesPresetOverride {
     pub train_batch_size: Option<usize>,
     pub eval_batch_size: Option<usize>,
     pub train_steps_per_species: Option<usize>,
+    pub train_token_budget: Option<usize>,
     pub max_recursion_depth: Option<usize>,
     pub stability_depth: Option<usize>,
 }
@@ -1433,6 +1442,7 @@ impl SpeciesPresetOverride {
             train_batch_size: None,
             eval_batch_size: None,
             train_steps_per_species: None,
+            train_token_budget: None,
             max_recursion_depth: None,
             stability_depth: None,
         }
@@ -1447,6 +1457,9 @@ impl SpeciesPresetOverride {
         }
         if let Some(train_steps_per_species) = self.train_steps_per_species {
             config.train_steps_per_species = train_steps_per_species;
+        }
+        if let Some(train_token_budget) = self.train_token_budget {
+            config.train_token_budget = Some(train_token_budget);
         }
         if let Some(max_recursion_depth) = self.max_recursion_depth {
             config.max_recursion_depth = max_recursion_depth;
@@ -1469,6 +1482,7 @@ pub struct TournamentConfig {
     pub train_batch_size: usize,
     pub eval_batch_size: usize,
     pub train_steps_per_species: usize,
+    pub train_token_budget: Option<usize>,
     pub eval_batches_per_family: usize,
     pub perplexity_eval_batches: Option<usize>,
     pub arc_eval_batches: Option<usize>,
@@ -1498,6 +1512,7 @@ impl Default for TournamentConfig {
             train_batch_size: 1,
             eval_batch_size: 1,
             train_steps_per_species: 1,
+            train_token_budget: None,
             eval_batches_per_family: 1,
             perplexity_eval_batches: None,
             arc_eval_batches: None,
@@ -1559,6 +1574,16 @@ impl TournamentConfig {
         if self.eval_batch_size == 0 {
             return Err(FractalError::InvalidConfig(
                 "eval_batch_size must be greater than zero".into(),
+            ));
+        }
+        if self.train_steps_per_species == 0 {
+            return Err(FractalError::InvalidConfig(
+                "train_steps_per_species must be greater than zero".into(),
+            ));
+        }
+        if self.train_token_budget == Some(0) {
+            return Err(FractalError::InvalidConfig(
+                "train_token_budget must be greater than zero when configured".into(),
             ));
         }
         if self.eval_batches_per_family == 0 {
@@ -1628,6 +1653,11 @@ impl TournamentConfig {
                     "species override train_steps_per_species must be greater than zero".into(),
                 ));
             }
+            if override_config.train_token_budget == Some(0) {
+                return Err(FractalError::InvalidConfig(
+                    "species override train_token_budget must be greater than zero".into(),
+                ));
+            }
             if override_config.max_recursion_depth == Some(0) {
                 return Err(FractalError::InvalidConfig(
                     "species override max_recursion_depth must be greater than zero".into(),
@@ -1659,6 +1689,7 @@ impl TournamentConfig {
             train_batch_size: 16,
             eval_batch_size: 8,
             train_steps_per_species: 50,
+            train_token_budget: None,
             eval_batches_per_family: 8,
             perplexity_eval_batches: None,
             arc_eval_batches: None,
@@ -1688,6 +1719,7 @@ impl TournamentConfig {
             train_batch_size: 8,
             eval_batch_size: 4,
             train_steps_per_species: 12,
+            train_token_budget: None,
             eval_batches_per_family: 2,
             perplexity_eval_batches: None,
             arc_eval_batches: None,
@@ -1717,6 +1749,7 @@ impl TournamentConfig {
             train_batch_size: 16,
             eval_batch_size: 8,
             train_steps_per_species: 24,
+            train_token_budget: None,
             eval_batches_per_family: 2,
             perplexity_eval_batches: None,
             arc_eval_batches: None,
@@ -1734,6 +1767,7 @@ impl TournamentConfig {
                 train_batch_size: Some(8),
                 eval_batch_size: Some(4),
                 train_steps_per_species: Some(16),
+                train_token_budget: None,
                 ..SpeciesPresetOverride::for_species(SpeciesId::Ifs)
             }],
             experiment: None,
@@ -1752,6 +1786,7 @@ impl TournamentConfig {
             train_batch_size: 8,
             eval_batch_size: 8,
             train_steps_per_species: 30,
+            train_token_budget: None,
             eval_batches_per_family: 2,
             perplexity_eval_batches: None,
             arc_eval_batches: None,
@@ -1781,6 +1816,7 @@ impl TournamentConfig {
             train_batch_size: 16,
             eval_batch_size: 16,
             train_steps_per_species: 5,
+            train_token_budget: None,
             eval_batches_per_family: 2,
             perplexity_eval_batches: None,
             arc_eval_batches: None,
@@ -1818,6 +1854,7 @@ impl TournamentConfig {
             train_batch_size: 8,
             eval_batch_size: 4,
             train_steps_per_species: 80,
+            train_token_budget: None,
             eval_batches_per_family: 2,
             perplexity_eval_batches: None,
             arc_eval_batches: None,
@@ -1851,6 +1888,7 @@ impl TournamentConfig {
             train_batch_size: 8,
             eval_batch_size: 4,
             train_steps_per_species: 48,
+            train_token_budget: None,
             eval_batches_per_family: 2,
             perplexity_eval_batches: None,
             arc_eval_batches: None,
@@ -1880,6 +1918,7 @@ impl TournamentConfig {
             train_batch_size: 4,
             eval_batch_size: 2,
             train_steps_per_species: 48,
+            train_token_budget: None,
             eval_batches_per_family: 2,
             perplexity_eval_batches: None,
             arc_eval_batches: None,
@@ -1922,6 +1961,7 @@ impl TournamentConfig {
             train_batch_size: 2,
             eval_batch_size: 2,
             train_steps_per_species: 5,
+            train_token_budget: None,
             eval_batches_per_family: 2,
             perplexity_eval_batches: None,
             arc_eval_batches: None,
@@ -1950,7 +1990,8 @@ impl TournamentConfig {
             router_threshold: 1.1,
             train_batch_size: 1,
             eval_batch_size: 1,
-            train_steps_per_species: 0,
+            train_steps_per_species: 1,
+            train_token_budget: None,
             eval_batches_per_family: 1,
             perplexity_eval_batches: None,
             arc_eval_batches: None,
@@ -1980,6 +2021,7 @@ impl TournamentConfig {
             train_batch_size: 8,
             eval_batch_size: 4,
             train_steps_per_species: 120,
+            train_token_budget: None,
             eval_batches_per_family: 4,
             perplexity_eval_batches: None,
             arc_eval_batches: None,
@@ -2150,6 +2192,55 @@ pub struct PhaseTiming {
     pub total: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckpointArtifactKind {
+    Latest,
+    Previous,
+    Best,
+    Final,
+}
+
+impl CheckpointArtifactKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Latest => "latest",
+            Self::Previous => "previous",
+            Self::Best => "best",
+            Self::Final => "final",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CheckpointArtifact {
+    pub kind: CheckpointArtifactKind,
+    pub tokens_seen: usize,
+    pub completed_steps: usize,
+    pub directory: String,
+    pub long_context_perplexity: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct InterimEvalSnapshot {
+    pub tokens_seen: usize,
+    pub completed_steps: usize,
+    pub stability_score: Option<f64>,
+    pub long_context_perplexity: Option<f64>,
+    pub arc_accuracy: Option<f64>,
+    pub tokens_per_sec: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TrainingRuntimeArtifact {
+    pub completed_steps: usize,
+    pub planned_steps: usize,
+    pub train_tokens_seen: usize,
+    pub target_train_tokens: usize,
+    pub resumed_from_checkpoint: bool,
+    pub checkpoints: Vec<CheckpointArtifact>,
+    pub interim_evaluations: Vec<InterimEvalSnapshot>,
+}
+
 #[derive(Clone, Debug)]
 pub struct RunManifest {
     pub variant_name: PrimitiveVariantName,
@@ -2163,6 +2254,7 @@ pub struct SpeciesRunArtifact {
     pub stage: SpeciesRunStage,
     pub manifest: RunManifest,
     pub phase_timings: Vec<PhaseTiming>,
+    pub training_runtime: TrainingRuntimeArtifact,
     pub execution_outcome: RunExecutionOutcome,
     pub quality_outcome: RunQualityOutcome,
     pub error: Option<String>,

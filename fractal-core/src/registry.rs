@@ -1,6 +1,8 @@
 use std::{
     collections::HashSet,
     fmt::{Display, Formatter},
+    fs,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
@@ -19,17 +21,20 @@ use burn::{
         GradientsParams, Optimizer,
     },
     prelude::Backend,
+    record::{BinFileRecorder, FullPrecisionSettings, Recorder},
     tensor::{backend::AutodiffBackend, Bool, ElementConversion, Int, Tensor},
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     data_generator::{SimpleHierarchicalGenerator, TaskFamily, TokenBatch, PAD_TOKEN},
     error::FractalError,
     fitness::SpeciesRawMetrics,
     lifecycle::{
-        ExperimentSpec, OptimizerKind, OptimizerSpec, PhaseTiming, RunExecutionOutcome,
-        RunManifest, RunPhase, RunQualityOutcome, SpeciesRunArtifact, SpeciesRunStage,
-        TournamentConfig,
+        CheckpointArtifact, CheckpointArtifactKind, ExperimentSpec, InterimEvalSnapshot,
+        OptimizerKind, OptimizerSpec, PhaseTiming, RunExecutionOutcome, RunManifest, RunPhase,
+        RunQualityOutcome, SpeciesRunArtifact, SpeciesRunStage, TournamentConfig,
+        TrainingRuntimeArtifact,
     },
     model::FractalModel,
     rule_trait::FractalRule,
@@ -77,10 +82,307 @@ where
         }
     }
 
+    fn load_checkpoint_record(
+        self,
+        path: &Path,
+        device: &B::Device,
+    ) -> Result<Self, FractalError> {
+        let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
+        match self {
+            Self::Adam(optimizer) => {
+                let record = recorder
+                    .load(path.to_path_buf(), device)
+                    .map_err(recorder_error)?;
+                Ok(Self::Adam(optimizer.load_record(record)))
+            }
+            Self::AdamW(optimizer) => {
+                let record = recorder
+                    .load(path.to_path_buf(), device)
+                    .map_err(recorder_error)?;
+                Ok(Self::AdamW(optimizer.load_record(record)))
+            }
+        }
+    }
+
+    fn save_checkpoint_record(&self, path: &Path) -> Result<(), FractalError> {
+        let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
+        match self {
+            Self::Adam(optimizer) => recorder
+                .record(optimizer.to_record(), path.to_path_buf())
+                .map(|_| ())
+                .map_err(recorder_error),
+            Self::AdamW(optimizer) => recorder
+                .record(optimizer.to_record(), path.to_path_buf())
+                .map(|_| ())
+                .map_err(recorder_error),
+        }
+    }
+
     fn step(&mut self, lr: f64, module: M, grads: GradientsParams) -> M {
         match self {
             Self::Adam(optimizer) => optimizer.step(lr, module, grads),
             Self::AdamW(optimizer) => optimizer.step(lr, module, grads),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct CheckpointContractSnapshot {
+    species: String,
+    variant_name: String,
+    dim: usize,
+    levels: usize,
+    vocab_size: usize,
+    max_seq_len: usize,
+    max_recursion_depth: usize,
+    stability_depth: usize,
+    train_batch_size: usize,
+    eval_batch_size: usize,
+    train_steps_per_species: usize,
+    train_token_budget: Option<usize>,
+    eval_batches_per_family: usize,
+    perplexity_eval_batches: usize,
+    arc_eval_batches: usize,
+    seed: u64,
+    optimizer: OptimizerSpec,
+    launch_policy: crate::LaunchPolicySpec,
+    training_input: Option<crate::TrainingInputSpec>,
+    execution_backend: String,
+    branch: Option<String>,
+    commit_sha: Option<String>,
+}
+
+impl CheckpointContractSnapshot {
+    fn from_manifest(stage: SpeciesRunStage, manifest: &RunManifest) -> Self {
+        let experiment = manifest.experiment.as_ref();
+        let config = &manifest.config;
+        Self {
+            species: stage.species.as_str().to_owned(),
+            variant_name: manifest.variant_name.as_str().to_owned(),
+            dim: config.dim,
+            levels: config.levels,
+            vocab_size: config.vocab_size,
+            max_seq_len: config.max_seq_len,
+            max_recursion_depth: config.max_recursion_depth,
+            stability_depth: config.stability_depth,
+            train_batch_size: config.train_batch_size,
+            eval_batch_size: config.eval_batch_size,
+            train_steps_per_species: config.train_steps_per_species,
+            train_token_budget: config.train_token_budget,
+            eval_batches_per_family: config.eval_batches_per_family,
+            perplexity_eval_batches: config.effective_perplexity_eval_batches(),
+            arc_eval_batches: config.effective_arc_eval_batches(),
+            seed: config.seed,
+            optimizer: config.optimizer.clone(),
+            launch_policy: config.launch_policy.clone(),
+            training_input: experiment.map(|spec| spec.training_input.clone()),
+            execution_backend: backend_name(&config.execution_backend).to_owned(),
+            branch: experiment.and_then(|spec| spec.experiment_id.branch.clone()),
+            commit_sha: experiment.and_then(|spec| spec.experiment_id.commit_sha.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RuntimeCheckpointState {
+    contract: CheckpointContractSnapshot,
+    completed_steps: usize,
+    planned_steps: usize,
+    train_tokens_seen: usize,
+    target_train_tokens: usize,
+    best_perplexity: Option<f64>,
+    next_checkpoint_token: Option<usize>,
+    next_perplexity_token: Option<usize>,
+    next_stability_token: Option<usize>,
+    next_arc_token: Option<usize>,
+    next_systems_speed_token: Option<usize>,
+    checkpoints: Vec<CheckpointArtifactState>,
+    interim_evaluations: Vec<InterimEvalSnapshotState>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CheckpointArtifactState {
+    kind: String,
+    tokens_seen: usize,
+    completed_steps: usize,
+    directory: String,
+    long_context_perplexity: Option<f64>,
+}
+
+impl CheckpointArtifactState {
+    fn into_runtime_artifact(self) -> CheckpointArtifact {
+        CheckpointArtifact {
+            kind: match self.kind.as_str() {
+                "latest" => CheckpointArtifactKind::Latest,
+                "previous" => CheckpointArtifactKind::Previous,
+                "best" => CheckpointArtifactKind::Best,
+                "final" => CheckpointArtifactKind::Final,
+                other => panic!("unknown checkpoint kind in saved state: {other}"),
+            },
+            tokens_seen: self.tokens_seen,
+            completed_steps: self.completed_steps,
+            directory: self.directory,
+            long_context_perplexity: self.long_context_perplexity,
+        }
+    }
+}
+
+impl From<&CheckpointArtifact> for CheckpointArtifactState {
+    fn from(value: &CheckpointArtifact) -> Self {
+        Self {
+            kind: value.kind.as_str().to_owned(),
+            tokens_seen: value.tokens_seen,
+            completed_steps: value.completed_steps,
+            directory: value.directory.clone(),
+            long_context_perplexity: value.long_context_perplexity,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct InterimEvalSnapshotState {
+    tokens_seen: usize,
+    completed_steps: usize,
+    stability_score: Option<f64>,
+    long_context_perplexity: Option<f64>,
+    arc_accuracy: Option<f64>,
+    tokens_per_sec: Option<f64>,
+}
+
+impl InterimEvalSnapshotState {
+    fn into_runtime_artifact(self) -> InterimEvalSnapshot {
+        InterimEvalSnapshot {
+            tokens_seen: self.tokens_seen,
+            completed_steps: self.completed_steps,
+            stability_score: self.stability_score,
+            long_context_perplexity: self.long_context_perplexity,
+            arc_accuracy: self.arc_accuracy,
+            tokens_per_sec: self.tokens_per_sec,
+        }
+    }
+}
+
+impl From<&InterimEvalSnapshot> for InterimEvalSnapshotState {
+    fn from(value: &InterimEvalSnapshot) -> Self {
+        Self {
+            tokens_seen: value.tokens_seen,
+            completed_steps: value.completed_steps,
+            stability_score: value.stability_score,
+            long_context_perplexity: value.long_context_perplexity,
+            arc_accuracy: value.arc_accuracy,
+            tokens_per_sec: value.tokens_per_sec,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TrainingExecutionPlan {
+    planned_steps: usize,
+    target_train_tokens: usize,
+}
+
+#[derive(Clone, Debug)]
+struct CheckpointRuntimePaths {
+    root: PathBuf,
+    latest: PathBuf,
+    previous: PathBuf,
+    best: PathBuf,
+    final_slot: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct LaunchRuntimeState {
+    completed_steps: usize,
+    planned_steps: usize,
+    train_tokens_seen: usize,
+    target_train_tokens: usize,
+    resumed_from_checkpoint: bool,
+    best_perplexity: Option<f64>,
+    next_checkpoint_token: Option<usize>,
+    next_perplexity_token: Option<usize>,
+    next_stability_token: Option<usize>,
+    next_arc_token: Option<usize>,
+    next_systems_speed_token: Option<usize>,
+    checkpoints: Vec<CheckpointArtifact>,
+    interim_evaluations: Vec<InterimEvalSnapshot>,
+}
+
+impl LaunchRuntimeState {
+    fn fresh(plan: &TrainingExecutionPlan, launch_policy: &crate::LaunchPolicySpec) -> Self {
+        Self {
+            completed_steps: 0,
+            planned_steps: plan.planned_steps,
+            train_tokens_seen: 0,
+            target_train_tokens: plan.target_train_tokens,
+            resumed_from_checkpoint: false,
+            best_perplexity: None,
+            next_checkpoint_token: launch_policy.checkpoint.interval_tokens,
+            next_perplexity_token: launch_policy.eval_cadence.perplexity_interval_tokens,
+            next_stability_token: launch_policy.eval_cadence.stability_interval_tokens,
+            next_arc_token: launch_policy.eval_cadence.arc_interval_tokens,
+            next_systems_speed_token: launch_policy.eval_cadence.systems_speed_interval_tokens,
+            checkpoints: Vec::new(),
+            interim_evaluations: Vec::new(),
+        }
+    }
+
+    fn from_checkpoint(state: RuntimeCheckpointState) -> Self {
+        Self {
+            completed_steps: state.completed_steps,
+            planned_steps: state.planned_steps,
+            train_tokens_seen: state.train_tokens_seen,
+            target_train_tokens: state.target_train_tokens,
+            resumed_from_checkpoint: true,
+            best_perplexity: state.best_perplexity,
+            next_checkpoint_token: state.next_checkpoint_token,
+            next_perplexity_token: state.next_perplexity_token,
+            next_stability_token: state.next_stability_token,
+            next_arc_token: state.next_arc_token,
+            next_systems_speed_token: state.next_systems_speed_token,
+            checkpoints: state
+                .checkpoints
+                .into_iter()
+                .map(CheckpointArtifactState::into_runtime_artifact)
+                .collect(),
+            interim_evaluations: state
+                .interim_evaluations
+                .into_iter()
+                .map(InterimEvalSnapshotState::into_runtime_artifact)
+                .collect(),
+        }
+    }
+
+    fn checkpoint_state(&self, contract: CheckpointContractSnapshot) -> RuntimeCheckpointState {
+        RuntimeCheckpointState {
+            contract,
+            completed_steps: self.completed_steps,
+            planned_steps: self.planned_steps,
+            train_tokens_seen: self.train_tokens_seen,
+            target_train_tokens: self.target_train_tokens,
+            best_perplexity: self.best_perplexity,
+            next_checkpoint_token: self.next_checkpoint_token,
+            next_perplexity_token: self.next_perplexity_token,
+            next_stability_token: self.next_stability_token,
+            next_arc_token: self.next_arc_token,
+            next_systems_speed_token: self.next_systems_speed_token,
+            checkpoints: self.checkpoints.iter().map(CheckpointArtifactState::from).collect(),
+            interim_evaluations: self
+                .interim_evaluations
+                .iter()
+                .map(InterimEvalSnapshotState::from)
+                .collect(),
+        }
+    }
+
+    fn artifact(&self) -> TrainingRuntimeArtifact {
+        TrainingRuntimeArtifact {
+            completed_steps: self.completed_steps,
+            planned_steps: self.planned_steps,
+            train_tokens_seen: self.train_tokens_seen,
+            target_train_tokens: self.target_train_tokens,
+            resumed_from_checkpoint: self.resumed_from_checkpoint,
+            checkpoints: self.checkpoints.clone(),
+            interim_evaluations: self.interim_evaluations.clone(),
         }
     }
 }
@@ -534,6 +836,7 @@ pub(crate) fn build_success_artifact(
         stage,
         manifest,
         phase_timings,
+        training_runtime: TrainingRuntimeArtifact::default(),
         execution_outcome: RunExecutionOutcome::Success,
         quality_outcome,
         error: None,
@@ -552,6 +855,7 @@ pub(crate) fn build_failure_artifact(
         stage,
         manifest,
         phase_timings,
+        training_runtime: TrainingRuntimeArtifact::default(),
         execution_outcome,
         quality_outcome: RunQualityOutcome::Clean,
         error: Some(error.into()),
@@ -616,7 +920,7 @@ where
         ordinal: config.parallelism.max(1),
         total: config.parallelism.max(1),
     };
-    let mut model = FractalModel::new(
+    let model = FractalModel::new(
         config.vocab_size,
         config.dim,
         config.max_recursion_depth,
@@ -628,34 +932,77 @@ where
     let criterion = CrossEntropyLossConfig::new()
         .with_pad_tokens(Some(vec![PAD_TOKEN]))
         .init(&device);
-    let mut optimizer = ConfiguredOptimizer::<FractalModel<B, R>, B>::from_spec(&config.optimizer);
-    let total_train_tokens = training_token_budget(&batches, config.train_steps_per_species);
-    let mut seen_train_tokens = 0usize;
+    let optimizer = ConfiguredOptimizer::<FractalModel<B, R>, B>::from_spec(&config.optimizer);
+    let execution_plan = match build_training_execution_plan(&batches, &config) {
+        Ok(plan) => plan,
+        Err(error) => {
+            let artifact = SpeciesRunArtifact {
+                stage,
+                manifest: manifest.clone(),
+                phase_timings: Vec::new(),
+                training_runtime: TrainingRuntimeArtifact::default(),
+                execution_outcome: RunExecutionOutcome::InfraFailure,
+                quality_outcome: RunQualityOutcome::Clean,
+                error: Some(error.to_string()),
+                metrics: None,
+            };
+            record_species_run_artifact(artifact);
+            return Err(error);
+        }
+    };
+    let checkpoint_contract = CheckpointContractSnapshot::from_manifest(stage.clone(), &manifest);
+    let (mut model, mut optimizer, mut launch_runtime, checkpoint_paths) =
+        match maybe_restore_checkpoint(
+            stage.clone(),
+            &manifest,
+            &execution_plan,
+            model,
+            optimizer,
+            &device,
+        ) {
+            Ok(restored) => restored,
+            Err(error) => {
+                let artifact = SpeciesRunArtifact {
+                    stage,
+                    manifest: manifest.clone(),
+                    phase_timings: Vec::new(),
+                    training_runtime: TrainingRuntimeArtifact::default(),
+                    execution_outcome: RunExecutionOutcome::InfraFailure,
+                    quality_outcome: RunQualityOutcome::Clean,
+                    error: Some(error.to_string()),
+                    metrics: None,
+                };
+                record_species_run_artifact(artifact);
+                return Err(error);
+            }
+        };
     let mut phase_timings = Vec::with_capacity(4);
 
     log_species_phase_start(
         species,
         "train",
         &[
-            format!("steps={}", config.train_steps_per_species),
+            format!("steps={}", launch_runtime.planned_steps),
+            format!("target_tokens={}", launch_runtime.target_train_tokens),
             format!("train_batch={}", config.train_batch_size),
         ],
     );
     let train_started = Instant::now();
-    for step in 0..config.train_steps_per_species {
+    for step in launch_runtime.completed_steps..launch_runtime.planned_steps {
         if let Some(deadline) = deadline {
             if Instant::now() >= deadline {
                 let elapsed = train_started.elapsed();
                 phase_timings.push(phase_timing(
                     RunPhase::Train,
                     elapsed,
-                    step,
-                    config.train_steps_per_species,
+                    launch_runtime.completed_steps,
+                    launch_runtime.planned_steps,
                 ));
                 let artifact = SpeciesRunArtifact {
                     stage,
                     manifest: manifest.clone(),
                     phase_timings,
+                    training_runtime: launch_runtime.artifact(),
                     execution_outcome: timeout_outcome_for_phase(RunPhase::Train),
                     quality_outcome: RunQualityOutcome::Clean,
                     error: Some("run timeout exceeded during training".into()),
@@ -672,13 +1019,14 @@ where
             phase_timings.push(phase_timing(
                 RunPhase::Train,
                 train_started.elapsed(),
-                step,
-                config.train_steps_per_species,
+                launch_runtime.completed_steps,
+                launch_runtime.planned_steps,
             ));
             let artifact = SpeciesRunArtifact {
                 stage,
                 manifest: manifest.clone(),
                 phase_timings,
+                training_runtime: launch_runtime.artifact(),
                 execution_outcome: RunExecutionOutcome::InfraFailure,
                 quality_outcome: RunQualityOutcome::Clean,
                 error: Some("training batch cache was empty".into()),
@@ -696,13 +1044,14 @@ where
                 phase_timings.push(phase_timing(
                     RunPhase::Train,
                     train_started.elapsed(),
-                    step,
-                    config.train_steps_per_species,
+                    launch_runtime.completed_steps,
+                    launch_runtime.planned_steps,
                 ));
                 let artifact = SpeciesRunArtifact {
                     stage,
                     manifest: manifest.clone(),
                     phase_timings,
+                    training_runtime: launch_runtime.artifact(),
                     execution_outcome: RunExecutionOutcome::InfraFailure,
                     quality_outcome: RunQualityOutcome::Clean,
                     error: Some(error.to_string()),
@@ -715,20 +1064,130 @@ where
         let grads = GradientsParams::from_grads(loss.backward(), &model);
         let scheduled_learning_rate = config
             .optimizer
-            .learning_rate_at_tokens(seen_train_tokens, total_train_tokens);
+            .learning_rate_at_tokens(
+                launch_runtime.train_tokens_seen,
+                launch_runtime.target_train_tokens,
+            );
         let mut grads = grads;
         if let Some(max_norm) = config.optimizer.gradient_clip_norm {
             clip_gradients_global_norm(&model, &mut grads, max_norm);
         }
         model = optimizer.step(scheduled_learning_rate, model, grads);
-        seen_train_tokens += batch.token_count;
-        let completed_step = step + 1;
-        if should_log_training_checkpoint(completed_step, config.train_steps_per_species) {
+        launch_runtime.train_tokens_seen += batch.token_count;
+        launch_runtime.completed_steps = step + 1;
+        let completed_step = launch_runtime.completed_steps;
+
+        let latest_snapshot =
+            match maybe_capture_interim_eval(species, &model, &criterion, &batches, &config, &mut launch_runtime)
+            {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    phase_timings.push(phase_timing(
+                        RunPhase::Train,
+                        train_started.elapsed(),
+                        launch_runtime.completed_steps,
+                        launch_runtime.planned_steps,
+                    ));
+                    let artifact = SpeciesRunArtifact {
+                        stage,
+                        manifest: manifest.clone(),
+                        phase_timings,
+                        training_runtime: launch_runtime.artifact(),
+                        execution_outcome: RunExecutionOutcome::InfraFailure,
+                        quality_outcome: RunQualityOutcome::Clean,
+                        error: Some(error.to_string()),
+                        metrics: None,
+                    };
+                    record_species_run_artifact(artifact);
+                    return Err(error);
+                }
+            };
+        let latest_perplexity = latest_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.long_context_perplexity);
+        let best_improved = latest_perplexity
+            .map(|perplexity| match launch_runtime.best_perplexity {
+                Some(best) => perplexity < best,
+                None => true,
+            })
+            .unwrap_or(false);
+        if let Some(perplexity) = latest_perplexity {
+            if best_improved {
+                launch_runtime.best_perplexity = Some(perplexity);
+            }
+        }
+        let checkpoint_due = advance_token_milestone(
+            &mut launch_runtime.next_checkpoint_token,
+            config.launch_policy.checkpoint.interval_tokens,
+            launch_runtime.train_tokens_seen,
+        );
+        if checkpoint_due {
+            if let Err(error) = maybe_persist_latest_checkpoint(
+                &checkpoint_paths,
+                &mut launch_runtime,
+                &checkpoint_contract,
+                &config.launch_policy,
+                &model,
+                &optimizer,
+                latest_perplexity,
+            ) {
+                phase_timings.push(phase_timing(
+                    RunPhase::Train,
+                    train_started.elapsed(),
+                    launch_runtime.completed_steps,
+                    launch_runtime.planned_steps,
+                ));
+                let artifact = SpeciesRunArtifact {
+                    stage,
+                    manifest: manifest.clone(),
+                    phase_timings,
+                    training_runtime: launch_runtime.artifact(),
+                    execution_outcome: RunExecutionOutcome::InfraFailure,
+                    quality_outcome: RunQualityOutcome::Clean,
+                    error: Some(error.to_string()),
+                    metrics: None,
+                };
+                record_species_run_artifact(artifact);
+                return Err(error);
+            }
+        }
+        if best_improved {
+            if let Err(error) = maybe_persist_best_checkpoint(
+                &checkpoint_paths,
+                &mut launch_runtime,
+                &checkpoint_contract,
+                &config.launch_policy,
+                &model,
+                &optimizer,
+                latest_perplexity,
+            ) {
+                phase_timings.push(phase_timing(
+                    RunPhase::Train,
+                    train_started.elapsed(),
+                    launch_runtime.completed_steps,
+                    launch_runtime.planned_steps,
+                ));
+                let artifact = SpeciesRunArtifact {
+                    stage,
+                    manifest: manifest.clone(),
+                    phase_timings,
+                    training_runtime: launch_runtime.artifact(),
+                    execution_outcome: RunExecutionOutcome::InfraFailure,
+                    quality_outcome: RunQualityOutcome::Clean,
+                    error: Some(error.to_string()),
+                    metrics: None,
+                };
+                record_species_run_artifact(artifact);
+                return Err(error);
+            }
+        }
+
+        if should_log_training_checkpoint(completed_step, launch_runtime.planned_steps) {
             log_species_phase_progress(
                 species,
                 "train",
                 completed_step,
-                config.train_steps_per_species,
+                launch_runtime.planned_steps,
                 train_started.elapsed(),
             );
         }
@@ -737,8 +1196,8 @@ where
     phase_timings.push(phase_timing(
         RunPhase::Train,
         train_elapsed,
-        config.train_steps_per_species,
-        config.train_steps_per_species,
+        launch_runtime.completed_steps,
+        launch_runtime.planned_steps,
     ));
     log_species_phase_done(species, "train", train_elapsed);
 
@@ -756,6 +1215,7 @@ where
                 stage,
                 manifest: manifest.clone(),
                 phase_timings,
+                training_runtime: launch_runtime.artifact(),
                 execution_outcome: timeout_outcome_for_phase(RunPhase::Stability),
                 quality_outcome: RunQualityOutcome::Clean,
                 error: Some("run timeout exceeded during stability".into()),
@@ -780,6 +1240,7 @@ where
                 stage,
                 manifest: manifest.clone(),
                 phase_timings,
+                training_runtime: launch_runtime.artifact(),
                 execution_outcome: RunExecutionOutcome::InfraFailure,
                 quality_outcome: RunQualityOutcome::Clean,
                 error: Some("stability batch cache was empty".into()),
@@ -791,13 +1252,13 @@ where
             ));
         }
     };
-    let stability_loss = match model.loss(
-        stability_batch,
+    let grad_norm_depth_20 = match evaluate_stability_score(
+        &model,
         &criterion,
-        Some(config.stability_depth),
-        false,
+        stability_batch,
+        config.stability_depth,
     ) {
-        Ok(loss) => loss,
+        Ok(score) => score,
         Err(error) => {
             phase_timings.push(phase_timing(
                 RunPhase::Stability,
@@ -809,6 +1270,7 @@ where
                 stage,
                 manifest: manifest.clone(),
                 phase_timings,
+                training_runtime: launch_runtime.artifact(),
                 execution_outcome: RunExecutionOutcome::InfraFailure,
                 quality_outcome: RunQualityOutcome::Clean,
                 error: Some(error.to_string()),
@@ -818,8 +1280,6 @@ where
             return Err(error);
         }
     };
-    let stability_grads = GradientsParams::from_grads(stability_loss.backward(), &model);
-    let grad_norm_depth_20 = gradient_l2_norm(&model, &stability_grads);
     let stability_elapsed = stability_started.elapsed();
     phase_timings.push(phase_timing(RunPhase::Stability, stability_elapsed, 1, 1));
     log_species_phase_done(species, "stability", stability_elapsed);
@@ -846,6 +1306,7 @@ where
                 stage,
                 manifest: manifest.clone(),
                 phase_timings,
+                training_runtime: launch_runtime.artifact(),
                 execution_outcome: timeout_outcome_for_phase(RunPhase::Perplexity),
                 quality_outcome: RunQualityOutcome::Clean,
                 error: Some("run timeout exceeded during perplexity".into()),
@@ -871,6 +1332,7 @@ where
                     stage,
                     manifest: manifest.clone(),
                     phase_timings,
+                    training_runtime: launch_runtime.artifact(),
                     execution_outcome: RunExecutionOutcome::InfraFailure,
                     quality_outcome: RunQualityOutcome::Clean,
                     error: Some(error.to_string()),
@@ -908,6 +1370,7 @@ where
                 stage,
                 manifest: manifest.clone(),
                 phase_timings,
+                training_runtime: launch_runtime.artifact(),
                 execution_outcome: timeout_outcome_for_phase(RunPhase::ArcSpeed),
                 quality_outcome: RunQualityOutcome::Clean,
                 error: Some("run timeout exceeded during ARC/speed evaluation".into()),
@@ -933,6 +1396,7 @@ where
                     stage,
                     manifest: manifest.clone(),
                     phase_timings,
+                    training_runtime: launch_runtime.artifact(),
                     execution_outcome: RunExecutionOutcome::InfraFailure,
                     quality_outcome: RunQualityOutcome::Clean,
                     error: Some(error.to_string()),
@@ -958,11 +1422,63 @@ where
         arc_accuracy,
         tokens_per_sec,
     };
+    let final_best_improved = match launch_runtime.best_perplexity {
+        Some(best) => long_context_perplexity < best,
+        None => true,
+    };
+    if final_best_improved {
+        launch_runtime.best_perplexity = Some(long_context_perplexity);
+        if let Err(error) = maybe_persist_best_checkpoint(
+            &checkpoint_paths,
+            &mut launch_runtime,
+            &checkpoint_contract,
+            &config.launch_policy,
+            &model,
+            &optimizer,
+            Some(long_context_perplexity),
+        ) {
+            let artifact = SpeciesRunArtifact {
+                stage,
+                manifest: manifest.clone(),
+                phase_timings,
+                training_runtime: launch_runtime.artifact(),
+                execution_outcome: RunExecutionOutcome::InfraFailure,
+                quality_outcome: RunQualityOutcome::Clean,
+                error: Some(error.to_string()),
+                metrics: None,
+            };
+            record_species_run_artifact(artifact);
+            return Err(error);
+        }
+    }
+    if let Err(error) = maybe_persist_final_checkpoint(
+        &checkpoint_paths,
+        &mut launch_runtime,
+        &checkpoint_contract,
+        &config.launch_policy,
+        &model,
+        &optimizer,
+        Some(long_context_perplexity),
+    ) {
+        let artifact = SpeciesRunArtifact {
+            stage,
+            manifest: manifest.clone(),
+            phase_timings,
+            training_runtime: launch_runtime.artifact(),
+            execution_outcome: RunExecutionOutcome::InfraFailure,
+            quality_outcome: RunQualityOutcome::Clean,
+            error: Some(error.to_string()),
+            metrics: None,
+        };
+        record_species_run_artifact(artifact);
+        return Err(error);
+    }
     let quality_outcome = classify_quality_outcome(&metrics);
     let artifact = SpeciesRunArtifact {
         stage,
         manifest,
         phase_timings,
+        training_runtime: launch_runtime.artifact(),
         execution_outcome: RunExecutionOutcome::Success,
         quality_outcome,
         error: None,
@@ -1240,4 +1756,618 @@ fn training_token_budget<B: AutodiffBackend>(
             batch.token_count
         })
         .sum()
+}
+
+fn build_training_execution_plan<B: AutodiffBackend>(
+    batches: &TrainingBatchSet<B>,
+    config: &TournamentConfig,
+) -> Result<TrainingExecutionPlan, FractalError> {
+    if let Some(target_train_tokens) = config.train_token_budget {
+        let mut planned_steps = 0usize;
+        let mut tokens = 0usize;
+        while tokens < target_train_tokens {
+            let train_batches = batches.train_batches_for_step(planned_steps);
+            if train_batches.is_empty() {
+                return Err(FractalError::InvalidState(
+                    "training batch cache was empty while computing token budget".into(),
+                ));
+            }
+            let batch = &train_batches[planned_steps % train_batches.len()];
+            if batch.token_count == 0 {
+                return Err(FractalError::InvalidState(
+                    "training batch token count must be greater than zero".into(),
+                ));
+            }
+            tokens += batch.token_count;
+            planned_steps += 1;
+        }
+        return Ok(TrainingExecutionPlan {
+            planned_steps,
+            target_train_tokens,
+        });
+    }
+
+    Ok(TrainingExecutionPlan {
+        planned_steps: config.train_steps_per_species,
+        target_train_tokens: training_token_budget(batches, config.train_steps_per_species),
+    })
+}
+
+fn advance_token_milestone(
+    next_token: &mut Option<usize>,
+    interval_tokens: Option<usize>,
+    train_tokens_seen: usize,
+) -> bool {
+    let Some(interval_tokens) = interval_tokens else {
+        return false;
+    };
+    let Some(mut current_next) = *next_token else {
+        return false;
+    };
+    let mut triggered = false;
+    while train_tokens_seen >= current_next {
+        triggered = true;
+        current_next = current_next.saturating_add(interval_tokens);
+    }
+    *next_token = Some(current_next);
+    triggered
+}
+
+fn evaluate_stability_score<B, R>(
+    model: &FractalModel<B, R>,
+    criterion: &CrossEntropyLoss<B>,
+    batch: &TokenBatch<B>,
+    stability_depth: usize,
+) -> Result<f64, FractalError>
+where
+    B: AutodiffBackend,
+    R: FractalRule<B>
+        + Module<B>
+        + AutodiffModule<B>
+        + ModuleDisplay
+        + Clone
+        + std::fmt::Debug,
+    <R as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend> + ModuleDisplay,
+{
+    let stability_loss = model.loss(batch, criterion, Some(stability_depth), false)?;
+    let stability_grads = GradientsParams::from_grads(stability_loss.backward(), model);
+    Ok(gradient_l2_norm(model, &stability_grads))
+}
+
+fn recorder_error(error: burn::record::RecorderError) -> FractalError {
+    FractalError::InvalidState(error.to_string())
+}
+
+fn backend_name(backend: &ComputeBackend) -> &'static str {
+    match backend {
+        ComputeBackend::CpuCandle => "cpu-candle",
+        #[cfg(feature = "cuda")]
+        ComputeBackend::CudaCandle { .. } => "cuda-candle",
+        ComputeBackend::MetalWgpu { .. } => "metal-wgpu",
+    }
+}
+
+fn resolve_checkpoint_paths(stage: SpeciesRunStage, manifest: &RunManifest) -> CheckpointRuntimePaths {
+    let root = if let Some(root) = std::env::var_os("FRACTAL_RUN_CHECKPOINT_DIR") {
+        PathBuf::from(root).join(stage.species.as_str())
+    } else if let Some(root) = std::env::var_os("FRACTAL_RUN_ARTIFACT_DIR") {
+        PathBuf::from(root)
+            .join("checkpoints")
+            .join(stage.species.as_str())
+    } else {
+        let run_id = manifest
+            .experiment
+            .as_ref()
+            .map(|experiment| experiment.experiment_id.run_id.clone())
+            .or_else(|| std::env::var("FRACTAL_RUN_ID").ok())
+            .unwrap_or_else(|| format!("run-{}", stage.species.as_str()));
+        PathBuf::from(".fractal-run-results")
+            .join(run_id)
+            .join("checkpoints")
+            .join(stage.species.as_str())
+    };
+
+    CheckpointRuntimePaths {
+        latest: root.join("latest"),
+        previous: root.join("previous"),
+        best: root.join("best"),
+        final_slot: root.join("final"),
+        root,
+    }
+}
+
+fn checkpoint_state_path(slot_dir: &Path) -> PathBuf {
+    slot_dir.join("state.json")
+}
+
+fn checkpoint_model_stem(slot_dir: &Path) -> PathBuf {
+    slot_dir.join("model")
+}
+
+fn checkpoint_optimizer_stem(slot_dir: &Path) -> PathBuf {
+    slot_dir.join("optimizer")
+}
+
+fn clear_checkpoint_root(root: &Path) -> Result<(), FractalError> {
+    if root.exists() {
+        fs::remove_dir_all(root).map_err(|error| {
+            FractalError::InvalidState(format!(
+                "failed to clear checkpoint root {}: {error}",
+                root.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn write_checkpoint_state(
+    path: &Path,
+    state: &RuntimeCheckpointState,
+) -> Result<(), FractalError> {
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(state)
+            .map_err(|error| FractalError::InvalidState(error.to_string()))?,
+    )
+    .map_err(|error| {
+        FractalError::InvalidState(format!(
+            "failed to write checkpoint state {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn read_checkpoint_state(path: &Path) -> Result<RuntimeCheckpointState, FractalError> {
+    let bytes = fs::read(path).map_err(|error| {
+        FractalError::InvalidState(format!(
+            "failed to read checkpoint state {}: {error}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        FractalError::InvalidState(format!(
+            "failed to parse checkpoint state {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn upsert_checkpoint_artifact(
+    checkpoints: &mut Vec<CheckpointArtifact>,
+    artifact: CheckpointArtifact,
+) {
+    if let Some(slot) = checkpoints.iter_mut().find(|existing| existing.kind == artifact.kind) {
+        *slot = artifact;
+    } else {
+        checkpoints.push(artifact);
+    }
+}
+
+fn promote_latest_to_previous(
+    runtime: &mut LaunchRuntimeState,
+    paths: &CheckpointRuntimePaths,
+) -> Result<(), FractalError> {
+    if !paths.latest.exists() {
+        return Ok(());
+    }
+    if paths.previous.exists() {
+        fs::remove_dir_all(&paths.previous).map_err(|error| {
+            FractalError::InvalidState(format!(
+                "failed to remove previous checkpoint {}: {error}",
+                paths.previous.display()
+            ))
+        })?;
+    }
+    fs::rename(&paths.latest, &paths.previous).map_err(|error| {
+        FractalError::InvalidState(format!(
+            "failed to rotate latest checkpoint {} -> {}: {error}",
+            paths.latest.display(),
+            paths.previous.display()
+        ))
+    })?;
+
+    if let Some(latest) = runtime
+        .checkpoints
+        .iter()
+        .find(|artifact| artifact.kind == CheckpointArtifactKind::Latest)
+        .cloned()
+    {
+        upsert_checkpoint_artifact(
+            &mut runtime.checkpoints,
+            CheckpointArtifact {
+                kind: CheckpointArtifactKind::Previous,
+                directory: paths.previous.display().to_string(),
+                ..latest
+            },
+        );
+    }
+    Ok(())
+}
+
+fn write_checkpoint_slot<B, R>(
+    slot_dir: &Path,
+    state: &RuntimeCheckpointState,
+    model: &FractalModel<B, R>,
+    optimizer: &ConfiguredOptimizer<FractalModel<B, R>, B>,
+) -> Result<(), FractalError>
+where
+    B: AutodiffBackend,
+    R: FractalRule<B>
+        + Module<B>
+        + AutodiffModule<B>
+        + ModuleDisplay
+        + Clone
+        + std::fmt::Debug,
+    <R as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend> + ModuleDisplay,
+{
+    if slot_dir.exists() {
+        fs::remove_dir_all(slot_dir).map_err(|error| {
+            FractalError::InvalidState(format!(
+                "failed to clear checkpoint slot {}: {error}",
+                slot_dir.display()
+            ))
+        })?;
+    }
+    fs::create_dir_all(slot_dir).map_err(|error| {
+        FractalError::InvalidState(format!(
+            "failed to create checkpoint slot {}: {error}",
+            slot_dir.display()
+        ))
+    })?;
+
+    let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
+    model
+        .clone()
+        .save_file(checkpoint_model_stem(slot_dir), &recorder)
+        .map_err(recorder_error)?;
+    optimizer.save_checkpoint_record(&checkpoint_optimizer_stem(slot_dir))?;
+    write_checkpoint_state(&checkpoint_state_path(slot_dir), state)?;
+    Ok(())
+}
+
+fn maybe_restore_checkpoint<B, R>(
+    stage: SpeciesRunStage,
+    manifest: &RunManifest,
+    plan: &TrainingExecutionPlan,
+    model: FractalModel<B, R>,
+    optimizer: ConfiguredOptimizer<FractalModel<B, R>, B>,
+    device: &B::Device,
+) -> Result<
+    (
+        FractalModel<B, R>,
+        ConfiguredOptimizer<FractalModel<B, R>, B>,
+        LaunchRuntimeState,
+        CheckpointRuntimePaths,
+    ),
+    FractalError,
+>
+where
+    B: AutodiffBackend,
+    R: FractalRule<B>
+        + Module<B>
+        + AutodiffModule<B>
+        + ModuleDisplay
+        + Clone
+        + std::fmt::Debug,
+    <R as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend> + ModuleDisplay,
+{
+    let paths = resolve_checkpoint_paths(stage.clone(), manifest);
+    let resume_policy = &manifest.config.launch_policy.resume;
+    let contract = CheckpointContractSnapshot::from_manifest(stage.clone(), manifest);
+
+    if !resume_policy.resume_on_interrupt {
+        return Ok((
+            model,
+            optimizer,
+            LaunchRuntimeState::fresh(plan, &manifest.config.launch_policy),
+            paths,
+        ));
+    }
+
+    let latest_state_path = checkpoint_state_path(&paths.latest);
+    if !latest_state_path.exists() {
+        return Ok((
+            model,
+            optimizer,
+            LaunchRuntimeState::fresh(plan, &manifest.config.launch_policy),
+            paths,
+        ));
+    }
+
+    let checkpoint_state = match read_checkpoint_state(&latest_state_path) {
+        Ok(state) => state,
+        Err(error) if resume_policy.restart_on_corruption => {
+            clear_checkpoint_root(&paths.root)?;
+            return Ok((
+                model,
+                optimizer,
+                LaunchRuntimeState::fresh(plan, &manifest.config.launch_policy),
+                paths,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+
+    if checkpoint_state.contract != contract {
+        if resume_policy.restart_on_contract_ambiguity {
+            clear_checkpoint_root(&paths.root)?;
+            return Ok((
+                model,
+                optimizer,
+                LaunchRuntimeState::fresh(plan, &manifest.config.launch_policy),
+                paths,
+            ));
+        }
+        return Err(FractalError::InvalidConfig(format!(
+            "checkpoint contract mismatch for {}",
+            latest_state_path.display()
+        )));
+    }
+
+    let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
+    let model = model
+        .load_file(checkpoint_model_stem(&paths.latest), &recorder, device)
+        .map_err(|error| {
+            if resume_policy.restart_on_corruption {
+                let _ = clear_checkpoint_root(&paths.root);
+            }
+            recorder_error(error)
+        })?;
+    let optimizer = optimizer
+        .load_checkpoint_record(&checkpoint_optimizer_stem(&paths.latest), device)
+        .map_err(|error| {
+            if resume_policy.restart_on_corruption {
+                let _ = clear_checkpoint_root(&paths.root);
+            }
+            error
+        })?;
+    Ok((
+        model,
+        optimizer,
+        LaunchRuntimeState::from_checkpoint(checkpoint_state),
+        paths,
+    ))
+}
+
+fn persist_checkpoint_alias<B, R>(
+    kind: CheckpointArtifactKind,
+    slot_dir: &Path,
+    runtime: &mut LaunchRuntimeState,
+    contract: &CheckpointContractSnapshot,
+    model: &FractalModel<B, R>,
+    optimizer: &ConfiguredOptimizer<FractalModel<B, R>, B>,
+    long_context_perplexity: Option<f64>,
+) -> Result<(), FractalError>
+where
+    B: AutodiffBackend,
+    R: FractalRule<B>
+        + Module<B>
+        + AutodiffModule<B>
+        + ModuleDisplay
+        + Clone
+        + std::fmt::Debug,
+    <R as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend> + ModuleDisplay,
+{
+    let state = runtime.checkpoint_state(contract.clone());
+    write_checkpoint_slot(slot_dir, &state, model, optimizer)?;
+    upsert_checkpoint_artifact(
+        &mut runtime.checkpoints,
+        CheckpointArtifact {
+            kind,
+            tokens_seen: runtime.train_tokens_seen,
+            completed_steps: runtime.completed_steps,
+            directory: slot_dir.display().to_string(),
+            long_context_perplexity,
+        },
+    );
+    Ok(())
+}
+
+fn maybe_persist_latest_checkpoint<B, R>(
+    paths: &CheckpointRuntimePaths,
+    runtime: &mut LaunchRuntimeState,
+    contract: &CheckpointContractSnapshot,
+    launch_policy: &crate::LaunchPolicySpec,
+    model: &FractalModel<B, R>,
+    optimizer: &ConfiguredOptimizer<FractalModel<B, R>, B>,
+    long_context_perplexity: Option<f64>,
+) -> Result<(), FractalError>
+where
+    B: AutodiffBackend,
+    R: FractalRule<B>
+        + Module<B>
+        + AutodiffModule<B>
+        + ModuleDisplay
+        + Clone
+        + std::fmt::Debug,
+    <R as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend> + ModuleDisplay,
+{
+    if launch_policy.checkpoint.keep_previous {
+        promote_latest_to_previous(runtime, paths)?;
+    } else if paths.latest.exists() {
+        fs::remove_dir_all(&paths.latest).map_err(|error| {
+            FractalError::InvalidState(format!(
+                "failed to clear latest checkpoint {}: {error}",
+                paths.latest.display()
+            ))
+        })?;
+    }
+
+    if launch_policy.checkpoint.keep_latest {
+        persist_checkpoint_alias(
+            CheckpointArtifactKind::Latest,
+            &paths.latest,
+            runtime,
+            contract,
+            model,
+            optimizer,
+            long_context_perplexity,
+        )?;
+    }
+    Ok(())
+}
+
+fn maybe_persist_best_checkpoint<B, R>(
+    paths: &CheckpointRuntimePaths,
+    runtime: &mut LaunchRuntimeState,
+    contract: &CheckpointContractSnapshot,
+    launch_policy: &crate::LaunchPolicySpec,
+    model: &FractalModel<B, R>,
+    optimizer: &ConfiguredOptimizer<FractalModel<B, R>, B>,
+    long_context_perplexity: Option<f64>,
+) -> Result<(), FractalError>
+where
+    B: AutodiffBackend,
+    R: FractalRule<B>
+        + Module<B>
+        + AutodiffModule<B>
+        + ModuleDisplay
+        + Clone
+        + std::fmt::Debug,
+    <R as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend> + ModuleDisplay,
+{
+    if !launch_policy.checkpoint.keep_best {
+        return Ok(());
+    }
+    persist_checkpoint_alias(
+        CheckpointArtifactKind::Best,
+        &paths.best,
+        runtime,
+        contract,
+        model,
+        optimizer,
+        long_context_perplexity,
+    )
+}
+
+fn maybe_persist_final_checkpoint<B, R>(
+    paths: &CheckpointRuntimePaths,
+    runtime: &mut LaunchRuntimeState,
+    contract: &CheckpointContractSnapshot,
+    launch_policy: &crate::LaunchPolicySpec,
+    model: &FractalModel<B, R>,
+    optimizer: &ConfiguredOptimizer<FractalModel<B, R>, B>,
+    long_context_perplexity: Option<f64>,
+) -> Result<(), FractalError>
+where
+    B: AutodiffBackend,
+    R: FractalRule<B>
+        + Module<B>
+        + AutodiffModule<B>
+        + ModuleDisplay
+        + Clone
+        + std::fmt::Debug,
+    <R as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend> + ModuleDisplay,
+{
+    if !launch_policy.checkpoint.keep_final {
+        return Ok(());
+    }
+    persist_checkpoint_alias(
+        CheckpointArtifactKind::Final,
+        &paths.final_slot,
+        runtime,
+        contract,
+        model,
+        optimizer,
+        long_context_perplexity,
+    )
+}
+
+fn maybe_capture_interim_eval<B, R>(
+    species: SpeciesId,
+    model: &FractalModel<B, R>,
+    criterion: &CrossEntropyLoss<B>,
+    batches: &TrainingBatchSet<B>,
+    config: &TournamentConfig,
+    runtime: &mut LaunchRuntimeState,
+) -> Result<Option<InterimEvalSnapshot>, FractalError>
+where
+    B: AutodiffBackend,
+    R: FractalRule<B>
+        + Module<B>
+        + AutodiffModule<B>
+        + ModuleDisplay
+        + Clone
+        + std::fmt::Debug,
+    <R as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend> + ModuleDisplay,
+{
+    let launch_policy = &config.launch_policy;
+    let stability_due = advance_token_milestone(
+        &mut runtime.next_stability_token,
+        launch_policy.eval_cadence.stability_interval_tokens,
+        runtime.train_tokens_seen,
+    );
+    let perplexity_due = advance_token_milestone(
+        &mut runtime.next_perplexity_token,
+        launch_policy.eval_cadence.perplexity_interval_tokens,
+        runtime.train_tokens_seen,
+    );
+    let arc_due = advance_token_milestone(
+        &mut runtime.next_arc_token,
+        launch_policy.eval_cadence.arc_interval_tokens,
+        runtime.train_tokens_seen,
+    );
+    let systems_speed_due = advance_token_milestone(
+        &mut runtime.next_systems_speed_token,
+        launch_policy.eval_cadence.systems_speed_interval_tokens,
+        runtime.train_tokens_seen,
+    );
+
+    if !(stability_due || perplexity_due || arc_due || systems_speed_due) {
+        return Ok(None);
+    }
+
+    let mut snapshot = InterimEvalSnapshot {
+        tokens_seen: runtime.train_tokens_seen,
+        completed_steps: runtime.completed_steps,
+        stability_score: None,
+        long_context_perplexity: None,
+        arc_accuracy: None,
+        tokens_per_sec: None,
+    };
+
+    if stability_due {
+        let batch = batches.eval_sentence.first().ok_or_else(|| {
+            FractalError::InvalidState("stability batch cache was empty".into())
+        })?;
+        snapshot.stability_score = Some(evaluate_stability_score(
+            model,
+            criterion,
+            batch,
+            config.stability_depth,
+        )?);
+        println!(
+            "[phase:checkpoint] {species} stability tokens={} steps={} value={:.4}",
+            snapshot.tokens_seen,
+            snapshot.completed_steps,
+            snapshot.stability_score.unwrap_or(0.0)
+        );
+    }
+
+    if perplexity_due {
+        snapshot.long_context_perplexity =
+            Some(evaluate_perplexity(model, criterion, &batches.eval_sentence)?);
+        println!(
+            "[phase:checkpoint] {species} perplexity tokens={} steps={} value={:.4}",
+            snapshot.tokens_seen,
+            snapshot.completed_steps,
+            snapshot.long_context_perplexity.unwrap_or(0.0)
+        );
+    }
+
+    if arc_due || systems_speed_due {
+        let (arc_accuracy, tokens_per_sec) = evaluate_accuracy_and_speed(model, &batches.eval_arc)?;
+        snapshot.arc_accuracy = Some(arc_accuracy);
+        snapshot.tokens_per_sec = Some(tokens_per_sec);
+        println!(
+            "[phase:checkpoint] {species} arc_speed tokens={} steps={} arc={:.4} tok/s={:.2}",
+            snapshot.tokens_seen,
+            snapshot.completed_steps,
+            arc_accuracy,
+            tokens_per_sec
+        );
+    }
+
+    runtime.interim_evaluations.push(snapshot.clone());
+    Ok(Some(snapshot))
 }

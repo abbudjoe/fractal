@@ -150,6 +150,7 @@ fn build_artifact_json(report: &TournamentRunReport) -> Value {
                         "total": timing.total,
                     })
                 }).collect::<Vec<_>>(),
+                "training_runtime": training_runtime_json(&record.training_runtime),
                 "metrics": record.metrics.as_ref().map(|metrics| {
                     json!({
                         "grad_norm_depth_20": metrics.grad_norm_depth_20,
@@ -191,6 +192,7 @@ fn config_json(report: &TournamentRunReport) -> Value {
         "train_batch_size": report.config.train_batch_size,
         "eval_batch_size": report.config.eval_batch_size,
         "train_steps_per_species": report.config.train_steps_per_species,
+        "train_token_budget": report.config.train_token_budget,
         "eval_batches_per_family": report.config.eval_batches_per_family,
         "perplexity_eval_batches": report.config.perplexity_eval_batches,
         "arc_eval_batches": report.config.arc_eval_batches,
@@ -249,6 +251,7 @@ fn experiment_json(spec: &crate::ExperimentSpec) -> Value {
             "train_batch_size": spec.budget.train_batch_size,
             "eval_batch_size": spec.budget.eval_batch_size,
             "train_steps_per_species": spec.budget.train_steps_per_species,
+            "train_token_budget": spec.budget.train_token_budget,
             "eval_batches_per_family": spec.budget.eval_batches_per_family,
             "perplexity_eval_batches": spec.budget.perplexity_eval_batches,
             "arc_eval_batches": spec.budget.arc_eval_batches,
@@ -328,6 +331,35 @@ fn training_input_json(spec: &crate::TrainingInputSpec) -> Value {
                 "pad_token_id": tokenizer.pad_token_id,
             })
         }),
+    })
+}
+
+fn training_runtime_json(spec: &fractal_core::lifecycle::TrainingRuntimeArtifact) -> Value {
+    json!({
+        "completed_steps": spec.completed_steps,
+        "planned_steps": spec.planned_steps,
+        "train_tokens_seen": spec.train_tokens_seen,
+        "target_train_tokens": spec.target_train_tokens,
+        "resumed_from_checkpoint": spec.resumed_from_checkpoint,
+        "checkpoints": spec.checkpoints.iter().map(|checkpoint| {
+            json!({
+                "kind": checkpoint.kind.as_str(),
+                "tokens_seen": checkpoint.tokens_seen,
+                "completed_steps": checkpoint.completed_steps,
+                "directory": checkpoint.directory,
+                "long_context_perplexity": checkpoint.long_context_perplexity,
+            })
+        }).collect::<Vec<_>>(),
+        "interim_evaluations": spec.interim_evaluations.iter().map(|snapshot| {
+            json!({
+                "tokens_seen": snapshot.tokens_seen,
+                "completed_steps": snapshot.completed_steps,
+                "stability_score": snapshot.stability_score,
+                "long_context_perplexity": snapshot.long_context_perplexity,
+                "arc_accuracy": snapshot.arc_accuracy,
+                "tokens_per_sec": snapshot.tokens_per_sec,
+            })
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -520,6 +552,7 @@ mod tests {
         species_registry_for_species, ComparisonContract, RankedSpeciesResult, SpeciesId,
         TournamentLane, TournamentPreset, TournamentRunReport,
     };
+    use fractal_core::lifecycle::TrainingRuntimeArtifact;
     use fractal_core::{
         ArtifactPolicy, BudgetSpec, DecisionIntent, ExecutionBackend, ExecutionTarget,
         ExecutionTargetKind, ExperimentId, ExperimentQuestion, ExperimentSpec, LaneIntent,
@@ -561,6 +594,7 @@ mod tests {
                     completed: 1,
                     total: 1,
                 }],
+                training_runtime: TrainingRuntimeArtifact::default(),
                 execution_outcome: fractal_core::RunExecutionOutcome::Success,
                 quality_outcome: fractal_core::RunQualityOutcome::Clean,
                 error: None,
