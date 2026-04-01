@@ -13,17 +13,18 @@ use fractal::{
     lifecycle::{
         ArtifactPolicy, BenchmarkMode, BudgetSpec, ComparisonContract, DecisionIntent,
         ExecutionBackend, ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
-        ExperimentSpecTemplate, LaneIntent, OptimizerSpec, RunExecutionOutcome, RuntimeSurfaceSpec,
-        SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig, TournamentPreset,
-        TournamentProgressEvent, TournamentReporter, TournamentSequence, TrainingInputMode,
-        TrainingInputSpec,
+        ExperimentSpecTemplate, LaneIntent, ModelContractSpec, OptimizerSpec, RunExecutionOutcome,
+        RuntimeSurfaceSpec, SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig,
+        TournamentPreset, TournamentProgressEvent, TournamentReporter, TournamentSequence,
+        TrainingInputMode, TrainingInputSpec,
     },
-    load_tokenizer_training_corpus_source, persist_run_artifacts, primitive_tracker_reminder_lines,
+    materialize_bridge_vocab_artifact,
+    persist_run_artifacts, primitive_tracker_reminder_lines,
     registry::{
         resolve_precision_profile, CandleBf16TrainBackend, CandleF32TrainBackend, ComputeBackend,
         ExecutionMode, MetalF32TrainBackend, ResolvedExecutablePrecisionProfile, SpeciesId,
     },
-    run_tokenizer_backed_species_from_source, species_registry_for_lane,
+    run_tokenizer_backed_species_from_experiment, species_registry_for_lane,
     species_registry_for_species, TournamentLane, TournamentRunReport,
 };
 #[cfg(feature = "cuda")]
@@ -40,6 +41,7 @@ fn main() -> Result<(), FractalError> {
             print_usage();
             Ok(())
         }
+        CliCommand::PrepareStage0Assets(options) => prepare_stage0_assets(&options),
         CliCommand::Run(options) => run_options(&options),
     }
 }
@@ -47,6 +49,7 @@ fn main() -> Result<(), FractalError> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CliCommand {
     Help,
+    PrepareStage0Assets(RunOptions),
     Run(RunOptions),
 }
 
@@ -77,6 +80,7 @@ struct RunOptions {
     arc_eval_batches: Option<usize>,
     benchmark_mode: Option<BenchmarkMode>,
     manifest_path: Option<PathBuf>,
+    prepare_stage0_assets: bool,
     logical_name: Option<String>,
     question_summary: Option<String>,
     comparison_override: Option<ComparisonContract>,
@@ -96,6 +100,7 @@ impl Default for RunOptions {
             arc_eval_batches: None,
             benchmark_mode: None,
             manifest_path: None,
+            prepare_stage0_assets: false,
             logical_name: None,
             question_summary: None,
             comparison_override: None,
@@ -107,6 +112,7 @@ impl RunOptions {
     fn ensure_manifest_isolated(&self) -> Result<(), FractalError> {
         let mut normalized = self.clone();
         normalized.backend = None;
+        normalized.prepare_stage0_assets = false;
         if normalized != Self::default() {
             return Err(invalid_argument(
                 "--experiment-manifest cannot be combined with other run-shaping flags".to_owned(),
@@ -311,6 +317,18 @@ struct ManifestConfigOverrides {
 
 impl ManifestConfigOverrides {
     fn apply(&self, config: &mut TournamentConfig) -> Result<(), FractalError> {
+        self.apply_with_backend_policy(config, true)
+    }
+
+    fn apply_without_backend(&self, config: &mut TournamentConfig) -> Result<(), FractalError> {
+        self.apply_with_backend_policy(config, false)
+    }
+
+    fn apply_with_backend_policy(
+        &self,
+        config: &mut TournamentConfig,
+        parse_backend_override: bool,
+    ) -> Result<(), FractalError> {
         if let Some(seed) = self.seed {
             config.seed = seed;
         }
@@ -386,8 +404,10 @@ impl ManifestConfigOverrides {
             }
             config.parallelism = parallelism;
         }
-        if let Some(backend) = self.backend.as_deref() {
-            config.execution_backend = parse_backend(backend)?.into();
+        if parse_backend_override {
+            if let Some(backend) = self.backend.as_deref() {
+                config.execution_backend = parse_backend(backend)?.into();
+            }
         }
         if let Some(timeout_seconds) = self.timeout_seconds {
             if timeout_seconds <= 0.0 {
@@ -406,6 +426,7 @@ impl ManifestConfigOverrides {
 struct ExperimentManifestV2Spec {
     question: ManifestQuestionOverrides,
     config: ManifestConfigOverrides,
+    model: Option<ModelContractSpec>,
     training_input: Option<TrainingInputSpec>,
     optimizer: Option<OptimizerSpec>,
     runtime: Option<RuntimeSurfaceSpec>,
@@ -472,6 +493,7 @@ impl ExperimentManifestFile {
                 self.benchmark_mode.as_deref().unwrap_or("leaderboard"),
             )?),
             manifest_path: Some(path.to_path_buf()),
+            prepare_stage0_assets: false,
             logical_name: Some(self.logical_name),
             question_summary: self.question_summary,
             comparison_override: Some(parse_comparison_name(
@@ -530,6 +552,7 @@ impl ExperimentManifestFileV2 {
                     .unwrap_or(BenchmarkMode::Leaderboard),
             ),
             manifest_path: Some(path.to_path_buf()),
+            prepare_stage0_assets: false,
             logical_name: Some(self.logical_name),
             question_summary: self.question_summary,
             comparison_override: Some(
@@ -652,18 +675,36 @@ fn parse_command<I>(args: I) -> Result<CliCommand, FractalError>
 where
     I: IntoIterator<Item = String>,
 {
+    let collected_args = args.into_iter().collect::<Vec<_>>();
+    let prepare_mode = collected_args
+        .iter()
+        .any(|arg| arg == "--prepare-stage0-assets");
     let mut options = RunOptions::default();
-    let mut args = args.into_iter();
+    let mut args = collected_args.into_iter();
     while let Some(arg) = args.next() {
         if arg == "--help" {
             return Ok(CliCommand::Help);
         }
-        parse_arg(&mut options, &mut args, arg)?;
+        parse_arg(&mut options, &mut args, arg, prepare_mode)?;
+    }
+    if prepare_mode {
+        options.prepare_stage0_assets = true;
+        if options.manifest_path.is_none() {
+            return Err(invalid_argument(
+                "--prepare-stage0-assets requires --experiment-manifest".to_owned(),
+            ));
+        }
+        return Ok(CliCommand::PrepareStage0Assets(options));
     }
     Ok(CliCommand::Run(options))
 }
 
-fn parse_arg<I>(options: &mut RunOptions, args: &mut I, arg: String) -> Result<(), FractalError>
+fn parse_arg<I>(
+    options: &mut RunOptions,
+    args: &mut I,
+    arg: String,
+    prepare_mode: bool,
+) -> Result<(), FractalError>
 where
     I: Iterator<Item = String>,
 {
@@ -671,7 +712,15 @@ where
         "--experiment-manifest" => {
             options.ensure_manifest_isolated()?;
             let value = next_value(args, "--experiment-manifest")?;
-            *options = options.clone().merge_manifest(Path::new(&value))?;
+            if prepare_mode {
+                options.manifest_path = Some(PathBuf::from(value));
+            } else {
+                *options = options.clone().merge_manifest(Path::new(&value))?;
+            }
+            Ok(())
+        }
+        "--prepare-stage0-assets" => {
+            options.prepare_stage0_assets = true;
             Ok(())
         }
         "--preset" => {
@@ -927,6 +976,52 @@ fn run_options(options: &RunOptions) -> Result<(), FractalError> {
     }
 }
 
+fn prepare_stage0_assets(options: &RunOptions) -> Result<(), FractalError> {
+    let manifest_path = options.manifest_path.as_deref().ok_or_else(|| {
+        invalid_argument("--prepare-stage0-assets requires --experiment-manifest".to_owned())
+    })?;
+    let manifest = load_manifest_v2(manifest_path)?.ok_or_else(|| {
+        invalid_argument("--prepare-stage0-assets requires a manifest v2 experiment".to_owned())
+    })?;
+    validate_manifest_identity(
+        manifest_path,
+        &manifest.expected_branch,
+        &manifest.expected_commit_sha,
+    )?;
+    let preset = match options.selection() {
+        RunSelection::Preset(preset) => preset,
+        RunSelection::Sequence(_) => {
+            return Err(invalid_argument(
+                "Stage 0 asset preparation does not support sequence manifests".to_owned(),
+            ));
+        }
+    };
+    let mut config = preset.config();
+    manifest.experiment.config.apply_without_backend(&mut config)?;
+    if let Some(optimizer) = manifest.experiment.optimizer.clone() {
+        config = config.with_optimizer(optimizer);
+    }
+    if let Some(runtime) = manifest.experiment.runtime.clone() {
+        config = config.with_launch_policy(runtime.launch_policy);
+    }
+    let lane = options.lane();
+    let species = options.species();
+    let comparison = options.comparison_for(ComparisonContract::authoritative_same_preset());
+    let template = build_experiment_template(
+        preset,
+        lane,
+        species,
+        &comparison,
+        &config,
+        options,
+        Some(&manifest),
+    );
+    template.validate_against_config(&config)?;
+    let output_path = materialize_bridge_vocab_artifact(&template.training_input, &config)?;
+    println!("Materialized Stage 0 bridge vocab artifact at {}", output_path.display());
+    Ok(())
+}
+
 fn run_sequence(options: &RunOptions, sequence: TournamentSequence) -> Result<(), FractalError> {
     for (index, preset) in sequence.stages().iter().copied().enumerate() {
         if index > 0 {
@@ -1028,31 +1123,27 @@ fn run_tokenizer_backed_preset(
                 "tokenizer-backed Stage 0 requires an experiment spec".into(),
             )
         })?;
-    let corpus_source = load_tokenizer_training_corpus_source(&experiment.training_input)?;
-
     let precision_profile =
         resolve_precision_profile(&config.execution_backend, &config.launch_policy.precision)?;
     let (metrics, bridge_stats) = match (&config.execution_backend, precision_profile) {
         (ComputeBackend::CpuCandle, ResolvedExecutablePrecisionProfile::CandleF32) => {
             let (metrics, bridge_stats, _artifact) =
-                run_tokenizer_backed_species_from_source::<CandleF32TrainBackend>(
+                run_tokenizer_backed_species_from_experiment::<CandleF32TrainBackend>(
                     species,
                     definition.variant_name,
                     config.clone(),
-                    Some(experiment.clone()),
-                    &corpus_source,
+                    experiment.clone(),
                     cpu_device(),
                 )?;
             (metrics, bridge_stats)
         }
         (ComputeBackend::CpuCandle, ResolvedExecutablePrecisionProfile::CandleBf16) => {
             let (metrics, bridge_stats, _artifact) =
-                run_tokenizer_backed_species_from_source::<CandleBf16TrainBackend>(
+                run_tokenizer_backed_species_from_experiment::<CandleBf16TrainBackend>(
                     species,
                     definition.variant_name,
                     config.clone(),
-                    Some(experiment.clone()),
-                    &corpus_source,
+                    experiment.clone(),
                     cpu_device(),
                 )?;
             (metrics, bridge_stats)
@@ -1063,12 +1154,11 @@ fn run_tokenizer_backed_preset(
             ResolvedExecutablePrecisionProfile::CandleF32,
         ) => {
             let (metrics, bridge_stats, _artifact) =
-                run_tokenizer_backed_species_from_source::<CandleF32TrainBackend>(
+                run_tokenizer_backed_species_from_experiment::<CandleF32TrainBackend>(
                     species,
                     definition.variant_name,
                     config.clone(),
-                    Some(experiment.clone()),
-                    &corpus_source,
+                    experiment.clone(),
                     cuda_device(*device_index),
                 )?;
             (metrics, bridge_stats)
@@ -1079,12 +1169,11 @@ fn run_tokenizer_backed_preset(
             ResolvedExecutablePrecisionProfile::CandleBf16,
         ) => {
             let (metrics, bridge_stats, _artifact) =
-                run_tokenizer_backed_species_from_source::<CandleBf16TrainBackend>(
+                run_tokenizer_backed_species_from_experiment::<CandleBf16TrainBackend>(
                     species,
                     definition.variant_name,
                     config.clone(),
-                    Some(experiment.clone()),
-                    &corpus_source,
+                    experiment.clone(),
                     cuda_device(*device_index),
                 )?;
             (metrics, bridge_stats)
@@ -1092,12 +1181,11 @@ fn run_tokenizer_backed_preset(
         (ComputeBackend::MetalWgpu { device }, ResolvedExecutablePrecisionProfile::MetalF32) => {
             initialize_metal_runtime(device);
             let (metrics, bridge_stats, _artifact) =
-                run_tokenizer_backed_species_from_source::<MetalF32TrainBackend>(
+                run_tokenizer_backed_species_from_experiment::<MetalF32TrainBackend>(
                     species,
                     definition.variant_name,
                     config.clone(),
-                    Some(experiment.clone()),
-                    &corpus_source,
+                    experiment.clone(),
                     device.clone(),
                 )?;
             (metrics, bridge_stats)
@@ -1167,6 +1255,11 @@ fn build_experiment_template(
         .and_then(|manifest| manifest.experiment.runtime.clone())
         .unwrap_or_else(|| options.runtime_surface_spec());
     runtime.launch_policy = config.launch_policy.clone();
+    let model = manifest_v2
+        .and_then(|manifest| manifest.experiment.model.clone())
+        .unwrap_or_else(|| {
+            ModelContractSpec::recursive_kernel_v1(config.dim, config.max_recursion_depth)
+        });
 
     ExperimentSpecTemplate {
         experiment_id: ExperimentId {
@@ -1187,6 +1280,7 @@ fn build_experiment_template(
         },
         budget: BudgetSpec::from_config(preset, config),
         optimizer: config.optimizer.clone(),
+        model,
         training_input: manifest_v2
             .and_then(|manifest| manifest.experiment.training_input.clone())
             .unwrap_or_else(TrainingInputSpec::synthetic),
@@ -1500,6 +1594,7 @@ fn print_usage() {
     println!("  --arc-eval-batches <usize>");
     println!("  --benchmark-mode <leaderboard|systems-speed>");
     println!("  --experiment-manifest <path>");
+    println!("  --prepare-stage0-assets");
     #[cfg(feature = "cuda")]
     println!("  --backend <cpu|cuda|metal>");
     #[cfg(not(feature = "cuda"))]
@@ -1522,6 +1617,7 @@ fn print_usage() {
     println!("  cargo run --release --example tournament -- --lane proving-ground");
     println!("  cargo run --release --example tournament -- --species generalized_mobius");
     println!("  cargo run --release --example tournament -- --preset research-medium --mode parallel --parallelism 4");
+    println!("  cargo run --release --example tournament -- --prepare-stage0-assets --experiment-manifest experiments/stage0/canary/seed42-p1_contractive.json");
     #[cfg(feature = "cuda")]
     println!(
         "  cargo run --release --features cuda --example tournament -- --lane leader --mode sequential"
@@ -1533,6 +1629,7 @@ fn print_usage() {
 mod tests {
     use super::*;
     use fractal::TrainingInputMode;
+    use fractal_tokenizer::{FaceoffTokenizer, FaceoffVocab, TokenizerConfig};
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -1616,6 +1713,33 @@ mod tests {
         path
     }
 
+    fn build_bridge_vocab_artifact(
+        root: &Path,
+        dim: usize,
+        levels: usize,
+        max_depth: usize,
+        seed: u64,
+        documents: &[&str],
+    ) -> PathBuf {
+        let path = root.join("bridge-vocab.json");
+        let tokenizer = FaceoffTokenizer::new(TokenizerConfig {
+            dim,
+            levels,
+            max_depth,
+            seed,
+            split_policy: fractal_tokenizer::SplitPolicy::Balanced,
+            substrate_mode: fractal_tokenizer::TokenizerSubstrateMode::RawBytes,
+        });
+        let device = fractal_core::registry::cpu_device();
+        let vocab = tokenizer
+            .induce_vocab_from_texts::<fractal_core::CpuTrainBackend>(documents, &device)
+            .expect("test bridge vocab should build");
+        vocab
+            .save_to_file(&path)
+            .expect("test bridge vocab should persist");
+        path
+    }
+
     #[test]
     fn parse_command_uses_default_preset_when_no_args() {
         let command = parse_command(Vec::<String>::new()).unwrap();
@@ -1655,6 +1779,7 @@ mod tests {
                 arc_eval_batches: None,
                 benchmark_mode: None,
                 manifest_path: None,
+                prepare_stage0_assets: false,
                 logical_name: None,
                 question_summary: None,
                 comparison_override: None,
@@ -1688,6 +1813,7 @@ mod tests {
                 arc_eval_batches: None,
                 benchmark_mode: None,
                 manifest_path: None,
+                prepare_stage0_assets: false,
                 logical_name: None,
                 question_summary: None,
                 comparison_override: None,
@@ -1720,6 +1846,7 @@ mod tests {
                 arc_eval_batches: None,
                 benchmark_mode: None,
                 manifest_path: None,
+                prepare_stage0_assets: false,
                 logical_name: None,
                 question_summary: None,
                 comparison_override: None,
@@ -1773,6 +1900,7 @@ mod tests {
                 arc_eval_batches: None,
                 benchmark_mode: None,
                 manifest_path: None,
+                prepare_stage0_assets: false,
                 logical_name: None,
                 question_summary: None,
                 comparison_override: None,
@@ -1802,6 +1930,7 @@ mod tests {
                 arc_eval_batches: None,
                 benchmark_mode: None,
                 manifest_path: None,
+                prepare_stage0_assets: false,
                 logical_name: None,
                 question_summary: None,
                 comparison_override: None,
@@ -1828,6 +1957,7 @@ mod tests {
                 arc_eval_batches: None,
                 benchmark_mode: None,
                 manifest_path: None,
+                prepare_stage0_assets: false,
                 logical_name: None,
                 question_summary: None,
                 comparison_override: None,
@@ -1854,6 +1984,7 @@ mod tests {
                 arc_eval_batches: None,
                 benchmark_mode: None,
                 manifest_path: None,
+                prepare_stage0_assets: false,
                 logical_name: None,
                 question_summary: None,
                 comparison_override: None,
@@ -1883,6 +2014,7 @@ mod tests {
                 arc_eval_batches: None,
                 benchmark_mode: None,
                 manifest_path: None,
+                prepare_stage0_assets: false,
                 logical_name: None,
                 question_summary: None,
                 comparison_override: None,
@@ -1909,6 +2041,7 @@ mod tests {
                 arc_eval_batches: None,
                 benchmark_mode: None,
                 manifest_path: None,
+                prepare_stage0_assets: false,
                 logical_name: None,
                 question_summary: None,
                 comparison_override: None,
@@ -1934,6 +2067,7 @@ mod tests {
                 arc_eval_batches: None,
                 benchmark_mode: None,
                 manifest_path: None,
+                prepare_stage0_assets: false,
                 logical_name: None,
                 question_summary: None,
                 comparison_override: None,
@@ -1959,6 +2093,7 @@ mod tests {
                 arc_eval_batches: None,
                 benchmark_mode: None,
                 manifest_path: None,
+                prepare_stage0_assets: false,
                 logical_name: None,
                 question_summary: None,
                 comparison_override: None,
@@ -1988,6 +2123,7 @@ mod tests {
                 arc_eval_batches: None,
                 benchmark_mode: None,
                 manifest_path: None,
+                prepare_stage0_assets: false,
                 logical_name: None,
                 question_summary: None,
                 comparison_override: None,
@@ -2047,6 +2183,7 @@ mod tests {
                 arc_eval_batches: Some(3),
                 benchmark_mode: None,
                 manifest_path: None,
+                prepare_stage0_assets: false,
                 logical_name: None,
                 question_summary: None,
                 comparison_override: None,
@@ -2078,6 +2215,7 @@ mod tests {
                 arc_eval_batches: None,
                 benchmark_mode: Some(BenchmarkMode::SystemsSpeed),
                 manifest_path: None,
+                prepare_stage0_assets: false,
                 logical_name: None,
                 question_summary: None,
                 comparison_override: None,
@@ -2130,6 +2268,7 @@ mod tests {
                 arc_eval_batches: None,
                 benchmark_mode: Some(BenchmarkMode::Leaderboard),
                 manifest_path: Some(manifest_path.clone()),
+                prepare_stage0_assets: false,
                 logical_name: Some("winner-bakeoff-s42-p1-fractal-hybrid".to_owned()),
                 question_summary: Some(
                     "rerun the frozen winner bakeoff row for p1_fractal_hybrid_v1".to_owned(),
@@ -2215,6 +2354,7 @@ mod tests {
                 arc_eval_batches: None,
                 benchmark_mode: Some(BenchmarkMode::Leaderboard),
                 manifest_path: Some(manifest_path.clone()),
+                prepare_stage0_assets: false,
                 logical_name: Some("winner-bakeoff-s44-p1-contractive".to_owned()),
                 question_summary: None,
                 comparison_override: Some(ComparisonContract::authoritative_same_preset()),
@@ -2268,6 +2408,7 @@ mod tests {
                 arc_eval_batches: None,
                 benchmark_mode: Some(BenchmarkMode::Leaderboard),
                 manifest_path: Some(manifest_path.clone()),
+                prepare_stage0_assets: false,
                 logical_name: Some("winner-bakeoff-s45-p1-contractive".to_owned()),
                 question_summary: None,
                 comparison_override: Some(ComparisonContract::authoritative_same_preset()),
@@ -2330,6 +2471,12 @@ mod tests {
                         "lane_intent": "benchmark",
                         "decision_intent": "benchmark"
                     },
+                    "model": {
+                        "architecture": "recursive-kernel-v1",
+                        "hidden_dim": 1024,
+                        "max_recursion_depth": 16,
+                        "router_enabled": true
+                    },
                     "config": {
                         "seed": 42,
                         "dim": 1024,
@@ -2374,6 +2521,17 @@ mod tests {
                         "bridge": {
                             "enabled": true,
                             "observational_only": true
+                        },
+                        "bridge_packaging": {
+                            "vocab_artifact_path": "/tmp/fineweb-bridge-vocab.json",
+                            "dim": 1024,
+                            "levels": 6,
+                            "max_depth": 16,
+                            "seed": 42,
+                            "split_policy": "balanced",
+                            "substrate_mode": "raw-bytes",
+                            "chunk_max_tokens": 2048,
+                            "chunk_max_bytes": 2048
                         },
                         "arc_source": {
                             "mode": "synthetic-canonical"
@@ -2496,6 +2654,15 @@ mod tests {
             template.training_input.corpus_name.as_deref(),
             Some("fineweb-stage0")
         );
+        assert_eq!(template.model.architecture.as_str(), "recursive-kernel-v1");
+        assert_eq!(
+            template
+                .training_input
+                .bridge_packaging
+                .as_ref()
+                .map(|packaging| packaging.vocab_artifact_path.as_str()),
+            Some("/tmp/fineweb-bridge-vocab.json")
+        );
         assert_eq!(template.runtime.launch_policy, expected_launch_policy);
         assert_eq!(template.question.lane_intent, LaneIntent::Benchmark);
         assert_eq!(template.question.decision_intent, DecisionIntent::Benchmark);
@@ -2527,11 +2694,150 @@ mod tests {
         assert_eq!(
             manifest
                 .experiment
+                .model
+                .as_ref()
+                .map(|model| model.architecture.as_str()),
+            Some("recursive-kernel-v1")
+        );
+        assert_eq!(
+            manifest
+                .experiment
                 .training_input
                 .as_ref()
                 .and_then(|training_input| training_input.corpus_name.as_deref()),
             Some("fineweb-stage0-canary")
         );
+        assert_eq!(
+            manifest
+                .experiment
+                .training_input
+                .as_ref()
+                .and_then(|training_input| training_input.bridge_packaging.as_ref())
+                .map(|packaging| packaging.vocab_artifact_path.as_str()),
+            Some("experiments/stage0/assets/open_llama_3b_v2/fineweb-stage0-canary-bridge-vocab.json")
+        );
+    }
+
+    #[test]
+    fn prepare_stage0_assets_materializes_bridge_vocab_from_manifest_v2() {
+        let _env_lock = MANIFEST_ENV_MUTEX.lock().unwrap();
+        let guard = TestEnvGuard::new("fractal-stage0-prepare");
+        let train_path = guard.path().join("train.jsonl");
+        let eval_path = guard.path().join("eval.jsonl");
+        let tokenizer_path = build_file_backed_sentencepiece_tokenizer(guard.path());
+        let bridge_vocab_path = guard.path().join("bridge-vocab.json");
+        let manifest_path = guard.path().join("stage0-canary-prepare.json");
+
+        write_jsonl_corpus(
+            &train_path,
+            &["I saw a girl with a telescope.", "alpha beta gamma delta"],
+        );
+        write_jsonl_corpus(&eval_path, &["I saw a girl with a telescope."]);
+
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "logical_name": "stage0-canary-prepare-s42-p1-contractive",
+                "question_summary": "materialize frozen Stage 0 assets from the manifest control plane",
+                "preset": "fast-test",
+                "species": "p1_contractive",
+                "experiment": {
+                    "question": {
+                        "lane_intent": "benchmark",
+                        "decision_intent": "benchmark"
+                    },
+                    "model": {
+                        "architecture": "recursive-kernel-v1",
+                        "hidden_dim": 8,
+                        "max_recursion_depth": 2,
+                        "router_enabled": true
+                    },
+                    "config": {
+                        "seed": 42,
+                        "dim": 8,
+                        "levels": 2,
+                        "vocab_size": 1000,
+                        "max_seq_len": 64,
+                        "max_recursion_depth": 2,
+                        "stability_depth": 1,
+                        "train_batch_size": 1,
+                        "eval_batch_size": 1,
+                        "train_steps_per_species": 1,
+                        "train_token_budget": 1,
+                        "eval_batches_per_family": 1,
+                        "perplexity_eval_batches": 1,
+                        "arc_eval_batches": 1,
+                        "execution_mode": "sequential",
+                        "parallelism": 1,
+                        "backend": "cpu"
+                    },
+                    "training_input": {
+                        "mode": "tokenizer-backed-text",
+                        "corpus_name": "fineweb-stage0-prepare",
+                        "corpus_source": {
+                            "train": {
+                                "path": train_path,
+                                "format": {
+                                    "format": "jsonl-text",
+                                    "text_field": "text"
+                                }
+                            },
+                            "eval": {
+                                "path": eval_path,
+                                "format": {
+                                    "format": "jsonl-text",
+                                    "text_field": "text"
+                                }
+                            }
+                        },
+                        "tokenizer": {
+                            "artifact_id": "openlm-research/open_llama_3b_v2",
+                            "artifact_path": tokenizer_path,
+                            "vocab_size": 1000,
+                            "pad_token_id": 0
+                        },
+                        "bridge": {
+                            "enabled": true,
+                            "observational_only": true
+                        },
+                        "bridge_packaging": {
+                            "vocab_artifact_path": bridge_vocab_path,
+                            "dim": 8,
+                            "levels": 2,
+                            "max_depth": 2,
+                            "seed": 42,
+                            "split_policy": "balanced",
+                            "substrate_mode": "raw-bytes",
+                            "chunk_max_tokens": 64,
+                            "chunk_max_bytes": 64
+                        },
+                        "arc_source": {
+                            "mode": "synthetic-canonical"
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let command = parse_command(vec![
+            "--prepare-stage0-assets".to_owned(),
+            "--experiment-manifest".to_owned(),
+            manifest_path.display().to_string(),
+        ])
+        .expect("prepare command should parse");
+        let options = match command {
+            CliCommand::PrepareStage0Assets(options) => options,
+            other => panic!("expected prepare command, got {other:?}"),
+        };
+
+        prepare_stage0_assets(&options).expect("asset preparation should succeed");
+
+        assert!(bridge_vocab_path.is_file());
+        let vocab = FaceoffVocab::load_from_file(&bridge_vocab_path)
+            .expect("prepared bridge vocab should load");
+        assert!(!vocab.entries().is_empty());
     }
 
     #[test]
@@ -2543,6 +2849,14 @@ mod tests {
         let train_path = guard.path().join("train.jsonl");
         let eval_path = guard.path().join("eval.jsonl");
         let tokenizer_path = build_file_backed_sentencepiece_tokenizer(guard.path());
+        let bridge_vocab_path = build_bridge_vocab_artifact(
+            guard.path(),
+            8,
+            2,
+            2,
+            42,
+            &["I saw a girl with a telescope.", "alpha beta gamma delta"],
+        );
         let manifest_path = guard
             .path()
             .join("stage0-canary-smoke-s42-p1-contractive.json");
@@ -2564,6 +2878,12 @@ mod tests {
                     "question": {
                         "lane_intent": "benchmark",
                         "decision_intent": "benchmark"
+                    },
+                    "model": {
+                        "architecture": "recursive-kernel-v1",
+                        "hidden_dim": 8,
+                        "max_recursion_depth": 2,
+                        "router_enabled": true
                     },
                     "config": {
                         "seed": 42,
@@ -2612,6 +2932,17 @@ mod tests {
                         "bridge": {
                             "enabled": true,
                             "observational_only": true
+                        },
+                        "bridge_packaging": {
+                            "vocab_artifact_path": bridge_vocab_path,
+                            "dim": 8,
+                            "levels": 2,
+                            "max_depth": 2,
+                            "seed": 42,
+                            "split_policy": "balanced",
+                            "substrate_mode": "raw-bytes",
+                            "chunk_max_tokens": 64,
+                            "chunk_max_bytes": 64
                         },
                         "arc_source": {
                             "mode": "synthetic-canonical"
@@ -2720,6 +3051,10 @@ mod tests {
             serde_json::Value::String(train_path.display().to_string())
         );
         assert_eq!(
+            persisted_manifest["experiments"][0]["model"]["architecture"],
+            serde_json::Value::String("recursive-kernel-v1".to_owned())
+        );
+        assert_eq!(
             persisted_artifact["results"][0]["execution_outcome"],
             serde_json::Value::String("success".to_owned())
         );
@@ -2734,6 +3069,10 @@ mod tests {
         assert_eq!(
             persisted_artifact["results"][0]["tokenizer_bridge"]["training_input_mode"],
             serde_json::Value::String("tokenizer-backed-text".to_owned())
+        );
+        assert_eq!(
+            persisted_artifact["results"][0]["tokenizer_bridge"]["bridge_vocab_artifact_path"],
+            serde_json::Value::String(bridge_vocab_path.display().to_string())
         );
         let runtime = &persisted_artifact["results"][0]["training_runtime"];
         assert_eq!(

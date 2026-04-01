@@ -79,7 +79,7 @@ Training budget is fixed before launch and may not be widened mid-run.
 ## Model Contract
 
 All 3 variants must share:
-- the same outer scaffold
+- the same executable model architecture
 - the same parameter budget target
 - the same tokenizer
 - the same context length
@@ -90,23 +90,24 @@ All 3 variants must share:
 
 Only the recursive core may differ.
 
-### Locked Stage 0 Shell
+### Locked Stage 0 Runtime Architecture
 
-Stage 0 uses a fixed outer envelope, not a minimum shell the primitive may exceed.
+Stage 0 must describe the runtime we can actually execute today, not a desired future shell.
 
-Outer shell:
-- `6` repeated outer blocks
-- `d_model = 1024`
-- `RMSNorm -> primitive core -> residual add`
-- final norm plus LM head
+Executable architecture:
+- `recursive-kernel-v1`
+- shared hidden state width `d_model = 1024`
+- shared recursion budget `max_recursion_depth = 16`
+- router enabled
+- current executable path is `embedding -> recursive rule -> router -> output`
 
 Rules:
-- the shell is identical for all 3 variants
-- the primitive may self-organize only within this fixed envelope
-- no shell-side routing, macro-block logic, or cross-block depth mixing in Stage 0
-- no primitive may silently widen the shared state or add extra outer blocks
+- the runtime architecture is identical for all 3 variants
+- the primitive may self-organize only within this fixed executable envelope
+- no manifest, doc, or launch wrapper may claim a shared outer scaffold that the runtime does not implement
+- any future shared-shell experiment must land as a new typed architecture kind before it can become canon
 
-This keeps Stage 0 focused on primitive behavior rather than scaffold competition.
+This keeps Stage 0 focused on primitive behavior without pretending the control plane can execute a scaffold it does not yet own.
 
 ### Locked Context Contract
 
@@ -133,6 +134,7 @@ Rules:
 - the tokenizer is shared across all 3 variants
 - the tokenizer is treated as infrastructure, not as a Stage 0 research variable
 - the tokenizer bridge path may be exercised and preserved, but tokenizer-specific features may not change primitive semantics in Stage 0
+- bridge packaging is a frozen experiment-owned artifact, not a live corpus-derived side effect
 - tokenizer-track work remains a parallel stream and does not redefine this contract mid-run
 
 ### Locked Optimization Contract

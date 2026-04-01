@@ -15,16 +15,18 @@ use fractal_core::{
     },
     error::FractalError,
     lifecycle::{
-        ArcSourceMode, ExperimentSpec, TextCorpusFormat, TextCorpusSourceSpec,
-        TextCorpusSplitSpec, TokenizerArtifactSpec, TrainingInputMode, TrainingInputSpec,
+        ArcSourceMode, BridgePackagingSpec, BridgeSplitPolicy, BridgeSubstrateMode, ExperimentSpec,
+        TextCorpusFormat, TextCorpusSourceSpec, TextCorpusSplitSpec, TokenizerArtifactSpec,
+        TrainingInputMode, TrainingInputSpec,
     },
     registry::{run_species_with_batches, PrimitiveVariantName, SpeciesId, TrainingBatchSet},
     SpeciesRawMetrics,
 };
 use fractal_tokenizer::{
-    EmbeddingBridgeAdapter, FaceoffChunkLimits, FaceoffTokenizer, FaceoffVocabConfig,
+    EmbeddingBridgeAdapter, FaceoffChunkLimits, FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig,
     ModelFacingBatch, ModelFacingDocument, NativeCollationSpec, NativeCompatibilityAdapter,
-    NativeCompatibilityError, NativeTokenizer, NativeTruncationPolicy, TypedEmbeddingBridge,
+    NativeCompatibilityError, NativeTokenizer, NativeTruncationPolicy, SplitPolicy,
+    TokenizerConfig, TokenizerSubstrateMode, TypedEmbeddingBridge,
 };
 use sentencepiece::{SentencePieceError, SentencePieceProcessor};
 
@@ -433,8 +435,40 @@ impl ResolvedTokenizerArtifact {
         self,
         corpus_name: impl Into<String>,
         corpus_source: TextCorpusSourceSpec,
+        bridge_packaging: BridgePackagingSpec,
     ) -> TrainingInputSpec {
         TrainingInputSpec::tokenizer_backed_text(corpus_name, self.spec, corpus_source)
+            .with_bridge_packaging(bridge_packaging)
+    }
+}
+
+struct ResolvedBridgePackaging {
+    spec: BridgePackagingSpec,
+    tokenizer: FaceoffTokenizer,
+    vocab: FaceoffVocab,
+}
+
+impl ResolvedBridgePackaging {
+    fn from_training_input(training_input: &TrainingInputSpec) -> Result<Self, FractalError> {
+        let spec = training_input.bridge_packaging.clone().ok_or_else(|| {
+            FractalError::InvalidConfig(
+                "tokenizer-backed text training requires bridge packaging metadata".into(),
+            )
+        })?;
+        let vocab = FaceoffVocab::load_from_file(&spec.vocab_artifact_path)?;
+        let tokenizer = FaceoffTokenizer::new(TokenizerConfig {
+            dim: spec.dim,
+            levels: spec.levels,
+            max_depth: spec.max_depth,
+            seed: spec.seed,
+            split_policy: split_policy_from_spec(spec.split_policy),
+            substrate_mode: substrate_mode_from_spec(spec.substrate_mode),
+        });
+        Ok(Self {
+            spec,
+            tokenizer,
+            vocab,
+        })
     }
 }
 
@@ -482,10 +516,16 @@ impl TokenizerTrainingCorpus {
 pub struct TokenizerBridgeStats {
     pub corpus_name: String,
     pub tokenizer_artifact_id: String,
+    pub bridge_vocab_artifact_path: String,
+    pub bridge_split_policy: BridgeSplitPolicy,
+    pub bridge_substrate_mode: BridgeSubstrateMode,
     pub training_input_mode: TrainingInputMode,
     pub bridge_enabled: bool,
     pub bridge_observational_only: bool,
     pub arc_source_mode: ArcSourceMode,
+    pub native_pad_token_id: Option<u32>,
+    pub canonical_model_pad_token_id: u32,
+    pub uses_canonical_pad_alias: bool,
     pub train_documents: usize,
     pub eval_documents: usize,
     pub model_facing_documents: usize,
@@ -501,9 +541,11 @@ pub struct TokenizerBridgeStats {
 }
 
 impl TokenizerBridgeStats {
-    fn new(
+    fn new<N>(
         training_input: &TrainingInputSpec,
         corpus: &TokenizerTrainingCorpus,
+        bridge_packaging: &BridgePackagingSpec,
+        runtime: &TokenizerTrainingRuntime<N>,
         model_facing_documents: usize,
         bridge_documents: usize,
         bridge_chunks: usize,
@@ -524,10 +566,16 @@ impl TokenizerBridgeStats {
         Ok(Self {
             corpus_name: corpus.name.clone(),
             tokenizer_artifact_id: tokenizer.artifact_id.clone(),
+            bridge_vocab_artifact_path: bridge_packaging.vocab_artifact_path.clone(),
+            bridge_split_policy: bridge_packaging.split_policy,
+            bridge_substrate_mode: bridge_packaging.substrate_mode,
             training_input_mode: training_input.mode,
             bridge_enabled: training_input.bridge.enabled,
             bridge_observational_only: training_input.bridge.observational_only,
             arc_source_mode: training_input.arc_source.mode,
+            native_pad_token_id: runtime.pad_semantics.native_pad_token_id,
+            canonical_model_pad_token_id: runtime.pad_semantics.canonical_model_pad_token_id,
+            uses_canonical_pad_alias: runtime.pad_semantics.uses_canonical_pad_alias(),
             train_documents: corpus.train_documents.len(),
             eval_documents: corpus.eval_documents.len(),
             model_facing_documents,
@@ -635,7 +683,44 @@ pub fn load_stage0_tokenizer_runtime(
     Ok((runtime, artifact))
 }
 
-pub fn load_tokenizer_training_corpus_source(
+fn materialize_bridge_vocab_artifact_from_corpus(
+    corpus: &TokenizerTrainingCorpus,
+    spec: &BridgePackagingSpec,
+) -> Result<PathBuf, FractalError> {
+    corpus.validate()?;
+    spec.validate()?;
+    let output_path = PathBuf::from(&spec.vocab_artifact_path);
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            FractalError::InvalidState(format!(
+                "failed to create bridge vocab parent directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    let tokenizer = FaceoffTokenizer::new(TokenizerConfig {
+        dim: spec.dim,
+        levels: spec.levels,
+        max_depth: spec.max_depth,
+        seed: spec.seed,
+        split_policy: split_policy_from_spec(spec.split_policy),
+        substrate_mode: substrate_mode_from_spec(spec.substrate_mode),
+    });
+    let documents = corpus
+        .train_documents
+        .iter()
+        .chain(corpus.eval_documents.iter())
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let device = fractal_core::registry::cpu_device();
+    let vocab =
+        tokenizer.induce_vocab_from_texts::<fractal_core::CpuTrainBackend>(&documents, &device)?;
+    vocab.save_to_file(&output_path)?;
+    FaceoffVocab::load_from_file(&output_path)?;
+    Ok(output_path)
+}
+
+fn load_tokenizer_training_corpus_source(
     training_input: &TrainingInputSpec,
 ) -> Result<TokenizerTrainingCorpusSource, FractalError> {
     if training_input.mode != TrainingInputMode::TokenizerBackedText {
@@ -645,9 +730,7 @@ pub fn load_tokenizer_training_corpus_source(
     }
 
     let corpus_name = training_input.corpus_name.clone().ok_or_else(|| {
-        FractalError::InvalidConfig(
-            "tokenizer-backed text training requires a corpus name".into(),
-        )
+        FractalError::InvalidConfig("tokenizer-backed text training requires a corpus name".into())
     })?;
     let corpus_source = training_input.corpus_source.as_ref().ok_or_else(|| {
         FractalError::InvalidConfig(
@@ -660,27 +743,24 @@ pub fn load_tokenizer_training_corpus_source(
     Ok(source)
 }
 
-pub fn build_tokenizer_backed_batches_from_source<B>(
-    config: &fractal_core::TournamentConfig,
+pub fn materialize_bridge_vocab_artifact(
     training_input: &TrainingInputSpec,
-    corpus_source: &TokenizerTrainingCorpusSource,
-    device: &B::Device,
-) -> Result<
-    (
-        TrainingBatchSet<B>,
-        TokenizerBridgeStats,
-        ResolvedTokenizerArtifact,
-    ),
-    FractalError,
->
-where
-    B: AutodiffBackend,
-{
-    let corpus = corpus_source.load()?;
-    let (runtime, artifact) = load_stage0_tokenizer_runtime(training_input, config.max_seq_len)?;
-    let (batches, stats) =
-        build_tokenizer_backed_batches::<B, _>(config, training_input, &corpus, &runtime, device)?;
-    Ok((batches, stats, artifact))
+    config: &fractal_core::TournamentConfig,
+) -> Result<PathBuf, FractalError> {
+    training_input.validate_against_config(config)?;
+    if training_input.mode != TrainingInputMode::TokenizerBackedText {
+        return Err(FractalError::InvalidConfig(
+            "bridge vocab materialization requires tokenizer-backed text input mode".into(),
+        ));
+    }
+    let source = load_tokenizer_training_corpus_source(training_input)?;
+    let corpus = source.load()?;
+    let bridge_packaging = training_input.bridge_packaging.as_ref().ok_or_else(|| {
+        FractalError::InvalidConfig(
+            "tokenizer-backed text training requires bridge packaging metadata".into(),
+        )
+    })?;
+    materialize_bridge_vocab_artifact_from_corpus(&corpus, bridge_packaging)
 }
 
 pub fn build_tokenizer_backed_batches<B, N>(
@@ -712,29 +792,11 @@ where
         }
     }
 
-    let faceoff_config = fractal_tokenizer::TokenizerConfig {
-        dim: config.dim,
-        levels: config.levels,
-        max_depth: config.max_recursion_depth,
-        seed: config.seed,
-        split_policy: fractal_tokenizer::SplitPolicy::Balanced,
-        substrate_mode: fractal_tokenizer::TokenizerSubstrateMode::RawBytes,
-    };
-    let faceoff_tokenizer = FaceoffTokenizer::new(faceoff_config);
-
-    let all_documents = corpus
-        .train_documents
-        .iter()
-        .chain(corpus.eval_documents.iter())
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let vocab = faceoff_tokenizer
-        .induce_vocab_from_texts::<B>(&all_documents, device)
-        .map_err(|error| FractalError::InvalidState(error.to_string()))?;
+    let bridge_packaging = ResolvedBridgePackaging::from_training_input(training_input)?;
 
     let train = build_split_batches::<B, N>(
-        &faceoff_tokenizer,
-        &vocab,
+        &bridge_packaging.tokenizer,
+        &bridge_packaging.vocab,
         &corpus.train_documents,
         config.train_batch_size,
         runtime.pad_semantics,
@@ -744,8 +806,8 @@ where
         device,
     )?;
     let eval = build_split_batches::<B, N>(
-        &faceoff_tokenizer,
-        &vocab,
+        &bridge_packaging.tokenizer,
+        &bridge_packaging.vocab,
         &corpus.eval_documents,
         config.eval_batch_size,
         runtime.pad_semantics,
@@ -760,6 +822,8 @@ where
     let stats = TokenizerBridgeStats::new(
         training_input,
         corpus,
+        &bridge_packaging.spec,
+        runtime,
         train.model_facing_documents + eval.model_facing_documents,
         train.bridge_documents + eval.bridge_documents,
         train.bridge_chunks + eval.bridge_chunks,
@@ -816,7 +880,7 @@ where
                 species,
                 variant_name,
                 config,
-                experiment,
+                experiment.clone(),
                 device,
                 rule,
                 batches,
@@ -828,7 +892,7 @@ where
                 species,
                 variant_name,
                 config,
-                experiment,
+                experiment.clone(),
                 device,
                 rule,
                 batches,
@@ -841,7 +905,7 @@ where
                 species,
                 variant_name,
                 config,
-                experiment,
+                experiment.clone(),
                 device,
                 rule,
                 batches,
@@ -858,12 +922,11 @@ where
     Ok((metrics, stats))
 }
 
-pub fn run_tokenizer_backed_species_from_source<B>(
+pub fn run_tokenizer_backed_species_from_experiment<B>(
     species: SpeciesId,
     variant_name: PrimitiveVariantName,
     config: fractal_core::TournamentConfig,
-    experiment: Option<ExperimentSpec>,
-    corpus_source: &TokenizerTrainingCorpusSource,
+    experiment: ExperimentSpec,
     device: B::Device,
 ) -> Result<
     (
@@ -876,19 +939,15 @@ pub fn run_tokenizer_backed_species_from_source<B>(
 where
     B: AutodiffBackend,
 {
-    let experiment = experiment.or_else(|| config.resolved_experiment(species, variant_name));
-    let training_input = experiment
-        .as_ref()
-        .map(|spec| &spec.training_input)
-        .ok_or_else(|| {
-            FractalError::InvalidConfig(
-                "tokenizer-backed training requires an experiment spec".into(),
-            )
-        })?;
-    let (batches, stats, artifact) = build_tokenizer_backed_batches_from_source::<B>(
+    let training_input = &experiment.training_input;
+    let corpus_source = load_tokenizer_training_corpus_source(training_input)?;
+    let corpus = corpus_source.load()?;
+    let (runtime, artifact) = load_stage0_tokenizer_runtime(training_input, config.max_seq_len)?;
+    let (batches, stats) = build_tokenizer_backed_batches::<B, _>(
         &config,
         training_input,
-        corpus_source,
+        &corpus,
+        &runtime,
         &device,
     )?;
 
@@ -899,7 +958,7 @@ where
                 species,
                 variant_name,
                 config,
-                experiment,
+                Some(experiment.clone()),
                 device,
                 rule,
                 batches,
@@ -911,7 +970,7 @@ where
                 species,
                 variant_name,
                 config,
-                experiment,
+                Some(experiment.clone()),
                 device,
                 rule,
                 batches,
@@ -924,7 +983,7 @@ where
                 species,
                 variant_name,
                 config,
-                experiment,
+                Some(experiment.clone()),
                 device,
                 rule,
                 batches,
@@ -960,6 +1019,21 @@ fn build_canonical_arc_eval_batches<B: AutodiffBackend>(
         config.effective_arc_eval_batches(),
         device,
     )
+}
+
+fn split_policy_from_spec(policy: BridgeSplitPolicy) -> SplitPolicy {
+    match policy {
+        BridgeSplitPolicy::Balanced => SplitPolicy::Balanced,
+        BridgeSplitPolicy::BoundaryAware => SplitPolicy::BoundaryAware,
+        BridgeSplitPolicy::SyntaxAware => SplitPolicy::SyntaxAware,
+    }
+}
+
+fn substrate_mode_from_spec(mode: BridgeSubstrateMode) -> TokenizerSubstrateMode {
+    match mode {
+        BridgeSubstrateMode::RawBytes => TokenizerSubstrateMode::RawBytes,
+        BridgeSubstrateMode::LexicalAtoms => TokenizerSubstrateMode::LexicalAtoms,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1161,7 +1235,10 @@ mod tests {
     };
 
     use burn::backend::candle::CandleDevice;
-    use fractal_core::lifecycle::ArcSourceMode;
+    use fractal_core::lifecycle::{
+        ArcSourceMode, BridgePackagingSpec, BridgeSplitPolicy, BridgeSubstrateMode,
+        ModelContractSpec,
+    };
     use fractal_core::{
         ArtifactPolicy, BudgetSpec, ComparisonContract, DecisionIntent, ExecutionBackend,
         ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
@@ -1177,14 +1254,15 @@ mod tests {
 
     use super::{
         build_tokenizer_backed_batches, load_stage0_tokenizer_runtime,
-        run_tokenizer_backed_species_from_source, ResolvedTokenizerArtifact, Stage0PadSemantics,
-        TextCorpusSplitSource, TokenizerArtifactSpec, TokenizerTrainingCorpus,
+        materialize_bridge_vocab_artifact,
+        run_tokenizer_backed_species_from_experiment, ResolvedTokenizerArtifact,
+        Stage0PadSemantics, TextCorpusSplitSource, TokenizerArtifactSpec, TokenizerTrainingCorpus,
         TokenizerTrainingCorpusSource, TokenizerTrainingRuntime,
         STAGE0_CANONICAL_TOKENIZER_FILENAME, STAGE0_CANONICAL_TOKENIZER_REPO_ID,
     };
     use fractal_core::registry::take_last_species_run_artifact;
     use fractal_core::PAD_TOKEN;
-    use fractal_tokenizer::NativeTokenizer;
+    use fractal_tokenizer::{FaceoffTokenizer, FaceoffVocab, NativeTokenizer, TokenizerConfig};
 
     #[derive(Clone, Debug)]
     struct ByteTokenizer;
@@ -1279,6 +1357,41 @@ mod tests {
         }
     }
 
+    fn bridge_packaging_spec_for_documents(
+        config: &fractal_core::TournamentConfig,
+        path: &PathBuf,
+        documents: &[&str],
+    ) -> BridgePackagingSpec {
+        let tokenizer = FaceoffTokenizer::new(TokenizerConfig {
+            dim: config.dim,
+            levels: config.levels,
+            max_depth: config.max_recursion_depth,
+            seed: config.seed,
+            split_policy: fractal_tokenizer::SplitPolicy::Balanced,
+            substrate_mode: fractal_tokenizer::TokenizerSubstrateMode::RawBytes,
+        });
+        let vocab = tokenizer
+            .induce_vocab_from_texts::<fractal_core::CpuTrainBackend>(documents, &CandleDevice::Cpu)
+            .expect("test faceoff vocab should build");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("bridge vocab parent directory should exist");
+        }
+        vocab
+            .save_to_file(path)
+            .expect("test faceoff vocab should persist");
+        BridgePackagingSpec {
+            vocab_artifact_path: path.display().to_string(),
+            dim: config.dim,
+            levels: config.levels,
+            max_depth: config.max_recursion_depth,
+            seed: config.seed,
+            split_policy: BridgeSplitPolicy::Balanced,
+            substrate_mode: BridgeSubstrateMode::RawBytes,
+            chunk_max_tokens: config.max_seq_len,
+            chunk_max_bytes: config.max_seq_len,
+        }
+    }
+
     #[test]
     fn tokenizer_backed_stage0_smoke_path_captures_bridge_metadata() {
         let temp_root =
@@ -1317,6 +1430,12 @@ mod tests {
         config.arc_eval_batches = Some(1);
         config.learning_rate = 1e-3;
         config.optimizer = OptimizerSpec::legacy_adam(config.learning_rate);
+        let bridge_vocab_path = temp_root.join("bridge-vocab.json");
+        let bridge_packaging = bridge_packaging_spec_for_documents(
+            &config,
+            &bridge_vocab_path,
+            &[train_documents[0], train_documents[1], eval_documents[0]],
+        );
 
         let corpus_source = TokenizerTrainingCorpusSource::fineweb_jsonl(
             "fineweb-stage0-smoke",
@@ -1324,9 +1443,11 @@ mod tests {
             &eval_path,
         );
         let corpus_spec: TextCorpusSourceSpec = corpus_source.clone().into();
-        let training_input = resolved_tokenizer
-            .clone()
-            .into_training_input("fineweb-stage0-smoke", corpus_spec);
+        let training_input = resolved_tokenizer.clone().into_training_input(
+            "fineweb-stage0-smoke",
+            corpus_spec,
+            bridge_packaging.clone(),
+        );
         let template = ExperimentSpecTemplate {
             experiment_id: ExperimentId {
                 logical_name: "stage0-tokenizer-smoke".to_owned(),
@@ -1342,6 +1463,7 @@ mod tests {
             },
             budget: BudgetSpec::from_config(TournamentPreset::FastTest, &config),
             optimizer: config.optimizer.clone(),
+            model: ModelContractSpec::recursive_kernel_v1(config.dim, config.max_recursion_depth),
             training_input: training_input.clone(),
             runtime: RuntimeSurfaceSpec::default(),
             comparison: ComparisonContract::authoritative_same_preset(),
@@ -1371,12 +1493,11 @@ mod tests {
         let device = CandleDevice::Cpu;
 
         let (metrics, bridge_stats, source_artifact) =
-            run_tokenizer_backed_species_from_source::<fractal_core::CpuTrainBackend>(
+            run_tokenizer_backed_species_from_experiment::<fractal_core::CpuTrainBackend>(
                 SpeciesId::P1Contractive,
                 PrimitiveVariantName::new_unchecked("p1_contractive_v1"),
                 config.clone(),
-                Some(experiment.clone()),
-                &corpus_source,
+                experiment.clone(),
                 device,
             )
             .expect("tokenizer-backed stage0 smoke run succeeds");
@@ -1395,10 +1516,15 @@ mod tests {
             STAGE0_CANONICAL_TOKENIZER_REPO_ID
         );
         assert_eq!(
+            bridge_stats.bridge_vocab_artifact_path,
+            bridge_packaging.vocab_artifact_path
+        );
+        assert_eq!(
             bridge_stats.arc_source_mode,
             ArcSourceMode::SyntheticCanonical
         );
         assert!(bridge_stats.bridge_enabled);
+        assert!(bridge_stats.uses_canonical_pad_alias);
         let artifact = take_last_species_run_artifact()
             .expect("tokenizer-backed stage0 smoke run records an artifact");
         assert_eq!(
@@ -1479,6 +1605,71 @@ mod tests {
     }
 
     #[test]
+    fn materialize_bridge_vocab_artifact_persists_loadable_frozen_vocab() {
+        let temp_root =
+            env::temp_dir().join(format!("fractal-tokenizer-materialize-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_root);
+        fs::create_dir_all(&temp_root).expect("temp root should exist");
+        let train_path = temp_root.join("train.jsonl");
+        let eval_path = temp_root.join("eval.jsonl");
+        let train_documents = [
+            "A small recursive system can still form stable motifs.",
+            "Stable motifs should persist across short train corpora.",
+        ];
+        let eval_documents = ["A small recursive system can still form stable motifs."];
+        write_jsonl_corpus(&train_path, &train_documents);
+        write_jsonl_corpus(&eval_path, &eval_documents);
+
+        let mut config = TournamentPreset::FastTest.config();
+        config.dim = 8;
+        config.levels = 2;
+        config.vocab_size = 1_000;
+        config.max_seq_len = 64;
+        config.max_recursion_depth = 2;
+
+        let tokenizer_path = build_file_backed_sentencepiece_tokenizer();
+        let bridge_vocab_path = temp_root.join("bridge-vocab.json");
+        let training_input = ResolvedTokenizerArtifact::canonical_open_llama_3b_v2(
+            &tokenizer_path,
+            config.vocab_size,
+            PAD_TOKEN,
+        )
+        .into_training_input(
+            "fineweb-stage0-materialize",
+            TokenizerTrainingCorpusSource::fineweb_jsonl(
+                "fineweb-stage0-materialize",
+                &train_path,
+                &eval_path,
+            )
+            .into(),
+            bridge_packaging_spec_for_documents(
+                &config,
+                &bridge_vocab_path,
+                &[
+                    train_documents[0],
+                    train_documents[1],
+                    eval_documents[0],
+                ],
+            ),
+        );
+
+        fs::remove_file(&bridge_vocab_path).expect("test should start without existing vocab");
+        let output_path = materialize_bridge_vocab_artifact(&training_input, &config)
+            .expect("bridge vocab materialization should succeed");
+
+        assert_eq!(output_path, bridge_vocab_path);
+        assert!(output_path.is_file());
+        let vocab = FaceoffVocab::load_from_file(&output_path)
+            .expect("materialized bridge vocab should load");
+        assert!(!vocab.entries().is_empty());
+
+        if let Some(parent) = tokenizer_path.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
     fn tokenizer_bridge_batch_builds_from_inline_text() {
         let device = CandleDevice::Cpu;
         let mut config = TournamentPreset::FastTest.config();
@@ -1499,7 +1690,12 @@ mod tests {
                 pad_token_id: 0,
             },
             inline_corpus_source_spec(),
-        );
+        )
+        .with_bridge_packaging(bridge_packaging_spec_for_documents(
+            &config,
+            &unique_temp_path("bridge-vocab", ".json"),
+            &["alpha beta", "gamma delta"],
+        ));
         let corpus = TokenizerTrainingCorpus::new(
             "fineweb-stage0-smoke",
             vec!["alpha beta".to_owned()],
@@ -1539,9 +1735,23 @@ mod tests {
     #[test]
     fn stage0_runtime_uses_real_slow_sentencepiece_tokens() {
         let tokenizer_path = build_file_backed_sentencepiece_tokenizer();
+        let mut config = TournamentPreset::FastTest.config();
+        config.dim = 8;
+        config.levels = 2;
+        config.max_seq_len = 64;
+        config.max_recursion_depth = 2;
+        let bridge_packaging = bridge_packaging_spec_for_documents(
+            &config,
+            &unique_temp_path("bridge-vocab", ".json"),
+            &["I saw a girl with a telescope."],
+        );
         let training_input =
             ResolvedTokenizerArtifact::canonical_open_llama_3b_v2(&tokenizer_path, 1_000, 0)
-                .into_training_input("fineweb-stage0-smoke", inline_corpus_source_spec());
+                .into_training_input(
+                    "fineweb-stage0-smoke",
+                    inline_corpus_source_spec(),
+                    bridge_packaging,
+                );
 
         let (runtime, artifact) = load_stage0_tokenizer_runtime(&training_input, 64)
             .expect("slow sentencepiece stage0 runtime should load");
@@ -1580,10 +1790,24 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let invalid_path = dir.join("tokenizer.json");
         fs::copy(sentencepiece_testdata_model(), &invalid_path).unwrap();
+        let mut config = TournamentPreset::FastTest.config();
+        config.dim = 8;
+        config.levels = 2;
+        config.max_seq_len = 64;
+        config.max_recursion_depth = 2;
+        let bridge_packaging = bridge_packaging_spec_for_documents(
+            &config,
+            &unique_temp_path("bridge-vocab", ".json"),
+            &["alpha beta"],
+        );
 
         let training_input =
             ResolvedTokenizerArtifact::canonical_open_llama_3b_v2(&invalid_path, 1_000, 0)
-                .into_training_input("fineweb-stage0-smoke", inline_corpus_source_spec());
+                .into_training_input(
+                    "fineweb-stage0-smoke",
+                    inline_corpus_source_spec(),
+                    bridge_packaging,
+                );
         let error = load_stage0_tokenizer_runtime(&training_input, 64)
             .expect_err("stage0 runtime must reject fast-tokenizer artifact filenames");
 
@@ -1603,12 +1827,6 @@ mod tests {
         let resolved_tokenizer =
             ResolvedTokenizerArtifact::canonical_open_llama_3b_v2(&tokenizer_path, 1_000, 0);
         let corpus_spec = inline_corpus_source_spec();
-        let training_input = resolved_tokenizer
-            .clone()
-            .into_training_input("fineweb-stage0-smoke", corpus_spec);
-        let (runtime, _) = load_stage0_tokenizer_runtime(&training_input, 32)
-            .expect("slow tokenizer runtime should load");
-
         let mut config = TournamentPreset::FastTest.config();
         config.dim = 8;
         config.levels = 2;
@@ -1618,6 +1836,18 @@ mod tests {
         config.stability_depth = 1;
         config.train_batch_size = 1;
         config.eval_batch_size = 1;
+        let bridge_packaging = bridge_packaging_spec_for_documents(
+            &config,
+            &unique_temp_path("bridge-vocab", ".json"),
+            &["I saw a girl with a telescope."],
+        );
+        let training_input = resolved_tokenizer.clone().into_training_input(
+            "fineweb-stage0-smoke",
+            corpus_spec,
+            bridge_packaging.clone(),
+        );
+        let (runtime, _) = load_stage0_tokenizer_runtime(&training_input, 32)
+            .expect("slow tokenizer runtime should load");
 
         let corpus = TokenizerTrainingCorpus::new(
             "fineweb-stage0-smoke",
@@ -1671,6 +1901,10 @@ mod tests {
         assert!(target[valid_len..]
             .iter()
             .all(|token| *token == PAD_TOKEN as i64));
+        assert_eq!(
+            stats.bridge_vocab_artifact_path,
+            bridge_packaging.vocab_artifact_path
+        );
         assert_eq!(stats.native_tokens, valid_len * 2);
 
         if let Some(parent) = tokenizer_path.parent() {

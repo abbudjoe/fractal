@@ -14,19 +14,19 @@ pub use data_generator::{
 };
 pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
 pub use lifecycle::{
-    ArcSourceMode, ArcSourceSpec, ArtifactPolicy, BatchingPolicy, BudgetSpec, BufferReusePolicy,
-    CheckpointPolicy, ComparisonAuthority, ComparisonContract, DecisionIntent, EvalBackendPolicy,
-    EvalCadencePolicy, ExecutionBackend, ExecutionTarget, ExecutionTargetKind, ExperimentId,
-    ExperimentQuestion, ExperimentSpec, ExperimentSpecTemplate, ForwardExecutionPolicy, LaneIntent,
-    LaunchPolicySpec, LearningRateScheduleKind, LearningRateScheduleSpec, NumericPrecisionKind,
-    OptimizerKind, OptimizerSpec, PhaseTiming, PrecisionPolicy, QuantizationPolicy,
-    QuantizedPrecisionKind, ResumePolicy, RunExecutionOutcome, RunManifest, RunOutcomeClass,
-    RunPhase, RunQualityOutcome, RuntimeBackendPolicy,
-    RuntimeSurfaceSpec, SpeciesCompletion, SpeciesRunArtifact, SpeciesRunStage,
-    TextCorpusFormat, TextCorpusSourceSpec, TextCorpusSplitSpec, TokenizerArtifactSpec,
-    TokenizerBridgeSpec, Tournament, TournamentConfig, TournamentPreset, TournamentProgressEvent,
-    TournamentReporter, TournamentRunArtifact, TournamentSequence, TrainingInputMode,
-    TrainingInputSpec, VariantSpec,
+    ArcSourceMode, ArcSourceSpec, ArtifactPolicy, BatchingPolicy, BridgePackagingSpec,
+    BridgeSplitPolicy, BridgeSubstrateMode, BudgetSpec, BufferReusePolicy, CheckpointPolicy,
+    ComparisonAuthority, ComparisonContract, DecisionIntent, EvalBackendPolicy, EvalCadencePolicy,
+    ExecutionBackend, ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
+    ExperimentSpec, ExperimentSpecTemplate, ForwardExecutionPolicy, LaneIntent, LaunchPolicySpec,
+    LearningRateScheduleKind, LearningRateScheduleSpec, ModelArchitectureKind, ModelContractSpec,
+    NumericPrecisionKind, OptimizerKind, OptimizerSpec, PhaseTiming, PrecisionPolicy,
+    QuantizationPolicy, QuantizedPrecisionKind, ResumePolicy, RunExecutionOutcome, RunManifest,
+    RunOutcomeClass, RunPhase, RunQualityOutcome, RuntimeBackendPolicy, RuntimeSurfaceSpec,
+    SpeciesCompletion, SpeciesRunArtifact, SpeciesRunStage, TextCorpusFormat, TextCorpusSourceSpec,
+    TextCorpusSplitSpec, TokenizerArtifactSpec, TokenizerBridgeSpec, Tournament, TournamentConfig,
+    TournamentPreset, TournamentProgressEvent, TournamentReporter, TournamentRunArtifact,
+    TournamentSequence, TrainingInputMode, TrainingInputSpec, VariantSpec,
 };
 pub use model::FractalModel;
 pub use registry::{

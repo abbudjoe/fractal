@@ -243,6 +243,13 @@ fn experiment_json(spec: &crate::ExperimentSpec) -> Value {
             "species": spec.variant.species.as_str(),
             "variant_name": spec.variant.variant_name.as_str(),
         },
+        "model": {
+            "architecture": spec.model.architecture.as_str(),
+            "hidden_dim": spec.model.hidden_dim,
+            "max_recursion_depth": spec.model.max_recursion_depth,
+            "router_enabled": spec.model.router_enabled,
+            "label": spec.model.label(),
+        },
         "optimizer": optimizer_json(&spec.optimizer),
         "training_input": training_input_json(&spec.training_input),
         "budget": {
@@ -329,6 +336,19 @@ fn training_input_json(spec: &crate::TrainingInputSpec) -> Value {
                 "artifact_path": tokenizer.artifact_path,
                 "vocab_size": tokenizer.vocab_size,
                 "pad_token_id": tokenizer.pad_token_id,
+            })
+        }),
+        "bridge_packaging": spec.bridge_packaging.as_ref().map(|bridge_packaging| {
+            json!({
+                "vocab_artifact_path": bridge_packaging.vocab_artifact_path,
+                "dim": bridge_packaging.dim,
+                "levels": bridge_packaging.levels,
+                "max_depth": bridge_packaging.max_depth,
+                "seed": bridge_packaging.seed,
+                "split_policy": bridge_packaging.split_policy.as_str(),
+                "substrate_mode": bridge_packaging.substrate_mode.as_str(),
+                "chunk_max_tokens": bridge_packaging.chunk_max_tokens,
+                "chunk_max_bytes": bridge_packaging.chunk_max_bytes,
             })
         }),
     })
@@ -418,10 +438,16 @@ fn tokenizer_bridge_json(stats: &crate::TokenizerBridgeStats) -> Value {
     json!({
         "corpus_name": stats.corpus_name,
         "tokenizer_artifact_id": stats.tokenizer_artifact_id,
+        "bridge_vocab_artifact_path": stats.bridge_vocab_artifact_path,
+        "bridge_split_policy": stats.bridge_split_policy.as_str(),
+        "bridge_substrate_mode": stats.bridge_substrate_mode.as_str(),
         "training_input_mode": stats.training_input_mode.as_str(),
         "bridge_enabled": stats.bridge_enabled,
         "bridge_observational_only": stats.bridge_observational_only,
         "arc_source_mode": stats.arc_source_mode.as_str(),
+        "native_pad_token_id": stats.native_pad_token_id,
+        "canonical_model_pad_token_id": stats.canonical_model_pad_token_id,
+        "uses_canonical_pad_alias": stats.uses_canonical_pad_alias,
         "train_documents": stats.train_documents,
         "eval_documents": stats.eval_documents,
         "model_facing_documents": stats.model_facing_documents,
@@ -704,6 +730,10 @@ mod tests {
                     "p1_contractive_v1",
                 ),
             },
+            model: fractal_core::ModelContractSpec::recursive_kernel_v1(
+                config.dim,
+                config.max_recursion_depth,
+            ),
             training_input: TrainingInputSpec::synthetic(),
             budget: BudgetSpec::from_config(TournamentPreset::FastTest, &config),
             optimizer: OptimizerSpec::legacy_adam(config.learning_rate),

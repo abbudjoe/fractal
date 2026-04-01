@@ -1341,12 +1341,12 @@ impl RunMetadata {
         let species = explicit_experiment
             .and_then(|experiment| experiment.variant.as_ref())
             .and_then(|variant| variant.species.as_deref())
-            .and_then(|species| species.parse().ok())
+            .and_then(|species| species.parse::<SpeciesId>().ok())
             .or_else(|| {
                 artifact_experiment
                     .and_then(|experiment| experiment.variant.as_ref())
                     .and_then(|variant| variant.species.as_deref())
-                    .and_then(|species| species.parse().ok())
+                    .and_then(|species| species.parse::<SpeciesId>().ok())
             })
             .or_else(|| {
                 artifact
@@ -1625,6 +1625,19 @@ struct RunControlVariantRecord {
 #[derive(Clone, Debug, Deserialize, Default)]
 #[serde(default)]
 #[allow(dead_code)]
+struct RunControlRuntimeSurfaceRecord {
+    eval_backend_policy: Option<String>,
+    batching_policy: Option<String>,
+    execution_policy: Option<String>,
+    buffer_reuse_policy: Option<String>,
+    benchmark_mode: Option<String>,
+    backend_policy: Option<String>,
+    label: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(default)]
+#[allow(dead_code)]
 struct RunControlExecutionRecord {
     backend: Option<String>,
     execution_mode: Option<String>,
@@ -1788,6 +1801,7 @@ struct ComparisonContractRecord {
 struct ArtifactExperimentRecord {
     experiment_id: Option<ArtifactExperimentIdRecord>,
     question: Option<ArtifactQuestionRecord>,
+    variant: Option<RunControlVariantRecord>,
     runtime: Option<ArtifactRuntimeSurfaceRecord>,
     comparison: Option<ComparisonContractRecord>,
     execution: Option<ArtifactExecutionRecord>,

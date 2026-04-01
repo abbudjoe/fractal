@@ -9,6 +9,12 @@
       "lane_intent": "benchmark",
       "decision_intent": "benchmark"
     },
+    "model": {
+      "architecture": "recursive-kernel-v1",
+      "hidden_dim": 1024,
+      "max_recursion_depth": 16,
+      "router_enabled": true
+    },
     "config": {
       "seed": 42,
       "dim": 1024,
@@ -34,14 +40,14 @@
       "corpus_name": "fineweb-stage0-canary",
       "corpus_source": {
         "train": {
-          "path": "assets/fineweb/stage0-canary/train.jsonl",
+          "path": "experiments/stage0/assets/fineweb/stage0-canary/train.jsonl",
           "format": {
             "format": "jsonl-text",
             "text_field": "text"
           }
         },
         "eval": {
-          "path": "assets/fineweb/stage0-canary/eval.jsonl",
+          "path": "experiments/stage0/assets/fineweb/stage0-canary/eval.jsonl",
           "format": {
             "format": "jsonl-text",
             "text_field": "text"
@@ -50,13 +56,24 @@
       },
       "tokenizer": {
         "artifact_id": "openlm-research/open_llama_3b_v2",
-        "artifact_path": "assets/tokenizers/open_llama_3b_v2/tokenizer.model",
+        "artifact_path": "experiments/stage0/assets/open_llama_3b_v2/tokenizer.model",
         "vocab_size": 32000,
         "pad_token_id": 0
       },
       "bridge": {
         "enabled": true,
         "observational_only": true
+      },
+      "bridge_packaging": {
+        "vocab_artifact_path": "experiments/stage0/assets/open_llama_3b_v2/fineweb-stage0-canary-bridge-vocab.json",
+        "dim": 1024,
+        "levels": 6,
+        "max_depth": 16,
+        "seed": 42,
+        "split_policy": "balanced",
+        "substrate_mode": "raw-bytes",
+        "chunk_max_tokens": 2048,
+        "chunk_max_bytes": 2048
       },
       "arc_source": {
         "mode": "synthetic-canonical"

@@ -25,14 +25,15 @@ use crate::{
     error::FractalError,
     fitness::SpeciesRawMetrics,
     lifecycle::{
-        ArtifactPolicy, BudgetSpec, ComparisonContract, DecisionIntent, ExecutionBackend,
-        ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
-        ExperimentSpecTemplate, LaneIntent, LaunchPolicySpec, LearningRateScheduleSpec,
-        NumericPrecisionKind, OptimizerKind, OptimizerSpec, QuantizationPolicy,
-        QuantizedPrecisionKind, RunExecutionOutcome, RunOutcomeClass, RunQualityOutcome,
-        RuntimeSurfaceSpec, TextCorpusFormat, TextCorpusSourceSpec, TextCorpusSplitSpec,
-        TokenizerArtifactSpec, Tournament, TournamentConfig, TournamentPreset,
-        TournamentProgressEvent, TournamentSequence, TrainingInputSpec,
+        ArtifactPolicy, BridgePackagingSpec, BridgeSplitPolicy, BridgeSubstrateMode, BudgetSpec,
+        ComparisonContract, DecisionIntent, ExecutionBackend, ExecutionTarget, ExecutionTargetKind,
+        ExperimentId, ExperimentQuestion, ExperimentSpecTemplate, LaneIntent, LaunchPolicySpec,
+        LearningRateScheduleSpec, ModelContractSpec, NumericPrecisionKind, OptimizerKind,
+        OptimizerSpec, QuantizationPolicy, QuantizedPrecisionKind, RunExecutionOutcome,
+        RunOutcomeClass, RunQualityOutcome, RuntimeSurfaceSpec, TextCorpusFormat,
+        TextCorpusSourceSpec, TextCorpusSplitSpec, TokenizerArtifactSpec, Tournament,
+        TournamentConfig, TournamentPreset, TournamentProgressEvent, TournamentSequence,
+        TrainingInputSpec,
     },
     model::FractalModel,
     primitives::complex_square,
@@ -1233,6 +1234,7 @@ fn test_experiment_template(config: TournamentConfig) -> ExperimentSpecTemplate 
         },
         budget: BudgetSpec::from_config(TournamentPreset::FastTest, &config),
         optimizer: config.optimizer.clone(),
+        model: ModelContractSpec::recursive_kernel_v1(config.dim, config.max_recursion_depth),
         training_input: TrainingInputSpec::synthetic(),
         runtime: RuntimeSurfaceSpec::default(),
         comparison: ComparisonContract::authoritative_same_preset(),
@@ -1275,7 +1277,18 @@ fn tokenizer_backed_training_input_rejects_tokenizer_model_mismatch() {
                 max_documents: None,
             },
         },
-    );
+    )
+    .with_bridge_packaging(BridgePackagingSpec {
+        vocab_artifact_path: "/tmp/fineweb-bridge-vocab.json".to_owned(),
+        dim: config.dim,
+        levels: config.levels,
+        max_depth: config.max_recursion_depth,
+        seed: config.seed,
+        split_policy: BridgeSplitPolicy::Balanced,
+        substrate_mode: BridgeSubstrateMode::RawBytes,
+        chunk_max_tokens: config.max_seq_len,
+        chunk_max_bytes: config.max_seq_len,
+    });
 
     let error = template.validate_against_config(&config).unwrap_err();
     let error_text = error.to_string();
@@ -1309,7 +1322,18 @@ fn tokenizer_backed_training_input_rejects_tokenizer_model_mismatch() {
                 max_documents: None,
             },
         },
-    );
+    )
+    .with_bridge_packaging(BridgePackagingSpec {
+        vocab_artifact_path: "/tmp/fineweb-bridge-vocab.json".to_owned(),
+        dim: pad_mismatch_config.dim,
+        levels: pad_mismatch_config.levels,
+        max_depth: pad_mismatch_config.max_recursion_depth,
+        seed: pad_mismatch_config.seed,
+        split_policy: BridgeSplitPolicy::Balanced,
+        substrate_mode: BridgeSubstrateMode::RawBytes,
+        chunk_max_tokens: pad_mismatch_config.max_seq_len,
+        chunk_max_bytes: pad_mismatch_config.max_seq_len,
+    });
 
     let error = pad_mismatch_template
         .validate_against_config(&pad_mismatch_config)

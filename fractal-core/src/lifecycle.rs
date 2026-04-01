@@ -293,6 +293,94 @@ impl ArcSourceMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelArchitectureKind {
+    RecursiveKernelV1,
+    SharedOuterScaffoldV1,
+}
+
+impl ModelArchitectureKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RecursiveKernelV1 => "recursive-kernel-v1",
+            Self::SharedOuterScaffoldV1 => "shared-outer-scaffold-v1",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelContractSpec {
+    pub architecture: ModelArchitectureKind,
+    pub hidden_dim: usize,
+    pub max_recursion_depth: usize,
+    pub router_enabled: bool,
+}
+
+impl ModelContractSpec {
+    pub const fn recursive_kernel_v1(hidden_dim: usize, max_recursion_depth: usize) -> Self {
+        Self {
+            architecture: ModelArchitectureKind::RecursiveKernelV1,
+            hidden_dim,
+            max_recursion_depth,
+            router_enabled: true,
+        }
+    }
+
+    pub fn label(&self) -> String {
+        format!(
+            "{} hidden_dim={} max_recursion_depth={} router_enabled={}",
+            self.architecture.as_str(),
+            self.hidden_dim,
+            self.max_recursion_depth,
+            self.router_enabled
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        if self.hidden_dim == 0 {
+            return Err(FractalError::InvalidConfig(
+                "model hidden_dim must be greater than zero".into(),
+            ));
+        }
+        if self.max_recursion_depth == 0 {
+            return Err(FractalError::InvalidConfig(
+                "model max_recursion_depth must be greater than zero".into(),
+            ));
+        }
+        match self.architecture {
+            ModelArchitectureKind::RecursiveKernelV1 => {
+                if !self.router_enabled {
+                    return Err(FractalError::InvalidConfig(
+                        "recursive-kernel-v1 currently requires router_enabled=true".into(),
+                    ));
+                }
+                Ok(())
+            }
+            ModelArchitectureKind::SharedOuterScaffoldV1 => Err(FractalError::InvalidConfig(
+                "shared-outer-scaffold-v1 is not yet executable in the runtime".into(),
+            )),
+        }
+    }
+
+    pub fn validate_against_config(&self, config: &TournamentConfig) -> Result<(), FractalError> {
+        self.validate()?;
+        if self.hidden_dim != config.dim {
+            return Err(FractalError::InvalidConfig(format!(
+                "model hidden_dim {} must match config dim {}",
+                self.hidden_dim, config.dim
+            )));
+        }
+        if self.max_recursion_depth != config.max_recursion_depth {
+            return Err(FractalError::InvalidConfig(format!(
+                "model max_recursion_depth {} must match config max_recursion_depth {}",
+                self.max_recursion_depth, config.max_recursion_depth
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "format", rename_all = "kebab-case")]
 pub enum TextCorpusFormat {
@@ -583,6 +671,100 @@ impl ArcSourceSpec {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BridgeSplitPolicy {
+    Balanced,
+    BoundaryAware,
+    SyntaxAware,
+}
+
+impl BridgeSplitPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Balanced => "balanced",
+            Self::BoundaryAware => "boundary-aware",
+            Self::SyntaxAware => "syntax-aware",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BridgeSubstrateMode {
+    RawBytes,
+    LexicalAtoms,
+}
+
+impl BridgeSubstrateMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RawBytes => "raw-bytes",
+            Self::LexicalAtoms => "lexical-atoms",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgePackagingSpec {
+    pub vocab_artifact_path: String,
+    pub dim: usize,
+    pub levels: usize,
+    pub max_depth: usize,
+    pub seed: u64,
+    pub split_policy: BridgeSplitPolicy,
+    pub substrate_mode: BridgeSubstrateMode,
+    pub chunk_max_tokens: usize,
+    pub chunk_max_bytes: usize,
+}
+
+impl BridgePackagingSpec {
+    pub fn validate(&self) -> Result<(), FractalError> {
+        if self.vocab_artifact_path.trim().is_empty() {
+            return Err(FractalError::InvalidConfig(
+                "bridge packaging vocab_artifact_path must be non-empty".into(),
+            ));
+        }
+        for (name, value) in [
+            ("dim", self.dim),
+            ("levels", self.levels),
+            ("max_depth", self.max_depth),
+            ("chunk_max_tokens", self.chunk_max_tokens),
+            ("chunk_max_bytes", self.chunk_max_bytes),
+        ] {
+            if value == 0 {
+                return Err(FractalError::InvalidConfig(format!(
+                    "bridge packaging {name} must be greater than zero"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_against_config(&self, config: &TournamentConfig) -> Result<(), FractalError> {
+        self.validate()?;
+        for (name, bridge_value, config_value) in [
+            ("dim", self.dim, config.dim),
+            ("levels", self.levels, config.levels),
+            ("max_depth", self.max_depth, config.max_recursion_depth),
+        ] {
+            if bridge_value != config_value {
+                return Err(FractalError::InvalidConfig(format!(
+                    "bridge packaging {name} {} must match config {} {}",
+                    bridge_value, name, config_value
+                )));
+            }
+        }
+        if self.seed != config.seed {
+            return Err(FractalError::InvalidConfig(format!(
+                "bridge packaging seed {} must match config seed {}",
+                self.seed, config.seed
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenizerArtifactSpec {
     pub artifact_id: String,
@@ -689,6 +871,7 @@ pub struct TrainingInputSpec {
     pub corpus_source: Option<TextCorpusSourceSpec>,
     pub tokenizer: Option<TokenizerArtifactSpec>,
     pub bridge: TokenizerBridgeSpec,
+    pub bridge_packaging: Option<BridgePackagingSpec>,
     pub arc_source: ArcSourceSpec,
 }
 
@@ -700,6 +883,7 @@ impl TrainingInputSpec {
             corpus_source: None,
             tokenizer: None,
             bridge: TokenizerBridgeSpec::disabled(),
+            bridge_packaging: None,
             arc_source: ArcSourceSpec::synthetic_canonical(),
         }
     }
@@ -715,8 +899,14 @@ impl TrainingInputSpec {
             corpus_source: Some(corpus_source),
             tokenizer: Some(tokenizer),
             bridge: TokenizerBridgeSpec::observational_only(),
+            bridge_packaging: None,
             arc_source: ArcSourceSpec::synthetic_canonical(),
         }
+    }
+
+    pub fn with_bridge_packaging(mut self, bridge_packaging: BridgePackagingSpec) -> Self {
+        self.bridge_packaging = Some(bridge_packaging);
+        self
     }
 
     pub fn validate(&self) -> Result<(), FractalError> {
@@ -727,6 +917,7 @@ impl TrainingInputSpec {
                 if self.corpus_name.is_some()
                     || self.corpus_source.is_some()
                     || self.tokenizer.is_some()
+                    || self.bridge_packaging.is_some()
                 {
                     return Err(FractalError::InvalidConfig(
                         "synthetic training input must not carry tokenizer corpus metadata".into(),
@@ -757,7 +948,13 @@ impl TrainingInputSpec {
                             .into(),
                     )
                 })?;
-                tokenizer.validate()
+                tokenizer.validate()?;
+                let bridge_packaging = self.bridge_packaging.as_ref().ok_or_else(|| {
+                    FractalError::InvalidConfig(
+                        "tokenizer-backed text training requires bridge packaging metadata".into(),
+                    )
+                })?;
+                bridge_packaging.validate()
             }
         }
     }
@@ -773,7 +970,13 @@ impl TrainingInputSpec {
                             .into(),
                     )
                 })?;
-                tokenizer.validate_against_model(config.vocab_size, PAD_TOKEN)
+                tokenizer.validate_against_model(config.vocab_size, PAD_TOKEN)?;
+                let bridge_packaging = self.bridge_packaging.as_ref().ok_or_else(|| {
+                    FractalError::InvalidConfig(
+                        "tokenizer-backed text training requires bridge packaging metadata".into(),
+                    )
+                })?;
+                bridge_packaging.validate_against_config(config)
             }
         }
     }
@@ -1412,6 +1615,7 @@ pub struct ExperimentSpec {
     pub experiment_id: ExperimentId,
     pub question: ExperimentQuestion,
     pub variant: VariantSpec,
+    pub model: ModelContractSpec,
     pub training_input: TrainingInputSpec,
     pub budget: BudgetSpec,
     pub optimizer: OptimizerSpec,
@@ -1427,6 +1631,7 @@ pub struct ExperimentSpecTemplate {
     pub question: ExperimentQuestion,
     pub budget: BudgetSpec,
     pub optimizer: OptimizerSpec,
+    pub model: ModelContractSpec,
     pub training_input: TrainingInputSpec,
     pub runtime: RuntimeSurfaceSpec,
     pub comparison: ComparisonContract,
@@ -1447,6 +1652,7 @@ impl ExperimentSpecTemplate {
                 species,
                 variant_name,
             },
+            model: self.model.clone(),
             training_input: self.training_input.clone(),
             budget: self.budget.clone(),
             optimizer: self.optimizer.clone(),
@@ -1463,6 +1669,7 @@ impl ExperimentSpecTemplate {
                 "experiment budget must match the resolved tournament config".into(),
             ));
         }
+        self.model.validate_against_config(config)?;
         self.training_input.validate_against_config(config)?;
         if !self.execution.matches_config(config) {
             return Err(FractalError::InvalidConfig(
