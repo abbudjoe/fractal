@@ -12,9 +12,12 @@ use burn::{
         wgpu::{self, graphics::Metal, WgpuDevice},
         Autodiff, Candle, Wgpu as BurnWgpu,
     },
-    module::{AutodiffModule, Module, ModuleDisplay, ModuleVisitor},
+    module::{AutodiffModule, Module, ModuleDisplay, ModuleVisitor, Param},
     nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig},
-    optim::{AdamConfig, GradientsParams, Optimizer},
+    optim::{
+        adaptor::OptimizerAdaptor, decay::WeightDecayConfig, Adam, AdamConfig, AdamW, AdamWConfig,
+        GradientsParams, Optimizer,
+    },
     prelude::Backend,
     tensor::{backend::AutodiffBackend, Bool, ElementConversion, Int, Tensor},
 };
@@ -24,8 +27,9 @@ use crate::{
     error::FractalError,
     fitness::SpeciesRawMetrics,
     lifecycle::{
-        ExperimentSpec, PhaseTiming, RunExecutionOutcome, RunManifest, RunPhase, RunQualityOutcome,
-        SpeciesRunArtifact, SpeciesRunStage, TournamentConfig,
+        ExperimentSpec, OptimizerKind, OptimizerSpec, PhaseTiming, RunExecutionOutcome,
+        RunManifest, RunPhase, RunQualityOutcome, SpeciesRunArtifact, SpeciesRunStage,
+        TournamentConfig,
     },
     model::FractalModel,
     rule_trait::FractalRule,
@@ -35,6 +39,51 @@ pub type CpuBackend = Candle<f32, i64>;
 pub type CpuTrainBackend = Autodiff<CpuBackend>;
 pub type MetalBackend = BurnWgpu<f32, i32>;
 pub type MetalTrainBackend = Autodiff<MetalBackend>;
+
+enum ConfiguredOptimizer<M, B>
+where
+    M: AutodiffModule<B>,
+    B: AutodiffBackend,
+{
+    Adam(OptimizerAdaptor<Adam, M, B>),
+    AdamW(OptimizerAdaptor<AdamW, M, B>),
+}
+
+impl<M, B> ConfiguredOptimizer<M, B>
+where
+    M: AutodiffModule<B>,
+    B: AutodiffBackend,
+{
+    fn from_spec(spec: &OptimizerSpec) -> Self {
+        match spec.kind {
+            OptimizerKind::Adam => {
+                let optimizer = AdamConfig::new()
+                    .with_beta_1(spec.beta_1)
+                    .with_beta_2(spec.beta_2)
+                    .with_epsilon(spec.epsilon)
+                    .with_weight_decay(Some(WeightDecayConfig::new(spec.weight_decay as f32)))
+                    .init::<B, M>();
+                Self::Adam(optimizer)
+            }
+            OptimizerKind::AdamW => {
+                let optimizer = AdamWConfig::new()
+                    .with_beta_1(spec.beta_1)
+                    .with_beta_2(spec.beta_2)
+                    .with_epsilon(spec.epsilon)
+                    .with_weight_decay(spec.weight_decay as f32)
+                    .init::<B, M>();
+                Self::AdamW(optimizer)
+            }
+        }
+    }
+
+    fn step(&mut self, lr: f64, module: M, grads: GradientsParams) -> M {
+        match self {
+            Self::Adam(optimizer) => optimizer.step(lr, module, grads),
+            Self::AdamW(optimizer) => optimizer.step(lr, module, grads),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComputeBackend {
@@ -569,7 +618,9 @@ where
     let criterion = CrossEntropyLossConfig::new()
         .with_pad_tokens(Some(vec![PAD_TOKEN]))
         .init(&device);
-    let mut optimizer = AdamConfig::new().init();
+    let mut optimizer = ConfiguredOptimizer::<FractalModel<B, R>, B>::from_spec(&config.optimizer);
+    let total_train_tokens = training_token_budget(&batches, config.train_steps_per_species);
+    let mut seen_train_tokens = 0usize;
     let mut phase_timings = Vec::with_capacity(4);
 
     log_species_phase_start(
@@ -656,7 +707,15 @@ where
             }
         };
         let grads = GradientsParams::from_grads(loss.backward(), &model);
-        model = optimizer.step(config.learning_rate, model, grads);
+        let scheduled_learning_rate = config
+            .optimizer
+            .learning_rate_at_tokens(seen_train_tokens, total_train_tokens);
+        let mut grads = grads;
+        if let Some(max_norm) = config.optimizer.gradient_clip_norm {
+            clip_gradients_global_norm(&model, &mut grads, max_norm);
+        }
+        model = optimizer.step(scheduled_learning_rate, model, grads);
+        seen_train_tokens += batch.token_count;
         let completed_step = step + 1;
         if should_log_training_checkpoint(completed_step, config.train_steps_per_species) {
             log_species_phase_progress(
@@ -1082,7 +1141,7 @@ fn log_species_phase_done(species: SpeciesId, phase: &str, elapsed: Duration) {
     );
 }
 
-fn gradient_l2_norm<M, B>(module: &M, grads: &GradientsParams) -> f64
+pub(crate) fn gradient_l2_norm<M, B>(module: &M, grads: &GradientsParams) -> f64
 where
     M: Module<B>,
     B: AutodiffBackend,
@@ -1094,7 +1153,7 @@ where
     }
 
     impl<'a, B: AutodiffBackend> ModuleVisitor<B> for Collector<'a, B> {
-        fn visit_float<const D: usize>(&mut self, param: &burn::module::Param<Tensor<B, D>>) {
+        fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
             if let Some(grad) = self.grads.get::<B::InnerBackend, D>(param.id) {
                 let value = (grad.clone() * grad).sum().into_scalar().elem::<f64>();
                 self.sum_sq += value;
@@ -1114,4 +1173,63 @@ where
     };
     module.visit(&mut collector);
     collector.sum_sq.sqrt()
+}
+
+pub(crate) fn clip_gradients_global_norm<M, B>(
+    module: &M,
+    grads: &mut GradientsParams,
+    max_norm: f64,
+) where
+    M: Module<B>,
+    B: AutodiffBackend,
+{
+    let norm = gradient_l2_norm(module, grads);
+    if norm == 0.0 || norm <= max_norm {
+        return;
+    }
+    let scale = (max_norm / norm) as f32;
+
+    struct Scaler<'a, B: AutodiffBackend> {
+        grads: &'a mut GradientsParams,
+        scale: f32,
+        _marker: std::marker::PhantomData<B>,
+    }
+
+    impl<'a, B: AutodiffBackend> ModuleVisitor<B> for Scaler<'a, B> {
+        fn visit_float<const D: usize>(&mut self, param: &burn::module::Param<Tensor<B, D>>) {
+            let Some(grad) = self.grads.remove::<B::InnerBackend, D>(param.id) else {
+                return;
+            };
+            self.grads
+                .register::<B::InnerBackend, D>(param.id, grad.mul_scalar(self.scale));
+        }
+
+        fn visit_int<const D: usize>(&mut self, _param: &Param<Tensor<B, D, Int>>) {}
+
+        fn visit_bool<const D: usize>(&mut self, _param: &Param<Tensor<B, D, Bool>>) {}
+    }
+
+    let mut scaler = Scaler::<B> {
+        grads,
+        scale,
+        _marker: std::marker::PhantomData,
+    };
+    module.visit(&mut scaler);
+}
+
+fn training_token_budget<B: AutodiffBackend>(batches: &RunBatches<B>, train_steps: usize) -> usize {
+    if train_steps == 0 {
+        return 0;
+    }
+
+    (0..train_steps)
+        .map(|step| {
+            let batch = if step % 2 == 0 {
+                &batches.train_sentence[step % batches.train_sentence.len()]
+            } else {
+                &batches.train_arc[step % batches.train_arc.len()]
+            };
+            batch.token_count
+        })
+        .sum()
 }

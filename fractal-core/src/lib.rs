@@ -17,11 +17,12 @@ pub use lifecycle::{
     ArtifactPolicy, BatchingPolicy, BudgetSpec, BufferReusePolicy, ComparisonAuthority,
     ComparisonContract, DecisionIntent, EvalBackendPolicy, ExecutionBackend, ExecutionTarget,
     ExecutionTargetKind, ExperimentId, ExperimentQuestion, ExperimentSpec, ExperimentSpecTemplate,
-    ForwardExecutionPolicy, LaneIntent, PhaseTiming, RunExecutionOutcome, RunManifest,
-    RunOutcomeClass, RunPhase, RunQualityOutcome, RuntimeBackendPolicy, RuntimeSurfaceSpec,
-    SpeciesCompletion, SpeciesRunArtifact, SpeciesRunStage, Tournament, TournamentConfig,
-    TournamentPreset, TournamentProgressEvent, TournamentReporter, TournamentRunArtifact,
-    TournamentSequence, VariantSpec,
+    ForwardExecutionPolicy, LaneIntent, LearningRateScheduleKind, LearningRateScheduleSpec,
+    OptimizerKind, OptimizerSpec, PhaseTiming, RunExecutionOutcome, RunManifest, RunOutcomeClass,
+    RunPhase, RunQualityOutcome, RuntimeBackendPolicy, RuntimeSurfaceSpec, SpeciesCompletion,
+    SpeciesRunArtifact, SpeciesRunStage, Tournament, TournamentConfig, TournamentPreset,
+    TournamentProgressEvent, TournamentReporter, TournamentRunArtifact, TournamentSequence,
+    VariantSpec,
 };
 pub use model::FractalModel;
 pub use registry::{

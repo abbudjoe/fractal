@@ -12,6 +12,8 @@ use burn::backend::candle::CandleDevice;
 use burn::{
     backend::{wgpu::WgpuDevice, Candle},
     module::{Module, Param},
+    nn,
+    optim::GradientsParams,
     tensor::{backend::Backend, Int, Tensor, TensorData},
 };
 
@@ -25,16 +27,17 @@ use crate::{
     lifecycle::{
         ArtifactPolicy, BudgetSpec, ComparisonContract, DecisionIntent, ExecutionBackend,
         ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
-        ExperimentSpecTemplate, LaneIntent, RunExecutionOutcome, RunOutcomeClass,
-        RunQualityOutcome, RuntimeSurfaceSpec, Tournament, TournamentConfig, TournamentPreset,
-        TournamentProgressEvent, TournamentSequence,
+        ExperimentSpecTemplate, LaneIntent, LearningRateScheduleSpec, OptimizerKind, OptimizerSpec,
+        RunExecutionOutcome, RunOutcomeClass, RunQualityOutcome, RuntimeSurfaceSpec, Tournament,
+        TournamentConfig, TournamentPreset, TournamentProgressEvent, TournamentSequence,
     },
     model::FractalModel,
     primitives::complex_square,
     registry::{
-        is_valid_primitive_variant_name, should_log_training_checkpoint,
-        training_progress_interval, ComputeBackend, ExecutionMode, PrimitiveVariantName,
-        SpeciesDefinition, SpeciesId, SpeciesRunContext,
+        clip_gradients_global_norm, gradient_l2_norm, is_valid_primitive_variant_name,
+        should_log_training_checkpoint, training_progress_interval, ComputeBackend,
+        CpuTrainBackend, ExecutionMode, PrimitiveVariantName, SpeciesDefinition, SpeciesId,
+        SpeciesRunContext,
     },
     router::EarlyExitRouter,
     rule_trait::{ApplyContext, FractalRule},
@@ -173,6 +176,56 @@ fn proving_ground_baseline_preset_targets_bounded_first_mandelbox_run() {
     assert_eq!(config.train_steps_per_species, 5);
     assert_eq!(config.eval_batches_per_family, 2);
     assert_eq!(config.learning_rate, 5e-4);
+    assert_eq!(config.optimizer, OptimizerSpec::legacy_adam(5e-4));
+}
+
+#[test]
+fn default_and_preset_optimizer_contracts_remain_legacy_for_current_tournaments() {
+    let default_config = TournamentConfig::default();
+    assert_eq!(
+        default_config.optimizer,
+        OptimizerSpec::legacy_adam(default_config.learning_rate)
+    );
+    assert_eq!(default_config.optimizer.kind, OptimizerKind::Adam);
+    assert_eq!(
+        default_config.optimizer.schedule,
+        LearningRateScheduleSpec::constant()
+    );
+
+    let fast_test = TournamentPreset::FastTest.config();
+    assert_eq!(
+        fast_test.optimizer,
+        OptimizerSpec::legacy_adam(fast_test.learning_rate)
+    );
+    assert_eq!(fast_test.optimizer.kind, OptimizerKind::Adam);
+}
+
+#[test]
+fn stage0_optimizer_contract_is_adamw_with_warmup_cosine_schedule() {
+    let optimizer = OptimizerSpec::stage0_adamw();
+
+    assert_eq!(optimizer.kind, OptimizerKind::AdamW);
+    assert_eq!(optimizer.peak_learning_rate, 2e-4);
+    assert_eq!(optimizer.beta_1, 0.9);
+    assert_eq!(optimizer.beta_2, 0.95);
+    assert_eq!(optimizer.epsilon, 1e-8);
+    assert_eq!(optimizer.weight_decay, 0.05);
+    assert_eq!(optimizer.gradient_clip_norm, Some(1.0));
+    assert_eq!(
+        optimizer.schedule,
+        LearningRateScheduleSpec::warmup_cosine(0.02, 0.1)
+    );
+}
+
+#[test]
+fn warmup_cosine_schedule_progresses_from_zero_to_floor() {
+    let schedule = LearningRateScheduleSpec::warmup_cosine(0.02, 0.1);
+    let peak = 2e-4;
+
+    assert_eq!(schedule.learning_rate_at_tokens(peak, 0, 100), 0.0);
+    assert!((schedule.learning_rate_at_tokens(peak, 1, 100) - 1e-4).abs() < 1e-10);
+    assert!((schedule.learning_rate_at_tokens(peak, 2, 100) - peak).abs() < 1e-10);
+    assert!((schedule.learning_rate_at_tokens(peak, 100, 100) - peak * 0.1).abs() < 1e-10);
 }
 
 #[test]
@@ -826,6 +879,27 @@ fn recurrent_model_routes_recursion_per_sample() {
 }
 
 #[test]
+fn global_gradient_clipping_scales_the_combined_norm() {
+    let device = Default::default();
+    let linear = nn::LinearConfig::new(4, 3).with_bias(true).init(&device);
+    let input = Tensor::<CpuTrainBackend, 2>::from_floats(
+        [[0.25f32, 0.5, 0.75, 1.0], [1.0, 0.75, 0.5, 0.25]],
+        &device,
+    );
+
+    let grads = linear.forward(input).backward();
+    let mut grads = GradientsParams::from_grads(grads, &linear);
+    let before = gradient_l2_norm(&linear, &grads);
+    assert!(before > 0.0);
+
+    clip_gradients_global_norm(&linear, &mut grads, before * 0.5);
+
+    let after = gradient_l2_norm(&linear, &grads);
+    assert!(after <= before * 0.5 + 1e-6);
+    assert!(after > 0.0);
+}
+
+#[test]
 fn state_batch_mask_where_expands_sample_mask_across_hidden_width() {
     let device = Default::default();
     let current = FractalState::Flat(Tensor::<TestBackend, 2>::from_data(
@@ -1032,6 +1106,7 @@ fn test_experiment_template(config: TournamentConfig) -> ExperimentSpecTemplate 
             decision_intent: DecisionIntent::Benchmark,
         },
         budget: BudgetSpec::from_config(TournamentPreset::FastTest, &config),
+        optimizer: config.optimizer.clone(),
         runtime: RuntimeSurfaceSpec::default(),
         comparison: ComparisonContract::authoritative_same_preset(),
         execution: ExecutionTarget {
