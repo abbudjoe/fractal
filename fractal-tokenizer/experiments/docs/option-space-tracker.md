@@ -38,11 +38,13 @@ Read:
 ### Split / Segmentation
 
 - `boundary-aware` split for `p1`
+- `syntax-aware` split for lexical substrate
 
 Read:
 
 - this was the one serious rescue pass on span geometry
-- it did not materially move held-out code/docs
+- syntax-aware improved the current lexical baseline slightly, but still did not
+  materially move held-out code/docs
 - segmentation alone is not the missing fix
 
 ### Motif Identity
@@ -136,19 +138,6 @@ Read:
 - but the tokenizer evidence so far suggests they are lower leverage than a
   tokenizer-control-plane shift
 
-### Split / Segmentation
-
-- syntax-aware segmentation
-- AST-aware segmentation for code
-- delimiter-anchored segmentation for docs and logs
-- document-type-specific boundary policy
-
-Read:
-
-- this is the strongest remaining tokenizer-internal structural candidate
-- the earlier boundary-aware split was not enough, but it was still a blunt
-  approximation
-
 ### Motif Identity / Held-Out Matching
 
 - signature-neighborhood matching
@@ -194,37 +183,13 @@ Read:
 
 ## Ranked Remaining Options
 
-### 1. Syntax-Aware Segmentation
-
-Layer:
-
-- split / segmentation
-
-Why it ranks first:
-
-- atom-first substrate moved the held-out line more than several earlier
-  control-plane tweaks
-- exact document-local cache produced only a tiny additional lift
-- the strongest remaining tokenizer-internal hypothesis is still that code/docs
-  need more canonical structural units
-
-Expected upside:
-
-- more stable recurring spans for code and docs
-- better motif identities without weakening exact matching
-- a cleaner substrate for any later contextual reuse plane
-
-Expected failure mode:
-
-- syntax hints still do not create enough cross-document reuse
-
-### 2. Signature-Neighborhood Matching
+### 1. Signature-Neighborhood Matching
 
 Layer:
 
 - motif identity / held-out matching
 
-Why it ranks second:
+Why it ranks first now:
 
 - exact matching has been too brittle
 - a neighborhood/prototype similarity layer could recover held-out structure
@@ -240,6 +205,27 @@ Expected upside:
 Expected failure mode:
 
 - false positives recreate the JSONL/code overcollapse line quickly
+
+### 2. Hybrid External Bakeoff
+
+Layer:
+
+- evaluation
+
+Why it ranks second now:
+
+- the local held-out story is now fairly well understood
+- if we keep spending cycles inside this architecture, we need to know whether
+  the same ceiling holds outside the local `fawx` ecosystem
+
+Expected upside:
+
+- clearer truth signal about whether the tokenizer is fundamentally local-data
+  coupled or generally limited
+
+Expected failure mode:
+
+- the same ceiling persists externally, which would strengthen the pivot case
 
 Expected failure mode:
 

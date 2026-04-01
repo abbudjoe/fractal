@@ -527,3 +527,58 @@ Updated read:
 - local contextual memory may still matter, but not in this narrow form
 - the next remaining high-leverage tokenizer-internal move is more likely a
   segmentation/substrate refinement than another local cache heuristic
+
+## Syntax-Aware Segmentation Result
+
+The next tokenizer-internal attempt was an explicit syntax-aware split policy on
+top of the atom-first lexical substrate.
+
+Important implementation note:
+
+- this pass exposed a real lexical-scanner bug
+- `NewlineIndent` atoms were incorrectly consuming the first non-indentation
+  character on zero-indent lines
+- that root-cause bug was fixed before judging the experiment
+
+Held-out local bakeoff on the lexical substrate:
+
+- baseline `--split-policy boundary-aware --local-cache off`
+  - `exact_motif_hit_docs=0`
+  - `prototype_hit_docs=0`
+  - `lexical_only_docs=19`
+  - `code.rust=0.80`
+  - `code.swift=1.02`
+  - `docs.spec=0.74`
+  - `jsonl.signals=9.21`
+  - `logs.operational_mixed=1.10`
+- experiment `--split-policy syntax-aware --local-cache off`
+  - `exact_motif_hit_docs=0`
+  - `prototype_hit_docs=0`
+  - `lexical_only_docs=17`
+  - `code.rust=0.80`
+  - `code.swift=0.98`
+  - `docs.spec=0.74`
+  - `jsonl.signals=6.94`
+  - `logs.operational_mixed=1.07`
+
+Hard gates stayed clean:
+
+- `roundtrip_failures=0`
+- `chunk_utf8_failures=0`
+- `collation_failures=0`
+- `byte_fallback_docs=0`
+
+Interpretation:
+
+- syntax-aware segmentation is real
+- it slightly reduces lexical-only pressure
+- it also improves structured JSONL precision relative to the current lexical
+  baseline
+- but it does not materially improve the held-out code/docs ceiling
+
+Updated read:
+
+- segmentation/substrate tweaks are now running low on remaining upside
+- the tokenizer has not been rescued on held-out code/docs
+- if we continue inside this architecture, the next move is likely a riskier
+  matching-layer experiment rather than another split heuristic

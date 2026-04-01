@@ -27,6 +27,7 @@ const TRACKER_REMINDER: &str =
 pub enum SplitPolicy {
     Balanced,
     BoundaryAware,
+    SyntaxAware,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -725,11 +726,13 @@ fn split_point(bytes: &[u8], policy: SplitPolicy) -> Option<usize> {
     }
 
     let fallback = balanced_split_point(bytes);
-    if policy == SplitPolicy::Balanced {
-        return fallback;
+    match policy {
+        SplitPolicy::Balanced => fallback,
+        SplitPolicy::BoundaryAware => boundary_aware_split_point(bytes).or(fallback),
+        SplitPolicy::SyntaxAware => syntax_aware_byte_split_point(bytes)
+            .or_else(|| boundary_aware_split_point(bytes))
+            .or(fallback),
     }
-
-    boundary_aware_split_point(bytes).or(fallback)
 }
 
 fn atom_split_point(atoms: &[LexemeSpan], policy: SplitPolicy) -> Option<usize> {
@@ -738,11 +741,13 @@ fn atom_split_point(atoms: &[LexemeSpan], policy: SplitPolicy) -> Option<usize> 
     }
 
     let fallback = Some((atoms.len() / 2).max(1));
-    if policy == SplitPolicy::Balanced {
-        return fallback;
+    match policy {
+        SplitPolicy::Balanced => fallback,
+        SplitPolicy::BoundaryAware => atom_boundary_aware_split_point(atoms).or(fallback),
+        SplitPolicy::SyntaxAware => syntax_aware_atom_split_point(atoms)
+            .or_else(|| atom_boundary_aware_split_point(atoms))
+            .or(fallback),
     }
-
-    atom_boundary_aware_split_point(atoms).or(fallback)
 }
 
 fn balanced_split_point(bytes: &[u8]) -> Option<usize> {
@@ -780,6 +785,26 @@ fn atom_boundary_aware_split_point(atoms: &[LexemeSpan]) -> Option<usize> {
     best.map(|(_, _, index)| index)
 }
 
+fn syntax_aware_atom_split_point(atoms: &[LexemeSpan]) -> Option<usize> {
+    if atoms.len() <= 1 {
+        return None;
+    }
+
+    let midpoint = atoms.len() / 2;
+    let mut best: Option<(u8, usize, usize)> = None;
+
+    for index in 1..atoms.len() {
+        let boundary = classify_syntax_atom_boundary(atoms, index);
+        let distance = midpoint.abs_diff(index);
+        let candidate = (boundary, distance, index);
+        if best.is_none_or(|current| candidate < current) {
+            best = Some(candidate);
+        }
+    }
+
+    best.map(|(_, _, index)| index)
+}
+
 fn boundary_aware_split_point(bytes: &[u8]) -> Option<usize> {
     let text = std::str::from_utf8(bytes).ok()?;
     if text.len() <= 1 {
@@ -805,6 +830,10 @@ fn boundary_aware_split_point(bytes: &[u8]) -> Option<usize> {
     best.map(|(_, _, index)| index)
 }
 
+fn syntax_aware_byte_split_point(bytes: &[u8]) -> Option<usize> {
+    boundary_aware_split_point(bytes)
+}
+
 fn classify_atom_boundary(left: &LexemeSpan, right: &LexemeSpan) -> u8 {
     if left.kind == FaceoffLexemeKind::NewlineIndent
         && right.kind == FaceoffLexemeKind::NewlineIndent
@@ -825,6 +854,36 @@ fn classify_atom_boundary(left: &LexemeSpan, right: &LexemeSpan) -> u8 {
     4
 }
 
+fn classify_syntax_atom_boundary(atoms: &[LexemeSpan], index: usize) -> u8 {
+    let left = &atoms[index - 1];
+    let right = &atoms[index];
+
+    if is_blank_line_boundary(left, right) {
+        return 0;
+    }
+    if is_line_start_declaration_boundary(atoms, index)
+        || is_pre_line_start_declaration_boundary(atoms, index)
+    {
+        return 1;
+    }
+    if is_line_start_markdown_boundary(atoms, index)
+        || is_pre_line_start_markdown_boundary(atoms, index)
+    {
+        return 2;
+    }
+    if is_statement_or_block_boundary(left, right) {
+        return 3;
+    }
+    if left.kind == FaceoffLexemeKind::Punctuation || right.kind == FaceoffLexemeKind::Punctuation {
+        return 4;
+    }
+    if left.kind == FaceoffLexemeKind::Whitespace || right.kind == FaceoffLexemeKind::Whitespace {
+        return 5;
+    }
+
+    6
+}
+
 fn classify_boundary(text: &str, index: usize) -> Option<u8> {
     let prev = text[..index].chars().next_back()?;
     let next = text[index..].chars().next()?;
@@ -843,6 +902,128 @@ fn classify_boundary(text: &str, index: usize) -> Option<u8> {
     }
 
     None
+}
+
+fn is_blank_line_boundary(left: &LexemeSpan, right: &LexemeSpan) -> bool {
+    left.kind == FaceoffLexemeKind::NewlineIndent && right.kind == FaceoffLexemeKind::NewlineIndent
+}
+
+fn is_line_start_declaration_boundary(atoms: &[LexemeSpan], index: usize) -> bool {
+    if !is_line_start(atoms, index) {
+        return false;
+    }
+    lexeme_text(&atoms[index]).is_some_and(is_declaration_keyword)
+}
+
+fn is_pre_line_start_declaration_boundary(atoms: &[LexemeSpan], index: usize) -> bool {
+    atoms[index].kind == FaceoffLexemeKind::NewlineIndent
+        && atoms
+            .get(index + 1)
+            .and_then(lexeme_text)
+            .is_some_and(is_declaration_keyword)
+}
+
+fn is_line_start_markdown_boundary(atoms: &[LexemeSpan], index: usize) -> bool {
+    if !is_line_start(atoms, index) {
+        return false;
+    }
+
+    let current = &atoms[index];
+    if lexeme_text(current).is_some_and(is_markdown_heading_marker) {
+        return true;
+    }
+    if lexeme_text(current).is_some_and(is_list_marker) {
+        return true;
+    }
+
+    current.kind == FaceoffLexemeKind::Number
+        && atoms
+            .get(index + 1)
+            .and_then(lexeme_text)
+            .is_some_and(is_enumerated_list_suffix)
+}
+
+fn is_pre_line_start_markdown_boundary(atoms: &[LexemeSpan], index: usize) -> bool {
+    if atoms[index].kind != FaceoffLexemeKind::NewlineIndent {
+        return false;
+    }
+
+    let Some(next) = atoms.get(index + 1) else {
+        return false;
+    };
+    if lexeme_text(next).is_some_and(is_markdown_heading_marker) {
+        return true;
+    }
+    if lexeme_text(next).is_some_and(is_list_marker) {
+        return true;
+    }
+
+    next.kind == FaceoffLexemeKind::Number
+        && atoms
+            .get(index + 2)
+            .and_then(lexeme_text)
+            .is_some_and(is_enumerated_list_suffix)
+}
+
+fn is_statement_or_block_boundary(left: &LexemeSpan, right: &LexemeSpan) -> bool {
+    if right.kind == FaceoffLexemeKind::NewlineIndent
+        && lexeme_text(left).is_some_and(is_clause_terminator)
+    {
+        return true;
+    }
+
+    lexeme_text(left).is_some_and(|text| matches!(text, "}" | "{"))
+        || lexeme_text(right).is_some_and(|text| matches!(text, "}" | "{"))
+}
+
+fn is_line_start(atoms: &[LexemeSpan], index: usize) -> bool {
+    index == 0 || atoms[index - 1].kind == FaceoffLexemeKind::NewlineIndent
+}
+
+fn lexeme_text(span: &LexemeSpan) -> Option<&str> {
+    std::str::from_utf8(&span.bytes).ok()
+}
+
+fn is_declaration_keyword(text: &str) -> bool {
+    matches!(
+        text,
+        "fn" | "struct"
+            | "enum"
+            | "impl"
+            | "trait"
+            | "use"
+            | "pub"
+            | "const"
+            | "let"
+            | "match"
+            | "if"
+            | "for"
+            | "while"
+            | "return"
+            | "class"
+            | "actor"
+            | "protocol"
+            | "extension"
+            | "func"
+            | "var"
+            | "import"
+    )
+}
+
+fn is_markdown_heading_marker(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte == b'#')
+}
+
+fn is_list_marker(text: &str) -> bool {
+    matches!(text, "-" | "*")
+}
+
+fn is_enumerated_list_suffix(text: &str) -> bool {
+    matches!(text, "." | ")")
+}
+
+fn is_clause_terminator(text: &str) -> bool {
+    matches!(text, "}" | ";" | ":" | "." | "?" | "!")
 }
 
 fn is_structural_punctuation(value: char) -> bool {
@@ -989,7 +1170,8 @@ fn tensor_data_to_vec<E: Element>(
 
 #[cfg(test)]
 mod split_tests {
-    use super::{split_point, SplitPolicy};
+    use super::{atom_split_point, split_point, SplitPolicy};
+    use crate::faceoff::scan_lexemes;
 
     #[test]
     fn boundary_aware_split_prefers_newline_boundaries() {
@@ -1031,6 +1213,52 @@ mod split_tests {
 
         assert!(std::str::from_utf8(&input.as_bytes()[..split]).is_ok());
         assert!(std::str::from_utf8(&input.as_bytes()[split..]).is_ok());
+    }
+
+    #[test]
+    fn syntax_aware_atom_split_prefers_line_start_declaration_boundaries() {
+        let input = "let auth_provider = 1;\nfn render_home_screen() {\n    println!(\"ok\");\n}\n";
+        let atoms = scan_lexemes(input, 0);
+        let split = atom_split_point(&atoms, SplitPolicy::SyntaxAware).unwrap();
+        let split_start = atoms[split].start;
+        let right = &input[split_start..];
+
+        assert!(
+            right.starts_with("fn ") || right.starts_with("\nfn "),
+            "syntax-aware split chose right segment {:?}",
+            right
+        );
+    }
+
+    #[test]
+    fn syntax_aware_atom_split_prefers_markdown_heading_boundaries() {
+        let input = "paragraph text paragraph text.\n## Next Section\n- item one\n- item two\n";
+        let atoms = scan_lexemes(input, 0);
+        let split = atom_split_point(&atoms, SplitPolicy::SyntaxAware).unwrap();
+        let split_start = atoms[split].start;
+        let right = &input[split_start..];
+
+        assert!(
+            right.starts_with("## ")
+                || right.starts_with("\n## ")
+                || right.starts_with("# ")
+                || right.starts_with("\n# ")
+                || right.starts_with("- ")
+                || right.starts_with("\n- "),
+            "syntax-aware split chose right segment {:?}",
+            right
+        );
+    }
+
+    #[test]
+    fn syntax_aware_atom_split_preserves_utf8_boundaries() {
+        let input = "## 概要\n- 項目🙂\nfn render_home() {\n    return;\n}\n";
+        let atoms = scan_lexemes(input, 0);
+        let split = atom_split_point(&atoms, SplitPolicy::SyntaxAware).unwrap();
+        let split_start = atoms[split].start;
+
+        assert!(std::str::from_utf8(&input.as_bytes()[..split_start]).is_ok());
+        assert!(std::str::from_utf8(&input.as_bytes()[split_start..]).is_ok());
     }
 }
 

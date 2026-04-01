@@ -97,7 +97,14 @@ fn consume_lexeme(text: &str, start: usize) -> (FaceoffLexemeKind, usize) {
 
 fn consume_newline_indent(text: &str, start: usize) -> usize {
     let after_newline = start + '\n'.len_utf8();
-    consume_while(text, after_newline, |value| matches!(value, ' ' | '\t'))
+    let mut end = after_newline;
+    for (offset, ch) in text[after_newline..].char_indices() {
+        if !matches!(ch, ' ' | '\t') {
+            break;
+        }
+        end = after_newline + offset + ch.len_utf8();
+    }
+    end
 }
 
 fn consume_while(text: &str, start: usize, predicate: impl Fn(char) -> bool) -> usize {
@@ -178,5 +185,22 @@ mod tests {
         assert!(spans
             .iter()
             .any(|span| span.kind == FaceoffLexemeKind::NewlineIndent));
+    }
+
+    #[test]
+    fn newline_indent_does_not_consume_next_line_content_without_indent() {
+        let spans = scan_lexemes(";\nfn render()", 0);
+        let newline = spans
+            .iter()
+            .find(|span| span.kind == FaceoffLexemeKind::NewlineIndent)
+            .expect("newline indent span should exist");
+        let next = spans
+            .iter()
+            .skip_while(|span| span.start < newline.end)
+            .find(|span| span.start == newline.end)
+            .expect("next span should start immediately after newline");
+
+        assert_eq!(std::str::from_utf8(&newline.bytes).unwrap(), "\n");
+        assert_eq!(std::str::from_utf8(&next.bytes).unwrap(), "fn");
     }
 }

@@ -21,8 +21,8 @@ Candidates are ranked by:
 
 ## Latest Trial Snapshot
 
-Most recent completed trial: exact document-local motif cache on top of the
-atom-first lexical substrate.
+Most recent completed trial: syntax-aware segmentation on top of the lexical
+substrate.
 
 - `BAKEOFF_DOCUMENTS=120`
 - `BAKEOFF_INDUCTION_DOCUMENTS=63`
@@ -33,20 +33,22 @@ atom-first lexical substrate.
 
 Result:
 
-- the cache produced a few honest contextual hits:
-  - `local_cache_hit_docs=4`
-- but the held-out medians were effectively unchanged:
-  - `code.rust=0.83`
-  - `code.swift=0.96`
-  - `docs.spec=0.77`
-  - `jsonl.signals=5.16`
+- syntax-aware segmentation reduced `lexical_only_docs`:
+  - `19 -> 17`
+- and improved structured JSONL precision relative to the current lexical
+  baseline:
+  - `jsonl.signals=9.21 -> 6.94`
+- but held-out code/docs did not materially improve:
+  - `code.rust=0.80 -> 0.80`
+  - `code.swift=1.02 -> 0.98`
+  - `docs.spec=0.74 -> 0.74`
 
 New read:
 
-- exact document-local reuse is real
-- it is not enough to rescue the held-out code/docs ceiling
-- the next candidate should target segmentation/substrate quality rather than
-  another small cache heuristic
+- syntax-aware segmentation is technically sound
+- it is another near-miss, not a rescue
+- the next remaining candidate, if we stay inside this architecture, is more
+  likely in the matching layer than in another split heuristic
 
 ## Current Baseline
 
@@ -101,7 +103,7 @@ The ranking below applies to **next** frontier candidates. Packaging is now trea
 
 Status:
 
-- `Active`
+- `Tried`
 
 Why it ranks first now:
 
@@ -124,9 +126,38 @@ Expected failure mode:
 
 Decision:
 
-- active next candidate
+- tried and not promoted
+- keep available as an explicit experiment mode
 
-### 2. Primitive Comparison Pivot
+### 2. Signature-Neighborhood Matching
+
+Status:
+
+- `Active`
+
+Why it ranks second now:
+
+- exact matching is still too brittle
+- primitive differences continue to wash out under the current matching surface
+- segmentation/substrate gains have largely stalled
+
+Expected upside:
+
+- more held-out structural hits without requiring literal identity
+- a direct test of whether matching tolerance is the last meaningful rescue
+  plane inside the current architecture
+
+Expected failure mode:
+
+- false positives recreate the earlier overcollapse pattern
+- or code/docs still fail to move, which would push the primitive even closer
+  to the kill line
+
+Decision:
+
+- active next candidate if we keep pushing the current architecture
+
+### 3. Primitive Comparison Pivot
 
 Status:
 
@@ -155,7 +186,7 @@ Decision:
 
 - keep ready as the next branch after the emission no-op
 
-### 3. Prototype Precision Guardrails
+### 4. Prototype Precision Guardrails
 
 Status:
 
@@ -185,7 +216,7 @@ Decision:
 - tried and not promoted
 - candidate 2 was the justified replacement attempt after this failure
 
-### 4. Targeted Prototype Precision
+### 5. Targeted Prototype Precision
 
 Status:
 
@@ -217,7 +248,7 @@ Decision:
 - keep coarse mode as the stable default
 - candidate 3 was later tried as a runtime emission gate and was a field no-op
 
-### 5. Prototype Emission Gate
+### 6. Prototype Emission Gate
 
 Status:
 

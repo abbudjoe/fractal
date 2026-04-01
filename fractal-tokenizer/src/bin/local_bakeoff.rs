@@ -270,6 +270,7 @@ struct Args {
     fallback_mode: FaceoffFallbackMode,
     identity_mode: FaceoffIdentityMode,
     prototype_granularity: PrototypeGranularityMode,
+    split_policy: SplitPolicy,
     substrate_mode: TokenizerSubstrateMode,
     local_cache_mode: FaceoffLocalCacheMode,
 }
@@ -286,6 +287,7 @@ impl Args {
         let mut fallback_mode = FaceoffFallbackMode::Full;
         let mut identity_mode = FaceoffIdentityMode::Legacy;
         let mut prototype_granularity = PrototypeGranularityMode::Coarse;
+        let mut split_policy = SplitPolicy::BoundaryAware;
         let mut substrate_mode = TokenizerSubstrateMode::RawBytes;
         let mut local_cache_mode = FaceoffLocalCacheMode::Off;
 
@@ -337,6 +339,10 @@ impl Args {
                             .ok_or("--prototype-granularity requires a value")?,
                     )?;
                 }
+                "--split-policy" => {
+                    split_policy =
+                        parse_split_policy(&args.next().ok_or("--split-policy requires a value")?)?;
+                }
                 "--substrate" => {
                     substrate_mode =
                         parse_substrate_mode(&args.next().ok_or("--substrate requires a value")?)?;
@@ -367,6 +373,7 @@ impl Args {
             fallback_mode,
             identity_mode,
             prototype_granularity,
+            split_policy,
             substrate_mode,
             local_cache_mode,
         })
@@ -375,7 +382,7 @@ impl Args {
 
 fn print_help() {
     eprintln!(
-        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--fawx-root DIR] [--home-state-root DIR] [--max-review-count N] [--primitive NAME] [--all-primitives] [--fallback-mode full|motif-only] [--identity-mode legacy|prototype-primary] [--prototype-granularity coarse|adaptive] [--substrate raw|lexical] [--local-cache off|exact]"
+        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--fawx-root DIR] [--home-state-root DIR] [--max-review-count N] [--primitive NAME] [--all-primitives] [--fallback-mode full|motif-only] [--identity-mode legacy|prototype-primary] [--prototype-granularity coarse|adaptive] [--split-policy balanced|boundary-aware|syntax-aware] [--substrate raw|lexical] [--local-cache off|exact]"
     );
 }
 
@@ -418,6 +425,18 @@ fn parse_substrate_mode(value: &str) -> Result<TokenizerSubstrateMode, Box<dyn E
         other => {
             Err(format!("unknown substrate mode `{other}`; expected one of: raw, lexical").into())
         }
+    }
+}
+
+fn parse_split_policy(value: &str) -> Result<SplitPolicy, Box<dyn Error>> {
+    match value {
+        "balanced" => Ok(SplitPolicy::Balanced),
+        "boundary-aware" => Ok(SplitPolicy::BoundaryAware),
+        "syntax-aware" => Ok(SplitPolicy::SyntaxAware),
+        other => Err(format!(
+            "unknown split policy `{other}`; expected one of: balanced, boundary-aware, syntax-aware"
+        )
+        .into()),
     }
 }
 
@@ -1078,6 +1097,7 @@ fn run_primitive_bakeoff(
         args.fallback_mode,
         args.identity_mode,
         args.prototype_granularity,
+        args.split_policy,
         args.substrate_mode,
         args.local_cache_mode,
     )?;
@@ -1096,12 +1116,13 @@ fn build_fractal_documents(
     fallback_mode: FaceoffFallbackMode,
     identity_mode: FaceoffIdentityMode,
     prototype_granularity: PrototypeGranularityMode,
+    split_policy: SplitPolicy,
     substrate_mode: TokenizerSubstrateMode,
     local_cache_mode: FaceoffLocalCacheMode,
 ) -> Result<(Vec<DocumentWork>, FaceoffVocab), Box<dyn Error>> {
     let device = Default::default();
     let tokenizer = FaceoffTokenizer::new(TokenizerConfig {
-        split_policy: SplitPolicy::BoundaryAware,
+        split_policy,
         substrate_mode,
         ..TokenizerConfig::default()
     });
@@ -1412,7 +1433,14 @@ fn print_summary(primitive: &str, results: &[BakeoffRecord], vocab: &FaceoffVoca
     println!("BAKEOFF_EVALUATION_FRONTIER_TOKENS={held_out_frontier}");
     println!("BAKEOFF_VOCAB_MOTIFS={}", vocab.motif_count());
     println!("BAKEOFF_OUTPUT_DIR={}", args.output_dir.display());
-    println!("BAKEOFF_SPLIT_POLICY=boundary_aware");
+    println!(
+        "BAKEOFF_SPLIT_POLICY={}",
+        match args.split_policy {
+            SplitPolicy::Balanced => "balanced",
+            SplitPolicy::BoundaryAware => "boundary_aware",
+            SplitPolicy::SyntaxAware => "syntax_aware",
+        }
+    );
     println!("BAKEOFF_VERDICT_SCOPE=evaluation");
     println!(
         "BAKEOFF_DIAGNOSTIC split=evaluation exact_motif_hit_docs={} prototype_hit_docs={} local_cache_hit_docs={} lexical_only_docs={}",
@@ -1885,6 +1913,7 @@ mod tests {
             fallback_mode: FaceoffFallbackMode::Full,
             identity_mode: FaceoffIdentityMode::Legacy,
             prototype_granularity: PrototypeGranularityMode::Coarse,
+            split_policy: SplitPolicy::BoundaryAware,
             substrate_mode: TokenizerSubstrateMode::RawBytes,
             local_cache_mode: FaceoffLocalCacheMode::Off,
         }
@@ -1987,6 +2016,28 @@ mod tests {
             .expect("unknown substrate mode should error")
             .to_string();
         assert!(error.contains("unknown substrate mode `totally-fake`"));
+    }
+
+    #[test]
+    fn parse_split_policy_defaults_to_boundary_aware() {
+        assert_eq!(base_args().split_policy, SplitPolicy::BoundaryAware);
+    }
+
+    #[test]
+    fn parse_split_policy_accepts_syntax_aware() {
+        assert_eq!(
+            parse_split_policy("syntax-aware").unwrap(),
+            SplitPolicy::SyntaxAware
+        );
+    }
+
+    #[test]
+    fn parse_split_policy_rejects_unknown_value() {
+        let error = parse_split_policy("totally-fake")
+            .err()
+            .expect("unknown split policy should error")
+            .to_string();
+        assert!(error.contains("unknown split policy `totally-fake`"));
     }
 
     #[test]
