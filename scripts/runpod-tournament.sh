@@ -1155,6 +1155,14 @@ fi
 
 if [ "$needs_build" -eq 1 ]; then
     echo "[runpod-wrapper] compiling release binary" | tee -a "$state_dir/logs/latest.log"
+    build_rustflags="-Clink-self-contained=no -Clink-arg=-fuse-ld=bfd"
+    if [ -n "${RUSTFLAGS:-}" ]; then
+        export RUSTFLAGS="${RUSTFLAGS} ${build_rustflags}"
+    else
+        export RUSTFLAGS="$build_rustflags"
+    fi
+    echo "[runpod-wrapper] using system bfd linker for remote cargo build" \
+        | tee -a "$state_dir/logs/latest.log"
     stdbuf -oL -eL cargo build --release --features cuda --example tournament \
         2>&1 | tee -a "$state_dir/logs/latest.log"
     cp "$CARGO_TARGET_DIR/release/examples/tournament" "$binary_path"
