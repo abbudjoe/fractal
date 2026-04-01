@@ -5,6 +5,7 @@ without changing primitive behavior or muddying the current winner-lane bakeoff.
 
 Use this alongside:
 - [experiment-interface.md](/Users/joseph/fractal/docs/experiment-interface.md)
+- [program-state.md](/Users/joseph/fractal/docs/program-state.md)
 - [harness-doctrine.md](/Users/joseph/fractal/docs/harness-doctrine.md)
 - [harness-hardening-checklist.md](/Users/joseph/fractal/docs/harness-hardening-checklist.md)
 - [promotion-policy.md](/Users/joseph/fractal/docs/promotion-policy.md)

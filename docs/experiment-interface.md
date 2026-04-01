@@ -11,6 +11,7 @@ comparison authority inside one explicit contract instead of scattering them acr
 - pod metadata
 
 Use this alongside:
+- [program-state.md](/Users/joseph/fractal/docs/program-state.md)
 - [harness-doctrine.md](/Users/joseph/fractal/docs/harness-doctrine.md)
 - [harness-hardening-checklist.md](/Users/joseph/fractal/docs/harness-hardening-checklist.md)
 - [optimization-surfaces.md](/Users/joseph/fractal/docs/optimization-surfaces.md)
