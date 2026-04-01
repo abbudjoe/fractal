@@ -19,7 +19,8 @@ use tokenizers::{
 use tokio::{process::Command as TokioCommand, runtime::Builder as TokioRuntimeBuilder};
 
 use crate::{
-    revived_primitive_factories, tokenizer::p1_dynamic_lever_factory,
+    revived_primitive_factories,
+    tokenizer::{p1_dynamic_lever_factory, try_p1_dynamic_lever_factory},
     validate_tokenizer_primitive_name, B1FractalGated, B3FractalHierarchical, B4Universal,
     EncodedDocument, EncodedTokenKind, FaceoffChunkLimits, FaceoffEmissionPolicy,
     FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLexemeKind, FaceoffLocalCacheMode,
@@ -100,7 +101,30 @@ fn proving_ground_runs_all_revived_primitives_with_fixed_seed() {
 fn revived_tokenizer_factory_names_follow_convention() {
     for factory in revived_primitive_factories::<TestBackend>() {
         validate_tokenizer_primitive_name(factory.name).unwrap();
+        factory.validated_name().unwrap();
     }
+}
+
+#[test]
+fn primitive_factory_try_new_rejects_invalid_names_without_panic() {
+    let error = crate::PrimitiveFactory::<TestBackend>::try_new(
+        "bad primitive name",
+        crate::MotifReusePolicy::Off,
+        |config, device| Box::new(B1FractalGated::new(config.dim, device)),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(error, fractal_core::error::FractalError::InvalidConfig(ref message) if message.contains("tokenizer primitive")),
+        "expected invalid-config tokenizer primitive error, got {error:?}"
+    );
+}
+
+#[test]
+fn dynamic_factory_try_constructor_matches_the_declared_name() {
+    let factory = try_p1_dynamic_lever_factory::<TestBackend>().unwrap();
+
+    assert_eq!(factory.validated_name().unwrap().as_str(), factory.name);
 }
 
 #[test]
@@ -1566,7 +1590,7 @@ fn faceoff_state_signature_prototype_clusters_ignore_lexical_shape() {
         prefix_bins: [1, -2, 0, 3, -1, 2],
         suffix_bins: [2, -1, 1, 0],
     };
-    let summaries = vec![
+    let summaries = [
         PrimitiveRunSummary {
             primitive: "manual",
             produced: 2,
@@ -1644,7 +1668,7 @@ fn faceoff_prototype_precision_guardrails_reject_all_unique_short_clusters() {
         prefix_bins: [2, -1, 1, -2, 0, 2],
         suffix_bins: [1, 1, -1, -1],
     };
-    let summaries = vec![
+    let summaries = [
         manual_summary_with_signature("render_home()", "aaaaaaaaaaaaaaaa", signature),
         manual_summary_with_signature("AUTH_2026!?", "bbbbbbbbbbbbbbbb", signature),
     ];
@@ -1676,7 +1700,7 @@ fn faceoff_prototype_precision_guardrails_keep_repeated_short_clusters() {
         prefix_bins: [2, -1, 1, -2, 0, 2],
         suffix_bins: [1, 1, -1, -1],
     };
-    let summaries = vec![
+    let summaries = [
         manual_summary_with_signature_pair(
             "render_home()",
             "aaaaaaaaaaaaaaaa",
@@ -1725,7 +1749,7 @@ fn faceoff_adaptive_signature_granularity_refines_broad_clusters() {
         prefix_bins: [2, -1, 1, -2, 0, 2],
         suffix_bins: [-1, -1, 1, 1],
     };
-    let summaries = vec![
+    let summaries = [
         PrimitiveRunSummary {
             primitive: "manual",
             produced: 2,
@@ -2381,8 +2405,8 @@ fn faceoff_lexical_substrate_summary_is_deterministic() {
         .unwrap();
 
     assert_eq!(
-        digest_sequences(&[first.clone()]),
-        digest_sequences(&[second.clone()])
+        digest_sequences(std::slice::from_ref(&first)),
+        digest_sequences(std::slice::from_ref(&second))
     );
     assert_eq!(first.tokens.len(), second.tokens.len());
     assert_eq!(

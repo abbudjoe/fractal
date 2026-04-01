@@ -95,7 +95,21 @@ pub enum MotifReusePolicy {
     StateNormSimilarityV2,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TokenizerPrimitiveName(&'static str);
+
+impl TokenizerPrimitiveName {
+    pub fn new(name: &'static str) -> Result<Self, FractalError> {
+        validate_tokenizer_primitive_name(name)?;
+        Ok(Self(name))
+    }
+
+    pub fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct PrimitiveFactory<B: Backend> {
     pub name: &'static str,
     pub motif_reuse: MotifReusePolicy,
@@ -108,15 +122,24 @@ impl<B: Backend> PrimitiveFactory<B> {
         motif_reuse: MotifReusePolicy,
         build: fn(TokenizerConfig, &B::Device) -> Box<dyn FractalRule<B>>,
     ) -> Self {
-        if let Err(error) = validate_tokenizer_primitive_name(name) {
-            panic!("invalid tokenizer primitive name `{name}`: {error}");
-        }
-
         Self {
             name,
             motif_reuse,
             build,
         }
+    }
+
+    pub fn try_new(
+        name: &'static str,
+        motif_reuse: MotifReusePolicy,
+        build: fn(TokenizerConfig, &B::Device) -> Box<dyn FractalRule<B>>,
+    ) -> Result<Self, FractalError> {
+        let validated_name = TokenizerPrimitiveName::new(name)?;
+        Ok(Self::new(validated_name.as_str(), motif_reuse, build))
+    }
+
+    pub fn validated_name(&self) -> Result<TokenizerPrimitiveName, FractalError> {
+        TokenizerPrimitiveName::new(self.name)
     }
 }
 
@@ -157,6 +180,20 @@ struct TokenSummary {
     state_signature: StateSignature,
 }
 
+struct TokenizeContext<'a, B: Backend> {
+    rule: &'a dyn FractalRule<B>,
+    tokens: &'a mut Vec<TokenRecord>,
+    motifs: &'a mut MotifRegistry,
+    motif_reuse: MotifReusePolicy,
+    device: &'a B::Device,
+}
+
+#[derive(Clone, Copy)]
+struct AtomTokenizeInput<'a> {
+    atoms: &'a [LexemeSpan],
+    text: &'a str,
+}
+
 impl RecursiveTokenizer {
     pub fn new(config: TokenizerConfig) -> Self {
         Self { config }
@@ -188,15 +225,14 @@ impl RecursiveTokenizer {
                     start: 0,
                     depth: 0,
                 };
-                self.tokenize_segment(
+                let mut context = TokenizeContext {
                     rule,
-                    state,
-                    root,
-                    &mut tokens,
-                    &mut motifs,
+                    tokens: &mut tokens,
+                    motifs: &mut motifs,
                     motif_reuse,
                     device,
-                )?;
+                };
+                self.tokenize_segment(state, root, &mut context)?;
             }
             TokenizerSubstrateMode::LexicalAtoms => {
                 let atoms = scan_lexemes(text, 0);
@@ -208,17 +244,18 @@ impl RecursiveTokenizer {
                     end_index: atoms.len(),
                     depth: 0,
                 };
-                self.tokenize_atom_segment(
-                    rule,
-                    state,
-                    &atoms,
+                let atom_input = AtomTokenizeInput {
+                    atoms: &atoms,
                     text,
-                    root,
-                    &mut tokens,
-                    &mut motifs,
+                };
+                let mut context = TokenizeContext {
+                    rule,
+                    tokens: &mut tokens,
+                    motifs: &mut motifs,
                     motif_reuse,
                     device,
-                )?;
+                };
+                self.tokenize_atom_segment(state, atom_input, root, &mut context)?;
             }
         }
         Ok(tokens)
@@ -230,7 +267,7 @@ impl RecursiveTokenizer {
         device: &B::Device,
         factory: PrimitiveFactory<B>,
     ) -> Result<PrimitiveRunSummary, FractalError> {
-        validate_tokenizer_primitive_name(factory.name)?;
+        let _ = factory.validated_name()?;
         let rule = (factory.build)(self.config, device);
         let tokens = self.tokenize_with_policy(rule.as_ref(), text, device, factory.motif_reuse)?;
         Ok(PrimitiveRunSummary {
@@ -242,20 +279,16 @@ impl RecursiveTokenizer {
 
     fn tokenize_segment<B: Backend>(
         &self,
-        rule: &dyn FractalRule<B>,
         state: FractalState<B>,
         segment: Segment<'_>,
-        tokens: &mut Vec<TokenRecord>,
-        motifs: &mut MotifRegistry,
-        motif_reuse: MotifReusePolicy,
-        device: &B::Device,
+        context: &mut TokenizeContext<'_, B>,
     ) -> Result<(), FractalError> {
         if segment.bytes.is_empty() {
             return Ok(());
         }
 
-        let features = segment_features::<B>(segment.bytes, self.config.dim, device);
-        let next_state = rule.apply(
+        let features = segment_features::<B>(segment.bytes, self.config.dim, context.device);
+        let next_state = context.rule.apply(
             &state,
             &features,
             ApplyContext {
@@ -267,11 +300,11 @@ impl RecursiveTokenizer {
             &next_state.readout(),
             segment.bytes,
             segment.depth,
-            motifs,
-            motif_reuse,
+            context.motifs,
+            context.motif_reuse,
         )?;
         let end = segment.start + segment.bytes.len();
-        tokens.push(TokenRecord {
+        context.tokens.push(TokenRecord {
             depth: segment.depth,
             start: segment.start,
             end,
@@ -287,30 +320,22 @@ impl RecursiveTokenizer {
         if let Some(split) = split_point(segment.bytes, self.config.split_policy) {
             let (left, right) = segment.bytes.split_at(split);
             self.tokenize_segment(
-                rule,
                 next_state.clone(),
                 Segment {
                     bytes: left,
                     start: segment.start,
                     depth: segment.depth + 1,
                 },
-                tokens,
-                motifs,
-                motif_reuse,
-                device,
+                context,
             )?;
             self.tokenize_segment(
-                rule,
                 next_state,
                 Segment {
                     bytes: right,
                     start: segment.start + split,
                     depth: segment.depth + 1,
                 },
-                tokens,
-                motifs,
-                motif_reuse,
-                device,
+                context,
             )?;
         }
 
@@ -319,35 +344,30 @@ impl RecursiveTokenizer {
 
     fn tokenize_atom_segment<B: Backend>(
         &self,
-        rule: &dyn FractalRule<B>,
         state: FractalState<B>,
-        atoms: &[LexemeSpan],
-        text: &str,
+        input: AtomTokenizeInput<'_>,
         segment: AtomSegment,
-        tokens: &mut Vec<TokenRecord>,
-        motifs: &mut MotifRegistry,
-        motif_reuse: MotifReusePolicy,
-        device: &B::Device,
+        context: &mut TokenizeContext<'_, B>,
     ) -> Result<(), FractalError> {
-        if segment.start_index >= segment.end_index || segment.end_index > atoms.len() {
+        if segment.start_index >= segment.end_index || segment.end_index > input.atoms.len() {
             return Ok(());
         }
 
-        let atom_slice = &atoms[segment.start_index..segment.end_index];
+        let atom_slice = &input.atoms[segment.start_index..segment.end_index];
         let byte_start = atom_slice.first().map(|atom| atom.start).unwrap_or(0);
         let byte_end = atom_slice.last().map(|atom| atom.end).unwrap_or(byte_start);
-        if byte_end > text.len() || byte_start > byte_end {
+        if byte_end > input.text.len() || byte_start > byte_end {
             return Err(FractalError::InvalidState(format!(
                 "atom segment span {}..{} is out of bounds for input length {}",
                 byte_start,
                 byte_end,
-                text.len()
+                input.text.len()
             )));
         }
 
-        let bytes = &text.as_bytes()[byte_start..byte_end];
-        let features = atom_segment_features::<B>(atom_slice, self.config.dim, device);
-        let next_state = rule.apply(
+        let bytes = &input.text.as_bytes()[byte_start..byte_end];
+        let features = atom_segment_features::<B>(atom_slice, self.config.dim, context.device);
+        let next_state = context.rule.apply(
             &state,
             &features,
             ApplyContext {
@@ -359,14 +379,14 @@ impl RecursiveTokenizer {
             &next_state.readout(),
             bytes,
             segment.depth,
-            motifs,
-            motif_reuse,
+            context.motifs,
+            context.motif_reuse,
         )?;
-        tokens.push(TokenRecord {
+        context.tokens.push(TokenRecord {
             depth: segment.depth,
             start: byte_start,
             end: byte_end,
-            text: text[byte_start..byte_end].to_string(),
+            text: input.text[byte_start..byte_end].to_string(),
             token: summary.token,
             state_signature: summary.state_signature,
         });
@@ -378,34 +398,24 @@ impl RecursiveTokenizer {
         if let Some(split) = atom_split_point(atom_slice, self.config.split_policy) {
             let absolute_split = segment.start_index + split;
             self.tokenize_atom_segment(
-                rule,
                 next_state.clone(),
-                atoms,
-                text,
+                input,
                 AtomSegment {
                     start_index: segment.start_index,
                     end_index: absolute_split,
                     depth: segment.depth + 1,
                 },
-                tokens,
-                motifs,
-                motif_reuse,
-                device,
+                context,
             )?;
             self.tokenize_atom_segment(
-                rule,
                 next_state,
-                atoms,
-                text,
+                input,
                 AtomSegment {
                     start_index: absolute_split,
                     end_index: segment.end_index,
                     depth: segment.depth + 1,
                 },
-                tokens,
-                motifs,
-                motif_reuse,
-                device,
+                context,
             )?;
         }
 
@@ -441,6 +451,14 @@ pub fn revived_primitive_factories<B: Backend>() -> [PrimitiveFactory<B>; 5] {
             seeded_b4_universal::<B>,
         ),
     ]
+}
+
+pub fn try_p1_dynamic_lever_factory<B: Backend>() -> Result<PrimitiveFactory<B>, FractalError> {
+    PrimitiveFactory::try_new(
+        "p1_fractal_hybrid_dyn-state-norm_v2",
+        MotifReusePolicy::StateNormSimilarityV2,
+        seeded_p1_fractal_hybrid_dynamic::<B>,
+    )
 }
 
 pub fn p1_dynamic_lever_factory<B: Backend>() -> PrimitiveFactory<B> {
@@ -1168,100 +1186,6 @@ fn tensor_data_to_vec<E: Element>(
         .map_err(|err| FractalError::InvalidState(format!("failed to extract {label}: {err:?}")))
 }
 
-#[cfg(test)]
-mod split_tests {
-    use super::{atom_split_point, split_point, SplitPolicy};
-    use crate::faceoff::scan_lexemes;
-
-    #[test]
-    fn boundary_aware_split_prefers_newline_boundaries() {
-        let input = "AAAAAAAAAAAA\n\nBBBBBBBBBBBB";
-        let split = split_point(input.as_bytes(), SplitPolicy::BoundaryAware).unwrap();
-        let prev = input[..split].chars().next_back().unwrap_or('\0');
-        let next = input[split..].chars().next().unwrap_or('\0');
-
-        assert!(prev == '\n' || next == '\n');
-    }
-
-    #[test]
-    fn boundary_aware_split_prefers_code_structure_over_midpoint() {
-        let input =
-            "fn_render_home_identifier_longtail(){AUTH_PROVIDER_2026=1;\nprintln!(\"ok\");\n}\n";
-        let boundary = split_point(input.as_bytes(), SplitPolicy::BoundaryAware).unwrap();
-        let prev = input[..boundary].chars().next_back().unwrap_or('\0');
-        let next = input[boundary..].chars().next().unwrap_or('\0');
-
-        assert!(
-            matches!(prev, '\n' | '{' | ';' | ')' | ':')
-                || matches!(next, '\n' | '{' | ';' | '(' | ':')
-        );
-    }
-
-    #[test]
-    fn boundary_aware_split_falls_back_when_no_boundary_exists() {
-        let input = "abcdefghij";
-        let balanced = split_point(input.as_bytes(), SplitPolicy::Balanced).unwrap();
-        let boundary = split_point(input.as_bytes(), SplitPolicy::BoundaryAware).unwrap();
-
-        assert_eq!(balanced, boundary);
-    }
-
-    #[test]
-    fn split_point_preserves_utf8_boundaries() {
-        let input = "🙂alpha\nbeta語";
-        let split = split_point(input.as_bytes(), SplitPolicy::BoundaryAware).unwrap();
-
-        assert!(std::str::from_utf8(&input.as_bytes()[..split]).is_ok());
-        assert!(std::str::from_utf8(&input.as_bytes()[split..]).is_ok());
-    }
-
-    #[test]
-    fn syntax_aware_atom_split_prefers_line_start_declaration_boundaries() {
-        let input = "let auth_provider = 1;\nfn render_home_screen() {\n    println!(\"ok\");\n}\n";
-        let atoms = scan_lexemes(input, 0);
-        let split = atom_split_point(&atoms, SplitPolicy::SyntaxAware).unwrap();
-        let split_start = atoms[split].start;
-        let right = &input[split_start..];
-
-        assert!(
-            right.starts_with("fn ") || right.starts_with("\nfn "),
-            "syntax-aware split chose right segment {:?}",
-            right
-        );
-    }
-
-    #[test]
-    fn syntax_aware_atom_split_prefers_markdown_heading_boundaries() {
-        let input = "paragraph text paragraph text.\n## Next Section\n- item one\n- item two\n";
-        let atoms = scan_lexemes(input, 0);
-        let split = atom_split_point(&atoms, SplitPolicy::SyntaxAware).unwrap();
-        let split_start = atoms[split].start;
-        let right = &input[split_start..];
-
-        assert!(
-            right.starts_with("## ")
-                || right.starts_with("\n## ")
-                || right.starts_with("# ")
-                || right.starts_with("\n# ")
-                || right.starts_with("- ")
-                || right.starts_with("\n- "),
-            "syntax-aware split chose right segment {:?}",
-            right
-        );
-    }
-
-    #[test]
-    fn syntax_aware_atom_split_preserves_utf8_boundaries() {
-        let input = "## 概要\n- 項目🙂\nfn render_home() {\n    return;\n}\n";
-        let atoms = scan_lexemes(input, 0);
-        let split = atom_split_point(&atoms, SplitPolicy::SyntaxAware).unwrap();
-        let split_start = atoms[split].start;
-
-        assert!(std::str::from_utf8(&input.as_bytes()[..split_start]).is_ok());
-        assert!(std::str::from_utf8(&input.as_bytes()[split_start..]).is_ok());
-    }
-}
-
 #[allow(dead_code)]
 fn _layout_width(layout: StateLayout, hidden_dim: usize) -> usize {
     layout.readout_width(hidden_dim)
@@ -1443,5 +1367,99 @@ impl StateSignature {
             prefix_bins,
             suffix_bins,
         }
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::{atom_split_point, split_point, SplitPolicy};
+    use crate::faceoff::scan_lexemes;
+
+    #[test]
+    fn boundary_aware_split_prefers_newline_boundaries() {
+        let input = "AAAAAAAAAAAA\n\nBBBBBBBBBBBB";
+        let split = split_point(input.as_bytes(), SplitPolicy::BoundaryAware).unwrap();
+        let prev = input[..split].chars().next_back().unwrap_or('\0');
+        let next = input[split..].chars().next().unwrap_or('\0');
+
+        assert!(prev == '\n' || next == '\n');
+    }
+
+    #[test]
+    fn boundary_aware_split_prefers_code_structure_over_midpoint() {
+        let input =
+            "fn_render_home_identifier_longtail(){AUTH_PROVIDER_2026=1;\nprintln!(\"ok\");\n}\n";
+        let boundary = split_point(input.as_bytes(), SplitPolicy::BoundaryAware).unwrap();
+        let prev = input[..boundary].chars().next_back().unwrap_or('\0');
+        let next = input[boundary..].chars().next().unwrap_or('\0');
+
+        assert!(
+            matches!(prev, '\n' | '{' | ';' | ')' | ':')
+                || matches!(next, '\n' | '{' | ';' | '(' | ':')
+        );
+    }
+
+    #[test]
+    fn boundary_aware_split_falls_back_when_no_boundary_exists() {
+        let input = "abcdefghij";
+        let balanced = split_point(input.as_bytes(), SplitPolicy::Balanced).unwrap();
+        let boundary = split_point(input.as_bytes(), SplitPolicy::BoundaryAware).unwrap();
+
+        assert_eq!(balanced, boundary);
+    }
+
+    #[test]
+    fn split_point_preserves_utf8_boundaries() {
+        let input = "🙂alpha\nbeta語";
+        let split = split_point(input.as_bytes(), SplitPolicy::BoundaryAware).unwrap();
+
+        assert!(std::str::from_utf8(&input.as_bytes()[..split]).is_ok());
+        assert!(std::str::from_utf8(&input.as_bytes()[split..]).is_ok());
+    }
+
+    #[test]
+    fn syntax_aware_atom_split_prefers_line_start_declaration_boundaries() {
+        let input = "let auth_provider = 1;\nfn render_home_screen() {\n    println!(\"ok\");\n}\n";
+        let atoms = scan_lexemes(input, 0);
+        let split = atom_split_point(&atoms, SplitPolicy::SyntaxAware).unwrap();
+        let split_start = atoms[split].start;
+        let right = &input[split_start..];
+
+        assert!(
+            right.starts_with("fn ") || right.starts_with("\nfn "),
+            "syntax-aware split chose right segment {:?}",
+            right
+        );
+    }
+
+    #[test]
+    fn syntax_aware_atom_split_prefers_markdown_heading_boundaries() {
+        let input = "paragraph text paragraph text.\n## Next Section\n- item one\n- item two\n";
+        let atoms = scan_lexemes(input, 0);
+        let split = atom_split_point(&atoms, SplitPolicy::SyntaxAware).unwrap();
+        let split_start = atoms[split].start;
+        let right = &input[split_start..];
+
+        assert!(
+            right.starts_with("## ")
+                || right.starts_with("\n## ")
+                || right.starts_with("# ")
+                || right.starts_with("\n# ")
+                || right.starts_with("- ")
+                || right.starts_with("\n- "),
+            "syntax-aware split chose right segment {:?}",
+            right
+        );
+    }
+
+    #[test]
+    fn syntax_aware_atom_split_preserves_utf8_boundaries() {
+        let input = "## 概要\n- 項目🙂\nfn render_home() {\n    return;\n}\n";
+        let atoms = scan_lexemes(input, 0);
+        let split = atom_split_point(&atoms, SplitPolicy::SyntaxAware).unwrap();
+        let split_start = atoms[split].start;
+
+        assert!(std::str::from_utf8(&input.as_bytes()[..split_start]).is_ok());
+        assert!(std::str::from_utf8(&input.as_bytes()[split_start..]).is_ok());
     }
 }

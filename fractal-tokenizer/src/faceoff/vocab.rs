@@ -14,16 +14,11 @@ use super::{lexeme::lexical_shape_key, FaceoffIdentityMode, FaceoffLexemeKind, F
 
 pub const FACEOFF_VOCAB_FORMAT_VERSION: u32 = 5;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PrototypeGranularityMode {
+    #[default]
     Coarse,
     Adaptive,
-}
-
-impl Default for PrototypeGranularityMode {
-    fn default() -> Self {
-        Self::Coarse
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

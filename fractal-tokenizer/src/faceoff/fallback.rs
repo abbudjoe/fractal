@@ -43,6 +43,22 @@ struct LocalMotifCache {
     next_ordinal: u32,
 }
 
+struct EncodeNodeContext<'a> {
+    tree: &'a SummaryTree<'a>,
+    input: &'a [u8],
+    vocab: &'a FaceoffVocab,
+    policy: FaceoffEmissionPolicy,
+    fallback_mode: FaceoffFallbackMode,
+    local_cache_mode: FaceoffLocalCacheMode,
+}
+
+#[derive(Default)]
+struct EncodeNodeState {
+    encoded: Vec<EncodedToken>,
+    stats: FaceoffFallbackStats,
+    local_cache: LocalMotifCache,
+}
+
 impl LocalMotifCache {
     fn lookup(&self, depth: usize, text: &str) -> Option<&LocalMotifEntry> {
         self.entries.get(&LocalSpanKey {
@@ -81,235 +97,183 @@ pub(crate) fn encode_summary_document(
     let input = text.as_bytes();
     let tree = SummaryTree::new(summary, input.len())?;
     let root = tree.root()?;
-    let mut encoded = Vec::new();
-    let mut stats = FaceoffFallbackStats::default();
-    let mut local_cache = LocalMotifCache::default();
-    encode_node(
-        root,
-        &tree,
+    let context = EncodeNodeContext {
+        tree: &tree,
         input,
         vocab,
         policy,
         fallback_mode,
         local_cache_mode,
-        &mut encoded,
-        &mut stats,
-        &mut local_cache,
-    )?;
-    encoded.sort_by_key(|token| token.start);
+    };
+    let mut state = EncodeNodeState::default();
+    encode_node(root, &context, &mut state)?;
+    state.encoded.sort_by_key(|token| token.start);
     Ok(EncodedDocument {
         input_len: input.len(),
-        tokens: encoded,
-        fallback: stats,
+        tokens: state.encoded,
+        fallback: state.stats,
     })
 }
 
 fn encode_node(
     record: &TokenRecord,
-    tree: &SummaryTree<'_>,
-    input: &[u8],
-    vocab: &FaceoffVocab,
-    policy: FaceoffEmissionPolicy,
-    fallback_mode: FaceoffFallbackMode,
-    local_cache_mode: FaceoffLocalCacheMode,
-    encoded: &mut Vec<EncodedToken>,
-    stats: &mut FaceoffFallbackStats,
-    local_cache: &mut LocalMotifCache,
+    context: &EncodeNodeContext<'_>,
+    state: &mut EncodeNodeState,
 ) -> Result<(), FractalError> {
-    if record.end > input.len() || record.start > record.end {
+    if record.end > context.input.len() || record.start > record.end {
         return Err(FractalError::InvalidState(format!(
             "token span {}..{} is out of bounds for input length {}",
             record.start,
             record.end,
-            input.len()
+            context.input.len()
         )));
     }
 
     let digest = token_digest(&record.token)?;
-    let children = tree.children(record);
+    let children = context.tree.children(record);
     let children_cover_parent = spans_cover_parent(record, &children);
     let should_recurse_known = should_recurse_known(
         record,
         &children,
         children_cover_parent,
-        policy,
-        &tree.digest_counts,
-        tree.max_depth,
+        context.policy,
+        &context.tree.digest_counts,
+        context.tree.max_depth,
     );
-    if vocab.identity_mode() == FaceoffIdentityMode::PrototypePrimary {
-        if let Some(id) = vocab.prototype_id(record)? {
+    if context.vocab.identity_mode() == FaceoffIdentityMode::PrototypePrimary {
+        if let Some(id) = context.vocab.prototype_id(record)? {
             if should_recurse_known {
-                stats.recursed_to_children += 1;
+                state.stats.recursed_to_children += 1;
                 for child in &children {
-                    encode_node(
-                        child,
-                        tree,
-                        input,
-                        vocab,
-                        policy,
-                        fallback_mode,
-                        local_cache_mode,
-                        encoded,
-                        stats,
-                        local_cache,
-                    )?;
+                    encode_node(child, context, state)?;
                 }
                 return Ok(());
             }
 
-            stats.motif_hits += 1;
-            stats.prototype_hits += 1;
-            encoded.push(EncodedToken {
+            state.stats.motif_hits += 1;
+            state.stats.prototype_hits += 1;
+            state.encoded.push(EncodedToken {
                 id,
                 kind: EncodedTokenKind::Motif {
-                    digest: vocab.motif_digest(id).unwrap_or(digest).to_owned(),
+                    digest: context.vocab.motif_digest(id).unwrap_or(digest).to_owned(),
                 },
                 depth: record.depth,
                 start: record.start,
                 end: record.end,
-                bytes: input[record.start..record.end].to_vec(),
+                bytes: context.input[record.start..record.end].to_vec(),
             });
             return Ok(());
         }
-    } else if let Some(id) = vocab.motif_id(digest) {
+    } else if let Some(id) = context.vocab.motif_id(digest) {
         if should_recurse_known {
-            stats.recursed_to_children += 1;
+            state.stats.recursed_to_children += 1;
             for child in &children {
-                encode_node(
-                    child,
-                    tree,
-                    input,
-                    vocab,
-                    policy,
-                    fallback_mode,
-                    local_cache_mode,
-                    encoded,
-                    stats,
-                    local_cache,
-                )?;
+                encode_node(child, context, state)?;
             }
             return Ok(());
         }
 
-        stats.motif_hits += 1;
-        stats.exact_motif_hits += 1;
-        encoded.push(EncodedToken {
+        state.stats.motif_hits += 1;
+        state.stats.exact_motif_hits += 1;
+        state.encoded.push(EncodedToken {
             id,
             kind: EncodedTokenKind::Motif {
-                digest: vocab.motif_digest(id).unwrap_or(digest).to_owned(),
+                digest: context.vocab.motif_digest(id).unwrap_or(digest).to_owned(),
             },
             depth: record.depth,
             start: record.start,
             end: record.end,
-            bytes: input[record.start..record.end].to_vec(),
+            bytes: context.input[record.start..record.end].to_vec(),
         });
         return Ok(());
     }
 
-    if vocab.identity_mode() == FaceoffIdentityMode::Legacy {
-        if let Some(id) = vocab.prototype_id(record)? {
+    if context.vocab.identity_mode() == FaceoffIdentityMode::Legacy {
+        if let Some(id) = context.vocab.prototype_id(record)? {
             if should_recurse_known {
-                stats.recursed_to_children += 1;
+                state.stats.recursed_to_children += 1;
                 for child in &children {
-                    encode_node(
-                        child,
-                        tree,
-                        input,
-                        vocab,
-                        policy,
-                        fallback_mode,
-                        local_cache_mode,
-                        encoded,
-                        stats,
-                        local_cache,
-                    )?;
+                    encode_node(child, context, state)?;
                 }
                 return Ok(());
             }
 
-            stats.motif_hits += 1;
-            stats.prototype_hits += 1;
-            encoded.push(EncodedToken {
+            state.stats.motif_hits += 1;
+            state.stats.prototype_hits += 1;
+            state.encoded.push(EncodedToken {
                 id,
                 kind: EncodedTokenKind::Motif {
-                    digest: vocab.motif_digest(id).unwrap_or(digest).to_owned(),
+                    digest: context.vocab.motif_digest(id).unwrap_or(digest).to_owned(),
                 },
                 depth: record.depth,
                 start: record.start,
                 end: record.end,
-                bytes: input[record.start..record.end].to_vec(),
+                bytes: context.input[record.start..record.end].to_vec(),
             });
             return Ok(());
         }
     }
 
-    let literal = std::str::from_utf8(&input[record.start..record.end]).map_err(|source| {
-        FractalError::InvalidState(format!(
-            "faceoff fallback span {}..{} is not valid UTF-8: {source}",
-            record.start, record.end
-        ))
-    })?;
-    if vocab.identity_mode() == FaceoffIdentityMode::Legacy && fallback_mode.allows_literal_rescue()
+    let literal =
+        std::str::from_utf8(&context.input[record.start..record.end]).map_err(|source| {
+            FractalError::InvalidState(format!(
+                "faceoff fallback span {}..{} is not valid UTF-8: {source}",
+                record.start, record.end
+            ))
+        })?;
+    if context.vocab.identity_mode() == FaceoffIdentityMode::Legacy
+        && context.fallback_mode.allows_literal_rescue()
     {
-        if let Some(id) = vocab.literal_id(literal) {
-            stats.motif_hits += 1;
-            stats.literal_hits += 1;
-            encoded.push(EncodedToken {
+        if let Some(id) = context.vocab.literal_id(literal) {
+            state.stats.motif_hits += 1;
+            state.stats.literal_hits += 1;
+            state.encoded.push(EncodedToken {
                 id,
                 kind: EncodedTokenKind::Motif {
-                    digest: vocab.motif_digest(id).unwrap_or(digest).to_owned(),
+                    digest: context.vocab.motif_digest(id).unwrap_or(digest).to_owned(),
                 },
                 depth: record.depth,
                 start: record.start,
                 end: record.end,
-                bytes: input[record.start..record.end].to_vec(),
+                bytes: context.input[record.start..record.end].to_vec(),
             });
             return Ok(());
         }
     }
 
-    if vocab.identity_mode() == FaceoffIdentityMode::Legacy && fallback_mode.allows_shape_rescue() {
-        if let Some(id) = vocab.shape_id_for_text(literal) {
+    if context.vocab.identity_mode() == FaceoffIdentityMode::Legacy
+        && context.fallback_mode.allows_shape_rescue()
+    {
+        if let Some(id) = context.vocab.shape_id_for_text(literal) {
             if should_recurse_known {
-                stats.recursed_to_children += 1;
+                state.stats.recursed_to_children += 1;
                 for child in &children {
-                    encode_node(
-                        child,
-                        tree,
-                        input,
-                        vocab,
-                        policy,
-                        fallback_mode,
-                        local_cache_mode,
-                        encoded,
-                        stats,
-                        local_cache,
-                    )?;
+                    encode_node(child, context, state)?;
                 }
                 return Ok(());
             }
 
-            stats.motif_hits += 1;
-            stats.shape_hits += 1;
-            encoded.push(EncodedToken {
+            state.stats.motif_hits += 1;
+            state.stats.shape_hits += 1;
+            state.encoded.push(EncodedToken {
                 id,
                 kind: EncodedTokenKind::Motif {
-                    digest: vocab.motif_digest(id).unwrap_or(digest).to_owned(),
+                    digest: context.vocab.motif_digest(id).unwrap_or(digest).to_owned(),
                 },
                 depth: record.depth,
                 start: record.start,
                 end: record.end,
-                bytes: input[record.start..record.end].to_vec(),
+                bytes: context.input[record.start..record.end].to_vec(),
             });
             return Ok(());
         }
     }
 
-    if local_cache_mode == FaceoffLocalCacheMode::ExactSpan {
-        if let Some(entry) = local_cache.lookup(record.depth, literal) {
-            stats.motif_hits += 1;
-            stats.local_cache_hits += 1;
-            encoded.push(EncodedToken {
+    if context.local_cache_mode == FaceoffLocalCacheMode::ExactSpan {
+        if let Some(entry) = state.local_cache.lookup(record.depth, literal) {
+            state.stats.motif_hits += 1;
+            state.stats.local_cache_hits += 1;
+            state.encoded.push(EncodedToken {
                 id: entry.id,
                 kind: EncodedTokenKind::Motif {
                     digest: entry.digest.clone(),
@@ -317,50 +281,45 @@ fn encode_node(
                 depth: record.depth,
                 start: record.start,
                 end: record.end,
-                bytes: input[record.start..record.end].to_vec(),
+                bytes: context.input[record.start..record.end].to_vec(),
             });
             return Ok(());
         }
     }
 
-    stats.unknown_motifs += 1;
+    state.stats.unknown_motifs += 1;
     if children_cover_parent {
-        stats.recursed_to_children += 1;
+        state.stats.recursed_to_children += 1;
         for child in &children {
-            encode_node(
-                child,
-                tree,
-                input,
-                vocab,
-                policy,
-                fallback_mode,
-                local_cache_mode,
-                encoded,
-                stats,
-                local_cache,
-            )?;
+            encode_node(child, context, state)?;
         }
         maybe_store_local_cache_entry(
-            local_cache_mode,
-            local_cache,
-            vocab,
+            context.local_cache_mode,
+            &mut state.local_cache,
+            context.vocab,
             record,
             literal,
             digest,
-            stats,
+            &mut state.stats,
         );
         return Ok(());
     }
 
-    emit_lexical_or_byte_fallback(record, input, vocab, encoded, stats);
+    emit_lexical_or_byte_fallback(
+        record,
+        context.input,
+        context.vocab,
+        &mut state.encoded,
+        &mut state.stats,
+    );
     maybe_store_local_cache_entry(
-        local_cache_mode,
-        local_cache,
-        vocab,
+        context.local_cache_mode,
+        &mut state.local_cache,
+        context.vocab,
         record,
         literal,
         digest,
-        stats,
+        &mut state.stats,
     );
     Ok(())
 }

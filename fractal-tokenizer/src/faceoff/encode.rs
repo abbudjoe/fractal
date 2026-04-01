@@ -2,14 +2,31 @@ use burn::tensor::backend::Backend;
 use fractal_core::error::FractalError;
 
 use crate::{
-    tokenizer::p1_dynamic_lever_factory, PrimitiveFactory, PrimitiveRunSummary, RecursiveTokenizer,
-    TokenizerConfig,
+    tokenizer::try_p1_dynamic_lever_factory, PrimitiveFactory, PrimitiveRunSummary,
+    RecursiveTokenizer, TokenizerConfig,
 };
 
 use super::{
     fallback::encode_summary_document, EncodedDocument, FaceoffEmissionPolicy, FaceoffFallbackMode,
     FaceoffLocalCacheMode, FaceoffVocab, FaceoffVocabConfig,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FaceoffEncodingOptions {
+    pub policy: FaceoffEmissionPolicy,
+    pub fallback_mode: FaceoffFallbackMode,
+    pub local_cache_mode: FaceoffLocalCacheMode,
+}
+
+impl Default for FaceoffEncodingOptions {
+    fn default() -> Self {
+        Self {
+            policy: FaceoffEmissionPolicy::FinestKnown,
+            fallback_mode: FaceoffFallbackMode::Full,
+            local_cache_mode: FaceoffLocalCacheMode::Off,
+        }
+    }
+}
 
 pub struct FaceoffTokenizer {
     tokenizer: RecursiveTokenizer,
@@ -33,7 +50,7 @@ impl FaceoffTokenizer {
         text: &str,
         device: &B::Device,
     ) -> Result<PrimitiveRunSummary, FractalError> {
-        self.summarize_with_factory(text, device, p1_dynamic_lever_factory::<B>())
+        self.summarize_with_factory(text, device, try_p1_dynamic_lever_factory::<B>()?)
     }
 
     pub fn summarize_with_factory<B: Backend>(
@@ -151,35 +168,35 @@ impl FaceoffTokenizer {
         fallback_mode: FaceoffFallbackMode,
         local_cache_mode: FaceoffLocalCacheMode,
     ) -> Result<EncodedDocument, FractalError> {
-        self.encode_text_with_factory_and_policy(
+        self.encode_text_with_factory(
             text,
             vocab,
             device,
-            p1_dynamic_lever_factory::<B>(),
-            policy,
-            fallback_mode,
-            local_cache_mode,
+            try_p1_dynamic_lever_factory::<B>()?,
+            FaceoffEncodingOptions {
+                policy,
+                fallback_mode,
+                local_cache_mode,
+            },
         )
     }
 
-    pub fn encode_text_with_factory_and_policy<B: Backend>(
+    pub fn encode_text_with_factory<B: Backend>(
         &self,
         text: &str,
         vocab: &FaceoffVocab,
         device: &B::Device,
         factory: PrimitiveFactory<B>,
-        policy: FaceoffEmissionPolicy,
-        fallback_mode: FaceoffFallbackMode,
-        local_cache_mode: FaceoffLocalCacheMode,
+        options: FaceoffEncodingOptions,
     ) -> Result<EncodedDocument, FractalError> {
         let summary = self.summarize_with_factory::<B>(text, device, factory)?;
         self.encode_summary_with_policy_and_fallback_mode(
             text,
             &summary,
             vocab,
-            policy,
-            fallback_mode,
-            local_cache_mode,
+            options.policy,
+            options.fallback_mode,
+            options.local_cache_mode,
         )
     }
 
