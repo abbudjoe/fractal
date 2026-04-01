@@ -7,6 +7,7 @@ use crate::{
 
 use super::{
     fallback::encode_summary_document, EncodedDocument, FaceoffEmissionPolicy, FaceoffVocab,
+    FaceoffVocabConfig,
 };
 
 pub struct FaceoffTokenizer {
@@ -40,11 +41,20 @@ impl FaceoffTokenizer {
         texts: &[&str],
         device: &B::Device,
     ) -> Result<FaceoffVocab, FractalError> {
+        self.induce_vocab_from_texts_with_config::<B>(texts, device, FaceoffVocabConfig::default())
+    }
+
+    pub fn induce_vocab_from_texts_with_config<B: Backend>(
+        &self,
+        texts: &[&str],
+        device: &B::Device,
+        config: FaceoffVocabConfig,
+    ) -> Result<FaceoffVocab, FractalError> {
         let summaries = texts
             .iter()
             .map(|text| self.summarize_v2::<B>(text, device))
             .collect::<Result<Vec<_>, _>>()?;
-        FaceoffVocab::from_summaries(summaries.iter())
+        FaceoffVocab::from_summaries_with_config(summaries.iter(), config)
     }
 
     pub fn encode_text_v2<B: Backend>(

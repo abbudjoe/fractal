@@ -22,10 +22,10 @@ use crate::{
     revived_primitive_factories, tokenizer::p1_dynamic_lever_factory,
     validate_tokenizer_primitive_name, B1FractalGated, B3FractalHierarchical, B4Universal,
     EncodedDocument, EncodedTokenKind, FaceoffChunkLimits, FaceoffEmissionPolicy, FaceoffTokenizer,
-    FaceoffVocab, HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument,
-    NativeCollationSpec, NativeCompatibilityAdapter, NativeTokenizer, P1FractalHybrid,
-    P2Mandelbrot, PrimitiveRunSummary, RecursiveTokenizer, TokenRecord, TokenizerConfig,
-    FACEOFF_VOCAB_FORMAT_VERSION,
+    FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer, ModelFacingBatch,
+    ModelFacingDocument, NativeCollationSpec, NativeCompatibilityAdapter, NativeTokenizer,
+    P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary, RecursiveTokenizer, TokenRecord,
+    TokenizerConfig, FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -1385,6 +1385,81 @@ fn faceoff_vocab_induction_is_deterministic() {
 
     assert_eq!(first.entries(), second.entries());
     assert!(first.motif_count() > 0);
+}
+
+#[test]
+fn faceoff_vocab_config_filters_one_off_large_motifs() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let shared = "error: retry later\n".repeat(16);
+    let unique_large = format!("unique start {}\n{}", "A".repeat(2048), stress_input());
+    let corpus = vec![shared.as_str(), shared.as_str(), unique_large.as_str()];
+
+    let default_vocab = faceoff
+        .induce_vocab_from_texts::<TestBackend>(&corpus, &device)
+        .unwrap();
+    let recurring_only = faceoff
+        .induce_vocab_from_texts_with_config::<TestBackend>(
+            &corpus,
+            &device,
+            FaceoffVocabConfig {
+                min_occurrence_count: 2,
+                min_doc_count: 2,
+                max_token_bytes: Some(512),
+            },
+        )
+        .unwrap();
+
+    assert!(recurring_only.motif_count() > 0);
+    assert!(recurring_only.motif_count() < default_vocab.motif_count());
+    assert!(recurring_only
+        .entries()
+        .iter()
+        .all(|entry| entry.occurrence_count >= 2));
+    assert!(recurring_only
+        .entries()
+        .iter()
+        .all(|entry| entry.doc_count >= 2));
+    assert!(recurring_only
+        .entries()
+        .iter()
+        .all(|entry| entry.max_byte_len <= 512));
+}
+
+#[test]
+fn faceoff_vocab_recover_descendant_cover_on_held_out_input() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig::default());
+    let shared = "The cat sat on the mat. The dog sat on the mat. The bird sat on the mat.";
+    let induction_a = format!("ALPHA HEADER\n{shared}\nALPHA FOOTER");
+    let induction_b = format!("BETA HEADER\n{shared}\nBETA FOOTER");
+    let held_out = format!("GAMMA HEADER\n{shared}\nGAMMA FOOTER");
+    let corpus = vec![induction_a.as_str(), induction_b.as_str()];
+
+    let vocab = faceoff
+        .induce_vocab_from_texts_with_config::<TestBackend>(
+            &corpus,
+            &device,
+            FaceoffVocabConfig {
+                min_occurrence_count: 2,
+                min_doc_count: 2,
+                max_token_bytes: Some(512),
+            },
+        )
+        .unwrap();
+
+    let encoded = faceoff
+        .encode_text_v2::<TestBackend>(&held_out, &vocab, &device)
+        .unwrap();
+
+    assert_eq!(faceoff.decode_document(&encoded).unwrap(), held_out);
+    assert!(encoded.fallback.unknown_motifs > 0);
+    assert!(encoded.fallback.recursed_to_children > 0);
+    assert!(encoded.fallback.motif_hits > 0);
+    assert!(
+        encoded.fallback.byte_fallback_tokens < held_out.len(),
+        "held-out recovery should not devolve to all-byte fallback"
+    );
 }
 
 #[test]

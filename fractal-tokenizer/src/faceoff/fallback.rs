@@ -89,6 +89,27 @@ fn encode_node(
         return Ok(());
     }
 
+    let literal = std::str::from_utf8(&input[record.start..record.end]).map_err(|source| {
+        FractalError::InvalidState(format!(
+            "faceoff fallback span {}..{} is not valid UTF-8: {source}",
+            record.start, record.end
+        ))
+    })?;
+    if let Some(id) = vocab.literal_id(literal) {
+        stats.motif_hits += 1;
+        encoded.push(EncodedToken {
+            id,
+            kind: EncodedTokenKind::Motif {
+                digest: vocab.motif_digest(id).unwrap_or(digest).to_owned(),
+            },
+            depth: record.depth,
+            start: record.start,
+            end: record.end,
+            bytes: input[record.start..record.end].to_vec(),
+        });
+        return Ok(());
+    }
+
     stats.unknown_motifs += 1;
     if children_cover_parent {
         stats.recursed_to_children += 1;
@@ -255,7 +276,8 @@ fn should_recurse_known(
                     || child_mean_reuse_num > parent_reuse * child_mean_reuse_den
             };
             let span_signal = child_peak_len.saturating_mul(2) > parent_len
-                || child_mean_len_num.saturating_mul(2) > parent_len.saturating_mul(child_mean_len_den);
+                || child_mean_len_num.saturating_mul(2)
+                    > parent_len.saturating_mul(child_mean_len_den);
 
             // HybridStructural only recurses when both structure signals agree:
             // the frontier must look meaningfully finer by reuse and by span shape.
