@@ -16,9 +16,9 @@ pub use primitive_tracker::{primitive_tracker_reminder_lines, TRACKER_PATH};
 pub use run_artifacts::{persist_run_artifacts, PersistedRunPaths};
 pub use tokenizer_training::{
     build_tokenizer_backed_batches_from_source, load_stage0_tokenizer_runtime,
-    run_tokenizer_backed_species, run_tokenizer_backed_species_from_source,
-    ResolvedTokenizerArtifact, Stage0PadSemantics, Stage0SlowTokenizer, TextCorpusFormat,
-    TextCorpusSplitSource, TokenizerBridgeStats, TokenizerTrainingCorpus,
+    load_tokenizer_training_corpus_source, run_tokenizer_backed_species,
+    run_tokenizer_backed_species_from_source, ResolvedTokenizerArtifact, Stage0PadSemantics,
+    Stage0SlowTokenizer, TextCorpusSplitSource, TokenizerBridgeStats, TokenizerTrainingCorpus,
     TokenizerTrainingCorpusSource, TokenizerTrainingRuntime, STAGE0_CANONICAL_TOKENIZER_FILENAME,
     STAGE0_CANONICAL_TOKENIZER_REPO_ID, STAGE0_CANONICAL_TOKENIZER_USE_FAST,
 };

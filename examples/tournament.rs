@@ -16,12 +16,17 @@ use fractal::{
         ExperimentSpecTemplate, LaneIntent, OptimizerSpec, RunExecutionOutcome,
         RuntimeSurfaceSpec, SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig,
         TournamentPreset, TournamentProgressEvent, TournamentReporter, TournamentSequence,
-        TrainingInputSpec,
+        TrainingInputMode, TrainingInputSpec,
     },
+    load_tokenizer_training_corpus_source,
     persist_run_artifacts, primitive_tracker_reminder_lines,
-    registry::{ComputeBackend, ExecutionMode, SpeciesId},
+    run_tokenizer_backed_species_from_source,
+    registry::{ComputeBackend, CpuTrainBackend, ExecutionMode, MetalTrainBackend, SpeciesId},
     species_registry_for_lane, species_registry_for_species, TournamentLane, TournamentRunReport,
 };
+#[cfg(feature = "cuda")]
+use fractal_core::registry::cuda_device;
+use fractal_core::registry::{cpu_device, initialize_metal_runtime, take_last_species_run_artifact};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -933,18 +938,20 @@ fn run_preset(
         .transpose()?
         .flatten();
     let base_config = options.config_for(preset)?;
-    let config = base_config
-        .clone()
-        .with_experiment(build_experiment_template(
-            preset,
-            lane,
-            species,
-            &comparison,
-            &base_config,
-            options,
-            manifest_v2.as_ref(),
-        ));
+    let experiment_template = build_experiment_template(
+        preset,
+        lane,
+        species,
+        &comparison,
+        &base_config,
+        options,
+        manifest_v2.as_ref(),
+    );
+    let config = base_config.clone().with_experiment(experiment_template.clone());
     print_header(preset, lane, species, &config, &comparison);
+    if experiment_template.training_input.mode == TrainingInputMode::TokenizerBackedText {
+        return run_tokenizer_backed_preset(preset, lane, species, comparison, config);
+    }
     let tournament = Tournament::new(config.clone())?;
     let reporter: Arc<dyn TournamentReporter> = Arc::new(StdoutProgressReporter);
     let species = if let Some(species) = species {
@@ -970,17 +977,104 @@ fn run_preset(
         artifact,
         BTreeMap::new(),
     );
-    let persisted = persist_run_artifacts(&report)?;
-    print_results(&report);
-    print_failures(&report);
-    print_primitive_tracker_reminder(&report);
-    println!(
-        "artifacts={} manifest={}",
-        persisted.artifact_path.display(),
-        persisted.manifest_path.display()
+    emit_persisted_report(&report)
+}
+
+fn run_tokenizer_backed_preset(
+    preset: TournamentPreset,
+    lane: TournamentLane,
+    species: Option<SpeciesId>,
+    comparison: ComparisonContract,
+    config: TournamentConfig,
+) -> Result<(), FractalError> {
+    if config.execution_mode != ExecutionMode::Sequential || config.parallelism != 1 {
+        return Err(invalid_argument(
+            "tokenizer-backed Stage 0 currently requires sequential execution with parallelism=1"
+                .to_owned(),
+        ));
+    }
+
+    let species = species.ok_or_else(|| {
+        invalid_argument(
+            "tokenizer-backed Stage 0 manifests must target a single --species run".to_owned(),
+        )
+    })?;
+    let definitions = species_registry_for_species(species);
+    let definition = definitions.first().copied().ok_or_else(|| {
+        FractalError::InvalidConfig(format!(
+            "no species definition registered for tokenizer-backed run {}",
+            species
+        ))
+    })?;
+    let experiment = config
+        .resolved_experiment(species, definition.variant_name)
+        .ok_or_else(|| {
+            FractalError::InvalidConfig(
+                "tokenizer-backed Stage 0 requires an experiment spec".into(),
+            )
+        })?;
+    let corpus_source = load_tokenizer_training_corpus_source(&experiment.training_input)?;
+
+    let (metrics, bridge_stats) = match &config.execution_backend {
+        ComputeBackend::CpuCandle => {
+            let (metrics, bridge_stats, _artifact) =
+                run_tokenizer_backed_species_from_source::<CpuTrainBackend>(
+                    species,
+                    definition.variant_name,
+                    config.clone(),
+                    Some(experiment.clone()),
+                    &corpus_source,
+                    cpu_device(),
+                )?;
+            (metrics, bridge_stats)
+        }
+        #[cfg(feature = "cuda")]
+        ComputeBackend::CudaCandle { device_index } => {
+            let (metrics, bridge_stats, _artifact) =
+                run_tokenizer_backed_species_from_source::<CpuTrainBackend>(
+                    species,
+                    definition.variant_name,
+                    config.clone(),
+                    Some(experiment.clone()),
+                    &corpus_source,
+                    cuda_device(*device_index),
+                )?;
+            (metrics, bridge_stats)
+        }
+        ComputeBackend::MetalWgpu { device } => {
+            initialize_metal_runtime(device);
+            let (metrics, bridge_stats, _artifact) =
+                run_tokenizer_backed_species_from_source::<MetalTrainBackend>(
+                    species,
+                    definition.variant_name,
+                    config.clone(),
+                    Some(experiment.clone()),
+                    &corpus_source,
+                    device.clone(),
+                )?;
+            (metrics, bridge_stats)
+        }
+    };
+
+    let artifact = take_last_species_run_artifact().ok_or_else(|| {
+        FractalError::InvalidState(
+            "tokenizer-backed Stage 0 run completed without recording a species artifact".into(),
+        )
+    })?;
+    let report = TournamentRunReport::new(
+        preset,
+        lane,
+        comparison,
+        config.clone(),
+        definitions,
+        aggregate_results(vec![metrics]),
+        fractal::TournamentRunArtifact {
+            config,
+            species: vec![artifact],
+        },
+        BTreeMap::from([(species, bridge_stats)]),
     );
-    ensure_successful_execution(&report)?;
-    Ok(())
+    emit_persisted_report(&report)
 }
 
 fn build_experiment_template(
@@ -1263,6 +1357,19 @@ fn print_primitive_tracker_reminder(report: &TournamentRunReport) {
     }
 }
 
+fn emit_persisted_report(report: &TournamentRunReport) -> Result<(), FractalError> {
+    let persisted = persist_run_artifacts(report)?;
+    print_results(report);
+    print_failures(report);
+    print_primitive_tracker_reminder(report);
+    println!(
+        "artifacts={} manifest={}",
+        persisted.artifact_path.display(),
+        persisted.manifest_path.display()
+    );
+    ensure_successful_execution(report)
+}
+
 fn ensure_successful_execution(report: &TournamentRunReport) -> Result<(), FractalError> {
     if let Some(record) = report
         .artifact
@@ -1371,7 +1478,88 @@ fn print_usage() {
 mod tests {
     use super::*;
     use fractal::TrainingInputMode;
-    use std::fs;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::Mutex,
+    };
+
+    static MANIFEST_ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    struct TestEnvGuard {
+        root: PathBuf,
+    }
+
+    impl TestEnvGuard {
+        fn new(prefix: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "{prefix}-{}-{}",
+                std::process::id(),
+                current_unix_ms()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).unwrap();
+            Self { root }
+        }
+
+        fn path(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("FRACTAL_RUN_ARTIFACT_DIR");
+            std::env::remove_var("FRACTAL_RUN_MANIFEST_DIR");
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn write_jsonl_corpus(path: &Path, documents: &[&str]) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let body = documents
+            .iter()
+            .map(|document| serde_json::json!({ "text": document }).to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(path, format!("{body}\n")).unwrap();
+    }
+
+    fn sentencepiece_testdata_model() -> PathBuf {
+        let output = Command::new("cargo")
+            .args(["metadata", "--format-version", "1"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("cargo metadata should run");
+        assert!(
+            output.status.success(),
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("cargo metadata should be valid json");
+        let packages = metadata["packages"]
+            .as_array()
+            .expect("cargo metadata should include packages");
+        let manifest_path = packages
+            .iter()
+            .find(|package| package["name"] == "sentencepiece")
+            .and_then(|package| package["manifest_path"].as_str())
+            .expect("sentencepiece package should be present in cargo metadata");
+        PathBuf::from(manifest_path)
+            .parent()
+            .expect("sentencepiece manifest should have parent")
+            .join("testdata")
+            .join("toy.model")
+    }
+
+    fn build_file_backed_sentencepiece_tokenizer(root: &Path) -> PathBuf {
+        let path = root.join("tokenizer.model");
+        fs::copy(sentencepiece_testdata_model(), &path).unwrap();
+        path
+    }
 
     #[test]
     fn parse_command_uses_default_preset_when_no_args() {
@@ -2106,6 +2294,22 @@ mod tests {
                     "training_input": {
                         "mode": "tokenizer-backed-text",
                         "corpus_name": "fineweb-stage0",
+                        "corpus_source": {
+                            "train": {
+                                "path": "/tmp/fineweb-train.jsonl",
+                                "format": {
+                                    "format": "jsonl-text",
+                                    "text_field": "text"
+                                }
+                            },
+                            "eval": {
+                                "path": "/tmp/fineweb-eval.jsonl",
+                                "format": {
+                                    "format": "jsonl-text",
+                                    "text_field": "text"
+                                }
+                            }
+                        },
                         "tokenizer": {
                             "artifact_id": "openlm-research/open_llama_3b_v2",
                             "artifact_path": "/tmp/tokenizer.model",
@@ -2235,5 +2439,208 @@ mod tests {
         assert_eq!(template.artifacts, ArtifactPolicy::default());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_options_executes_tokenizer_backed_manifest_v2_and_persists_artifacts() {
+        let _env_lock = MANIFEST_ENV_MUTEX.lock().unwrap();
+        let guard = TestEnvGuard::new("fractal-stage0-manifest-run");
+        let artifact_dir = guard.path().join("artifacts");
+        let manifest_dir = guard.path().join("manifests");
+        let train_path = guard.path().join("train.jsonl");
+        let eval_path = guard.path().join("eval.jsonl");
+        let tokenizer_path = build_file_backed_sentencepiece_tokenizer(guard.path());
+        let manifest_path = guard.path().join("stage0-canary-smoke-s42-p1-contractive.json");
+
+        write_jsonl_corpus(
+            &train_path,
+            &["I saw a girl with a telescope.", "alpha beta gamma delta"],
+        );
+        write_jsonl_corpus(&eval_path, &["I saw a girl with a telescope."]);
+
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "logical_name": "stage0-canary-smoke-s42-p1-contractive",
+                "question_summary": "exercise tokenizer-backed Stage 0 manifest runner end-to-end",
+                "preset": "fast-test",
+                "species": "p1_contractive",
+                "experiment": {
+                    "question": {
+                        "lane_intent": "benchmark",
+                        "decision_intent": "benchmark"
+                    },
+                    "config": {
+                        "seed": 42,
+                        "dim": 8,
+                        "levels": 2,
+                        "vocab_size": 1000,
+                        "max_seq_len": 64,
+                        "max_recursion_depth": 2,
+                        "stability_depth": 1,
+                        "train_batch_size": 1,
+                        "eval_batch_size": 1,
+                        "train_steps_per_species": 1,
+                        "eval_batches_per_family": 1,
+                        "perplexity_eval_batches": 1,
+                        "arc_eval_batches": 1,
+                        "execution_mode": "sequential",
+                        "parallelism": 1,
+                        "backend": "cpu"
+                    },
+                    "training_input": {
+                        "mode": "tokenizer-backed-text",
+                        "corpus_name": "fineweb-stage0-smoke",
+                        "corpus_source": {
+                            "train": {
+                                "path": train_path,
+                                "format": {
+                                    "format": "jsonl-text",
+                                    "text_field": "text"
+                                }
+                            },
+                            "eval": {
+                                "path": eval_path,
+                                "format": {
+                                    "format": "jsonl-text",
+                                    "text_field": "text"
+                                }
+                            }
+                        },
+                        "tokenizer": {
+                            "artifact_id": "openlm-research/open_llama_3b_v2",
+                            "artifact_path": tokenizer_path,
+                            "vocab_size": 1000,
+                            "pad_token_id": 0
+                        },
+                        "bridge": {
+                            "enabled": true,
+                            "observational_only": true
+                        },
+                        "arc_source": {
+                            "mode": "synthetic-canonical"
+                        }
+                    },
+                    "optimizer": {
+                        "kind": "adamw",
+                        "peak_learning_rate": 0.0002,
+                        "beta_1": 0.9,
+                        "beta_2": 0.95,
+                        "epsilon": 1e-8,
+                        "weight_decay": 0.05,
+                        "gradient_clip_norm": 1.0,
+                        "schedule": {
+                            "kind": "warmup-cosine",
+                            "warmup_fraction": 0.02,
+                            "decay_floor_fraction": 0.1
+                        }
+                    },
+                    "runtime": {
+                        "eval_backend_policy": "shared-backend",
+                        "batching_policy": "padded",
+                        "execution_policy": "simple-loop",
+                        "buffer_reuse_policy": "disabled",
+                        "benchmark_mode": "leaderboard",
+                        "backend_policy": "active-execution-backend",
+                        "launch_policy": {
+                            "precision": {
+                                "compute": "bf16",
+                                "optimizer_state": "fp32",
+                                "reduction": "fp32",
+                                "tf32_enabled": true
+                            },
+                            "checkpoint": {
+                                "interval_tokens": 10000000,
+                                "keep_latest": true,
+                                "keep_best": true,
+                                "keep_final": true,
+                                "keep_previous": true
+                            },
+                            "eval_cadence": {
+                                "perplexity_interval_tokens": 10000000,
+                                "stability_interval_tokens": 10000000,
+                                "arc_interval_tokens": 20000000,
+                                "systems_speed_interval_tokens": 20000000,
+                                "final_full_eval": true
+                            },
+                            "resume": {
+                                "resume_on_interrupt": true,
+                                "restart_on_corruption": true,
+                                "restart_on_contract_ambiguity": true
+                            }
+                        }
+                    },
+                    "comparison": {
+                        "authority": "authoritative",
+                        "requires_same_preset": true,
+                        "requires_same_runtime_surfaces": true,
+                        "requires_frozen_commit": true,
+                        "requires_same_backend": true
+                    },
+                    "artifacts": {
+                        "manifest_required": true,
+                        "structured_artifact_required": true,
+                        "final_log_required": true,
+                        "tracker_ready_output_required": true
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        std::env::set_var("FRACTAL_RUN_ARTIFACT_DIR", &artifact_dir);
+        std::env::set_var("FRACTAL_RUN_MANIFEST_DIR", &manifest_dir);
+
+        let command = parse_command(vec![
+            "--experiment-manifest".to_owned(),
+            manifest_path.display().to_string(),
+        ])
+        .unwrap();
+        let options = match command {
+            CliCommand::Run(options) => options,
+            other => panic!("expected run command, got {other:?}"),
+        };
+
+        run_options(&options).expect("tokenizer-backed manifest run should succeed");
+
+        let persisted_manifest_path = manifest_dir.join("tournament-run-manifest.json");
+        let persisted_artifact_path = artifact_dir.join("tournament-run-artifact.json");
+        assert!(persisted_manifest_path.exists());
+        assert!(persisted_artifact_path.exists());
+
+        let persisted_manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&persisted_manifest_path).unwrap()).unwrap();
+        let persisted_artifact: serde_json::Value =
+            serde_json::from_slice(&fs::read(&persisted_artifact_path).unwrap()).unwrap();
+
+        assert_eq!(
+            persisted_manifest["experiments"][0]["training_input"]["mode"],
+            serde_json::Value::String("tokenizer-backed-text".to_owned())
+        );
+        assert_eq!(
+            persisted_manifest["experiments"][0]["training_input"]["corpus_source"]["train"]["path"],
+            serde_json::Value::String(train_path.display().to_string())
+        );
+        assert_eq!(
+            persisted_artifact["results"][0]["execution_outcome"],
+            serde_json::Value::String("success".to_owned())
+        );
+        assert_eq!(
+            persisted_artifact["results"][0]["quality_outcome"],
+            serde_json::Value::String("low-signal".to_owned())
+        );
+        assert_eq!(
+            persisted_artifact["results"][0]["tokenizer_bridge"]["training_input_mode"],
+            serde_json::Value::String("tokenizer-backed-text".to_owned())
+        );
+        assert_eq!(
+            persisted_artifact["results"][0]["tokenizer_bridge"]["corpus_name"],
+            serde_json::Value::String("fineweb-stage0-smoke".to_owned())
+        );
+        assert_eq!(
+            persisted_artifact["results"][0]["experiment"]["training_input"]["tokenizer"]["artifact_id"],
+            serde_json::Value::String("openlm-research/open_llama_3b_v2".to_owned())
+        );
     }
 }

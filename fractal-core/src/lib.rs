@@ -22,9 +22,10 @@ pub use lifecycle::{
     OptimizerKind, OptimizerSpec, PhaseTiming, PrecisionPolicy, ResumePolicy, RunExecutionOutcome,
     RunManifest, RunOutcomeClass, RunPhase, RunQualityOutcome, RuntimeBackendPolicy,
     RuntimeSurfaceSpec, SpeciesCompletion, SpeciesRunArtifact, SpeciesRunStage,
-    TokenizerArtifactSpec, TokenizerBridgeSpec, Tournament, TournamentConfig, TournamentPreset,
-    TournamentProgressEvent, TournamentReporter, TournamentRunArtifact, TournamentSequence,
-    TrainingInputMode, TrainingInputSpec, VariantSpec,
+    TextCorpusFormat, TextCorpusSourceSpec, TextCorpusSplitSpec, TokenizerArtifactSpec,
+    TokenizerBridgeSpec, Tournament, TournamentConfig, TournamentPreset, TournamentProgressEvent,
+    TournamentReporter, TournamentRunArtifact, TournamentSequence, TrainingInputMode,
+    TrainingInputSpec, VariantSpec,
 };
 pub use model::FractalModel;
 pub use registry::{

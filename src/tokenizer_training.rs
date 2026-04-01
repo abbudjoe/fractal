@@ -15,7 +15,8 @@ use fractal_core::{
     },
     error::FractalError,
     lifecycle::{
-        ArcSourceMode, ExperimentSpec, TokenizerArtifactSpec, TrainingInputMode, TrainingInputSpec,
+        ArcSourceMode, ExperimentSpec, TextCorpusFormat, TextCorpusSourceSpec,
+        TextCorpusSplitSpec, TokenizerArtifactSpec, TrainingInputMode, TrainingInputSpec,
     },
     registry::{run_species_with_batches, PrimitiveVariantName, SpeciesId, TrainingBatchSet},
     SpeciesRawMetrics,
@@ -194,12 +195,6 @@ impl fmt::Display for Stage0SlowTokenizerError {
 impl std::error::Error for Stage0SlowTokenizerError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TextCorpusFormat {
-    JsonlText { text_field: String },
-    PlainTextLines,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextCorpusSplitSource {
     pub path: PathBuf,
     pub format: TextCorpusFormat,
@@ -275,6 +270,29 @@ impl TextCorpusSplitSource {
     }
 }
 
+impl From<TextCorpusSplitSource> for TextCorpusSplitSpec {
+    fn from(value: TextCorpusSplitSource) -> Self {
+        Self {
+            path: value.path.display().to_string(),
+            format: value.format,
+            max_documents: value.max_documents,
+        }
+    }
+}
+
+impl TryFrom<&TextCorpusSplitSpec> for TextCorpusSplitSource {
+    type Error = FractalError;
+
+    fn try_from(value: &TextCorpusSplitSpec) -> Result<Self, Self::Error> {
+        value.validate("corpus split")?;
+        Ok(Self {
+            path: PathBuf::from(&value.path),
+            format: value.format.clone(),
+            max_documents: value.max_documents,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TokenizerTrainingCorpusSource {
     pub name: String,
@@ -315,6 +333,28 @@ impl TokenizerTrainingCorpusSource {
         );
         corpus.validate()?;
         Ok(corpus)
+    }
+}
+
+impl From<TokenizerTrainingCorpusSource> for TextCorpusSourceSpec {
+    fn from(value: TokenizerTrainingCorpusSource) -> Self {
+        Self {
+            train: value.train.into(),
+            eval: value.eval.into(),
+        }
+    }
+}
+
+impl TryFrom<&TextCorpusSourceSpec> for TokenizerTrainingCorpusSource {
+    type Error = FractalError;
+
+    fn try_from(value: &TextCorpusSourceSpec) -> Result<Self, Self::Error> {
+        value.validate()?;
+        Ok(Self {
+            name: "tokenizer-backed-corpus".to_owned(),
+            train: TextCorpusSplitSource::try_from(&value.train)?,
+            eval: TextCorpusSplitSource::try_from(&value.eval)?,
+        })
     }
 }
 
@@ -389,8 +429,12 @@ impl ResolvedTokenizerArtifact {
         }
     }
 
-    pub fn into_training_input(self, corpus_name: impl Into<String>) -> TrainingInputSpec {
-        TrainingInputSpec::tokenizer_backed_text(corpus_name, self.spec)
+    pub fn into_training_input(
+        self,
+        corpus_name: impl Into<String>,
+        corpus_source: TextCorpusSourceSpec,
+    ) -> TrainingInputSpec {
+        TrainingInputSpec::tokenizer_backed_text(corpus_name, self.spec, corpus_source)
     }
 }
 
@@ -589,6 +633,31 @@ pub fn load_stage0_tokenizer_runtime(
     let runtime = TokenizerTrainingRuntime::new(tokenizer, max_sequence_len)?
         .with_pad_semantics(pad_semantics);
     Ok((runtime, artifact))
+}
+
+pub fn load_tokenizer_training_corpus_source(
+    training_input: &TrainingInputSpec,
+) -> Result<TokenizerTrainingCorpusSource, FractalError> {
+    if training_input.mode != TrainingInputMode::TokenizerBackedText {
+        return Err(FractalError::InvalidConfig(
+            "tokenizer corpus sources require tokenizer-backed text input mode".into(),
+        ));
+    }
+
+    let corpus_name = training_input.corpus_name.clone().ok_or_else(|| {
+        FractalError::InvalidConfig(
+            "tokenizer-backed text training requires a corpus name".into(),
+        )
+    })?;
+    let corpus_source = training_input.corpus_source.as_ref().ok_or_else(|| {
+        FractalError::InvalidConfig(
+            "tokenizer-backed text training requires corpus split sources".into(),
+        )
+    })?;
+    corpus_source.validate()?;
+    let mut source = TokenizerTrainingCorpusSource::try_from(corpus_source)?;
+    source.name = corpus_name;
+    Ok(source)
 }
 
 pub fn build_tokenizer_backed_batches_from_source<B>(
@@ -1097,7 +1166,8 @@ mod tests {
         ArtifactPolicy, BudgetSpec, ComparisonContract, DecisionIntent, ExecutionBackend,
         ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
         ExperimentSpecTemplate, LaneIntent, OptimizerSpec, PrimitiveVariantName,
-        RuntimeSurfaceSpec, SpeciesId, TaskFamily, TrainingInputMode, TrainingInputSpec,
+        RuntimeSurfaceSpec, SpeciesId, TaskFamily, TextCorpusSourceSpec, TrainingInputMode,
+        TrainingInputSpec,
     };
 
     use crate::{
@@ -1108,9 +1178,9 @@ mod tests {
     use super::{
         build_tokenizer_backed_batches, load_stage0_tokenizer_runtime,
         run_tokenizer_backed_species_from_source, ResolvedTokenizerArtifact, Stage0PadSemantics,
-        TokenizerArtifactSpec, TokenizerTrainingCorpus, TokenizerTrainingCorpusSource,
-        TokenizerTrainingRuntime, STAGE0_CANONICAL_TOKENIZER_FILENAME,
-        STAGE0_CANONICAL_TOKENIZER_REPO_ID,
+        TextCorpusSplitSource, TokenizerArtifactSpec, TokenizerTrainingCorpus,
+        TokenizerTrainingCorpusSource, TokenizerTrainingRuntime,
+        STAGE0_CANONICAL_TOKENIZER_FILENAME, STAGE0_CANONICAL_TOKENIZER_REPO_ID,
     };
     use fractal_core::registry::take_last_species_run_artifact;
     use fractal_core::PAD_TOKEN;
@@ -1202,6 +1272,13 @@ mod tests {
         path
     }
 
+    fn inline_corpus_source_spec() -> TextCorpusSourceSpec {
+        TextCorpusSourceSpec {
+            train: TextCorpusSplitSource::plain_text_lines("inline://train").into(),
+            eval: TextCorpusSplitSource::plain_text_lines("inline://eval").into(),
+        }
+    }
+
     #[test]
     fn tokenizer_backed_stage0_smoke_path_captures_bridge_metadata() {
         let temp_root =
@@ -1241,9 +1318,15 @@ mod tests {
         config.learning_rate = 1e-3;
         config.optimizer = OptimizerSpec::legacy_adam(config.learning_rate);
 
+        let corpus_source = TokenizerTrainingCorpusSource::fineweb_jsonl(
+            "fineweb-stage0-smoke",
+            &train_path,
+            &eval_path,
+        );
+        let corpus_spec: TextCorpusSourceSpec = corpus_source.clone().into();
         let training_input = resolved_tokenizer
             .clone()
-            .into_training_input("fineweb-stage0-smoke");
+            .into_training_input("fineweb-stage0-smoke", corpus_spec);
         let template = ExperimentSpecTemplate {
             experiment_id: ExperimentId {
                 logical_name: "stage0-tokenizer-smoke".to_owned(),
@@ -1274,11 +1357,6 @@ mod tests {
         let experiment = template.resolve_variant(
             SpeciesId::P1Contractive,
             PrimitiveVariantName::new_unchecked("p1_contractive_v1"),
-        );
-        let corpus_source = TokenizerTrainingCorpusSource::fineweb_jsonl(
-            "fineweb-stage0-smoke",
-            &train_path,
-            &eval_path,
         );
         let (_runtime, loaded_artifact) =
             load_stage0_tokenizer_runtime(&training_input, config.max_seq_len)
@@ -1420,6 +1498,7 @@ mod tests {
                 vocab_size: 32_000,
                 pad_token_id: 0,
             },
+            inline_corpus_source_spec(),
         );
         let corpus = TokenizerTrainingCorpus::new(
             "fineweb-stage0-smoke",
@@ -1462,7 +1541,7 @@ mod tests {
         let tokenizer_path = build_file_backed_sentencepiece_tokenizer();
         let training_input =
             ResolvedTokenizerArtifact::canonical_open_llama_3b_v2(&tokenizer_path, 1_000, 0)
-                .into_training_input("fineweb-stage0-smoke");
+                .into_training_input("fineweb-stage0-smoke", inline_corpus_source_spec());
 
         let (runtime, artifact) = load_stage0_tokenizer_runtime(&training_input, 64)
             .expect("slow sentencepiece stage0 runtime should load");
@@ -1504,7 +1583,7 @@ mod tests {
 
         let training_input =
             ResolvedTokenizerArtifact::canonical_open_llama_3b_v2(&invalid_path, 1_000, 0)
-                .into_training_input("fineweb-stage0-smoke");
+                .into_training_input("fineweb-stage0-smoke", inline_corpus_source_spec());
         let error = load_stage0_tokenizer_runtime(&training_input, 64)
             .expect_err("stage0 runtime must reject fast-tokenizer artifact filenames");
 
@@ -1523,9 +1602,10 @@ mod tests {
         let tokenizer_path = build_file_backed_sentencepiece_tokenizer();
         let resolved_tokenizer =
             ResolvedTokenizerArtifact::canonical_open_llama_3b_v2(&tokenizer_path, 1_000, 0);
+        let corpus_spec = inline_corpus_source_spec();
         let training_input = resolved_tokenizer
             .clone()
-            .into_training_input("fineweb-stage0-smoke");
+            .into_training_input("fineweb-stage0-smoke", corpus_spec);
         let (runtime, _) = load_stage0_tokenizer_runtime(&training_input, 32)
             .expect("slow tokenizer runtime should load");
 

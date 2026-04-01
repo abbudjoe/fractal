@@ -293,6 +293,63 @@ impl ArcSourceMode {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "format", rename_all = "kebab-case")]
+pub enum TextCorpusFormat {
+    JsonlText { text_field: String },
+    PlainTextLines,
+}
+
+impl TextCorpusFormat {
+    pub fn validate(&self) -> Result<(), FractalError> {
+        match self {
+            Self::JsonlText { text_field } if text_field.trim().is_empty() => {
+                Err(FractalError::InvalidConfig(
+                    "text corpus jsonl text_field must be non-empty".into(),
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextCorpusSplitSpec {
+    pub path: String,
+    pub format: TextCorpusFormat,
+    pub max_documents: Option<usize>,
+}
+
+impl TextCorpusSplitSpec {
+    pub fn validate(&self, split_name: &str) -> Result<(), FractalError> {
+        if self.path.trim().is_empty() {
+            return Err(FractalError::InvalidConfig(format!(
+                "text corpus {split_name} path must be non-empty"
+            )));
+        }
+        if self.max_documents == Some(0) {
+            return Err(FractalError::InvalidConfig(format!(
+                "text corpus {split_name} max_documents must be greater than zero when configured"
+            )));
+        }
+        self.format.validate()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextCorpusSourceSpec {
+    pub train: TextCorpusSplitSpec,
+    pub eval: TextCorpusSplitSpec,
+}
+
+impl TextCorpusSourceSpec {
+    pub fn validate(&self) -> Result<(), FractalError> {
+        self.train.validate("train")?;
+        self.eval.validate("eval")?;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LearningRateScheduleSpec {
     pub kind: LearningRateScheduleKind,
@@ -629,6 +686,7 @@ impl TokenizerBridgeSpec {
 pub struct TrainingInputSpec {
     pub mode: TrainingInputMode,
     pub corpus_name: Option<String>,
+    pub corpus_source: Option<TextCorpusSourceSpec>,
     pub tokenizer: Option<TokenizerArtifactSpec>,
     pub bridge: TokenizerBridgeSpec,
     pub arc_source: ArcSourceSpec,
@@ -639,6 +697,7 @@ impl TrainingInputSpec {
         Self {
             mode: TrainingInputMode::Synthetic,
             corpus_name: None,
+            corpus_source: None,
             tokenizer: None,
             bridge: TokenizerBridgeSpec::disabled(),
             arc_source: ArcSourceSpec::synthetic_canonical(),
@@ -648,10 +707,12 @@ impl TrainingInputSpec {
     pub fn tokenizer_backed_text(
         corpus_name: impl Into<String>,
         tokenizer: TokenizerArtifactSpec,
+        corpus_source: TextCorpusSourceSpec,
     ) -> Self {
         Self {
             mode: TrainingInputMode::TokenizerBackedText,
             corpus_name: Some(corpus_name.into()),
+            corpus_source: Some(corpus_source),
             tokenizer: Some(tokenizer),
             bridge: TokenizerBridgeSpec::observational_only(),
             arc_source: ArcSourceSpec::synthetic_canonical(),
@@ -663,7 +724,10 @@ impl TrainingInputSpec {
         self.arc_source.validate(self.mode)?;
         match self.mode {
             TrainingInputMode::Synthetic => {
-                if self.corpus_name.is_some() || self.tokenizer.is_some() {
+                if self.corpus_name.is_some()
+                    || self.corpus_source.is_some()
+                    || self.tokenizer.is_some()
+                {
                     return Err(FractalError::InvalidConfig(
                         "synthetic training input must not carry tokenizer corpus metadata".into(),
                     ));
@@ -681,6 +745,12 @@ impl TrainingInputSpec {
                         "tokenizer-backed text corpus name must be non-empty".into(),
                     ));
                 }
+                let corpus_source = self.corpus_source.as_ref().ok_or_else(|| {
+                    FractalError::InvalidConfig(
+                        "tokenizer-backed text training requires corpus split sources".into(),
+                    )
+                })?;
+                corpus_source.validate()?;
                 let tokenizer = self.tokenizer.as_ref().ok_or_else(|| {
                     FractalError::InvalidConfig(
                         "tokenizer-backed text training requires tokenizer artifact metadata"

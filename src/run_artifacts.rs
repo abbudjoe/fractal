@@ -307,6 +307,12 @@ fn training_input_json(spec: &crate::TrainingInputSpec) -> Value {
     json!({
         "mode": spec.mode.as_str(),
         "corpus_name": spec.corpus_name,
+        "corpus_source": spec.corpus_source.as_ref().map(|source| {
+            json!({
+                "train": text_corpus_split_json(&source.train),
+                "eval": text_corpus_split_json(&source.eval),
+            })
+        }),
         "arc_source": {
             "mode": spec.arc_source.mode.as_str(),
         },
@@ -322,6 +328,22 @@ fn training_input_json(spec: &crate::TrainingInputSpec) -> Value {
                 "pad_token_id": tokenizer.pad_token_id,
             })
         }),
+    })
+}
+
+fn text_corpus_split_json(spec: &crate::TextCorpusSplitSpec) -> Value {
+    json!({
+        "path": spec.path,
+        "format": match &spec.format {
+            crate::TextCorpusFormat::JsonlText { text_field } => json!({
+                "format": "jsonl-text",
+                "text_field": text_field,
+            }),
+            crate::TextCorpusFormat::PlainTextLines => json!({
+                "format": "plain-text-lines",
+            }),
+        },
+        "max_documents": spec.max_documents,
     })
 }
 

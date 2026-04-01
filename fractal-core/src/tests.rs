@@ -29,7 +29,8 @@ use crate::{
         ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
         ExperimentSpecTemplate, LaneIntent, LaunchPolicySpec, LearningRateScheduleSpec,
         NumericPrecisionKind, OptimizerKind, OptimizerSpec, RunExecutionOutcome, RunOutcomeClass,
-        RunQualityOutcome, RuntimeSurfaceSpec, TokenizerArtifactSpec, Tournament, TournamentConfig,
+        RunQualityOutcome, RuntimeSurfaceSpec, TextCorpusFormat, TextCorpusSourceSpec,
+        TextCorpusSplitSpec, TokenizerArtifactSpec, Tournament, TournamentConfig,
         TournamentPreset, TournamentProgressEvent, TournamentSequence, TrainingInputSpec,
     },
     model::FractalModel,
@@ -1206,6 +1207,22 @@ fn tokenizer_backed_training_input_rejects_tokenizer_model_mismatch() {
             vocab_size: config.vocab_size + 1,
             pad_token_id: PAD_TOKEN,
         },
+        TextCorpusSourceSpec {
+            train: TextCorpusSplitSpec {
+                path: "/tmp/fineweb-train.jsonl".to_owned(),
+                format: TextCorpusFormat::JsonlText {
+                    text_field: "text".to_owned(),
+                },
+                max_documents: None,
+            },
+            eval: TextCorpusSplitSpec {
+                path: "/tmp/fineweb-eval.jsonl".to_owned(),
+                format: TextCorpusFormat::JsonlText {
+                    text_field: "text".to_owned(),
+                },
+                max_documents: None,
+            },
+        },
     );
 
     let error = template.validate_against_config(&config).unwrap_err();
@@ -1223,6 +1240,22 @@ fn tokenizer_backed_training_input_rejects_tokenizer_model_mismatch() {
             artifact_path: Some("inline://mismatch-pad".to_owned()),
             vocab_size: pad_mismatch_config.vocab_size,
             pad_token_id: 1,
+        },
+        TextCorpusSourceSpec {
+            train: TextCorpusSplitSpec {
+                path: "/tmp/fineweb-train.jsonl".to_owned(),
+                format: TextCorpusFormat::JsonlText {
+                    text_field: "text".to_owned(),
+                },
+                max_documents: None,
+            },
+            eval: TextCorpusSplitSpec {
+                path: "/tmp/fineweb-eval.jsonl".to_owned(),
+                format: TextCorpusFormat::JsonlText {
+                    text_field: "text".to_owned(),
+                },
+                max_documents: None,
+            },
         },
     );
 
