@@ -8,6 +8,27 @@ floor. The hard gates are good, typed lexical fallback fixed byte collapse, and
 the frontier/emission line has been exhausted. What remains is a missing
 architectural layer for reusable held-out structure.
 
+## Active Pivot
+
+The active post-postmortem pivot is now:
+
+- [canonical-tokenizer-recursive-overlay-spec.md](./canonical-tokenizer-recursive-overlay-spec.md)
+
+This is intentionally **not** another attempt to rescue recursion as the
+primary tokenizer substrate.
+
+It reframes recursion as:
+
+- a reversible structure and reuse overlay over a production-proven canonical
+  tokenizer
+
+The first experiment scope is narrow:
+
+- document-local or record-local reuse on repetitive structured text
+- no second token ABI
+- no global fuzzy motif matching
+- code, prose, and multilingual text are guardrail domains
+
 ## Tried By Layer
 
 ### Primitive
