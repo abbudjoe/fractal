@@ -26,7 +26,8 @@ pub use model_face::{
     TypedEmbeddingBridge,
 };
 pub use overlay::{
-    build_recursive_overlay, LocalMacro, LocalMacroKind, OverlayDictionaryScope,
+    build_recursive_overlay, pack_overlay_documents_in_batches, LocalMacro, LocalMacroKind,
+    OverlayBatchPack, OverlayBatchPackSummary, OverlayBatchPackingStrategy, OverlayDictionaryScope,
     OverlayDocumentMode, OverlayPack, OverlaySegment, OverlaySharingPolicy,
     OverlayTransportSummary, PackedOverlayDocument, PackedOverlayDocumentTransport,
     PackedOverlaySegment, RecursiveOverlayConfig, RecursiveOverlayDocument, RecursiveOverlayMode,

@@ -137,6 +137,29 @@ Read:
 - the architecture is now earning a clear niche advantage on repetitive
   structured text without broadening risk on the guardrail buckets
 
+Latest `fixed-pack sequential vs structure-aware` read on
+`codex/shared-overlay-dictionary-impl`:
+
+- fixed-pack setting:
+  - `max_pack_docs = 16`
+- overall transport:
+  - `global batch_local transport_ratio = 1.43`
+  - `sequential fixed-pack transport_ratio = 1.39`
+  - `structure_aware fixed-pack transport_ratio = 1.39`
+- target buckets:
+  - `jsonl.signals` median ratio `sequential 3.38`, `structure_aware 3.57`
+  - `logs.operational_mixed` median ratio `sequential 2.24`, `structure_aware 2.15`
+- exact expansion remains `0` failures
+
+Read:
+
+- structure-aware fixed-pack batching is a real mechanism, but it is not a
+  major leverage point on the current hybrid corpus
+- the likely reason is that the held-out corpus order is already fairly
+  clustered, so naive sequential packs preserve most of the available sharing
+- this makes batch packing look more like a runtime scheduling concern than a
+  representation-layer bottleneck
+
 ## Tried By Layer
 
 ### Primitive

@@ -19,18 +19,18 @@ use tokenizers::{
 use tokio::{process::Command as TokioCommand, runtime::Builder as TokioRuntimeBuilder};
 
 use crate::{
-    build_recursive_overlay, revived_primitive_factories,
+    build_recursive_overlay, pack_overlay_documents_in_batches, revived_primitive_factories,
     tokenizer::{p1_dynamic_lever_factory, try_p1_dynamic_lever_factory},
     validate_tokenizer_primitive_name, B1FractalGated, B3FractalHierarchical, B4Universal,
     EncodedDocument, EncodedTokenKind, FaceoffChunkLimits, FaceoffEmissionPolicy,
     FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLexemeKind, FaceoffLocalCacheMode,
-    FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer, LocalMacroKind,
-    ModelFacingBatch, ModelFacingDocument, NativeCollationSpec, NativeCompatibilityAdapter,
-    NativeTokenizer, OverlayDictionaryScope, OverlayDocumentMode, OverlayPack,
-    OverlaySharingPolicy, P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary,
-    PrototypeGranularityMode, RecursiveOverlayConfig, RecursiveOverlayMode, RecursiveTokenizer,
-    StateSignature, TokenRecord, TokenizerConfig, TokenizerSubstrateMode,
-    FACEOFF_VOCAB_FORMAT_VERSION,
+    FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer,
+    LocalMacroKind, ModelFacingBatch, ModelFacingDocument, NativeCollationSpec,
+    NativeCompatibilityAdapter, NativeTokenizer, OverlayBatchPackingStrategy,
+    OverlayDictionaryScope, OverlayDocumentMode, OverlayPack, OverlaySharingPolicy,
+    P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary, PrototypeGranularityMode,
+    RecursiveOverlayConfig, RecursiveOverlayMode, RecursiveTokenizer, StateSignature, TokenRecord,
+    TokenizerConfig, TokenizerSubstrateMode, FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -1077,6 +1077,70 @@ fn canonical_overlay_batch_local_factorizes_shared_macro_definitions_exactly() {
     assert!(
         factored_summary.transport_ratio() > unfactored_summary.transport_ratio(),
         "factorized shared definitions should improve overall batch-local transport efficiency"
+    );
+}
+
+#[test]
+fn canonical_overlay_structure_aware_batch_packing_beats_sequential_fixed_packs() {
+    let text_a1 = "\
+{\"ts\": 1, \"level\": \"info\", \"route\": \"/health\", \"service\": \"auth\", \"status\": 200, \"req\": \"a1\"}\n\
+{\"ts\": 2, \"level\": \"info\", \"route\": \"/health\", \"service\": \"auth\", \"status\": 500, \"req\": \"a2\"}\n\
+";
+    let text_b1 = "\
+2026-04-01T12:00:01Z INFO auth request_id=abc-1 route=/ready status=200 latency_ms=11\n\
+2026-04-01T12:00:02Z INFO auth request_id=abc-2 route=/ready status=500 latency_ms=14\n\
+";
+    let text_a2 = "\
+{\"ts\": 3, \"level\": \"info\", \"route\": \"/health\", \"service\": \"auth\", \"status\": 200, \"req\": \"b1\"}\n\
+{\"ts\": 4, \"level\": \"info\", \"route\": \"/health\", \"service\": \"auth\", \"status\": 500, \"req\": \"b2\"}\n\
+";
+    let text_b2 = "\
+2026-04-01T12:01:01Z INFO auth request_id=def-1 route=/ready status=200 latency_ms=09\n\
+2026-04-01T12:01:02Z INFO auth request_id=def-2 route=/ready status=500 latency_ms=13\n\
+";
+
+    let tokenizer = build_hf_native_tokenizer(&[text_a1, text_b1, text_a2, text_b2]);
+    let overlays = [text_a1, text_b1, text_a2, text_b2]
+        .into_iter()
+        .map(|text| {
+            let canonical = tokenizer.tokenize_with_byte_offsets(text).unwrap();
+            build_recursive_overlay(
+                text,
+                canonical,
+                RecursiveOverlayMode::LocalRecordMacro,
+                &RecursiveOverlayConfig::default(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let policy = OverlaySharingPolicy::default();
+    let sequential = pack_overlay_documents_in_batches(
+        OverlayDictionaryScope::BatchLocal,
+        &overlays,
+        &policy,
+        2,
+        OverlayBatchPackingStrategy::Sequential,
+    );
+    let structure_aware = pack_overlay_documents_in_batches(
+        OverlayDictionaryScope::BatchLocal,
+        &overlays,
+        &policy,
+        2,
+        OverlayBatchPackingStrategy::StructureAware,
+    );
+
+    assert!(sequential.exact_ok());
+    assert!(structure_aware.exact_ok());
+    assert_eq!(sequential.summary().pack_count, 2);
+    assert_eq!(structure_aware.summary().pack_count, 2);
+    assert!(
+        structure_aware.summary().transport_ratio() > sequential.summary().transport_ratio(),
+        "grouping similar structured records into the same fixed-size packs should improve transport efficiency"
+    );
+    assert!(
+        structure_aware.summary().definition_overhead_rate()
+            < sequential.summary().definition_overhead_rate(),
+        "structure-aware packing should amortize dictionary-definition cost better than naive sequential packing"
     );
 }
 

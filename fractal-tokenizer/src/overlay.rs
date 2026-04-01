@@ -293,6 +293,101 @@ impl PackedOverlayDocumentTransport {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayBatchPackingStrategy {
+    Sequential,
+    StructureAware,
+}
+
+impl OverlayBatchPackingStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sequential => "sequential",
+            Self::StructureAware => "structure_aware",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OverlayBatchPackSummary {
+    pub scope: OverlayDictionaryScope,
+    pub strategy: OverlayBatchPackingStrategy,
+    pub max_pack_docs: usize,
+    pub pack_count: usize,
+    pub docs: usize,
+    pub canonical_tokens: usize,
+    pub transport_symbols: f64,
+    pub base_slice_symbols: usize,
+    pub macro_ref_symbols: usize,
+    pub macro_definition_symbols: f64,
+}
+
+impl OverlayBatchPackSummary {
+    pub fn transport_ratio(&self) -> f64 {
+        self.canonical_tokens as f64 / self.transport_symbols.max(1.0)
+    }
+
+    pub fn definition_overhead_rate(&self) -> f64 {
+        self.macro_definition_symbols / self.transport_symbols.max(1.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OverlayBatchPack {
+    pub scope: OverlayDictionaryScope,
+    pub strategy: OverlayBatchPackingStrategy,
+    pub max_pack_docs: usize,
+    pub packs: Vec<OverlayPack>,
+    pub document_views: Vec<PackedOverlayDocumentTransport>,
+}
+
+impl OverlayBatchPack {
+    pub fn exact_ok(&self) -> bool {
+        self.packs.iter().all(OverlayPack::exact_ok)
+    }
+
+    pub fn summary(&self) -> OverlayBatchPackSummary {
+        let canonical_tokens = self
+            .document_views
+            .iter()
+            .map(|view| view.canonical_token_count)
+            .sum::<usize>();
+        let base_slice_symbols = self
+            .document_views
+            .iter()
+            .map(|view| view.base_slice_symbols)
+            .sum::<usize>();
+        let macro_ref_symbols = self
+            .document_views
+            .iter()
+            .map(|view| view.macro_ref_symbols)
+            .sum::<usize>();
+        let macro_definition_symbols = self
+            .document_views
+            .iter()
+            .map(|view| view.allocated_macro_definition_symbols)
+            .sum::<f64>();
+        let transport_symbols = self
+            .document_views
+            .iter()
+            .map(PackedOverlayDocumentTransport::transport_symbols)
+            .sum::<f64>();
+
+        OverlayBatchPackSummary {
+            scope: self.scope,
+            strategy: self.strategy,
+            max_pack_docs: self.max_pack_docs,
+            pack_count: self.packs.len(),
+            docs: self.document_views.len(),
+            canonical_tokens,
+            transport_symbols,
+            base_slice_symbols,
+            macro_ref_symbols,
+            macro_definition_symbols,
+        }
+    }
+}
+
 impl OverlayPack {
     pub fn from_documents(
         scope: OverlayDictionaryScope,
@@ -548,10 +643,56 @@ impl OverlayPack {
     }
 }
 
+pub fn pack_overlay_documents_in_batches(
+    scope: OverlayDictionaryScope,
+    documents: &[RecursiveOverlayDocument],
+    policy: &OverlaySharingPolicy,
+    max_pack_docs: usize,
+    strategy: OverlayBatchPackingStrategy,
+) -> OverlayBatchPack {
+    let pack_groups = plan_overlay_pack_groups(documents, max_pack_docs, strategy);
+    let mut packs = Vec::with_capacity(pack_groups.len());
+    let mut document_views = vec![
+        PackedOverlayDocumentTransport {
+            canonical_token_count: 0,
+            base_slice_symbols: 0,
+            macro_ref_symbols: 0,
+            allocated_macro_definition_symbols: 0.0,
+        };
+        documents.len()
+    ];
+
+    for group in pack_groups {
+        let pack_documents = group
+            .iter()
+            .map(|index| documents[*index].clone())
+            .collect::<Vec<_>>();
+        let pack = OverlayPack::from_documents_with_policy(scope, &pack_documents, policy);
+        for (document_index, view) in group.into_iter().zip(pack.document_transport_views()) {
+            document_views[document_index] = view;
+        }
+        packs.push(pack);
+    }
+
+    OverlayBatchPack {
+        scope,
+        strategy,
+        max_pack_docs: max_pack_docs.max(1),
+        packs,
+        document_views,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct SharedMacroKey {
     kind: LocalMacroKind,
     token_ids: Vec<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct OverlayBatchGroupingKey {
+    primary_kind: LocalMacroKind,
+    primary_tokens: Vec<u32>,
 }
 
 fn shared_macro_is_profitable(entry: &SharedMacro, policy: &OverlaySharingPolicy) -> bool {
@@ -560,6 +701,67 @@ fn shared_macro_is_profitable(entry: &SharedMacro, policy: &OverlaySharingPolicy
     let inlined_transport_cost = definition_cost * entry.total_use_count;
     let net_gain_symbols = inlined_transport_cost.saturating_sub(kept_transport_cost);
     net_gain_symbols >= policy.min_net_gain_symbols
+}
+
+fn plan_overlay_pack_groups(
+    documents: &[RecursiveOverlayDocument],
+    max_pack_docs: usize,
+    strategy: OverlayBatchPackingStrategy,
+) -> Vec<Vec<usize>> {
+    let max_pack_docs = max_pack_docs.max(1);
+    match strategy {
+        OverlayBatchPackingStrategy::Sequential => documents
+            .iter()
+            .enumerate()
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>()
+            .chunks(max_pack_docs)
+            .map(|chunk| chunk.to_vec())
+            .collect(),
+        OverlayBatchPackingStrategy::StructureAware => {
+            let mut keyed_groups = BTreeMap::<OverlayBatchGroupingKey, Vec<usize>>::new();
+            let mut unkeyed = Vec::<usize>::new();
+
+            for (index, document) in documents.iter().enumerate() {
+                if let Some(key) = overlay_batch_grouping_key(document) {
+                    keyed_groups.entry(key).or_default().push(index);
+                } else {
+                    unkeyed.push(index);
+                }
+            }
+
+            let mut groups = Vec::<Vec<usize>>::new();
+            for indices in keyed_groups.into_values() {
+                groups.extend(indices.chunks(max_pack_docs).map(|chunk| chunk.to_vec()));
+            }
+            for chunk in unkeyed.chunks(max_pack_docs) {
+                groups.push(chunk.to_vec());
+            }
+            groups
+        }
+    }
+}
+
+fn overlay_batch_grouping_key(
+    document: &RecursiveOverlayDocument,
+) -> Option<OverlayBatchGroupingKey> {
+    document
+        .macros
+        .iter()
+        .max_by(|left, right| {
+            macro_priority_score(left)
+                .cmp(&macro_priority_score(right))
+                .then_with(|| left.token_ids.len().cmp(&right.token_ids.len()))
+                .then_with(|| right.token_ids.cmp(&left.token_ids))
+        })
+        .map(|entry| OverlayBatchGroupingKey {
+            primary_kind: entry.kind,
+            primary_tokens: entry.token_ids.clone(),
+        })
+}
+
+fn macro_priority_score(entry: &LocalMacro) -> usize {
+    entry.use_count.saturating_mul(entry.token_ids.len())
 }
 
 fn factorize_shared_macros(

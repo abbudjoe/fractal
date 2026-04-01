@@ -4,12 +4,13 @@ use fractal_primitives_private::{
     MandelboxRecursiveDynEscapeRadius, P1Contractive, P1FractalHybridComposite, P3Hierarchical,
 };
 use fractal_tokenizer::{
-    build_recursive_overlay, p1_dynamic_lever_factory, revived_primitive_factories,
-    EncodedDocument, FaceoffChunkLimits, FaceoffEmissionPolicy, FaceoffEncodingOptions,
-    FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLocalCacheMode, FaceoffTokenizer,
-    FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer, ModelFacingBatch,
-    ModelFacingDocument, MotifReusePolicy, NativeCollationSpec, NativeCompatibilityAdapter,
-    OverlayDictionaryScope, OverlayPack,
+    build_recursive_overlay, p1_dynamic_lever_factory, pack_overlay_documents_in_batches,
+    revived_primitive_factories, EncodedDocument, FaceoffChunkLimits, FaceoffEmissionPolicy,
+    FaceoffEncodingOptions, FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLocalCacheMode,
+    FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer,
+    ModelFacingBatch, ModelFacingDocument, MotifReusePolicy, NativeCollationSpec,
+    NativeCompatibilityAdapter, OverlayBatchPackingStrategy, OverlayDictionaryScope, OverlayPack,
+    OverlaySharingPolicy,
     PrimitiveFactory, PrototypeGranularityMode, RecursiveOverlayConfig, RecursiveOverlayMode,
     SplitPolicy, TokenizerConfig, TokenizerSubstrateMode,
 };
@@ -55,6 +56,7 @@ const EXTERNAL_CHAR_LIMIT: usize = 12_000;
 const EXTERNAL_PROSE_MIN_CHARS: usize = 700;
 const EXTERNAL_CODE_MIN_CHARS: usize = 400;
 const EXTERNAL_MULTILINGUAL_MIN_CHARS: usize = 700;
+const DEFAULT_OVERLAY_PACK_DOCS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -293,6 +295,14 @@ struct OverlayMetrics {
     batch_local_transport_ratio: f64,
     batch_local_allocated_definition_symbols: f64,
     batch_local_definition_overhead_rate: f64,
+    sequential_pack_transport_symbols: f64,
+    sequential_pack_transport_ratio: f64,
+    sequential_pack_allocated_definition_symbols: f64,
+    sequential_pack_definition_overhead_rate: f64,
+    structure_aware_pack_transport_symbols: f64,
+    structure_aware_pack_transport_ratio: f64,
+    structure_aware_pack_allocated_definition_symbols: f64,
+    structure_aware_pack_definition_overhead_rate: f64,
     exact_ok: bool,
 }
 
@@ -2120,6 +2130,14 @@ fn attach_overlay_shadow(
                 batch_local_transport_ratio: 0.0,
                 batch_local_allocated_definition_symbols: 0.0,
                 batch_local_definition_overhead_rate: 0.0,
+                sequential_pack_transport_symbols: 0.0,
+                sequential_pack_transport_ratio: 0.0,
+                sequential_pack_allocated_definition_symbols: 0.0,
+                sequential_pack_definition_overhead_rate: 0.0,
+                structure_aware_pack_transport_symbols: 0.0,
+                structure_aware_pack_transport_ratio: 0.0,
+                structure_aware_pack_allocated_definition_symbols: 0.0,
+                structure_aware_pack_definition_overhead_rate: 0.0,
                 exact_ok: true,
             });
         }
@@ -2147,6 +2165,14 @@ fn attach_overlay_shadow(
                 batch_local_transport_ratio: 0.0,
                 batch_local_allocated_definition_symbols: 0.0,
                 batch_local_definition_overhead_rate: 0.0,
+                sequential_pack_transport_symbols: 0.0,
+                sequential_pack_transport_ratio: 0.0,
+                sequential_pack_allocated_definition_symbols: 0.0,
+                sequential_pack_definition_overhead_rate: 0.0,
+                structure_aware_pack_transport_symbols: 0.0,
+                structure_aware_pack_transport_ratio: 0.0,
+                structure_aware_pack_allocated_definition_symbols: 0.0,
+                structure_aware_pack_definition_overhead_rate: 0.0,
                 exact_ok: true,
             });
         }
@@ -2173,6 +2199,14 @@ fn attach_overlay_shadow(
                 batch_local_transport_ratio: 0.0,
                 batch_local_allocated_definition_symbols: 0.0,
                 batch_local_definition_overhead_rate: 0.0,
+                sequential_pack_transport_symbols: 0.0,
+                sequential_pack_transport_ratio: 0.0,
+                sequential_pack_allocated_definition_symbols: 0.0,
+                sequential_pack_definition_overhead_rate: 0.0,
+                structure_aware_pack_transport_symbols: 0.0,
+                structure_aware_pack_transport_ratio: 0.0,
+                structure_aware_pack_allocated_definition_symbols: 0.0,
+                structure_aware_pack_definition_overhead_rate: 0.0,
                 exact_ok: true,
             });
         }
@@ -2195,11 +2229,31 @@ fn attach_overlay_shadow(
     let batch_local_pack =
         OverlayPack::from_documents(OverlayDictionaryScope::BatchLocal, &overlays);
     let batch_local_views = batch_local_pack.document_transport_views();
+    let batch_local_exact_ok = batch_local_pack.exact_ok();
+    let sharing_policy = OverlaySharingPolicy::default();
+    let sequential_pack = pack_overlay_documents_in_batches(
+        OverlayDictionaryScope::BatchLocal,
+        &overlays,
+        &sharing_policy,
+        DEFAULT_OVERLAY_PACK_DOCS,
+        OverlayBatchPackingStrategy::Sequential,
+    );
+    let sequential_pack_exact_ok = sequential_pack.exact_ok();
+    let structure_aware_pack = pack_overlay_documents_in_batches(
+        OverlayDictionaryScope::BatchLocal,
+        &overlays,
+        &sharing_policy,
+        DEFAULT_OVERLAY_PACK_DOCS,
+        OverlayBatchPackingStrategy::StructureAware,
+    );
+    let structure_aware_pack_exact_ok = structure_aware_pack.exact_ok();
 
-    for ((record, overlay), batch_view) in results
+    for ((((record, overlay), batch_view), sequential_view), structure_aware_view) in results
         .iter_mut()
         .zip(overlays.into_iter())
         .zip(batch_local_views.into_iter())
+        .zip(sequential_pack.document_views.into_iter())
+        .zip(structure_aware_pack.document_views.into_iter())
     {
         record.overlay = Some(OverlayMetrics {
             status: "ok".to_string(),
@@ -2222,7 +2276,21 @@ fn attach_overlay_shadow(
             batch_local_transport_ratio: batch_view.transport_ratio(),
             batch_local_allocated_definition_symbols: batch_view.allocated_macro_definition_symbols,
             batch_local_definition_overhead_rate: batch_view.definition_overhead_rate(),
-            exact_ok: overlay.exact_ok() && batch_local_pack.exact_ok(),
+            sequential_pack_transport_symbols: sequential_view.transport_symbols(),
+            sequential_pack_transport_ratio: sequential_view.transport_ratio(),
+            sequential_pack_allocated_definition_symbols: sequential_view
+                .allocated_macro_definition_symbols,
+            sequential_pack_definition_overhead_rate: sequential_view.definition_overhead_rate(),
+            structure_aware_pack_transport_symbols: structure_aware_view.transport_symbols(),
+            structure_aware_pack_transport_ratio: structure_aware_view.transport_ratio(),
+            structure_aware_pack_allocated_definition_symbols: structure_aware_view
+                .allocated_macro_definition_symbols,
+            structure_aware_pack_definition_overhead_rate: structure_aware_view
+                .definition_overhead_rate(),
+            exact_ok: overlay.exact_ok()
+                && batch_local_exact_ok
+                && sequential_pack_exact_ok
+                && structure_aware_pack_exact_ok,
         });
     }
 
@@ -2514,6 +2582,47 @@ fn print_overlay_summary(results: &[BakeoffRecord], args: &Args) {
         total_batch_definition_symbols,
         total_batch_definition_symbols / total_batch_transport_symbols.max(1.0)
     );
+    let total_sequential_pack_transport_symbols = ok_records
+        .iter()
+        .map(|(_, overlay)| overlay.sequential_pack_transport_symbols)
+        .sum::<f64>();
+    let total_sequential_pack_definition_symbols = ok_records
+        .iter()
+        .map(|(_, overlay)| overlay.sequential_pack_allocated_definition_symbols)
+        .sum::<f64>();
+    println!(
+        "OVERLAY_PACKING_SUMMARY split=evaluation strategy=sequential max_pack_docs={} docs={} canonical_tokens={} transport_symbols={:.2} transport_ratio={:.2} base_slice_symbols={} macro_ref_symbols={} macro_definition_symbols={:.2} definition_overhead_rate={:.2}",
+        DEFAULT_OVERLAY_PACK_DOCS,
+        ok_records.len(),
+        total_canonical_tokens,
+        total_sequential_pack_transport_symbols,
+        total_canonical_tokens as f64 / total_sequential_pack_transport_symbols.max(1.0),
+        total_base_slice_symbols,
+        total_macro_ref_symbols,
+        total_sequential_pack_definition_symbols,
+        total_sequential_pack_definition_symbols / total_sequential_pack_transport_symbols.max(1.0)
+    );
+    let total_structure_aware_pack_transport_symbols = ok_records
+        .iter()
+        .map(|(_, overlay)| overlay.structure_aware_pack_transport_symbols)
+        .sum::<f64>();
+    let total_structure_aware_pack_definition_symbols = ok_records
+        .iter()
+        .map(|(_, overlay)| overlay.structure_aware_pack_allocated_definition_symbols)
+        .sum::<f64>();
+    println!(
+        "OVERLAY_PACKING_SUMMARY split=evaluation strategy=structure_aware max_pack_docs={} docs={} canonical_tokens={} transport_symbols={:.2} transport_ratio={:.2} base_slice_symbols={} macro_ref_symbols={} macro_definition_symbols={:.2} definition_overhead_rate={:.2}",
+        DEFAULT_OVERLAY_PACK_DOCS,
+        ok_records.len(),
+        total_canonical_tokens,
+        total_structure_aware_pack_transport_symbols,
+        total_canonical_tokens as f64 / total_structure_aware_pack_transport_symbols.max(1.0),
+        total_base_slice_symbols,
+        total_macro_ref_symbols,
+        total_structure_aware_pack_definition_symbols,
+        total_structure_aware_pack_definition_symbols
+            / total_structure_aware_pack_transport_symbols.max(1.0)
+    );
 
     let mut per_bucket = BTreeMap::<String, Vec<&OverlayMetrics>>::new();
     for (bucket, overlay) in ok_records {
@@ -2547,11 +2656,32 @@ fn print_overlay_summary(results: &[BakeoffRecord], args: &Args) {
             .iter()
             .map(|overlay| overlay.batch_local_definition_overhead_rate)
             .collect::<Vec<_>>();
+        let mut sequential_pack_ratios = overlays
+            .iter()
+            .map(|overlay| overlay.sequential_pack_transport_ratio)
+            .collect::<Vec<_>>();
+        let mut sequential_pack_definition_overhead = overlays
+            .iter()
+            .map(|overlay| overlay.sequential_pack_definition_overhead_rate)
+            .collect::<Vec<_>>();
+        let mut structure_aware_pack_ratios = overlays
+            .iter()
+            .map(|overlay| overlay.structure_aware_pack_transport_ratio)
+            .collect::<Vec<_>>();
+        let mut structure_aware_pack_definition_overhead = overlays
+            .iter()
+            .map(|overlay| overlay.structure_aware_pack_definition_overhead_rate)
+            .collect::<Vec<_>>();
         ratios.sort_by(|left, right| left.partial_cmp(right).unwrap());
         saved.sort_by(|left, right| left.partial_cmp(right).unwrap());
         definition_overhead.sort_by(|left, right| left.partial_cmp(right).unwrap());
         batch_ratios.sort_by(|left, right| left.partial_cmp(right).unwrap());
         batch_definition_overhead.sort_by(|left, right| left.partial_cmp(right).unwrap());
+        sequential_pack_ratios.sort_by(|left, right| left.partial_cmp(right).unwrap());
+        sequential_pack_definition_overhead.sort_by(|left, right| left.partial_cmp(right).unwrap());
+        structure_aware_pack_ratios.sort_by(|left, right| left.partial_cmp(right).unwrap());
+        structure_aware_pack_definition_overhead
+            .sort_by(|left, right| left.partial_cmp(right).unwrap());
         let activation_rate = overlays
             .iter()
             .filter(|overlay| overlay.mode == "local-macro" && overlay.macro_ref_count > 0)
@@ -2574,6 +2704,26 @@ fn print_overlay_summary(results: &[BakeoffRecord], args: &Args) {
             activation_rate,
             median_sorted(&saved),
             median_sorted(&batch_definition_overhead)
+        );
+        println!(
+            "OVERLAY_PACKING_BUCKET_SUMMARY split=evaluation strategy=sequential max_pack_docs={} bucket={} docs={} median_ratio={:.2} activation_rate={:.2} median_saved_tokens={:.2} median_definition_overhead_rate={:.2}",
+            DEFAULT_OVERLAY_PACK_DOCS,
+            bucket,
+            overlays.len(),
+            median_sorted(&sequential_pack_ratios),
+            activation_rate,
+            median_sorted(&saved),
+            median_sorted(&sequential_pack_definition_overhead)
+        );
+        println!(
+            "OVERLAY_PACKING_BUCKET_SUMMARY split=evaluation strategy=structure_aware max_pack_docs={} bucket={} docs={} median_ratio={:.2} activation_rate={:.2} median_saved_tokens={:.2} median_definition_overhead_rate={:.2}",
+            DEFAULT_OVERLAY_PACK_DOCS,
+            bucket,
+            overlays.len(),
+            median_sorted(&structure_aware_pack_ratios),
+            activation_rate,
+            median_sorted(&saved),
+            median_sorted(&structure_aware_pack_definition_overhead)
         );
     }
 }
