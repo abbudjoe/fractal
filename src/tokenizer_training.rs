@@ -1,4 +1,8 @@
-use std::{fmt, num::NonZeroUsize, path::Path};
+use std::{
+    fmt, fs,
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+};
 
 use burn::tensor::{
     backend::{AutodiffBackend, Backend},
@@ -17,9 +21,215 @@ use fractal_core::{
 };
 use fractal_tokenizer::{
     EmbeddingBridgeAdapter, FaceoffChunkLimits, FaceoffTokenizer, FaceoffVocabConfig,
-    ModelFacingBatch, ModelFacingDocument, NativeCollationSpec, NativeCompatibilityAdapter,
-    NativeCompatibilityError, NativeTokenizer, NativeTruncationPolicy, TypedEmbeddingBridge,
+    HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument, NativeCollationSpec,
+    NativeCompatibilityAdapter, NativeCompatibilityError, NativeTokenizer, NativeTruncationPolicy,
+    TypedEmbeddingBridge,
 };
+
+pub const STAGE0_CANONICAL_TOKENIZER_REPO_ID: &str = "openlm-research/open_llama_3b_v2";
+pub const STAGE0_CANONICAL_TOKENIZER_FILENAME: &str = "tokenizer.json";
+pub const STAGE0_CANONICAL_TOKENIZER_USE_FAST: bool = false;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextCorpusFormat {
+    JsonlText { text_field: String },
+    PlainTextLines,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextCorpusSplitSource {
+    pub path: PathBuf,
+    pub format: TextCorpusFormat,
+    pub max_documents: Option<usize>,
+}
+
+impl TextCorpusSplitSource {
+    pub fn jsonl_text(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            format: TextCorpusFormat::JsonlText {
+                text_field: "text".to_owned(),
+            },
+            max_documents: None,
+        }
+    }
+
+    pub fn plain_text_lines(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            format: TextCorpusFormat::PlainTextLines,
+            max_documents: None,
+        }
+    }
+
+    pub fn with_max_documents(mut self, max_documents: usize) -> Self {
+        self.max_documents = Some(max_documents);
+        self
+    }
+
+    fn load_documents(&self) -> Result<Vec<String>, FractalError> {
+        let content = fs::read_to_string(&self.path).map_err(|error| {
+            FractalError::InvalidState(format!(
+                "failed to read text corpus split {}: {error}",
+                self.path.display()
+            ))
+        })?;
+        let mut documents = match &self.format {
+            TextCorpusFormat::JsonlText { text_field } => content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| {
+                    let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+                        FractalError::InvalidState(format!(
+                            "failed to parse jsonl line for {}: {error}",
+                            self.path.display()
+                        ))
+                    })?;
+                    let text = value
+                        .get(text_field)
+                        .and_then(|value| value.as_str())
+                        .ok_or_else(|| {
+                            FractalError::InvalidState(format!(
+                                "jsonl record in {} is missing string field {}",
+                                self.path.display(),
+                                text_field
+                            ))
+                        })?;
+                    Ok(text.to_owned())
+                })
+                .collect::<Result<Vec<_>, FractalError>>()?,
+            TextCorpusFormat::PlainTextLines => content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        };
+
+        if let Some(max_documents) = self.max_documents {
+            documents.truncate(max_documents);
+        }
+        Ok(documents)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenizerTrainingCorpusSource {
+    pub name: String,
+    pub train: TextCorpusSplitSource,
+    pub eval: TextCorpusSplitSource,
+}
+
+impl TokenizerTrainingCorpusSource {
+    pub fn new(
+        name: impl Into<String>,
+        train: TextCorpusSplitSource,
+        eval: TextCorpusSplitSource,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            train,
+            eval,
+        }
+    }
+
+    pub fn fineweb_jsonl(
+        name: impl Into<String>,
+        train_path: impl Into<PathBuf>,
+        eval_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self::new(
+            name,
+            TextCorpusSplitSource::jsonl_text(train_path),
+            TextCorpusSplitSource::jsonl_text(eval_path),
+        )
+    }
+
+    pub fn load(&self) -> Result<TokenizerTrainingCorpus, FractalError> {
+        let corpus = TokenizerTrainingCorpus::new(
+            self.name.clone(),
+            self.train.load_documents()?,
+            self.eval.load_documents()?,
+        );
+        corpus.validate()?;
+        Ok(corpus)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedTokenizerArtifact {
+    pub repo_id: String,
+    pub revision: Option<String>,
+    pub tokenizer_filename: String,
+    pub use_fast: bool,
+    pub local_path: PathBuf,
+    pub spec: TokenizerArtifactSpec,
+}
+
+impl ResolvedTokenizerArtifact {
+    pub fn from_training_input(training_input: &TrainingInputSpec) -> Result<Self, FractalError> {
+        let spec = training_input.tokenizer.clone().ok_or_else(|| {
+            FractalError::InvalidConfig(
+                "tokenizer-backed text training requires tokenizer artifact metadata".into(),
+            )
+        })?;
+        let path = spec.artifact_path.clone().ok_or_else(|| {
+            FractalError::InvalidConfig(
+                "tokenizer-backed text training requires a tokenizer artifact path".into(),
+            )
+        })?;
+        let local_path = PathBuf::from(path);
+        if !local_path.is_file() {
+            return Err(FractalError::InvalidState(format!(
+                "tokenizer artifact path {} does not point to a readable file",
+                local_path.display()
+            )));
+        }
+        let tokenizer_filename = local_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(STAGE0_CANONICAL_TOKENIZER_FILENAME)
+            .to_owned();
+        Ok(Self {
+            repo_id: spec.artifact_id.clone(),
+            revision: None,
+            tokenizer_filename,
+            use_fast: STAGE0_CANONICAL_TOKENIZER_USE_FAST,
+            local_path,
+            spec,
+        })
+    }
+
+    pub fn canonical_open_llama_3b_v2(
+        tokenizer_json_path: impl Into<PathBuf>,
+        vocab_size: usize,
+        pad_token_id: usize,
+    ) -> Self {
+        let local_path = tokenizer_json_path.into();
+        let tokenizer_filename = local_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(STAGE0_CANONICAL_TOKENIZER_FILENAME)
+            .to_owned();
+        let spec = TokenizerArtifactSpec {
+            artifact_id: STAGE0_CANONICAL_TOKENIZER_REPO_ID.to_owned(),
+            artifact_path: Some(local_path.display().to_string()),
+            vocab_size,
+            pad_token_id,
+        };
+        Self {
+            repo_id: STAGE0_CANONICAL_TOKENIZER_REPO_ID.to_owned(),
+            revision: None,
+            tokenizer_filename,
+            use_fast: STAGE0_CANONICAL_TOKENIZER_USE_FAST,
+            local_path,
+            spec,
+        }
+    }
+
+    pub fn into_training_input(self, corpus_name: impl Into<String>) -> TrainingInputSpec {
+        TrainingInputSpec::tokenizer_backed_text(corpus_name, self.spec)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TokenizerTrainingCorpus {
@@ -150,15 +360,49 @@ impl<N> TokenizerTrainingRuntime<N> {
 }
 
 pub fn load_native_tokenizer(
-    tokenizer: &TokenizerArtifactSpec,
-) -> Result<fractal_tokenizer::HuggingFaceNativeTokenizer, FractalError> {
-    let path = tokenizer.artifact_path.as_ref().ok_or_else(|| {
-        FractalError::InvalidConfig(
-            "tokenizer-backed text training requires a tokenizer artifact path".into(),
-        )
-    })?;
-    fractal_tokenizer::HuggingFaceNativeTokenizer::from_file(Path::new(path))
+    artifact: &ResolvedTokenizerArtifact,
+) -> Result<HuggingFaceNativeTokenizer, FractalError> {
+    HuggingFaceNativeTokenizer::from_file(Path::new(&artifact.local_path))
         .map_err(|error| FractalError::InvalidState(error.to_string()))
+}
+
+pub fn load_stage0_tokenizer_runtime(
+    training_input: &TrainingInputSpec,
+    max_sequence_len: usize,
+) -> Result<
+    (
+        TokenizerTrainingRuntime<HuggingFaceNativeTokenizer>,
+        ResolvedTokenizerArtifact,
+    ),
+    FractalError,
+> {
+    let artifact = ResolvedTokenizerArtifact::from_training_input(training_input)?;
+    let tokenizer = load_native_tokenizer(&artifact)?;
+    let runtime = TokenizerTrainingRuntime::new(tokenizer, max_sequence_len)?;
+    Ok((runtime, artifact))
+}
+
+pub fn build_tokenizer_backed_batches_from_source<B>(
+    config: &fractal_core::TournamentConfig,
+    training_input: &TrainingInputSpec,
+    corpus_source: &TokenizerTrainingCorpusSource,
+    device: &B::Device,
+) -> Result<
+    (
+        TrainingBatchSet<B>,
+        TokenizerBridgeStats,
+        ResolvedTokenizerArtifact,
+    ),
+    FractalError,
+>
+where
+    B: AutodiffBackend,
+{
+    let corpus = corpus_source.load()?;
+    let (runtime, artifact) = load_stage0_tokenizer_runtime(training_input, config.max_seq_len)?;
+    let (batches, stats) =
+        build_tokenizer_backed_batches::<B, _>(config, training_input, &corpus, &runtime, device)?;
+    Ok((batches, stats, artifact))
 }
 
 pub fn build_tokenizer_backed_batches<B, N>(
@@ -334,6 +578,89 @@ where
     };
 
     Ok((metrics, stats))
+}
+
+pub fn run_tokenizer_backed_species_from_source<B>(
+    species: SpeciesId,
+    variant_name: PrimitiveVariantName,
+    config: fractal_core::TournamentConfig,
+    experiment: Option<ExperimentSpec>,
+    corpus_source: &TokenizerTrainingCorpusSource,
+    device: B::Device,
+) -> Result<
+    (
+        SpeciesRawMetrics,
+        TokenizerBridgeStats,
+        ResolvedTokenizerArtifact,
+    ),
+    FractalError,
+>
+where
+    B: AutodiffBackend,
+{
+    let experiment = experiment.or_else(|| config.resolved_experiment(species, variant_name));
+    let training_input = experiment
+        .as_ref()
+        .map(|spec| &spec.training_input)
+        .ok_or_else(|| {
+            FractalError::InvalidConfig(
+                "tokenizer-backed training requires an experiment spec".into(),
+            )
+        })?;
+    let (batches, stats, artifact) = build_tokenizer_backed_batches_from_source::<B>(
+        &config,
+        training_input,
+        corpus_source,
+        &device,
+    )?;
+
+    let metrics = match species {
+        SpeciesId::P1Contractive => {
+            let rule = fractal_primitives_private::P1Contractive::<B>::new(config.dim, &device);
+            run_species_with_batches::<B, _>(
+                species,
+                variant_name,
+                config,
+                experiment,
+                device,
+                rule,
+                batches,
+            )?
+        }
+        SpeciesId::P1FractalHybrid => {
+            let rule = fractal_primitives_private::P1FractalHybrid::<B>::new(config.dim, &device);
+            run_species_with_batches::<B, _>(
+                species,
+                variant_name,
+                config,
+                experiment,
+                device,
+                rule,
+                batches,
+            )?
+        }
+        SpeciesId::P1FractalHybridComposite => {
+            let rule =
+                fractal_primitives_private::P1FractalHybridComposite::<B>::new(config.dim, &device);
+            run_species_with_batches::<B, _>(
+                species,
+                variant_name,
+                config,
+                experiment,
+                device,
+                rule,
+                batches,
+            )?
+        }
+        _ => {
+            return Err(FractalError::InvalidConfig(format!(
+                "tokenizer-backed Stage 0 only supports the locked top cohort, got {}",
+                species
+            )));
+        }
+    };
+
+    Ok((metrics, stats, artifact))
 }
 
 fn build_canonical_arc_eval_batches<B: AutodiffBackend>(
@@ -561,7 +888,14 @@ fn native_error_to_state<E: fmt::Display>(error: NativeCompatibilityError<E>) ->
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, env, error::Error, fmt, fs};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        env,
+        error::Error,
+        fmt, fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use burn::backend::candle::CandleDevice;
     use fractal_core::lifecycle::ArcSourceMode;
@@ -578,11 +912,17 @@ mod tests {
     };
 
     use super::{
-        build_tokenizer_backed_batches, run_tokenizer_backed_species, TokenizerArtifactSpec,
-        TokenizerTrainingCorpus, TokenizerTrainingRuntime,
+        build_tokenizer_backed_batches, load_stage0_tokenizer_runtime,
+        run_tokenizer_backed_species_from_source, ResolvedTokenizerArtifact, TokenizerArtifactSpec,
+        TokenizerTrainingCorpus, TokenizerTrainingCorpusSource, TokenizerTrainingRuntime,
+        STAGE0_CANONICAL_TOKENIZER_REPO_ID,
     };
     use fractal_core::registry::take_last_species_run_artifact;
     use fractal_tokenizer::NativeTokenizer;
+    use tokenizers::{
+        models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace, PaddingDirection,
+        PaddingParams, PaddingStrategy, Tokenizer,
+    };
 
     #[derive(Clone, Debug)]
     struct ByteTokenizer;
@@ -611,6 +951,71 @@ mod tests {
         }
     }
 
+    fn unique_temp_path(prefix: &str, suffix: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        env::temp_dir().join(format!(
+            "fractal-stage0-{prefix}-{}-{stamp}{suffix}",
+            std::process::id()
+        ))
+    }
+
+    fn write_jsonl_corpus(path: &PathBuf, documents: &[&str]) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let body = documents
+            .iter()
+            .map(|document| serde_json::json!({ "text": document }).to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(path, format!("{body}\n")).unwrap();
+    }
+
+    fn build_file_backed_hf_tokenizer(inputs: &[&str]) -> PathBuf {
+        let mut vocab = std::collections::HashMap::<String, u32>::new();
+        vocab.insert("[PAD]".to_owned(), 0);
+        vocab.insert("[UNK]".to_owned(), 1);
+
+        let mut next_id = 2u32;
+        let mut pieces = BTreeSet::<String>::new();
+        for input in inputs {
+            pieces.extend(input.split_whitespace().map(str::to_owned));
+        }
+        for piece in pieces {
+            vocab.insert(piece, next_id);
+            next_id += 1;
+        }
+        while next_id < 32_000 {
+            vocab.insert(format!("token-{next_id}"), next_id);
+            next_id += 1;
+        }
+
+        let model = WordLevel::builder()
+            .vocab(vocab)
+            .unk_token("[UNK]".to_string())
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_pre_tokenizer(Some(Whitespace {}));
+        tokenizer.with_padding(Some(PaddingParams {
+            strategy: PaddingStrategy::BatchLongest,
+            direction: PaddingDirection::Right,
+            pad_to_multiple_of: None,
+            pad_id: 0,
+            pad_type_id: 0,
+            pad_token: "[PAD]".to_owned(),
+        }));
+
+        let dir = unique_temp_path("tokenizer-artifact", "");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tokenizer.json");
+        tokenizer.save(&path, false).unwrap();
+        path
+    }
+
     #[test]
     fn tokenizer_backed_stage0_smoke_path_captures_bridge_metadata() {
         let temp_root =
@@ -618,8 +1023,25 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_root);
         let artifact_dir = temp_root.join("artifacts");
         let manifest_dir = temp_root.join("manifests");
+        let train_path = temp_root.join("train.jsonl");
+        let eval_path = temp_root.join("eval.jsonl");
         env::set_var("FRACTAL_RUN_ARTIFACT_DIR", &artifact_dir);
         env::set_var("FRACTAL_RUN_MANIFEST_DIR", &manifest_dir);
+
+        let train_documents = [
+            "the quick brown fox jumps over the lazy dog",
+            "recursive primitives keep their own state",
+        ];
+        let eval_documents = ["held out text stays separate"];
+        write_jsonl_corpus(&train_path, &train_documents);
+        write_jsonl_corpus(&eval_path, &eval_documents);
+        let tokenizer_path = build_file_backed_hf_tokenizer(&[
+            train_documents[0],
+            train_documents[1],
+            eval_documents[0],
+        ]);
+        let resolved_tokenizer =
+            ResolvedTokenizerArtifact::canonical_open_llama_3b_v2(&tokenizer_path, 32_000, 0);
 
         let mut config = TournamentPreset::FastTest.config();
         config.dim = 8;
@@ -637,15 +1059,9 @@ mod tests {
         config.learning_rate = 1e-3;
         config.optimizer = OptimizerSpec::legacy_adam(config.learning_rate);
 
-        let training_input = TrainingInputSpec::tokenizer_backed_text(
-            "fineweb-stage0-smoke",
-            TokenizerArtifactSpec {
-                artifact_id: "frozen-32k-sentencepiece".to_owned(),
-                artifact_path: Some("inline://frozen-32k-sentencepiece".to_owned()),
-                vocab_size: 32_000,
-                pad_token_id: 0,
-            },
-        );
+        let training_input = resolved_tokenizer
+            .clone()
+            .into_training_input("fineweb-stage0-smoke");
         let template = ExperimentSpecTemplate {
             experiment_id: ExperimentId {
                 logical_name: "stage0-tokenizer-smoke".to_owned(),
@@ -677,30 +1093,33 @@ mod tests {
             SpeciesId::P1Contractive,
             PrimitiveVariantName::new_unchecked("p1_contractive_v1"),
         );
-        let corpus = TokenizerTrainingCorpus::new(
+        let corpus_source = TokenizerTrainingCorpusSource::fineweb_jsonl(
             "fineweb-stage0-smoke",
-            vec![
-                "the quick brown fox jumps over the lazy dog".to_owned(),
-                "recursive primitives keep their own state".to_owned(),
-            ],
-            vec!["held out text stays separate".to_owned()],
+            &train_path,
+            &eval_path,
         );
-        let runtime = TokenizerTrainingRuntime::new(ByteTokenizer, config.max_seq_len).unwrap();
+        let (_runtime, loaded_artifact) =
+            load_stage0_tokenizer_runtime(&training_input, config.max_seq_len)
+                .expect("canonical Stage 0 tokenizer runtime loads");
+        assert_eq!(loaded_artifact.repo_id, STAGE0_CANONICAL_TOKENIZER_REPO_ID);
+        assert_eq!(loaded_artifact.local_path, tokenizer_path);
+        assert_eq!(loaded_artifact.tokenizer_filename, "tokenizer.json");
+        assert!(!loaded_artifact.use_fast);
         let device = CandleDevice::Cpu;
 
-        let (metrics, bridge_stats) =
-            run_tokenizer_backed_species::<fractal_core::CpuTrainBackend, _>(
+        let (metrics, bridge_stats, source_artifact) =
+            run_tokenizer_backed_species_from_source::<fractal_core::CpuTrainBackend>(
                 SpeciesId::P1Contractive,
                 PrimitiveVariantName::new_unchecked("p1_contractive_v1"),
                 config.clone(),
                 Some(experiment.clone()),
-                &corpus,
-                &runtime,
+                &corpus_source,
                 device,
             )
             .expect("tokenizer-backed stage0 smoke run succeeds");
 
         assert!(metrics.tokens_per_sec.is_finite());
+        assert_eq!(source_artifact.repo_id, STAGE0_CANONICAL_TOKENIZER_REPO_ID);
         assert!(bridge_stats.bridge_enabled);
         assert!(bridge_stats.bridge_observational_only);
         assert_eq!(
@@ -710,7 +1129,7 @@ mod tests {
         assert_eq!(bridge_stats.corpus_name, "fineweb-stage0-smoke");
         assert_eq!(
             bridge_stats.tokenizer_artifact_id,
-            "frozen-32k-sentencepiece"
+            STAGE0_CANONICAL_TOKENIZER_REPO_ID
         );
         assert_eq!(
             bridge_stats.arc_source_mode,
@@ -777,7 +1196,7 @@ mod tests {
         );
         assert_eq!(
             manifest["experiments"][0]["training_input"]["tokenizer"]["artifact_id"],
-            serde_json::Value::String("frozen-32k-sentencepiece".to_owned())
+            serde_json::Value::String(STAGE0_CANONICAL_TOKENIZER_REPO_ID.to_owned())
         );
         assert_eq!(
             artifact_json["results"][0]["tokenizer_bridge"]["bridge_enabled"],
@@ -790,6 +1209,9 @@ mod tests {
 
         env::remove_var("FRACTAL_RUN_ARTIFACT_DIR");
         env::remove_var("FRACTAL_RUN_MANIFEST_DIR");
+        if let Some(parent) = tokenizer_path.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
         let _ = fs::remove_dir_all(&temp_root);
     }
 
