@@ -4,7 +4,7 @@
 use burn::{
     module::Param,
     nn::Linear,
-    tensor::{backend::Backend, Element, Tensor, TensorData},
+    tensor::{backend::Backend, Element, ElementConversion, Tensor, TensorData},
 };
 use fractal_core::{
     error::FractalError,
@@ -1157,7 +1157,7 @@ fn summarize_readout<B: Backend>(
     motifs: &mut MotifRegistry,
     motif_reuse: MotifReusePolicy,
 ) -> Result<TokenSummary, FractalError> {
-    let values = tensor_data_to_vec::<f32>(readout.clone().into_data(), "token readout")?;
+    let values = tensor_readout_to_f32::<B>(readout, "token readout")?;
     let state_signature = StateSignature::from_values(&values);
     let prefix = values.iter().take(8).copied().collect::<Vec<_>>();
     let mut digest = 1469598103934665603u64;
@@ -1184,6 +1184,37 @@ fn tensor_data_to_vec<E: Element>(
 ) -> Result<Vec<E>, FractalError> {
     data.to_vec::<E>()
         .map_err(|err| FractalError::InvalidState(format!("failed to extract {label}: {err:?}")))
+}
+
+fn tensor_readout_to_f32<B: Backend>(
+    tensor: &Tensor<B, 2>,
+    label: &'static str,
+) -> Result<Vec<f32>, FractalError> {
+    tensor_data_to_vec::<B::FloatElem>(tensor.clone().into_data(), label)
+        .map(|values| values.into_iter().map(|value| value.elem::<f32>()).collect())
+}
+
+#[cfg(test)]
+mod readout_tests {
+    use super::tensor_readout_to_f32;
+    use burn::{
+        backend::{candle::CandleDevice, Candle},
+        tensor::{bf16, Tensor},
+    };
+
+    type Bf16Backend = Candle<bf16, i64>;
+
+    #[test]
+    fn tensor_readout_to_f32_accepts_bf16_backend_outputs() {
+        let device = CandleDevice::Cpu;
+        let readout = Tensor::<Bf16Backend, 2>::from_floats([[0.5, -1.25]], &device);
+        let values = tensor_readout_to_f32::<Bf16Backend>(&readout, "token readout")
+            .expect("bf16 readout conversion should succeed");
+
+        assert_eq!(values.len(), 2);
+        assert!((values[0] - 0.5).abs() < 0.02);
+        assert!((values[1] + 1.25).abs() < 0.02);
+    }
 }
 
 #[allow(dead_code)]
