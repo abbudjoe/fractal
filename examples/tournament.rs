@@ -736,6 +736,7 @@ fn build_experiment_template(
             decision_intent: decision_intent_for_contract(comparison),
         },
         budget: BudgetSpec::from_config(preset, config),
+        optimizer: config.optimizer.clone(),
         runtime: options.runtime_surface_spec(),
         comparison: comparison.clone(),
         execution: ExecutionTarget {

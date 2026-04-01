@@ -162,6 +162,7 @@ pub struct RawExample {
 pub struct TokenBatch<B: Backend> {
     pub input_ids: Tensor<B, 2, Int>,
     pub target_ids: Tensor<B, 2, Int>,
+    pub token_count: usize,
     pub family: TaskFamily,
 }
 
@@ -170,6 +171,7 @@ impl<B: Backend> TokenBatch<B> {
         Self {
             input_ids: self.input_ids.to_device(device),
             target_ids: self.target_ids.to_device(device),
+            token_count: self.token_count,
             family: self.family,
         }
     }
@@ -325,6 +327,7 @@ impl SimpleHierarchicalGenerator {
         let seq_len = self.config.max_seq_len;
         let mut input_flat = Vec::with_capacity(batch_size * seq_len);
         let mut target_flat = Vec::with_capacity(batch_size * seq_len);
+        let mut token_count = 0usize;
 
         for offset in 0..batch_size {
             let example = &dataset[(start + offset) % dataset.len()];
@@ -348,6 +351,7 @@ impl SimpleHierarchicalGenerator {
                     .copied()
                     .map(|token| token.elem::<B::IntElem>()),
             );
+            token_count += example.token_len;
         }
 
         let input_ids = Tensor::<B, 2, Int>::from_data(
@@ -362,6 +366,7 @@ impl SimpleHierarchicalGenerator {
         Ok(TokenBatch {
             input_ids,
             target_ids,
+            token_count,
             family,
         })
     }

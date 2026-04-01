@@ -196,6 +196,7 @@ fn config_json(report: &TournamentRunReport) -> Value {
         "effective_perplexity_eval_batches": report.config.effective_perplexity_eval_batches(),
         "effective_arc_eval_batches": report.config.effective_arc_eval_batches(),
         "learning_rate": report.config.learning_rate,
+        "optimizer": optimizer_json(&report.config.optimizer),
         "seed": report.config.seed,
         "parallelism": report.config.parallelism,
     })
@@ -233,6 +234,7 @@ fn experiment_json(spec: &crate::ExperimentSpec) -> Value {
             "species": spec.variant.species.as_str(),
             "variant_name": spec.variant.variant_name.as_str(),
         },
+        "optimizer": optimizer_json(&spec.optimizer),
         "budget": {
             "preset": spec.budget.preset.name(),
             "seed": spec.budget.seed,
@@ -270,6 +272,25 @@ fn experiment_json(spec: &crate::ExperimentSpec) -> Value {
             "final_log_required": spec.artifacts.final_log_required,
             "tracker_ready_output_required": spec.artifacts.tracker_ready_output_required,
         },
+    })
+}
+
+fn optimizer_json(spec: &crate::OptimizerSpec) -> Value {
+    json!({
+        "kind": spec.kind.as_str(),
+        "peak_learning_rate": spec.peak_learning_rate,
+        "beta_1": spec.beta_1,
+        "beta_2": spec.beta_2,
+        "epsilon": spec.epsilon,
+        "weight_decay": spec.weight_decay,
+        "gradient_clip_norm": spec.gradient_clip_norm,
+        "schedule": {
+            "kind": spec.schedule.kind.as_str(),
+            "warmup_fraction": spec.schedule.warmup_fraction,
+            "decay_floor_fraction": spec.schedule.decay_floor_fraction,
+            "label": spec.schedule.label(),
+        },
+        "label": spec.label(),
     })
 }
 
@@ -394,7 +415,7 @@ mod tests {
     use fractal_core::{
         ArtifactPolicy, BudgetSpec, DecisionIntent, ExecutionBackend, ExecutionTarget,
         ExecutionTargetKind, ExperimentId, ExperimentQuestion, ExperimentSpec, LaneIntent,
-        RuntimeSurfaceSpec, VariantSpec,
+        OptimizerSpec, RuntimeSurfaceSpec, VariantSpec,
     };
 
     use super::{persist_run_artifacts, ARTIFACT_FILENAME, MANIFEST_FILENAME};
@@ -481,6 +502,10 @@ mod tests {
             serde_json::Value::String("conservative-defaults".to_owned())
         );
         assert_eq!(
+            manifest["config"]["optimizer"]["kind"],
+            serde_json::Value::String("adam".to_owned())
+        );
+        assert_eq!(
             artifact_json["results"][0]["comparison_authority"],
             serde_json::Value::String("authoritative same-preset".to_owned())
         );
@@ -491,6 +516,10 @@ mod tests {
         assert_eq!(
             artifact_json["results"][0]["experiment"]["variant"]["variant_name"],
             serde_json::Value::String("p1_contractive_v1".to_owned())
+        );
+        assert_eq!(
+            artifact_json["results"][0]["experiment"]["optimizer"]["kind"],
+            serde_json::Value::String("adam".to_owned())
         );
 
         env::remove_var("FRACTAL_RUN_ARTIFACT_DIR");
@@ -520,6 +549,7 @@ mod tests {
                 ),
             },
             budget: BudgetSpec::from_config(TournamentPreset::FastTest, &config),
+            optimizer: OptimizerSpec::legacy_adam(config.learning_rate),
             runtime: RuntimeSurfaceSpec::default(),
             comparison: ComparisonContract::authoritative_same_preset(),
             execution: ExecutionTarget {

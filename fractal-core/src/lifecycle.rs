@@ -221,6 +221,228 @@ pub struct VariantSpec {
     pub variant_name: PrimitiveVariantName,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptimizerKind {
+    Adam,
+    AdamW,
+}
+
+impl OptimizerKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Adam => "adam",
+            Self::AdamW => "adamw",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LearningRateScheduleKind {
+    Constant,
+    WarmupCosine,
+}
+
+impl LearningRateScheduleKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Constant => "constant",
+            Self::WarmupCosine => "warmup-cosine",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LearningRateScheduleSpec {
+    pub kind: LearningRateScheduleKind,
+    pub warmup_fraction: f64,
+    pub decay_floor_fraction: f64,
+}
+
+impl Default for LearningRateScheduleSpec {
+    fn default() -> Self {
+        Self::constant()
+    }
+}
+
+impl LearningRateScheduleSpec {
+    pub const fn constant() -> Self {
+        Self {
+            kind: LearningRateScheduleKind::Constant,
+            warmup_fraction: 0.0,
+            decay_floor_fraction: 1.0,
+        }
+    }
+
+    pub fn warmup_cosine(warmup_fraction: f64, decay_floor_fraction: f64) -> Self {
+        Self {
+            kind: LearningRateScheduleKind::WarmupCosine,
+            warmup_fraction,
+            decay_floor_fraction,
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self.kind {
+            LearningRateScheduleKind::Constant => "constant".to_owned(),
+            LearningRateScheduleKind::WarmupCosine => format!(
+                "warmup_cosine(warmup_fraction={:.4}, decay_floor_fraction={:.4})",
+                self.warmup_fraction, self.decay_floor_fraction
+            ),
+        }
+    }
+
+    pub fn learning_rate_at_tokens(
+        &self,
+        peak_learning_rate: f64,
+        seen_tokens: usize,
+        total_tokens: usize,
+    ) -> f64 {
+        match self.kind {
+            LearningRateScheduleKind::Constant => peak_learning_rate,
+            LearningRateScheduleKind::WarmupCosine => {
+                let total_tokens = total_tokens.max(1) as f64;
+                let progress = (seen_tokens as f64 / total_tokens).clamp(0.0, 1.0);
+                let warmup_fraction = self.warmup_fraction.clamp(0.0, 1.0);
+                let min_lr = peak_learning_rate * self.decay_floor_fraction.clamp(0.0, 1.0);
+
+                if warmup_fraction > 0.0 && progress < warmup_fraction {
+                    peak_learning_rate * (progress / warmup_fraction)
+                } else if progress >= 1.0 {
+                    min_lr
+                } else {
+                    let decay_progress = if warmup_fraction >= 1.0 {
+                        1.0
+                    } else {
+                        ((progress - warmup_fraction) / (1.0 - warmup_fraction)).clamp(0.0, 1.0)
+                    };
+                    min_lr
+                        + 0.5
+                            * (peak_learning_rate - min_lr)
+                            * (1.0 + (decay_progress * std::f64::consts::PI).cos())
+                }
+            }
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        if self.warmup_fraction < 0.0 || self.warmup_fraction > 1.0 {
+            return Err(FractalError::InvalidConfig(
+                "optimizer warmup_fraction must be within [0, 1]".into(),
+            ));
+        }
+        if self.decay_floor_fraction < 0.0 || self.decay_floor_fraction > 1.0 {
+            return Err(FractalError::InvalidConfig(
+                "optimizer decay_floor_fraction must be within [0, 1]".into(),
+            ));
+        }
+        if matches!(self.kind, LearningRateScheduleKind::Constant)
+            && (self.warmup_fraction != 0.0 || self.decay_floor_fraction != 1.0)
+        {
+            return Err(FractalError::InvalidConfig(
+                "constant optimizer schedule must use warmup_fraction=0 and decay_floor_fraction=1"
+                    .into(),
+            ));
+        }
+        if matches!(self.kind, LearningRateScheduleKind::WarmupCosine)
+            && self.warmup_fraction >= 1.0
+        {
+            return Err(FractalError::InvalidConfig(
+                "warmup_cosine optimizer schedule requires warmup_fraction < 1".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OptimizerSpec {
+    pub kind: OptimizerKind,
+    pub peak_learning_rate: f64,
+    pub beta_1: f32,
+    pub beta_2: f32,
+    pub epsilon: f32,
+    pub weight_decay: f64,
+    pub gradient_clip_norm: Option<f64>,
+    pub schedule: LearningRateScheduleSpec,
+}
+
+impl Default for OptimizerSpec {
+    fn default() -> Self {
+        Self::legacy_adam(1e-3)
+    }
+}
+
+impl OptimizerSpec {
+    pub fn legacy_adam(learning_rate: f64) -> Self {
+        Self {
+            kind: OptimizerKind::Adam,
+            peak_learning_rate: learning_rate,
+            beta_1: 0.9,
+            beta_2: 0.999,
+            epsilon: 1e-8,
+            weight_decay: 0.0,
+            gradient_clip_norm: None,
+            schedule: LearningRateScheduleSpec::constant(),
+        }
+    }
+
+    pub fn stage0_adamw() -> Self {
+        Self {
+            kind: OptimizerKind::AdamW,
+            peak_learning_rate: 2e-4,
+            beta_1: 0.9,
+            beta_2: 0.95,
+            epsilon: 1e-8,
+            weight_decay: 0.05,
+            gradient_clip_norm: Some(1.0),
+            schedule: LearningRateScheduleSpec::warmup_cosine(0.02, 0.1),
+        }
+    }
+
+    pub fn label(&self) -> String {
+        format!(
+            "kind={} peak_lr={} beta_1={} beta_2={} epsilon={} weight_decay={} grad_clip_norm={} schedule={}",
+            self.kind.as_str(),
+            self.peak_learning_rate,
+            self.beta_1,
+            self.beta_2,
+            self.epsilon,
+            self.weight_decay,
+            self.gradient_clip_norm
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "disabled".to_owned()),
+            self.schedule.label(),
+        )
+    }
+
+    pub fn learning_rate_at_tokens(&self, seen_tokens: usize, total_tokens: usize) -> f64 {
+        self.schedule
+            .learning_rate_at_tokens(self.peak_learning_rate, seen_tokens, total_tokens)
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        if self.peak_learning_rate <= 0.0 {
+            return Err(FractalError::InvalidConfig(
+                "optimizer peak_learning_rate must be greater than zero".into(),
+            ));
+        }
+        if self.weight_decay < 0.0 {
+            return Err(FractalError::InvalidConfig(
+                "optimizer weight_decay must be non-negative".into(),
+            ));
+        }
+        if let Some(clip_norm) = self.gradient_clip_norm {
+            if clip_norm <= 0.0 {
+                return Err(FractalError::InvalidConfig(
+                    "optimizer gradient_clip_norm must be greater than zero when configured".into(),
+                ));
+            }
+        }
+        self.schedule.validate()?;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct BudgetSpec {
     pub preset: TournamentPreset,
@@ -473,6 +695,7 @@ pub struct ExperimentSpec {
     pub question: ExperimentQuestion,
     pub variant: VariantSpec,
     pub budget: BudgetSpec,
+    pub optimizer: OptimizerSpec,
     pub runtime: RuntimeSurfaceSpec,
     pub comparison: ComparisonContract,
     pub execution: ExecutionTarget,
@@ -484,6 +707,7 @@ pub struct ExperimentSpecTemplate {
     pub experiment_id: ExperimentId,
     pub question: ExperimentQuestion,
     pub budget: BudgetSpec,
+    pub optimizer: OptimizerSpec,
     pub runtime: RuntimeSurfaceSpec,
     pub comparison: ComparisonContract,
     pub execution: ExecutionTarget,
@@ -504,6 +728,7 @@ impl ExperimentSpecTemplate {
                 variant_name,
             },
             budget: self.budget.clone(),
+            optimizer: self.optimizer.clone(),
             runtime: self.runtime.clone(),
             comparison: self.comparison.clone(),
             execution: self.execution.clone(),
@@ -520,6 +745,11 @@ impl ExperimentSpecTemplate {
         if !self.execution.matches_config(config) {
             return Err(FractalError::InvalidConfig(
                 "experiment execution target must match the resolved tournament config".into(),
+            ));
+        }
+        if self.optimizer != config.optimizer {
+            return Err(FractalError::InvalidConfig(
+                "experiment optimizer must match the resolved tournament config".into(),
             ));
         }
         Ok(())
@@ -583,6 +813,7 @@ pub struct TournamentConfig {
     pub perplexity_eval_batches: Option<usize>,
     pub arc_eval_batches: Option<usize>,
     pub learning_rate: f64,
+    pub optimizer: OptimizerSpec,
     pub seed: u64,
     pub run_timeout: Option<Duration>,
     pub generator_depth_config: GeneratorDepthConfig,
@@ -610,6 +841,7 @@ impl Default for TournamentConfig {
             perplexity_eval_batches: None,
             arc_eval_batches: None,
             learning_rate: 1e-3,
+            optimizer: OptimizerSpec::legacy_adam(1e-3),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
@@ -687,6 +919,12 @@ impl TournamentConfig {
                 "learning_rate must be greater than zero".into(),
             ));
         }
+        if (self.learning_rate - self.optimizer.peak_learning_rate).abs() >= f64::EPSILON {
+            return Err(FractalError::InvalidConfig(
+                "learning_rate must match optimizer peak_learning_rate".into(),
+            ));
+        }
+        self.optimizer.validate()?;
         if let Some(run_timeout) = self.run_timeout {
             if run_timeout.is_zero() {
                 return Err(FractalError::InvalidConfig(
@@ -762,6 +1000,7 @@ impl TournamentConfig {
             perplexity_eval_batches: None,
             arc_eval_batches: None,
             learning_rate: 1e-3,
+            optimizer: OptimizerSpec::legacy_adam(1e-3),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
@@ -789,6 +1028,7 @@ impl TournamentConfig {
             perplexity_eval_batches: None,
             arc_eval_batches: None,
             learning_rate: 1e-3,
+            optimizer: OptimizerSpec::legacy_adam(1e-3),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
@@ -816,6 +1056,7 @@ impl TournamentConfig {
             perplexity_eval_batches: None,
             arc_eval_batches: None,
             learning_rate: 1e-3,
+            optimizer: OptimizerSpec::legacy_adam(1e-3),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::polish_top_candidates(),
@@ -849,6 +1090,7 @@ impl TournamentConfig {
             perplexity_eval_batches: None,
             arc_eval_batches: None,
             learning_rate: 1e-3,
+            optimizer: OptimizerSpec::legacy_adam(1e-3),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
@@ -876,6 +1118,7 @@ impl TournamentConfig {
             perplexity_eval_batches: None,
             arc_eval_batches: None,
             learning_rate: 5e-4,
+            optimizer: OptimizerSpec::legacy_adam(5e-4),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
@@ -911,6 +1154,7 @@ impl TournamentConfig {
             perplexity_eval_batches: None,
             arc_eval_batches: None,
             learning_rate: 1e-3,
+            optimizer: OptimizerSpec::legacy_adam(1e-3),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::polish_top_candidates(),
@@ -942,6 +1186,7 @@ impl TournamentConfig {
             perplexity_eval_batches: None,
             arc_eval_batches: None,
             learning_rate: 1e-3,
+            optimizer: OptimizerSpec::legacy_adam(1e-3),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::polish_top_candidates(),
@@ -969,6 +1214,7 @@ impl TournamentConfig {
             perplexity_eval_batches: None,
             arc_eval_batches: None,
             learning_rate: 1e-3,
+            optimizer: OptimizerSpec::legacy_adam(1e-3),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::polish_top_candidates(),
@@ -1009,6 +1255,7 @@ impl TournamentConfig {
             perplexity_eval_batches: None,
             arc_eval_batches: None,
             learning_rate: 1e-3,
+            optimizer: OptimizerSpec::legacy_adam(1e-3),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
@@ -1036,6 +1283,7 @@ impl TournamentConfig {
             perplexity_eval_batches: None,
             arc_eval_batches: None,
             learning_rate: 1e-3,
+            optimizer: OptimizerSpec::legacy_adam(1e-3),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::default(),
@@ -1063,6 +1311,7 @@ impl TournamentConfig {
             perplexity_eval_batches: None,
             arc_eval_batches: None,
             learning_rate: 1e-3,
+            optimizer: OptimizerSpec::legacy_adam(1e-3),
             seed: 42,
             run_timeout: None,
             generator_depth_config: GeneratorDepthConfig::stress_top_candidates(),
@@ -1086,6 +1335,12 @@ impl TournamentConfig {
 
     pub fn with_parallelism(mut self, parallelism: usize) -> Self {
         self.parallelism = parallelism;
+        self
+    }
+
+    pub fn with_optimizer(mut self, optimizer: OptimizerSpec) -> Self {
+        self.learning_rate = optimizer.peak_learning_rate;
+        self.optimizer = optimizer;
         self
     }
 
