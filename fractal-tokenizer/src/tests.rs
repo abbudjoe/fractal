@@ -26,10 +26,10 @@ use crate::{
     FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLexemeKind, FaceoffLocalCacheMode,
     FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer, LocalMacroKind,
     ModelFacingBatch, ModelFacingDocument, NativeCollationSpec, NativeCompatibilityAdapter,
-    NativeTokenizer, OverlayDocumentMode, P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary,
-    PrototypeGranularityMode, RecursiveOverlayConfig, RecursiveOverlayMode, RecursiveTokenizer,
-    StateSignature, TokenRecord, TokenizerConfig, TokenizerSubstrateMode,
-    FACEOFF_VOCAB_FORMAT_VERSION,
+    NativeTokenizer, OverlayDictionaryScope, OverlayDocumentMode, OverlayPack, P1FractalHybrid,
+    P2Mandelbrot, PrimitiveRunSummary, PrototypeGranularityMode, RecursiveOverlayConfig,
+    RecursiveOverlayMode, RecursiveTokenizer, StateSignature, TokenRecord, TokenizerConfig,
+    TokenizerSubstrateMode, FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -861,6 +861,101 @@ The overlay should keep the canonical tokenizer as the source of truth.\n\
     assert!(overlay.macros.is_empty());
     assert!(overlay.exact_ok());
     assert_eq!(overlay.overlay_symbol_count(), canonical.token_ids.len());
+}
+
+#[test]
+fn canonical_overlay_batch_local_pack_deduplicates_shared_scaffolds_exactly() {
+    let text_a = "\
+{\"ts\": 1, \"level\": \"info\", \"route\": \"/health\", \"status\": 200, \"req\": \"a1\"}\n\
+{\"ts\": 2, \"level\": \"info\", \"route\": \"/health\", \"status\": 500, \"req\": \"b2\"}\n\
+";
+    let text_b = "\
+{\"ts\": 3, \"level\": \"info\", \"route\": \"/health\", \"status\": 200, \"req\": \"c3\"}\n\
+{\"ts\": 4, \"level\": \"info\", \"route\": \"/health\", \"status\": 500, \"req\": \"d4\"}\n\
+";
+    let tokenizer = build_hf_native_tokenizer(&[text_a, text_b]);
+    let canonical_a = tokenizer.tokenize_with_byte_offsets(text_a).unwrap();
+    let canonical_b = tokenizer.tokenize_with_byte_offsets(text_b).unwrap();
+    let overlay_a = build_recursive_overlay(
+        text_a,
+        canonical_a,
+        RecursiveOverlayMode::LocalRecordMacro,
+        &RecursiveOverlayConfig::default(),
+    );
+    let overlay_b = build_recursive_overlay(
+        text_b,
+        canonical_b,
+        RecursiveOverlayMode::LocalRecordMacro,
+        &RecursiveOverlayConfig::default(),
+    );
+
+    let document_local = OverlayPack::from_documents(
+        OverlayDictionaryScope::DocumentLocal,
+        &[overlay_a.clone(), overlay_b.clone()],
+    );
+    let batch_local =
+        OverlayPack::from_documents(OverlayDictionaryScope::BatchLocal, &[overlay_a, overlay_b]);
+
+    assert!(document_local.exact_ok());
+    assert!(batch_local.exact_ok());
+
+    let document_summary = document_local.transport_summary();
+    let batch_summary = batch_local.transport_summary();
+    assert_eq!(
+        document_summary.base_slice_symbols,
+        batch_summary.base_slice_symbols
+    );
+    assert_eq!(
+        document_summary.macro_ref_symbols,
+        batch_summary.macro_ref_symbols
+    );
+    assert!(
+        batch_summary.macro_definition_symbols < document_summary.macro_definition_symbols,
+        "batch-local sharing should amortize identical scaffold definitions"
+    );
+    assert!(
+        batch_summary.transport_ratio() > document_summary.transport_ratio(),
+        "batch-local sharing should improve total transport efficiency"
+    );
+}
+
+#[test]
+fn canonical_overlay_batch_local_transport_allocation_sums_to_shared_definition_cost() {
+    let text_a = "\
+2026-04-01T12:00:01Z INFO auth request_id=abc-1 route=/health status=200 latency_ms=11\n\
+2026-04-01T12:00:02Z INFO auth request_id=abc-2 route=/health status=500 latency_ms=14\n\
+";
+    let text_b = "\
+2026-04-01T12:01:01Z INFO auth request_id=def-1 route=/health status=200 latency_ms=09\n\
+2026-04-01T12:01:02Z INFO auth request_id=def-2 route=/health status=500 latency_ms=13\n\
+";
+    let tokenizer = build_hf_native_tokenizer(&[text_a, text_b]);
+    let overlays = [text_a, text_b]
+        .into_iter()
+        .map(|text| {
+            let canonical = tokenizer.tokenize_with_byte_offsets(text).unwrap();
+            build_recursive_overlay(
+                text,
+                canonical,
+                RecursiveOverlayMode::LocalRecordMacro,
+                &RecursiveOverlayConfig::default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let batch_local = OverlayPack::from_documents(OverlayDictionaryScope::BatchLocal, &overlays);
+    let batch_summary = batch_local.transport_summary();
+    let views = batch_local.document_transport_views();
+
+    assert!(batch_local.exact_ok());
+    assert_eq!(views.len(), 2);
+    let allocated_definition_sum = views
+        .iter()
+        .map(|view| view.allocated_macro_definition_symbols)
+        .sum::<f64>();
+    assert!(
+        (allocated_definition_sum - batch_summary.macro_definition_symbols as f64).abs() < 1e-6,
+        "per-document allocated definition cost should sum to the shared batch definition cost"
+    );
 }
 
 fn unique_temp_path(prefix: &str, suffix: &str) -> PathBuf {

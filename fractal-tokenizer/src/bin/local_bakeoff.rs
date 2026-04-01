@@ -9,6 +9,7 @@ use fractal_tokenizer::{
     FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLocalCacheMode, FaceoffTokenizer,
     FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer, ModelFacingBatch,
     ModelFacingDocument, MotifReusePolicy, NativeCollationSpec, NativeCompatibilityAdapter,
+    OverlayDictionaryScope, OverlayPack,
     PrimitiveFactory, PrototypeGranularityMode, RecursiveOverlayConfig, RecursiveOverlayMode,
     SplitPolicy, TokenizerConfig, TokenizerSubstrateMode,
 };
@@ -288,6 +289,10 @@ struct OverlayMetrics {
     macro_count: usize,
     macro_ref_count: usize,
     repeated_token_mass_saved: usize,
+    batch_local_transport_symbols: f64,
+    batch_local_transport_ratio: f64,
+    batch_local_allocated_definition_symbols: f64,
+    batch_local_definition_overhead_rate: f64,
     exact_ok: bool,
 }
 
@@ -2111,6 +2116,10 @@ fn attach_overlay_shadow(
                 macro_count: 0,
                 macro_ref_count: 0,
                 repeated_token_mass_saved: 0,
+                batch_local_transport_symbols: 0.0,
+                batch_local_transport_ratio: 0.0,
+                batch_local_allocated_definition_symbols: 0.0,
+                batch_local_definition_overhead_rate: 0.0,
                 exact_ok: true,
             });
         }
@@ -2134,6 +2143,10 @@ fn attach_overlay_shadow(
                 macro_count: 0,
                 macro_ref_count: 0,
                 repeated_token_mass_saved: 0,
+                batch_local_transport_symbols: 0.0,
+                batch_local_transport_ratio: 0.0,
+                batch_local_allocated_definition_symbols: 0.0,
+                batch_local_definition_overhead_rate: 0.0,
                 exact_ok: true,
             });
         }
@@ -2156,6 +2169,10 @@ fn attach_overlay_shadow(
                 macro_count: 0,
                 macro_ref_count: 0,
                 repeated_token_mass_saved: 0,
+                batch_local_transport_symbols: 0.0,
+                batch_local_transport_ratio: 0.0,
+                batch_local_allocated_definition_symbols: 0.0,
+                batch_local_definition_overhead_rate: 0.0,
                 exact_ok: true,
             });
         }
@@ -2163,14 +2180,27 @@ fn attach_overlay_shadow(
     };
 
     let config = RecursiveOverlayConfig::default();
-    for record in results {
-        let canonical = tokenizer.tokenize_with_byte_offsets(&record.corpus.text)?;
-        let overlay = build_recursive_overlay(
-            &record.corpus.text,
-            canonical,
-            args.overlay_mode.recursive_mode(),
-            &config,
-        );
+    let overlays = results
+        .iter()
+        .map(|record| {
+            let canonical = tokenizer.tokenize_with_byte_offsets(&record.corpus.text)?;
+            Ok(build_recursive_overlay(
+                &record.corpus.text,
+                canonical,
+                args.overlay_mode.recursive_mode(),
+                &config,
+            ))
+        })
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+    let batch_local_pack =
+        OverlayPack::from_documents(OverlayDictionaryScope::BatchLocal, &overlays);
+    let batch_local_views = batch_local_pack.document_transport_views();
+
+    for ((record, overlay), batch_view) in results
+        .iter_mut()
+        .zip(overlays.into_iter())
+        .zip(batch_local_views.into_iter())
+    {
         record.overlay = Some(OverlayMetrics {
             status: "ok".to_string(),
             base_tokenizer_label: source.label.clone(),
@@ -2188,7 +2218,11 @@ fn attach_overlay_shadow(
             macro_count: overlay.macros.len(),
             macro_ref_count: overlay.macro_ref_count(),
             repeated_token_mass_saved: overlay.repeated_token_mass_saved(),
-            exact_ok: overlay.exact_ok(),
+            batch_local_transport_symbols: batch_view.transport_symbols(),
+            batch_local_transport_ratio: batch_view.transport_ratio(),
+            batch_local_allocated_definition_symbols: batch_view.allocated_macro_definition_symbols,
+            batch_local_definition_overhead_rate: batch_view.definition_overhead_rate(),
+            exact_ok: overlay.exact_ok() && batch_local_pack.exact_ok(),
         });
     }
 
@@ -2461,6 +2495,25 @@ fn print_overlay_summary(results: &[BakeoffRecord], args: &Args) {
         total_macro_definition_symbols,
         total_macro_definition_symbols as f64 / total_transport_symbols.max(1) as f64
     );
+    let total_batch_transport_symbols = ok_records
+        .iter()
+        .map(|(_, overlay)| overlay.batch_local_transport_symbols)
+        .sum::<f64>();
+    let total_batch_definition_symbols = ok_records
+        .iter()
+        .map(|(_, overlay)| overlay.batch_local_allocated_definition_symbols)
+        .sum::<f64>();
+    println!(
+        "OVERLAY_TRANSPORT_SUMMARY split=evaluation scope=batch_local docs={} canonical_tokens={} transport_symbols={:.2} transport_ratio={:.2} base_slice_symbols={} macro_ref_symbols={} macro_definition_symbols={:.2} definition_overhead_rate={:.2}",
+        ok_records.len(),
+        total_canonical_tokens,
+        total_batch_transport_symbols,
+        total_canonical_tokens as f64 / total_batch_transport_symbols.max(1.0),
+        total_base_slice_symbols,
+        total_macro_ref_symbols,
+        total_batch_definition_symbols,
+        total_batch_definition_symbols / total_batch_transport_symbols.max(1.0)
+    );
 
     let mut per_bucket = BTreeMap::<String, Vec<&OverlayMetrics>>::new();
     for (bucket, overlay) in ok_records {
@@ -2486,22 +2539,41 @@ fn print_overlay_summary(results: &[BakeoffRecord], args: &Args) {
                     / overlay.overlay_symbol_count.max(1) as f64
             })
             .collect::<Vec<_>>();
+        let mut batch_ratios = overlays
+            .iter()
+            .map(|overlay| overlay.batch_local_transport_ratio)
+            .collect::<Vec<_>>();
+        let mut batch_definition_overhead = overlays
+            .iter()
+            .map(|overlay| overlay.batch_local_definition_overhead_rate)
+            .collect::<Vec<_>>();
         ratios.sort_by(|left, right| left.partial_cmp(right).unwrap());
         saved.sort_by(|left, right| left.partial_cmp(right).unwrap());
         definition_overhead.sort_by(|left, right| left.partial_cmp(right).unwrap());
+        batch_ratios.sort_by(|left, right| left.partial_cmp(right).unwrap());
+        batch_definition_overhead.sort_by(|left, right| left.partial_cmp(right).unwrap());
         let activation_rate = overlays
             .iter()
             .filter(|overlay| overlay.mode == "local-macro" && overlay.macro_ref_count > 0)
             .count() as f64
             / overlays.len().max(1) as f64;
         println!(
-            "OVERLAY_BUCKET_SUMMARY split=evaluation bucket={} docs={} median_ratio={:.2} activation_rate={:.2} median_saved_tokens={:.2} median_definition_overhead_rate={:.2}",
+            "OVERLAY_BUCKET_SUMMARY split=evaluation scope=document_local bucket={} docs={} median_ratio={:.2} activation_rate={:.2} median_saved_tokens={:.2} median_definition_overhead_rate={:.2}",
             bucket,
             overlays.len(),
             median_sorted(&ratios),
             activation_rate,
             median_sorted(&saved),
             median_sorted(&definition_overhead)
+        );
+        println!(
+            "OVERLAY_BUCKET_SUMMARY split=evaluation scope=batch_local bucket={} docs={} median_ratio={:.2} activation_rate={:.2} median_saved_tokens={:.2} median_definition_overhead_rate={:.2}",
+            bucket,
+            overlays.len(),
+            median_sorted(&batch_ratios),
+            activation_rate,
+            median_sorted(&saved),
+            median_sorted(&batch_definition_overhead)
         );
     }
 }

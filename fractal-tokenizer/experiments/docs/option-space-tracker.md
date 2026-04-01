@@ -72,6 +72,25 @@ Read:
 - the next high-leverage layer is amortizing shared scaffold definitions across
   documents, not broadening activation heuristics
 
+Latest `batch_local` shared-dictionary read on `codex/shared-overlay-dictionary-impl`:
+
+- overall transport:
+  - `document_local transport_ratio = 1.27`
+  - `batch_local transport_ratio = 1.37`
+  - `document_local definition_overhead_rate = 0.19`
+  - `batch_local definition_overhead_rate = 0.12`
+- target buckets:
+  - `jsonl.signals` median transport ratio `2.27 -> 3.35`
+  - `logs.operational_mixed` median transport ratio `1.54 -> 1.99`
+- exact expansion remains `0` failures
+
+Read:
+
+- the shared-dictionary layer is the first clear transport-efficiency win after
+  record-aware activation
+- the remaining gap is now closer to the success bars in
+  [shared-overlay-dictionary-spec.md](./shared-overlay-dictionary-spec.md)
+
 ## Tried By Layer
 
 ### Primitive

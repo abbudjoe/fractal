@@ -26,8 +26,10 @@ pub use model_face::{
     TypedEmbeddingBridge,
 };
 pub use overlay::{
-    build_recursive_overlay, LocalMacro, LocalMacroKind, OverlayDocumentMode, OverlaySegment,
-    RecursiveOverlayConfig, RecursiveOverlayDocument, RecursiveOverlayMode,
+    build_recursive_overlay, LocalMacro, LocalMacroKind, OverlayDictionaryScope,
+    OverlayDocumentMode, OverlayPack, OverlaySegment, OverlayTransportSummary,
+    PackedOverlayDocument, PackedOverlayDocumentTransport, PackedOverlaySegment,
+    RecursiveOverlayConfig, RecursiveOverlayDocument, RecursiveOverlayMode, SharedMacro,
 };
 pub use primitives::{
     B1FractalGated, B3FractalHierarchical, B4Universal, P1FractalHybrid, P2Mandelbrot,

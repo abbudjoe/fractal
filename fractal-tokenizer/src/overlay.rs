@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::CanonicalTokenization;
 
@@ -45,7 +45,7 @@ pub enum OverlayDocumentMode {
     LocalMacro,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LocalMacroKind {
     RepeatedLine,
     RepeatedRecordScaffold,
@@ -63,6 +63,358 @@ pub struct LocalMacro {
 pub enum OverlaySegment {
     BaseSlice { start: usize, len: usize },
     MacroRef { macro_id: usize, span_len: usize },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayDictionaryScope {
+    DocumentLocal,
+    BatchLocal,
+    SessionLocal,
+}
+
+impl OverlayDictionaryScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DocumentLocal => "document_local",
+            Self::BatchLocal => "batch_local",
+            Self::SessionLocal => "session_local",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SharedMacro {
+    pub shared_macro_id: usize,
+    pub kind: LocalMacroKind,
+    pub token_ids: Vec<u32>,
+    pub doc_ref_count: usize,
+    pub total_use_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PackedOverlaySegment {
+    BaseSlice {
+        start: usize,
+        len: usize,
+    },
+    SharedMacroRef {
+        shared_macro_id: usize,
+        span_len: usize,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackedOverlayDocument {
+    canonical_token_ids: Vec<u32>,
+    pub segments: Vec<PackedOverlaySegment>,
+}
+
+impl PackedOverlayDocument {
+    pub fn canonical_token_count(&self) -> usize {
+        self.canonical_token_ids.len()
+    }
+
+    pub fn expand_token_ids(&self, shared_macros: &[SharedMacro]) -> Vec<u32> {
+        let macro_map = shared_macros
+            .iter()
+            .map(|entry| (entry.shared_macro_id, entry.token_ids.as_slice()))
+            .collect::<BTreeMap<_, _>>();
+        let mut expanded = Vec::with_capacity(self.canonical_token_ids.len());
+        for segment in &self.segments {
+            match segment {
+                PackedOverlaySegment::BaseSlice { start, len } => {
+                    expanded.extend_from_slice(&self.canonical_token_ids[*start..(*start + *len)]);
+                }
+                PackedOverlaySegment::SharedMacroRef {
+                    shared_macro_id, ..
+                } => {
+                    if let Some(tokens) = macro_map.get(shared_macro_id) {
+                        expanded.extend_from_slice(tokens);
+                    }
+                }
+            }
+        }
+        expanded
+    }
+
+    pub fn exact_ok(&self, shared_macros: &[SharedMacro]) -> bool {
+        self.expand_token_ids(shared_macros) == self.canonical_token_ids
+    }
+
+    pub fn base_slice_symbol_count(&self) -> usize {
+        self.segments
+            .iter()
+            .map(|segment| match segment {
+                PackedOverlaySegment::BaseSlice { len, .. } => *len,
+                PackedOverlaySegment::SharedMacroRef { .. } => 0,
+            })
+            .sum()
+    }
+
+    pub fn macro_ref_symbol_count(&self) -> usize {
+        self.segments
+            .iter()
+            .filter(|segment| matches!(segment, PackedOverlaySegment::SharedMacroRef { .. }))
+            .count()
+    }
+
+    fn referenced_shared_macro_ids(&self) -> BTreeSet<usize> {
+        self.segments
+            .iter()
+            .filter_map(|segment| match segment {
+                PackedOverlaySegment::BaseSlice { .. } => None,
+                PackedOverlaySegment::SharedMacroRef {
+                    shared_macro_id, ..
+                } => Some(*shared_macro_id),
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverlayPack {
+    pub scope: OverlayDictionaryScope,
+    pub shared_macros: Vec<SharedMacro>,
+    pub documents: Vec<PackedOverlayDocument>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverlayTransportSummary {
+    pub scope: OverlayDictionaryScope,
+    pub docs: usize,
+    pub canonical_tokens: usize,
+    pub transport_symbols: usize,
+    pub base_slice_symbols: usize,
+    pub macro_ref_symbols: usize,
+    pub macro_definition_symbols: usize,
+}
+
+impl OverlayTransportSummary {
+    pub fn transport_ratio(&self) -> f64 {
+        self.canonical_tokens as f64 / self.transport_symbols.max(1) as f64
+    }
+
+    pub fn definition_overhead_rate(&self) -> f64 {
+        self.macro_definition_symbols as f64 / self.transport_symbols.max(1) as f64
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackedOverlayDocumentTransport {
+    pub canonical_token_count: usize,
+    pub base_slice_symbols: usize,
+    pub macro_ref_symbols: usize,
+    pub allocated_macro_definition_symbols: f64,
+}
+
+impl PackedOverlayDocumentTransport {
+    pub fn transport_symbols(&self) -> f64 {
+        self.base_slice_symbols as f64
+            + self.macro_ref_symbols as f64
+            + self.allocated_macro_definition_symbols
+    }
+
+    pub fn transport_ratio(&self) -> f64 {
+        self.canonical_token_count as f64 / self.transport_symbols().max(1.0)
+    }
+
+    pub fn definition_overhead_rate(&self) -> f64 {
+        self.allocated_macro_definition_symbols / self.transport_symbols().max(1.0)
+    }
+}
+
+impl OverlayPack {
+    pub fn from_documents(
+        scope: OverlayDictionaryScope,
+        documents: &[RecursiveOverlayDocument],
+    ) -> Self {
+        match scope {
+            OverlayDictionaryScope::DocumentLocal => {
+                Self::from_documents_without_sharing(scope, documents)
+            }
+            OverlayDictionaryScope::BatchLocal | OverlayDictionaryScope::SessionLocal => {
+                Self::from_documents_with_sharing(scope, documents)
+            }
+        }
+    }
+
+    pub fn exact_ok(&self) -> bool {
+        self.documents
+            .iter()
+            .all(|document| document.exact_ok(&self.shared_macros))
+    }
+
+    pub fn transport_summary(&self) -> OverlayTransportSummary {
+        let canonical_tokens = self
+            .documents
+            .iter()
+            .map(PackedOverlayDocument::canonical_token_count)
+            .sum::<usize>();
+        let base_slice_symbols = self
+            .documents
+            .iter()
+            .map(PackedOverlayDocument::base_slice_symbol_count)
+            .sum::<usize>();
+        let macro_ref_symbols = self
+            .documents
+            .iter()
+            .map(PackedOverlayDocument::macro_ref_symbol_count)
+            .sum::<usize>();
+        let macro_definition_symbols = self
+            .shared_macros
+            .iter()
+            .map(|entry| entry.token_ids.len())
+            .sum::<usize>();
+        let transport_symbols = base_slice_symbols + macro_ref_symbols + macro_definition_symbols;
+
+        OverlayTransportSummary {
+            scope: self.scope,
+            docs: self.documents.len(),
+            canonical_tokens,
+            transport_symbols,
+            base_slice_symbols,
+            macro_ref_symbols,
+            macro_definition_symbols,
+        }
+    }
+
+    pub fn document_transport_views(&self) -> Vec<PackedOverlayDocumentTransport> {
+        self.documents
+            .iter()
+            .map(|document| {
+                let allocated_macro_definition_symbols = document
+                    .referenced_shared_macro_ids()
+                    .into_iter()
+                    .map(|shared_macro_id| {
+                        let entry = &self.shared_macros[shared_macro_id];
+                        entry.token_ids.len() as f64 / entry.doc_ref_count.max(1) as f64
+                    })
+                    .sum::<f64>();
+
+                PackedOverlayDocumentTransport {
+                    canonical_token_count: document.canonical_token_count(),
+                    base_slice_symbols: document.base_slice_symbol_count(),
+                    macro_ref_symbols: document.macro_ref_symbol_count(),
+                    allocated_macro_definition_symbols,
+                }
+            })
+            .collect()
+    }
+
+    fn from_documents_without_sharing(
+        scope: OverlayDictionaryScope,
+        documents: &[RecursiveOverlayDocument],
+    ) -> Self {
+        let mut shared_macros = Vec::new();
+        let mut packed_documents = Vec::with_capacity(documents.len());
+
+        for document in documents {
+            let mut macro_map = BTreeMap::<usize, usize>::new();
+            for local_macro in &document.macros {
+                let shared_macro_id = shared_macros.len();
+                shared_macros.push(SharedMacro {
+                    shared_macro_id,
+                    kind: local_macro.kind,
+                    token_ids: local_macro.token_ids.clone(),
+                    doc_ref_count: 1,
+                    total_use_count: local_macro.use_count,
+                });
+                macro_map.insert(local_macro.macro_id, shared_macro_id);
+            }
+            packed_documents.push(pack_document(document, &macro_map));
+        }
+
+        Self {
+            scope,
+            shared_macros,
+            documents: packed_documents,
+        }
+    }
+
+    fn from_documents_with_sharing(
+        scope: OverlayDictionaryScope,
+        documents: &[RecursiveOverlayDocument],
+    ) -> Self {
+        let mut shared_macros = Vec::<SharedMacro>::new();
+        let mut shared_macro_ids = BTreeMap::<SharedMacroKey, usize>::new();
+        let mut packed_documents = Vec::with_capacity(documents.len());
+
+        for document in documents {
+            let mut macro_map = BTreeMap::<usize, usize>::new();
+            let mut document_shared_ids = BTreeSet::<usize>::new();
+            for local_macro in &document.macros {
+                let key = SharedMacroKey {
+                    kind: local_macro.kind,
+                    token_ids: local_macro.token_ids.clone(),
+                };
+                let shared_macro_id = *shared_macro_ids.entry(key).or_insert_with(|| {
+                    let shared_macro_id = shared_macros.len();
+                    shared_macros.push(SharedMacro {
+                        shared_macro_id,
+                        kind: local_macro.kind,
+                        token_ids: local_macro.token_ids.clone(),
+                        doc_ref_count: 0,
+                        total_use_count: 0,
+                    });
+                    shared_macro_id
+                });
+                macro_map.insert(local_macro.macro_id, shared_macro_id);
+                document_shared_ids.insert(shared_macro_id);
+                if let Some(entry) = shared_macros.get_mut(shared_macro_id) {
+                    entry.total_use_count += local_macro.use_count;
+                }
+            }
+
+            for shared_macro_id in document_shared_ids {
+                if let Some(entry) = shared_macros.get_mut(shared_macro_id) {
+                    entry.doc_ref_count += 1;
+                }
+            }
+
+            packed_documents.push(pack_document(document, &macro_map));
+        }
+
+        Self {
+            scope,
+            shared_macros,
+            documents: packed_documents,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct SharedMacroKey {
+    kind: LocalMacroKind,
+    token_ids: Vec<u32>,
+}
+
+fn pack_document(
+    document: &RecursiveOverlayDocument,
+    macro_map: &BTreeMap<usize, usize>,
+) -> PackedOverlayDocument {
+    let segments = document
+        .segments
+        .iter()
+        .map(|segment| match segment {
+            OverlaySegment::BaseSlice { start, len } => PackedOverlaySegment::BaseSlice {
+                start: *start,
+                len: *len,
+            },
+            OverlaySegment::MacroRef { macro_id, span_len } => {
+                PackedOverlaySegment::SharedMacroRef {
+                    shared_macro_id: *macro_map
+                        .get(macro_id)
+                        .expect("packed overlay must remap every local macro reference"),
+                    span_len: *span_len,
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+
+    PackedOverlayDocument {
+        canonical_token_ids: document.canonical.token_ids.clone(),
+        segments,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
