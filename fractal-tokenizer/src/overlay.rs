@@ -83,6 +83,19 @@ impl OverlayDictionaryScope {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverlaySharingPolicy {
+    pub min_net_gain_symbols: usize,
+}
+
+impl Default for OverlaySharingPolicy {
+    fn default() -> Self {
+        Self {
+            min_net_gain_symbols: 8,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SharedMacro {
     pub shared_macro_id: usize,
     pub kind: LocalMacroKind,
@@ -228,12 +241,20 @@ impl OverlayPack {
         scope: OverlayDictionaryScope,
         documents: &[RecursiveOverlayDocument],
     ) -> Self {
+        Self::from_documents_with_policy(scope, documents, &OverlaySharingPolicy::default())
+    }
+
+    pub fn from_documents_with_policy(
+        scope: OverlayDictionaryScope,
+        documents: &[RecursiveOverlayDocument],
+        policy: &OverlaySharingPolicy,
+    ) -> Self {
         match scope {
             OverlayDictionaryScope::DocumentLocal => {
                 Self::from_documents_without_sharing(scope, documents)
             }
             OverlayDictionaryScope::BatchLocal | OverlayDictionaryScope::SessionLocal => {
-                Self::from_documents_with_sharing(scope, documents)
+                Self::from_documents_with_sharing(scope, documents, policy)
             }
         }
     }
@@ -334,43 +355,74 @@ impl OverlayPack {
     fn from_documents_with_sharing(
         scope: OverlayDictionaryScope,
         documents: &[RecursiveOverlayDocument],
+        policy: &OverlaySharingPolicy,
     ) -> Self {
-        let mut shared_macros = Vec::<SharedMacro>::new();
-        let mut shared_macro_ids = BTreeMap::<SharedMacroKey, usize>::new();
+        let mut candidate_macros = Vec::<SharedMacro>::new();
+        let mut candidate_macro_ids = BTreeMap::<SharedMacroKey, usize>::new();
+        let mut document_candidate_maps = Vec::with_capacity(documents.len());
         let mut packed_documents = Vec::with_capacity(documents.len());
 
         for document in documents {
-            let mut macro_map = BTreeMap::<usize, usize>::new();
-            let mut document_shared_ids = BTreeSet::<usize>::new();
+            let mut candidate_map = BTreeMap::<usize, usize>::new();
+            let mut document_candidate_ids = BTreeSet::<usize>::new();
             for local_macro in &document.macros {
                 let key = SharedMacroKey {
                     kind: local_macro.kind,
                     token_ids: local_macro.token_ids.clone(),
                 };
-                let shared_macro_id = *shared_macro_ids.entry(key).or_insert_with(|| {
-                    let shared_macro_id = shared_macros.len();
-                    shared_macros.push(SharedMacro {
-                        shared_macro_id,
+                let candidate_id = *candidate_macro_ids.entry(key).or_insert_with(|| {
+                    let candidate_id = candidate_macros.len();
+                    candidate_macros.push(SharedMacro {
+                        shared_macro_id: candidate_id,
                         kind: local_macro.kind,
                         token_ids: local_macro.token_ids.clone(),
                         doc_ref_count: 0,
                         total_use_count: 0,
                     });
-                    shared_macro_id
+                    candidate_id
                 });
-                macro_map.insert(local_macro.macro_id, shared_macro_id);
-                document_shared_ids.insert(shared_macro_id);
-                if let Some(entry) = shared_macros.get_mut(shared_macro_id) {
+                candidate_map.insert(local_macro.macro_id, candidate_id);
+                document_candidate_ids.insert(candidate_id);
+                if let Some(entry) = candidate_macros.get_mut(candidate_id) {
                     entry.total_use_count += local_macro.use_count;
                 }
             }
 
-            for shared_macro_id in document_shared_ids {
-                if let Some(entry) = shared_macros.get_mut(shared_macro_id) {
+            for candidate_id in document_candidate_ids {
+                if let Some(entry) = candidate_macros.get_mut(candidate_id) {
                     entry.doc_ref_count += 1;
                 }
             }
 
+            document_candidate_maps.push(candidate_map);
+        }
+
+        let mut candidate_to_shared = BTreeMap::<usize, usize>::new();
+        let mut shared_macros = Vec::<SharedMacro>::new();
+        for (candidate_id, candidate) in candidate_macros.iter().enumerate() {
+            if shared_macro_is_profitable(candidate, policy) {
+                let shared_macro_id = shared_macros.len();
+                shared_macros.push(SharedMacro {
+                    shared_macro_id,
+                    kind: candidate.kind,
+                    token_ids: candidate.token_ids.clone(),
+                    doc_ref_count: candidate.doc_ref_count,
+                    total_use_count: candidate.total_use_count,
+                });
+                candidate_to_shared.insert(candidate_id, shared_macro_id);
+            }
+        }
+
+        for (document, candidate_map) in documents.iter().zip(document_candidate_maps.into_iter()) {
+            let macro_map = candidate_map
+                .into_iter()
+                .filter_map(|(local_macro_id, candidate_id)| {
+                    candidate_to_shared
+                        .get(&candidate_id)
+                        .copied()
+                        .map(|shared_macro_id| (local_macro_id, shared_macro_id))
+                })
+                .collect::<BTreeMap<_, _>>();
             packed_documents.push(pack_document(document, &macro_map));
         }
 
@@ -388,28 +440,46 @@ struct SharedMacroKey {
     token_ids: Vec<u32>,
 }
 
+fn shared_macro_is_profitable(entry: &SharedMacro, policy: &OverlaySharingPolicy) -> bool {
+    let definition_cost = entry.token_ids.len();
+    let kept_transport_cost = definition_cost + entry.total_use_count;
+    let inlined_transport_cost = definition_cost * entry.total_use_count;
+    let net_gain_symbols = inlined_transport_cost.saturating_sub(kept_transport_cost);
+    net_gain_symbols >= policy.min_net_gain_symbols
+}
+
 fn pack_document(
     document: &RecursiveOverlayDocument,
     macro_map: &BTreeMap<usize, usize>,
 ) -> PackedOverlayDocument {
-    let segments = document
-        .segments
-        .iter()
-        .map(|segment| match segment {
-            OverlaySegment::BaseSlice { start, len } => PackedOverlaySegment::BaseSlice {
-                start: *start,
-                len: *len,
-            },
-            OverlaySegment::MacroRef { macro_id, span_len } => {
-                PackedOverlaySegment::SharedMacroRef {
-                    shared_macro_id: *macro_map
-                        .get(macro_id)
-                        .expect("packed overlay must remap every local macro reference"),
-                    span_len: *span_len,
-                }
+    let mut segments = Vec::with_capacity(document.segments.len());
+    let mut cursor = 0usize;
+
+    for segment in &document.segments {
+        match segment {
+            OverlaySegment::BaseSlice { start, len } => {
+                segments.push(PackedOverlaySegment::BaseSlice {
+                    start: *start,
+                    len: *len,
+                });
+                cursor = start + len;
             }
-        })
-        .collect::<Vec<_>>();
+            OverlaySegment::MacroRef { macro_id, span_len } => {
+                if let Some(shared_macro_id) = macro_map.get(macro_id) {
+                    segments.push(PackedOverlaySegment::SharedMacroRef {
+                        shared_macro_id: *shared_macro_id,
+                        span_len: *span_len,
+                    });
+                } else {
+                    segments.push(PackedOverlaySegment::BaseSlice {
+                        start: cursor,
+                        len: *span_len,
+                    });
+                }
+                cursor += span_len;
+            }
+        }
+    }
 
     PackedOverlayDocument {
         canonical_token_ids: document.canonical.token_ids.clone(),

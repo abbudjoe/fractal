@@ -26,10 +26,11 @@ use crate::{
     FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLexemeKind, FaceoffLocalCacheMode,
     FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer, LocalMacroKind,
     ModelFacingBatch, ModelFacingDocument, NativeCollationSpec, NativeCompatibilityAdapter,
-    NativeTokenizer, OverlayDictionaryScope, OverlayDocumentMode, OverlayPack, P1FractalHybrid,
-    P2Mandelbrot, PrimitiveRunSummary, PrototypeGranularityMode, RecursiveOverlayConfig,
-    RecursiveOverlayMode, RecursiveTokenizer, StateSignature, TokenRecord, TokenizerConfig,
-    TokenizerSubstrateMode, FACEOFF_VOCAB_FORMAT_VERSION,
+    NativeTokenizer, OverlayDictionaryScope, OverlayDocumentMode, OverlayPack,
+    OverlaySharingPolicy, P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary,
+    PrototypeGranularityMode, RecursiveOverlayConfig, RecursiveOverlayMode, RecursiveTokenizer,
+    StateSignature, TokenRecord, TokenizerConfig, TokenizerSubstrateMode,
+    FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -898,20 +899,15 @@ fn canonical_overlay_batch_local_pack_deduplicates_shared_scaffolds_exactly() {
 
     assert!(document_local.exact_ok());
     assert!(batch_local.exact_ok());
-
     let document_summary = document_local.transport_summary();
     let batch_summary = batch_local.transport_summary();
-    assert_eq!(
-        document_summary.base_slice_symbols,
-        batch_summary.base_slice_symbols
-    );
-    assert_eq!(
-        document_summary.macro_ref_symbols,
-        batch_summary.macro_ref_symbols
-    );
     assert!(
         batch_summary.macro_definition_symbols < document_summary.macro_definition_symbols,
         "batch-local sharing should amortize identical scaffold definitions"
+    );
+    assert!(
+        batch_summary.transport_symbols < document_summary.transport_symbols,
+        "batch-local sharing should still beat document-local transport after profitability gating"
     );
     assert!(
         batch_summary.transport_ratio() > document_summary.transport_ratio(),
@@ -955,6 +951,68 @@ fn canonical_overlay_batch_local_transport_allocation_sums_to_shared_definition_
     assert!(
         (allocated_definition_sum - batch_summary.macro_definition_symbols as f64).abs() < 1e-6,
         "per-document allocated definition cost should sum to the shared batch definition cost"
+    );
+}
+
+#[test]
+fn canonical_overlay_batch_local_policy_drops_unprofitable_shared_macros_exactly() {
+    let text_a = "\
+{\"ts\": 1, \"level\": \"info\", \"route\": \"/health\", \"status\": 200, \"req\": \"a1\"}\n\
+{\"ts\": 2, \"level\": \"info\", \"route\": \"/health\", \"status\": 500, \"req\": \"b2\"}\n\
+";
+    let text_b = "\
+{\"ts\": 3, \"level\": \"info\", \"route\": \"/health\", \"status\": 200, \"req\": \"c3\"}\n\
+{\"ts\": 4, \"level\": \"info\", \"route\": \"/health\", \"status\": 500, \"req\": \"d4\"}\n\
+";
+    let tokenizer = build_hf_native_tokenizer(&[text_a, text_b]);
+    let overlays = [text_a, text_b]
+        .into_iter()
+        .map(|text| {
+            let canonical = tokenizer.tokenize_with_byte_offsets(text).unwrap();
+            build_recursive_overlay(
+                text,
+                canonical,
+                RecursiveOverlayMode::LocalRecordMacro,
+                &RecursiveOverlayConfig::default(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let default_pack = OverlayPack::from_documents(OverlayDictionaryScope::BatchLocal, &overlays);
+    let max_net_gain = default_pack
+        .shared_macros
+        .iter()
+        .map(|entry| {
+            let definition_cost = entry.token_ids.len();
+            let kept_transport_cost = definition_cost + entry.total_use_count;
+            let inlined_transport_cost = definition_cost * entry.total_use_count;
+            inlined_transport_cost.saturating_sub(kept_transport_cost)
+        })
+        .max()
+        .unwrap_or(0);
+    let strict_pack = OverlayPack::from_documents_with_policy(
+        OverlayDictionaryScope::BatchLocal,
+        &overlays,
+        &OverlaySharingPolicy {
+            min_net_gain_symbols: max_net_gain + 1,
+        },
+    );
+
+    assert!(default_pack.exact_ok());
+    assert!(strict_pack.exact_ok());
+    assert!(
+        !default_pack.shared_macros.is_empty(),
+        "baseline batch-local sharing should discover at least one shared scaffold"
+    );
+    assert!(
+        strict_pack.shared_macros.is_empty(),
+        "a stricter profitability floor should prune every candidate shared scaffold"
+    );
+    assert_eq!(strict_pack.transport_summary().macro_ref_symbols, 0);
+    assert_eq!(
+        strict_pack.transport_summary().transport_symbols,
+        strict_pack.transport_summary().canonical_tokens,
+        "dropping every shared macro should fall back to canonical transport cost"
     );
 }
 

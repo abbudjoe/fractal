@@ -91,6 +91,29 @@ Read:
 - the remaining gap is now closer to the success bars in
   [shared-overlay-dictionary-spec.md](./shared-overlay-dictionary-spec.md)
 
+Latest `batch_local + profitability gate` read on
+`codex/shared-overlay-dictionary-impl`:
+
+- default profitability floor: `min_net_gain_symbols = 8`
+- overall transport:
+  - `document_local transport_ratio = 1.27`
+  - `batch_local transport_ratio = 1.38`
+  - `document_local definition_overhead_rate = 0.19`
+  - `batch_local definition_overhead_rate = 0.10`
+- target buckets:
+  - `jsonl.signals` median transport ratio `2.27 -> 3.34`
+  - `logs.operational_mixed` median transport ratio `1.54 -> 1.99`
+- exact expansion remains `0` failures
+
+Read:
+
+- profitability gating is worth keeping when it is tuned as a transport-layer
+  floor rather than a blunt pruning pass
+- the tuned gate improved overall transport efficiency without sacrificing the
+  structured-text win buckets
+- the next remaining overhead now looks more like scaffold factorization than
+  dead-weight macro admission
+
 ## Tried By Layer
 
 ### Primitive
