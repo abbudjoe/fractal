@@ -3,11 +3,31 @@
   "question_summary": "rerun the frozen scientific winner bakeoff row for p1_fractal_hybrid_v1 on seed 44",
   "preset": "full-medium-stress",
   "species": "p1_fractal_hybrid",
-  "seed": 44,
-  "backend": "cuda",
-  "execution_mode": "sequential",
-  "parallelism": 1,
-  "comparison": "authoritative_same_preset",
-  "benchmark_mode": "leaderboard",
-  "expected_branch": "codex/runpod-cuda-next-tournament"
+  "expected_branch": "main",
+  "experiment": {
+    "config": {
+      "seed": 44,
+      "execution_mode": "sequential",
+      "parallelism": 1,
+      "backend": "cuda",
+      "perplexity_eval_batches": 2,
+      "arc_eval_batches": 2
+    },
+    "runtime": {
+      "benchmark_mode": "leaderboard"
+    },
+    "comparison": {
+      "authority": "authoritative",
+      "requires_same_preset": true,
+      "requires_same_runtime_surfaces": true,
+      "requires_frozen_commit": true,
+      "requires_same_backend": true
+    },
+    "artifacts": {
+      "manifest_required": true,
+      "structured_artifact_required": true,
+      "final_log_required": true,
+      "tracker_ready_output_required": true
+    }
+  }
 }
