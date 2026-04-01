@@ -29,6 +29,29 @@ The first experiment scope is narrow:
 - no global fuzzy motif matching
 - code, prose, and multilingual text are guardrail domains
 
+Initial shadow-run read on `codex/post-tokenizer-pivot`:
+
+- exact expansion back to canonical token ids is now clean
+- local `jsonl.signals` is the clearest early win
+  - median overlay ratio `1.27`
+  - activation rate `1.00`
+- local code is mildly positive
+  - `code.rust` median overlay ratio `1.03`
+  - `code.swift` median overlay ratio `1.05`
+- local docs are effectively neutral
+  - `docs.spec` median overlay ratio `1.00`
+- hybrid guardrails stayed conservative
+  - `external.prose.web` median overlay ratio `1.00`
+  - `external.multilingual` median overlay ratio `1.00`
+  - external code activated on some docs but stayed neutral at the median
+
+Read:
+
+- this is the first post-postmortem direction that is both exact and
+  directionally useful
+- the strongest current signal is still repetitive structured text, not
+  universal code/prose improvement
+
 ## Tried By Layer
 
 ### Primitive

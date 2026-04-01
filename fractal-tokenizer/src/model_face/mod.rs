@@ -13,7 +13,8 @@ pub use bridge::{
     TypedEmbeddingBridge,
 };
 pub use native::{
-    CanonicalPadSemantics, HuggingFaceNativeTokenizer, HuggingFaceNativeTokenizerError,
+    CanonicalPadSemantics, CanonicalTokenization, HuggingFaceNativeTokenizer,
+    HuggingFaceNativeTokenizerError,
     ModelFacingDocumentView, NativeCollatedBatch, NativeCollatedChunk, NativeCollatedDocument,
     NativeCollationError, NativeCollationSpec, NativeCompatibilityAdapter,
     NativeCompatibilityBatch, NativeCompatibilityError, NativeTokenizedBatch, NativeTokenizedChunk,

@@ -3,6 +3,7 @@
 // Examples: p1_fractal_hybrid_v1, b1_fractal_gated_dyn-residual-norm_v1
 mod faceoff;
 mod model_face;
+mod overlay;
 mod primitives;
 mod tokenizer;
 
@@ -15,6 +16,7 @@ pub use faceoff::{
 };
 pub use model_face::{
     BridgeBatch, BridgeDocument, BridgeFeatureChunk, BridgeFeatureToken, CanonicalPadSemantics,
+    CanonicalTokenization,
     EmbeddingBridgeAdapter, HuggingFaceNativeTokenizer, HuggingFaceNativeTokenizerError,
     ModelAdapter, ModelBatch, ModelFacingBatch, ModelFacingDocument, NativeCollatedBatch,
     NativeCollatedChunk, NativeCollatedDocument, NativeCollationError, NativeCollationSpec,
@@ -22,6 +24,10 @@ pub use model_face::{
     NativeTokenizedBatch, NativeTokenizedChunk, NativeTokenizedDocument, NativeTokenizer,
     NativeTruncationPolicy, SlowSentencePieceTokenizer, SlowSentencePieceTokenizerError,
     TypedEmbeddingBridge,
+};
+pub use overlay::{
+    build_recursive_overlay, LocalMacro, LocalMacroKind, OverlayDocumentMode, OverlaySegment,
+    RecursiveOverlayConfig, RecursiveOverlayDocument, RecursiveOverlayMode,
 };
 pub use primitives::{
     B1FractalGated, B3FractalHierarchical, B4Universal, P1FractalHybrid, P2Mandelbrot,

@@ -4,11 +4,12 @@ use fractal_primitives_private::{
     MandelboxRecursiveDynEscapeRadius, P1Contractive, P1FractalHybridComposite, P3Hierarchical,
 };
 use fractal_tokenizer::{
-    p1_dynamic_lever_factory, revived_primitive_factories, EncodedDocument, FaceoffChunkLimits,
-    FaceoffEmissionPolicy, FaceoffEncodingOptions, FaceoffFallbackMode, FaceoffIdentityMode,
-    FaceoffLocalCacheMode, FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig,
-    HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument, MotifReusePolicy,
-    NativeCollationSpec, NativeCompatibilityAdapter, PrimitiveFactory, PrototypeGranularityMode,
+    build_recursive_overlay, p1_dynamic_lever_factory, revived_primitive_factories,
+    EncodedDocument, FaceoffChunkLimits, FaceoffEmissionPolicy, FaceoffEncodingOptions,
+    FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLocalCacheMode, FaceoffTokenizer,
+    FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer, ModelFacingBatch,
+    ModelFacingDocument, MotifReusePolicy, NativeCollationSpec, NativeCompatibilityAdapter,
+    PrimitiveFactory, PrototypeGranularityMode, RecursiveOverlayConfig, RecursiveOverlayMode,
     SplitPolicy, TokenizerConfig, TokenizerSubstrateMode,
 };
 use reqwest::blocking::Client;
@@ -149,6 +150,7 @@ struct ModelMetrics {
 struct BakeoffRecord {
     corpus: CorpusDocument,
     fractal: FractalMetrics,
+    overlay: Option<OverlayMetrics>,
     models: BTreeMap<String, ModelMetrics>,
 }
 
@@ -269,6 +271,43 @@ struct PrimitiveBakeoffRun {
     primitive: String,
     results: Vec<BakeoffRecord>,
     vocab: FaceoffVocab,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct OverlayMetrics {
+    status: String,
+    base_tokenizer_label: String,
+    base_tokenizer_path: String,
+    mode: String,
+    canonical_token_count: usize,
+    overlay_symbol_count: usize,
+    compression_ratio_vs_canonical: f64,
+    macro_count: usize,
+    macro_ref_count: usize,
+    repeated_token_mass_saved: usize,
+    exact_ok: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverlaySummaryMode {
+    Off,
+    LocalLineMacro,
+}
+
+impl OverlaySummaryMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::LocalLineMacro => "local-line-macro",
+        }
+    }
+
+    fn recursive_mode(self) -> RecursiveOverlayMode {
+        match self {
+            Self::Off => RecursiveOverlayMode::Off,
+            Self::LocalLineMacro => RecursiveOverlayMode::LocalLineMacro,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -394,6 +433,8 @@ struct Args {
     split_policy: SplitPolicy,
     substrate_mode: TokenizerSubstrateMode,
     local_cache_mode: FaceoffLocalCacheMode,
+    overlay_mode: OverlaySummaryMode,
+    overlay_base_tokenizer: String,
 }
 
 impl Args {
@@ -422,6 +463,8 @@ impl Args {
         let mut split_policy = SplitPolicy::BoundaryAware;
         let mut substrate_mode = TokenizerSubstrateMode::RawBytes;
         let mut local_cache_mode = FaceoffLocalCacheMode::Off;
+        let mut overlay_mode = OverlaySummaryMode::Off;
+        let mut overlay_base_tokenizer = "qwen25".to_string();
 
         let mut args = iter.into_iter().map(Into::into);
         while let Some(arg) = args.next() {
@@ -495,6 +538,15 @@ impl Args {
                         &args.next().ok_or("--local-cache requires a value")?,
                     )?;
                 }
+                "--overlay-mode" => {
+                    overlay_mode =
+                        parse_overlay_mode(&args.next().ok_or("--overlay-mode requires a value")?)?;
+                }
+                "--overlay-base-tokenizer" => {
+                    overlay_base_tokenizer = args
+                        .next()
+                        .ok_or("--overlay-base-tokenizer requires a value")?;
+                }
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -525,13 +577,15 @@ impl Args {
             split_policy,
             substrate_mode,
             local_cache_mode,
+            overlay_mode,
+            overlay_base_tokenizer,
         })
     }
 }
 
 fn print_help() {
     eprintln!(
-        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--corpus-source local|hybrid] [--fawx-root DIR] [--home-state-root DIR] [--hf-datasets-endpoint URL] [--max-review-count N] [--primitive NAME] [--all-primitives] [--fallback-mode full|motif-only] [--identity-mode legacy|prototype-primary] [--prototype-granularity coarse|adaptive] [--split-policy balanced|boundary-aware|syntax-aware] [--substrate raw|lexical] [--local-cache off|exact]"
+        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--corpus-source local|hybrid] [--fawx-root DIR] [--home-state-root DIR] [--hf-datasets-endpoint URL] [--max-review-count N] [--primitive NAME] [--all-primitives] [--fallback-mode full|motif-only] [--identity-mode legacy|prototype-primary] [--prototype-granularity coarse|adaptive] [--split-policy balanced|boundary-aware|syntax-aware] [--substrate raw|lexical] [--local-cache off|exact] [--overlay-mode off|local-line-macro] [--overlay-base-tokenizer LABEL]"
     );
 }
 
@@ -606,6 +660,17 @@ fn parse_local_cache_mode(value: &str) -> Result<FaceoffLocalCacheMode, Box<dyn 
         other => {
             Err(format!("unknown local cache mode `{other}`; expected one of: off, exact").into())
         }
+    }
+}
+
+fn parse_overlay_mode(value: &str) -> Result<OverlaySummaryMode, Box<dyn Error>> {
+    match value {
+        "off" => Ok(OverlaySummaryMode::Off),
+        "local-line-macro" => Ok(OverlaySummaryMode::LocalLineMacro),
+        other => Err(format!(
+            "unknown overlay mode `{other}`; expected one of: off, local-line-macro"
+        )
+        .into()),
     }
 }
 
@@ -1757,7 +1822,8 @@ fn run_primitive_bakeoff(
     };
     let (works, vocab) = build_fractal_documents(corpus, primitive, modes)?;
     let model_results = run_model_bakeoff(&works, model_sources)?;
-    let results = merge_results(works, model_results);
+    let mut results = merge_results(works, model_results);
+    attach_overlay_shadow(&mut results, model_sources, args)?;
     Ok(PrimitiveBakeoffRun {
         primitive: primitive_name,
         results,
@@ -1849,6 +1915,7 @@ fn build_fractal_documents(
             record: BakeoffRecord {
                 corpus: candidate.corpus.clone(),
                 fractal,
+                overlay: None,
                 models: BTreeMap::new(),
             },
             model_facing,
@@ -2016,6 +2083,132 @@ fn merge_results(
         .collect()
 }
 
+fn attach_overlay_shadow(
+    results: &mut [BakeoffRecord],
+    model_sources: &[ModelTokenizerSource],
+    args: &Args,
+) -> Result<(), Box<dyn Error>> {
+    if args.overlay_mode == OverlaySummaryMode::Off {
+        for record in results {
+            record.overlay = Some(OverlayMetrics {
+                status: "off".to_string(),
+                base_tokenizer_label: args.overlay_base_tokenizer.clone(),
+                base_tokenizer_path: String::new(),
+                mode: "off".to_string(),
+                canonical_token_count: 0,
+                overlay_symbol_count: 0,
+                compression_ratio_vs_canonical: 0.0,
+                macro_count: 0,
+                macro_ref_count: 0,
+                repeated_token_mass_saved: 0,
+                exact_ok: true,
+            });
+        }
+        return Ok(());
+    }
+
+    let Some(source) = select_overlay_base_tokenizer(model_sources, &args.overlay_base_tokenizer)?
+    else {
+        for record in results {
+            record.overlay = Some(OverlayMetrics {
+                status: "skipped".to_string(),
+                base_tokenizer_label: args.overlay_base_tokenizer.clone(),
+                base_tokenizer_path: String::new(),
+                mode: args.overlay_mode.as_str().to_string(),
+                canonical_token_count: 0,
+                overlay_symbol_count: 0,
+                compression_ratio_vs_canonical: 0.0,
+                macro_count: 0,
+                macro_ref_count: 0,
+                repeated_token_mass_saved: 0,
+                exact_ok: true,
+            });
+        }
+        return Ok(());
+    };
+
+    let Some(tokenizer) = &source.tokenizer else {
+        for record in results {
+            record.overlay = Some(OverlayMetrics {
+                status: "skipped".to_string(),
+                base_tokenizer_label: source.label.clone(),
+                base_tokenizer_path: source.tokenizer_json_path.display().to_string(),
+                mode: args.overlay_mode.as_str().to_string(),
+                canonical_token_count: 0,
+                overlay_symbol_count: 0,
+                compression_ratio_vs_canonical: 0.0,
+                macro_count: 0,
+                macro_ref_count: 0,
+                repeated_token_mass_saved: 0,
+                exact_ok: true,
+            });
+        }
+        return Ok(());
+    };
+
+    let config = RecursiveOverlayConfig::default();
+    for record in results {
+        let canonical = tokenizer.tokenize_with_byte_offsets(&record.corpus.text)?;
+        let overlay = build_recursive_overlay(
+            &record.corpus.text,
+            canonical,
+            args.overlay_mode.recursive_mode(),
+            &config,
+        );
+        record.overlay = Some(OverlayMetrics {
+            status: "ok".to_string(),
+            base_tokenizer_label: source.label.clone(),
+            base_tokenizer_path: source.tokenizer_json_path.display().to_string(),
+            mode: match overlay.mode {
+                fractal_tokenizer::OverlayDocumentMode::Passthrough => "passthrough".to_string(),
+                fractal_tokenizer::OverlayDocumentMode::LocalMacro => "local-macro".to_string(),
+            },
+            canonical_token_count: overlay.canonical.token_ids.len(),
+            overlay_symbol_count: overlay.overlay_symbol_count(),
+            compression_ratio_vs_canonical: overlay.compression_ratio_vs_canonical(),
+            macro_count: overlay.macros.len(),
+            macro_ref_count: overlay.macro_ref_count(),
+            repeated_token_mass_saved: overlay.repeated_token_mass_saved(),
+            exact_ok: overlay.exact_ok(),
+        });
+    }
+
+    Ok(())
+}
+
+fn select_overlay_base_tokenizer<'a>(
+    model_sources: &'a [ModelTokenizerSource],
+    preferred_label: &str,
+) -> Result<Option<&'a ModelTokenizerSource>, Box<dyn Error>> {
+    if preferred_label.is_empty() {
+        return Ok(model_sources
+            .iter()
+            .find(|source| source.tokenizer.is_some()));
+    }
+
+    if let Some(source) = model_sources
+        .iter()
+        .find(|source| source.label == preferred_label)
+    {
+        if source.tokenizer.is_some() {
+            return Ok(Some(source));
+        }
+        return Ok(model_sources
+            .iter()
+            .find(|candidate| candidate.tokenizer.is_some()));
+    }
+
+    Err(format!(
+        "unknown overlay base tokenizer `{preferred_label}`; available: {}",
+        model_sources
+            .iter()
+            .map(|source| source.label.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+    .into())
+}
+
 fn print_summary(primitive: &str, results: &[BakeoffRecord], vocab: &FaceoffVocab, args: &Args) {
     let total_docs = results.len();
     let induction_docs = results
@@ -2099,6 +2292,7 @@ fn print_summary(primitive: &str, results: &[BakeoffRecord], vocab: &FaceoffVoca
         "BAKEOFF_DIAGNOSTIC split=evaluation exact_motif_hit_docs={} prototype_hit_docs={} local_cache_hit_docs={} lexical_only_docs={}",
         exact_motif_hit_docs, prototype_hit_docs, local_cache_hit_docs, lexical_only_docs
     );
+    print_overlay_summary(results, args);
 
     let verdict = summarize_verdict(results);
     println!(
@@ -2165,6 +2359,92 @@ fn print_summary(primitive: &str, results: &[BakeoffRecord], vocab: &FaceoffVoca
         println!("BAKEOFF_VERDICT_REASON={reason}");
     }
     println!("PRIMITIVE_END name={primitive}");
+}
+
+fn print_overlay_summary(results: &[BakeoffRecord], args: &Args) {
+    let held_out = held_out_records(results);
+    let overlay_records = held_out
+        .iter()
+        .filter_map(|record| {
+            record
+                .overlay
+                .as_ref()
+                .map(|overlay| (&record.corpus.bucket, overlay))
+        })
+        .collect::<Vec<_>>();
+    let ok_records = overlay_records
+        .iter()
+        .filter(|(_, overlay)| overlay.status == "ok")
+        .collect::<Vec<_>>();
+
+    println!("OVERLAY_MODE={}", args.overlay_mode.as_str());
+    println!("OVERLAY_BASE_TOKENIZER={}", args.overlay_base_tokenizer);
+
+    if ok_records.is_empty() {
+        let skipped = overlay_records
+            .iter()
+            .filter(|(_, overlay)| overlay.status == "skipped")
+            .count();
+        println!(
+            "OVERLAY_DIAGNOSTIC split=evaluation status=inactive ok_docs=0 skipped_docs={} activation_docs=0 macro_hit_docs=0 exact_failures=0",
+            skipped
+        );
+        return;
+    }
+
+    let activation_docs = ok_records
+        .iter()
+        .filter(|(_, overlay)| overlay.mode == "local-macro" && overlay.macro_ref_count > 0)
+        .count();
+    let exact_failures = ok_records
+        .iter()
+        .filter(|(_, overlay)| !overlay.exact_ok)
+        .count();
+    let macro_hit_docs = ok_records
+        .iter()
+        .filter(|(_, overlay)| overlay.macro_ref_count > 0)
+        .count();
+    println!(
+        "OVERLAY_DIAGNOSTIC split=evaluation status=ok ok_docs={} skipped_docs=0 activation_docs={} macro_hit_docs={} exact_failures={}",
+        ok_records.len(),
+        activation_docs,
+        macro_hit_docs,
+        exact_failures
+    );
+
+    let mut per_bucket = BTreeMap::<String, Vec<&OverlayMetrics>>::new();
+    for (bucket, overlay) in ok_records {
+        per_bucket
+            .entry((*bucket).clone())
+            .or_default()
+            .push(*overlay);
+    }
+
+    for (bucket, overlays) in per_bucket {
+        let mut ratios = overlays
+            .iter()
+            .map(|overlay| overlay.compression_ratio_vs_canonical)
+            .collect::<Vec<_>>();
+        let mut saved = overlays
+            .iter()
+            .map(|overlay| overlay.repeated_token_mass_saved as f64)
+            .collect::<Vec<_>>();
+        ratios.sort_by(|left, right| left.partial_cmp(right).unwrap());
+        saved.sort_by(|left, right| left.partial_cmp(right).unwrap());
+        let activation_rate = overlays
+            .iter()
+            .filter(|overlay| overlay.mode == "local-macro" && overlay.macro_ref_count > 0)
+            .count() as f64
+            / overlays.len().max(1) as f64;
+        println!(
+            "OVERLAY_BUCKET_SUMMARY split=evaluation bucket={} docs={} median_ratio={:.2} activation_rate={:.2} median_saved_tokens={:.2}",
+            bucket,
+            overlays.len(),
+            median_sorted(&ratios),
+            activation_rate,
+            median_sorted(&saved)
+        );
+    }
 }
 
 fn print_review_list(primitive: &str, results: &[BakeoffRecord], args: &Args) {
@@ -2610,6 +2890,8 @@ mod tests {
             split_policy: SplitPolicy::BoundaryAware,
             substrate_mode: TokenizerSubstrateMode::RawBytes,
             local_cache_mode: FaceoffLocalCacheMode::Off,
+            overlay_mode: OverlaySummaryMode::Off,
+            overlay_base_tokenizer: "qwen25".to_string(),
         }
     }
 
@@ -2766,6 +3048,28 @@ mod tests {
     #[test]
     fn parse_local_cache_defaults_to_off() {
         assert_eq!(base_args().local_cache_mode, FaceoffLocalCacheMode::Off);
+    }
+
+    #[test]
+    fn parse_overlay_mode_defaults_to_off() {
+        assert_eq!(base_args().overlay_mode, OverlaySummaryMode::Off);
+    }
+
+    #[test]
+    fn parse_overlay_mode_accepts_local_line_macro() {
+        assert_eq!(
+            parse_overlay_mode("local-line-macro").unwrap(),
+            OverlaySummaryMode::LocalLineMacro
+        );
+    }
+
+    #[test]
+    fn parse_overlay_mode_rejects_unknown_value() {
+        let error = parse_overlay_mode("totally-fake")
+            .err()
+            .expect("unknown overlay mode should error")
+            .to_string();
+        assert!(error.contains("unknown overlay mode `totally-fake`"));
     }
 
     #[test]
@@ -3175,6 +3479,7 @@ mod tests {
                 collation_ok: metrics.collation_ok,
                 wall_time_ms: 1.0,
             },
+            overlay: None,
             models,
         }
     }

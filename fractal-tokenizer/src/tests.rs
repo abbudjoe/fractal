@@ -19,15 +19,16 @@ use tokenizers::{
 use tokio::{process::Command as TokioCommand, runtime::Builder as TokioRuntimeBuilder};
 
 use crate::{
-    revived_primitive_factories,
+    build_recursive_overlay, revived_primitive_factories,
     tokenizer::{p1_dynamic_lever_factory, try_p1_dynamic_lever_factory},
     validate_tokenizer_primitive_name, B1FractalGated, B3FractalHierarchical, B4Universal,
     EncodedDocument, EncodedTokenKind, FaceoffChunkLimits, FaceoffEmissionPolicy,
     FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLexemeKind, FaceoffLocalCacheMode,
     FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer,
     ModelFacingBatch, ModelFacingDocument, NativeCollationSpec, NativeCompatibilityAdapter,
-    NativeTokenizer, P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary, PrototypeGranularityMode,
-    RecursiveTokenizer, StateSignature, TokenRecord, TokenizerConfig, TokenizerSubstrateMode,
+    NativeTokenizer, OverlayDocumentMode, P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary,
+    PrototypeGranularityMode, RecursiveOverlayConfig, RecursiveOverlayMode, RecursiveTokenizer,
+    StateSignature, TokenRecord, TokenizerConfig, TokenizerSubstrateMode,
     FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
@@ -712,6 +713,55 @@ fn build_hf_native_tokenizer(inputs: &[&str]) -> HuggingFaceNativeTokenizer {
     }));
 
     HuggingFaceNativeTokenizer::new(tokenizer)
+}
+
+#[test]
+fn canonical_overlay_expands_back_to_canonical_token_ids_exactly() {
+    let text = "\
+ts=1 level=info route=/health status=200\n\
+ts=2 level=info route=/health status=200\n\
+ts=3 level=info route=/health status=200\n\
+";
+    let tokenizer = build_hf_native_tokenizer(&[text]);
+    let canonical = tokenizer.tokenize_with_byte_offsets(text).unwrap();
+    let overlay = build_recursive_overlay(
+        text,
+        canonical.clone(),
+        RecursiveOverlayMode::LocalLineMacro,
+        &RecursiveOverlayConfig::default(),
+    );
+
+    assert_eq!(overlay.mode, OverlayDocumentMode::LocalMacro);
+    assert!(overlay.exact_ok());
+    assert_eq!(overlay.expand_token_ids(), canonical.token_ids);
+    assert_eq!(overlay.macros.len(), 1);
+    assert!(overlay.macro_ref_count() >= 3);
+    assert!(
+        overlay.overlay_symbol_count() < canonical.token_ids.len(),
+        "local macro overlay should reduce storage cost for repeated structured lines"
+    );
+}
+
+#[test]
+fn canonical_overlay_stays_passthrough_on_non_repetitive_text() {
+    let text = "\
+Each paragraph in this tiny prose sample is different enough to avoid local line reuse.\n\
+We want the canonical overlay to stay conservative when no exact repeated line spans exist.\n\
+That keeps the canonical tokenizer as the real source of truth.\n\
+";
+    let tokenizer = build_hf_native_tokenizer(&[text]);
+    let canonical = tokenizer.tokenize_with_byte_offsets(text).unwrap();
+    let overlay = build_recursive_overlay(
+        text,
+        canonical.clone(),
+        RecursiveOverlayMode::LocalLineMacro,
+        &RecursiveOverlayConfig::default(),
+    );
+
+    assert_eq!(overlay.mode, OverlayDocumentMode::Passthrough);
+    assert!(overlay.macros.is_empty());
+    assert!(overlay.exact_ok());
+    assert_eq!(overlay.overlay_symbol_count(), canonical.token_ids.len());
 }
 
 fn unique_temp_path(prefix: &str, suffix: &str) -> PathBuf {
