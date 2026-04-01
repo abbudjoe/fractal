@@ -66,9 +66,9 @@
       },
       "bridge_packaging": {
         "vocab_artifact_path": "experiments/stage0/assets/open_llama_3b_v2/fineweb-stage0-canary-bridge-vocab.json",
-        "dim": 1024,
-        "levels": 6,
-        "max_depth": 16,
+        "dim": 64,
+        "levels": 3,
+        "max_depth": 6,
         "seed": 42,
         "split_policy": "balanced",
         "substrate_mode": "raw-bytes",

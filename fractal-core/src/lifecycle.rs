@@ -743,22 +743,10 @@ impl BridgePackagingSpec {
 
     pub fn validate_against_config(&self, config: &TournamentConfig) -> Result<(), FractalError> {
         self.validate()?;
-        for (name, bridge_value, config_value) in [
-            ("dim", self.dim, config.dim),
-            ("levels", self.levels, config.levels),
-            ("max_depth", self.max_depth, config.max_recursion_depth),
-        ] {
-            if bridge_value != config_value {
-                return Err(FractalError::InvalidConfig(format!(
-                    "bridge packaging {name} {} must match config {} {}",
-                    bridge_value, name, config_value
-                )));
-            }
-        }
-        if self.seed != config.seed {
+        if self.chunk_max_tokens > config.max_seq_len {
             return Err(FractalError::InvalidConfig(format!(
-                "bridge packaging seed {} must match config seed {}",
-                self.seed, config.seed
+                "bridge packaging chunk_max_tokens {} must be less than or equal to config max_seq_len {}",
+                self.chunk_max_tokens, config.max_seq_len
             )));
         }
         Ok(())

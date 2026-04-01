@@ -1353,6 +1353,98 @@ fn experiment_template_rejects_launch_policy_mismatch() {
     assert!(error.to_string().contains("launch policy"));
 }
 
+#[test]
+fn experiment_template_allows_independent_bridge_packaging_contract() {
+    let config = TournamentPreset::FastTest.config();
+    let mut template = test_experiment_template(config.clone());
+    template.training_input = TrainingInputSpec::tokenizer_backed_text(
+        "fineweb-stage0-smoke",
+        TokenizerArtifactSpec {
+            artifact_id: "openlm-research/open_llama_3b_v2".to_owned(),
+            artifact_path: Some("inline://open-llama".to_owned()),
+            vocab_size: config.vocab_size,
+            pad_token_id: PAD_TOKEN,
+        },
+        TextCorpusSourceSpec {
+            train: TextCorpusSplitSpec {
+                path: "/tmp/fineweb-train.jsonl".to_owned(),
+                format: TextCorpusFormat::JsonlText {
+                    text_field: "text".to_owned(),
+                },
+                max_documents: None,
+            },
+            eval: TextCorpusSplitSpec {
+                path: "/tmp/fineweb-eval.jsonl".to_owned(),
+                format: TextCorpusFormat::JsonlText {
+                    text_field: "text".to_owned(),
+                },
+                max_documents: None,
+            },
+        },
+    )
+    .with_bridge_packaging(BridgePackagingSpec {
+        vocab_artifact_path: "/tmp/fineweb-bridge-vocab.json".to_owned(),
+        dim: 64,
+        levels: 3,
+        max_depth: 6,
+        seed: 7,
+        split_policy: BridgeSplitPolicy::Balanced,
+        substrate_mode: BridgeSubstrateMode::RawBytes,
+        chunk_max_tokens: config.max_seq_len,
+        chunk_max_bytes: config.max_seq_len,
+    });
+
+    template
+        .validate_against_config(&config)
+        .expect("bridge packaging should be independently configurable");
+}
+
+#[test]
+fn experiment_template_rejects_bridge_chunk_limit_above_model_context() {
+    let config = TournamentPreset::FastTest.config();
+    let mut template = test_experiment_template(config.clone());
+    template.training_input = TrainingInputSpec::tokenizer_backed_text(
+        "fineweb-stage0-smoke",
+        TokenizerArtifactSpec {
+            artifact_id: "openlm-research/open_llama_3b_v2".to_owned(),
+            artifact_path: Some("inline://open-llama".to_owned()),
+            vocab_size: config.vocab_size,
+            pad_token_id: PAD_TOKEN,
+        },
+        TextCorpusSourceSpec {
+            train: TextCorpusSplitSpec {
+                path: "/tmp/fineweb-train.jsonl".to_owned(),
+                format: TextCorpusFormat::JsonlText {
+                    text_field: "text".to_owned(),
+                },
+                max_documents: None,
+            },
+            eval: TextCorpusSplitSpec {
+                path: "/tmp/fineweb-eval.jsonl".to_owned(),
+                format: TextCorpusFormat::JsonlText {
+                    text_field: "text".to_owned(),
+                },
+                max_documents: None,
+            },
+        },
+    )
+    .with_bridge_packaging(BridgePackagingSpec {
+        vocab_artifact_path: "/tmp/fineweb-bridge-vocab.json".to_owned(),
+        dim: 64,
+        levels: 3,
+        max_depth: 6,
+        seed: 7,
+        split_policy: BridgeSplitPolicy::Balanced,
+        substrate_mode: BridgeSubstrateMode::RawBytes,
+        chunk_max_tokens: config.max_seq_len + 1,
+        chunk_max_bytes: config.max_seq_len + 1,
+    });
+
+    let error = template.validate_against_config(&config).unwrap_err();
+    assert!(error.to_string().contains("chunk_max_tokens"));
+    assert!(error.to_string().contains("max_seq_len"));
+}
+
 fn test_variant_name(id: SpeciesId) -> PrimitiveVariantName {
     let name = match id {
         SpeciesId::P1Contractive => "p1_contractive_v1",

@@ -554,8 +554,10 @@ fn materialize_bridge_vocab_artifact_from_corpus(
         .map(String::as_str)
         .collect::<Vec<_>>();
     let device = fractal_core::registry::cpu_device();
+    // Bridge vocab induction is a preprocessing step, not model training. Use the
+    // non-autodiff CPU backend so asset prep does not build gradient graphs.
     let vocab =
-        tokenizer.induce_vocab_from_texts::<fractal_core::CpuTrainBackend>(&documents, &device)?;
+        tokenizer.induce_vocab_from_texts::<fractal_core::CpuBackend>(&documents, &device)?;
     vocab.save_to_file(&output_path)?;
     FaceoffVocab::load_from_file(&output_path)?;
     Ok(output_path)
