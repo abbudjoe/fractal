@@ -388,6 +388,55 @@ Updated read:
 - adaptive refinement can stay available as an experiment mode
 - the gate from candidate 2 to candidate 3 does not open
 
+## Prototype Emission Gate Result
+
+The last tightly scoped rescue attempt asked whether the remaining precision
+problem lived at runtime emission rather than in induction or identity.
+
+The experiment added a selective runtime gate that recurses to children when:
+
+- a prototype hit is available
+- the child frontier fully covers the parent
+- every child is already structurally recoverable
+
+Focused regression result:
+
+- `Direct` emits one parent prototype
+- `Selective` recurses and emits the two child prototypes
+
+Held-out local bakeoff result for `p1_fractal_hybrid_dyn-state-norm_v2` with
+adaptive granularity:
+
+- `direct`
+  - `prototype_hit_docs=19`
+  - `lexical_only_docs=31`
+  - `code.rust=0.83`
+  - `code.swift=0.91`
+  - `docs.spec=0.78`
+  - `jsonl.signals=7.60`
+  - verdict: `YELLOW`
+- `selective`
+  - `prototype_hit_docs=19`
+  - `lexical_only_docs=31`
+  - `code.rust=0.83`
+  - `code.swift=0.91`
+  - `docs.spec=0.78`
+  - `jsonl.signals=7.60`
+  - verdict: `YELLOW`
+
+Interpretation:
+
+- the runtime emission gate works in isolation
+- but it is a complete field no-op on the held-out corpus
+- that means runtime prototype emission is not the active bottleneck
+
+Updated read:
+
+- the remaining ceiling is upstream of emission
+- the rescue line of admission -> granularity -> emission is exhausted
+- the next move should be a broader tokenizer-control-plane pivot or primitive
+  comparison, not another local emission heuristic
+
 ## Prototype Precision Guardrails Result
 
 The next empirical step added a dynamic prototype admission policy based on:

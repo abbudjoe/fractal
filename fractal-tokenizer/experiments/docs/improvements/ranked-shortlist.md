@@ -21,7 +21,7 @@ Candidates are ranked by:
 
 ## Latest Trial Snapshot
 
-Most recent completed trial: adaptive signature granularity on top of the
+Most recent completed trial: prototype emission gate on top of the adaptive
 state-signature prototype surface.
 
 - `BAKEOFF_DOCUMENTS=120`
@@ -33,21 +33,20 @@ state-signature prototype surface.
 
 Result:
 
-- adaptive refinement recovered a meaningful share of the prototype lift without
-  returning to the catastrophic `jsonl.signals=113.26` failure
-- `full` mode on `p1_fractal_hybrid_dyn-state-norm_v2` now shows:
+- the focused regression proved selective runtime emission works in isolation
+- but the held-out bakeoff was identical between `direct` and `selective`
+- `full` mode on `p1_fractal_hybrid_dyn-state-norm_v2` stayed at:
   - `exact_motif_hit_docs=1`
   - `prototype_hit_docs=19`
   - `lexical_only_docs=31`
-- but the held-out run still trips the non-log overcollapse gate:
   - `jsonl.signals=7.60`
   - `suspicious_nonlog_overcollapse_docs=10`
 
 New read:
 
-- adaptive precision-by-representation is better than blunt rejection
-- it is still not selective enough to pass the bakeoff gate
-- candidate 3 does not earn a turn from this line
+- runtime prototype emission is not the active bottleneck
+- the remaining ceiling is upstream of emission
+- another emission-side heuristic is not justified from this line
 
 ## Current Baseline
 
@@ -98,7 +97,36 @@ The ranking below applies to **next** frontier candidates. Packaging is now trea
 
 ## Ranked Candidates
 
-### 1. Prototype Precision Guardrails
+### 1. Primitive Comparison Pivot
+
+Status:
+
+- `Active`
+
+Why it ranks first now:
+
+- the admission -> granularity -> emission rescue line is now exhausted
+- the pipeline is strong enough to compare primitives against the same held-out
+  control-plane contract
+- if no better primitive emerges, the result strengthens the case for a
+  broader tokenizer-architecture pivot
+
+Expected upside:
+
+- we stop guessing whether the current held-out ceiling is specific to `p1`
+- we find out whether another primitive family breaks out under the same honest
+  bakeoff
+
+Expected failure mode:
+
+- no better primitive emerges, which would confirm that the current bottleneck
+  is the tokenizer control plane or a deeper architectural limit
+
+Decision:
+
+- keep ready as the next branch after the emission no-op
+
+### 2. Prototype Precision Guardrails
 
 Status:
 
@@ -128,7 +156,7 @@ Decision:
 - tried and not promoted
 - candidate 2 was the justified replacement attempt after this failure
 
-### 2. Targeted Prototype Precision
+### 3. Targeted Prototype Precision
 
 Status:
 
@@ -158,37 +186,40 @@ Decision:
 - tried and not promoted
 - keep adaptive granularity available as an explicit experiment mode
 - keep coarse mode as the stable default
-- do not proceed to candidate 3 from this branch
+- candidate 3 was later tried as a runtime emission gate and was a field no-op
 
-### 3. Primitive Comparison Pivot
+### 4. Prototype Emission Gate
 
 Status:
 
-- `Active`
+- `Tried`
 
-Why it ranks second now:
+Why it mattered:
 
-- if precision guardrails cannot rescue the new state-signature line,
-  primitive comparison is the next honest branch
-- the pipeline is strong enough now to compare primitives against the same held-out
-  control-plane contract
+- adaptive granularity suggested one last local question:
+  are prototypes over-emitted at runtime even when induction is already good
+  enough?
+- the experiment tested that directly without changing induction or identity
 
-Expected upside:
+Observed result:
 
-- we stop guessing whether this ceiling is specific to `p1`
-- we find out whether another primitive family breaks out under the same honest
-  held-out bakeoff
-
-Expected failure mode:
-
-- no better primitive emerges, which would strengthen the case for a broader
-  tokenizer-architecture pivot
+- focused regression: `Selective` recurses to structural children correctly
+- held-out bakeoff: `Selective` and `Direct` were identical
+- no metric moved:
+  - `prototype_hit_docs=19`
+  - `lexical_only_docs=31`
+  - `code.rust=0.83`
+  - `code.swift=0.91`
+  - `docs.spec=0.78`
+  - `jsonl.signals=7.60`
 
 Decision:
 
-- keep ready as the next branch if the precision pass fails
+- tried and not promoted
+- revert the runtime experiment from code and keep only the logged result
+- treat this as evidence that the remaining ceiling is upstream of emission
 
-### 4. State-Signature Prototype Induction
+### 5. State-Signature Prototype Induction
 
 Status:
 
@@ -216,7 +247,7 @@ Decision:
 - keep the typed state-signature surface
 - do not treat it as seaworthy without precision guardrails
 
-### 5. Boundary-Aware Split For `p1`
+### 6. Boundary-Aware Split For `p1`
 
 Status:
 
