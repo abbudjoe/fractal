@@ -9,7 +9,7 @@ use std::{
 use crate::{
     data_generator::{
         GeneratorConfig, GeneratorDepthConfig, SimpleHierarchicalGenerator, MIN_SEQUENCE_LEN,
-        MIN_VOCAB_SIZE,
+        MIN_VOCAB_SIZE, PAD_TOKEN,
     },
     error::FractalError,
     fitness::SpeciesRawMetrics,
@@ -236,6 +236,64 @@ impl TrainingInputMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArcSourceMode {
+    SyntheticCanonical,
+    TokenizerBackedCanonical,
+    Unavailable,
+}
+
+impl ArcSourceMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SyntheticCanonical => "synthetic-canonical",
+            Self::TokenizerBackedCanonical => "tokenizer-backed-canonical",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArcSourceSpec {
+    pub mode: ArcSourceMode,
+}
+
+impl ArcSourceSpec {
+    pub const fn synthetic_canonical() -> Self {
+        Self {
+            mode: ArcSourceMode::SyntheticCanonical,
+        }
+    }
+
+    pub const fn tokenizer_backed_canonical() -> Self {
+        Self {
+            mode: ArcSourceMode::TokenizerBackedCanonical,
+        }
+    }
+
+    pub const fn unavailable() -> Self {
+        Self {
+            mode: ArcSourceMode::Unavailable,
+        }
+    }
+
+    pub fn validate(&self, training_input_mode: TrainingInputMode) -> Result<(), FractalError> {
+        match training_input_mode {
+            TrainingInputMode::Synthetic => Ok(()),
+            TrainingInputMode::TokenizerBackedText => match self.mode {
+                ArcSourceMode::SyntheticCanonical => Ok(()),
+                ArcSourceMode::TokenizerBackedCanonical => Err(FractalError::InvalidConfig(
+                    "tokenizer-backed Stage 0 cannot yet map canonical ARC from text batches"
+                        .into(),
+                )),
+                ArcSourceMode::Unavailable => Err(FractalError::InvalidConfig(
+                    "tokenizer-backed Stage 0 must declare an explicit canonical ARC source".into(),
+                )),
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TokenizerArtifactSpec {
     pub artifact_id: String,
@@ -260,6 +318,33 @@ impl TokenizerArtifactSpec {
             return Err(FractalError::InvalidConfig(format!(
                 "tokenizer pad_token_id {} must be less than vocab_size {}",
                 self.pad_token_id, self.vocab_size
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn validate_against_model(
+        &self,
+        model_vocab_size: usize,
+        model_pad_token_id: usize,
+    ) -> Result<(), FractalError> {
+        self.validate()?;
+        if self.vocab_size != model_vocab_size {
+            return Err(FractalError::InvalidConfig(format!(
+                "tokenizer vocab_size {} must match model vocab_size {}",
+                self.vocab_size, model_vocab_size
+            )));
+        }
+        if self.pad_token_id != model_pad_token_id {
+            return Err(FractalError::InvalidConfig(format!(
+                "tokenizer pad_token_id {} must match model pad_token_id {}",
+                self.pad_token_id, model_pad_token_id
+            )));
+        }
+        if self.pad_token_id != PAD_TOKEN {
+            return Err(FractalError::InvalidConfig(format!(
+                "tokenizer pad_token_id {} must match canonical PAD_TOKEN {}",
+                self.pad_token_id, PAD_TOKEN
             )));
         }
         Ok(())
@@ -314,6 +399,7 @@ pub struct TrainingInputSpec {
     pub corpus_name: Option<String>,
     pub tokenizer: Option<TokenizerArtifactSpec>,
     pub bridge: TokenizerBridgeSpec,
+    pub arc_source: ArcSourceSpec,
 }
 
 impl TrainingInputSpec {
@@ -323,6 +409,7 @@ impl TrainingInputSpec {
             corpus_name: None,
             tokenizer: None,
             bridge: TokenizerBridgeSpec::disabled(),
+            arc_source: ArcSourceSpec::synthetic_canonical(),
         }
     }
 
@@ -335,11 +422,13 @@ impl TrainingInputSpec {
             corpus_name: Some(corpus_name.into()),
             tokenizer: Some(tokenizer),
             bridge: TokenizerBridgeSpec::observational_only(),
+            arc_source: ArcSourceSpec::synthetic_canonical(),
         }
     }
 
     pub fn validate(&self) -> Result<(), FractalError> {
         self.bridge.validate(self.mode)?;
+        self.arc_source.validate(self.mode)?;
         match self.mode {
             TrainingInputMode::Synthetic => {
                 if self.corpus_name.is_some() || self.tokenizer.is_some() {
@@ -367,6 +456,22 @@ impl TrainingInputSpec {
                     )
                 })?;
                 tokenizer.validate()
+            }
+        }
+    }
+
+    pub fn validate_against_config(&self, config: &TournamentConfig) -> Result<(), FractalError> {
+        self.validate()?;
+        match self.mode {
+            TrainingInputMode::Synthetic => Ok(()),
+            TrainingInputMode::TokenizerBackedText => {
+                let tokenizer = self.tokenizer.as_ref().ok_or_else(|| {
+                    FractalError::InvalidConfig(
+                        "tokenizer-backed text training requires tokenizer artifact metadata"
+                            .into(),
+                    )
+                })?;
+                tokenizer.validate_against_model(config.vocab_size, PAD_TOKEN)
             }
         }
     }
@@ -665,13 +770,13 @@ impl ExperimentSpecTemplate {
         }
     }
 
-    fn validate_against_config(&self, config: &TournamentConfig) -> Result<(), FractalError> {
+    pub fn validate_against_config(&self, config: &TournamentConfig) -> Result<(), FractalError> {
         if !self.budget.matches_config(config) {
             return Err(FractalError::InvalidConfig(
                 "experiment budget must match the resolved tournament config".into(),
             ));
         }
-        self.training_input.validate()?;
+        self.training_input.validate_against_config(config)?;
         if !self.execution.matches_config(config) {
             return Err(FractalError::InvalidConfig(
                 "experiment execution target must match the resolved tournament config".into(),

@@ -5,9 +5,13 @@ use burn::tensor::{
     Int, Tensor, TensorData,
 };
 use fractal_core::{
-    data_generator::{TaskFamily, TokenBatch, PAD_TOKEN},
+    data_generator::{
+        GeneratorConfig, SimpleHierarchicalGenerator, TaskFamily, TokenBatch, PAD_TOKEN,
+    },
     error::FractalError,
-    lifecycle::{ExperimentSpec, TokenizerArtifactSpec, TrainingInputMode, TrainingInputSpec},
+    lifecycle::{
+        ArcSourceMode, ExperimentSpec, TokenizerArtifactSpec, TrainingInputMode, TrainingInputSpec,
+    },
     registry::{run_species_with_batches, PrimitiveVariantName, SpeciesId, TrainingBatchSet},
     SpeciesRawMetrics,
 };
@@ -64,6 +68,7 @@ pub struct TokenizerBridgeStats {
     pub training_input_mode: TrainingInputMode,
     pub bridge_enabled: bool,
     pub bridge_observational_only: bool,
+    pub arc_source_mode: ArcSourceMode,
     pub train_documents: usize,
     pub eval_documents: usize,
     pub model_facing_documents: usize,
@@ -105,6 +110,7 @@ impl TokenizerBridgeStats {
             training_input_mode: training_input.mode,
             bridge_enabled: training_input.bridge.enabled,
             bridge_observational_only: training_input.bridge.observational_only,
+            arc_source_mode: training_input.arc_source.mode,
             train_documents: corpus.train_documents.len(),
             eval_documents: corpus.eval_documents.len(),
             model_facing_documents,
@@ -167,7 +173,7 @@ where
     N: NativeTokenizer<Token = u32>,
     N::Error: fmt::Display + fmt::Debug + Send + Sync + 'static,
 {
-    training_input.validate()?;
+    training_input.validate_against_config(config)?;
     corpus.validate()?;
     if training_input.mode != TrainingInputMode::TokenizerBackedText {
         return Err(FractalError::InvalidConfig(
@@ -227,6 +233,8 @@ where
         device,
     )?;
 
+    let arc_batches = build_canonical_arc_batches::<B>(config, device)?;
+
     let stats = TokenizerBridgeStats::new(
         training_input,
         corpus,
@@ -245,9 +253,9 @@ where
     Ok((
         TrainingBatchSet {
             train_sentence: train.batches.clone(),
-            train_arc: train.batches,
+            train_arc: arc_batches.train_arc,
             eval_sentence: eval.batches.clone(),
-            eval_arc: eval.batches,
+            eval_arc: arc_batches.eval_arc,
         },
         stats,
     ))
@@ -326,6 +334,36 @@ where
     };
 
     Ok((metrics, stats))
+}
+
+fn build_canonical_arc_batches<B: AutodiffBackend>(
+    config: &fractal_core::TournamentConfig,
+    device: &B::Device,
+) -> Result<TrainingBatchSet<B>, FractalError> {
+    let generator = SimpleHierarchicalGenerator::new(GeneratorConfig {
+        vocab_size: config.vocab_size,
+        max_seq_len: config.max_seq_len,
+        train_examples_per_family: config.train_batch_size.max(1),
+        eval_examples_per_family: config.eval_batches_per_family.max(1),
+        seed: config.seed,
+        depth_config: config.generator_depth_config,
+    })?;
+
+    Ok(TrainingBatchSet {
+        train_sentence: Vec::new(),
+        train_arc: generator.train_batches_for::<B>(
+            TaskFamily::ArcGrid,
+            config.train_batch_size,
+            device,
+        )?,
+        eval_sentence: Vec::new(),
+        eval_arc: generator.eval_batches_for::<B>(
+            TaskFamily::ArcGrid,
+            config.eval_batch_size,
+            config.effective_arc_eval_batches(),
+            device,
+        )?,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -527,11 +565,12 @@ mod tests {
     use std::{collections::BTreeMap, env, error::Error, fmt, fs};
 
     use burn::backend::candle::CandleDevice;
+    use fractal_core::lifecycle::ArcSourceMode;
     use fractal_core::{
         ArtifactPolicy, BudgetSpec, ComparisonContract, DecisionIntent, ExecutionBackend,
         ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
         ExperimentSpecTemplate, LaneIntent, PrimitiveVariantName, RuntimeSurfaceSpec, SpeciesId,
-        TrainingInputMode, TrainingInputSpec,
+        TaskFamily, TrainingInputMode, TrainingInputSpec,
     };
 
     use crate::{
@@ -586,7 +625,7 @@ mod tests {
         let mut config = TournamentPreset::FastTest.config();
         config.dim = 8;
         config.levels = 2;
-        config.vocab_size = 256;
+        config.vocab_size = 32_000;
         config.max_seq_len = 64;
         config.max_recursion_depth = 2;
         config.stability_depth = 1;
@@ -672,6 +711,10 @@ mod tests {
             bridge_stats.tokenizer_artifact_id,
             "frozen-32k-sentencepiece"
         );
+        assert_eq!(
+            bridge_stats.arc_source_mode,
+            ArcSourceMode::SyntheticCanonical
+        );
         let artifact = take_last_species_run_artifact()
             .expect("tokenizer-backed stage0 smoke run records an artifact");
         assert_eq!(
@@ -683,6 +726,17 @@ mod tests {
                 .training_input
                 .mode,
             TrainingInputMode::TokenizerBackedText
+        );
+        assert_eq!(
+            artifact
+                .manifest
+                .experiment
+                .as_ref()
+                .expect("experiment recorded")
+                .training_input
+                .arc_source
+                .mode,
+            ArcSourceMode::SyntheticCanonical
         );
 
         let report = TournamentRunReport::new(
@@ -735,7 +789,7 @@ mod tests {
         let mut config = TournamentPreset::FastTest.config();
         config.dim = 8;
         config.levels = 2;
-        config.vocab_size = 64;
+        config.vocab_size = 32_000;
         config.max_seq_len = 16;
         config.max_recursion_depth = 2;
         config.stability_depth = 1;
@@ -768,9 +822,20 @@ mod tests {
         assert_eq!(batches.train_sentence.len(), 1);
         assert_eq!(batches.eval_sentence.len(), 1);
         assert_eq!(
+            batches.train_sentence[0].family,
+            TaskFamily::TokenizerBackedText
+        );
+        assert_eq!(
+            batches.eval_sentence[0].family,
+            TaskFamily::TokenizerBackedText
+        );
+        assert_eq!(batches.train_arc[0].family, TaskFamily::ArcGrid);
+        assert_eq!(batches.eval_arc[0].family, TaskFamily::ArcGrid);
+        assert_eq!(
             stats.training_input_mode,
             TrainingInputMode::TokenizerBackedText
         );
+        assert_eq!(stats.arc_source_mode, ArcSourceMode::SyntheticCanonical);
         assert!(stats.bridge_tokens > 0);
         assert!(stats.native_tokens > 0);
     }

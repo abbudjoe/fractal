@@ -14,15 +14,15 @@ pub use data_generator::{
 };
 pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
 pub use lifecycle::{
-    ArtifactPolicy, BatchingPolicy, BudgetSpec, BufferReusePolicy, ComparisonAuthority,
-    ComparisonContract, DecisionIntent, EvalBackendPolicy, ExecutionBackend, ExecutionTarget,
-    ExecutionTargetKind, ExperimentId, ExperimentQuestion, ExperimentSpec, ExperimentSpecTemplate,
-    ForwardExecutionPolicy, LaneIntent, PhaseTiming, RunExecutionOutcome, RunManifest,
-    RunOutcomeClass, RunPhase, RunQualityOutcome, RuntimeBackendPolicy, RuntimeSurfaceSpec,
-    SpeciesCompletion, SpeciesRunArtifact, SpeciesRunStage, TokenizerArtifactSpec,
-    TokenizerBridgeSpec, Tournament, TournamentConfig, TournamentPreset, TournamentProgressEvent,
-    TournamentReporter, TournamentRunArtifact, TournamentSequence, TrainingInputMode,
-    TrainingInputSpec, VariantSpec,
+    ArcSourceMode, ArcSourceSpec, ArtifactPolicy, BatchingPolicy, BudgetSpec, BufferReusePolicy,
+    ComparisonAuthority, ComparisonContract, DecisionIntent, EvalBackendPolicy, ExecutionBackend,
+    ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion, ExperimentSpec,
+    ExperimentSpecTemplate, ForwardExecutionPolicy, LaneIntent, PhaseTiming, RunExecutionOutcome,
+    RunManifest, RunOutcomeClass, RunPhase, RunQualityOutcome, RuntimeBackendPolicy,
+    RuntimeSurfaceSpec, SpeciesCompletion, SpeciesRunArtifact, SpeciesRunStage,
+    TokenizerArtifactSpec, TokenizerBridgeSpec, Tournament, TournamentConfig, TournamentPreset,
+    TournamentProgressEvent, TournamentReporter, TournamentRunArtifact, TournamentSequence,
+    TrainingInputMode, TrainingInputSpec, VariantSpec,
 };
 pub use model::FractalModel;
 pub use registry::{

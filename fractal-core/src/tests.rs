@@ -26,8 +26,8 @@ use crate::{
         ArtifactPolicy, BudgetSpec, ComparisonContract, DecisionIntent, ExecutionBackend,
         ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
         ExperimentSpecTemplate, LaneIntent, RunExecutionOutcome, RunOutcomeClass,
-        RunQualityOutcome, RuntimeSurfaceSpec, Tournament, TournamentConfig, TournamentPreset,
-        TournamentProgressEvent, TournamentSequence, TrainingInputSpec,
+        RunQualityOutcome, RuntimeSurfaceSpec, TokenizerArtifactSpec, Tournament, TournamentConfig,
+        TournamentPreset, TournamentProgressEvent, TournamentSequence, TrainingInputSpec,
     },
     model::FractalModel,
     primitives::complex_square,
@@ -1044,6 +1044,46 @@ fn test_experiment_template(config: TournamentConfig) -> ExperimentSpecTemplate 
         },
         artifacts: ArtifactPolicy::default(),
     }
+}
+
+#[test]
+fn tokenizer_backed_training_input_rejects_tokenizer_model_mismatch() {
+    let config = TournamentPreset::FastTest.config();
+    let mut template = test_experiment_template(config.clone());
+    template.training_input = TrainingInputSpec::tokenizer_backed_text(
+        "fineweb-stage0-smoke",
+        TokenizerArtifactSpec {
+            artifact_id: "mismatch-vocab".to_owned(),
+            artifact_path: Some("inline://mismatch-vocab".to_owned()),
+            vocab_size: config.vocab_size + 1,
+            pad_token_id: PAD_TOKEN,
+        },
+    );
+
+    let error = template.validate_against_config(&config).unwrap_err();
+    let error_text = error.to_string();
+    assert!(error_text.contains("tokenizer vocab_size"));
+    assert!(error_text.contains("must match model vocab_size"));
+
+    let mut pad_mismatch_config = config.clone();
+    pad_mismatch_config.vocab_size = 32_000;
+    let mut pad_mismatch_template = test_experiment_template(pad_mismatch_config.clone());
+    pad_mismatch_template.training_input = TrainingInputSpec::tokenizer_backed_text(
+        "fineweb-stage0-smoke",
+        TokenizerArtifactSpec {
+            artifact_id: "mismatch-pad".to_owned(),
+            artifact_path: Some("inline://mismatch-pad".to_owned()),
+            vocab_size: pad_mismatch_config.vocab_size,
+            pad_token_id: 1,
+        },
+    );
+
+    let error = pad_mismatch_template
+        .validate_against_config(&pad_mismatch_config)
+        .unwrap_err();
+    let error_text = error.to_string();
+    assert!(error_text.contains("tokenizer pad_token_id"));
+    assert!(error_text.contains("must match model pad_token_id"));
 }
 
 fn test_variant_name(id: SpeciesId) -> PrimitiveVariantName {

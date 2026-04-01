@@ -284,6 +284,9 @@ fn training_input_json(spec: &crate::TrainingInputSpec) -> Value {
     json!({
         "mode": spec.mode.as_str(),
         "corpus_name": spec.corpus_name,
+        "arc_source": {
+            "mode": spec.arc_source.mode.as_str(),
+        },
         "bridge": {
             "enabled": spec.bridge.enabled,
             "observational_only": spec.bridge.observational_only,
@@ -306,6 +309,7 @@ fn tokenizer_bridge_json(stats: &crate::TokenizerBridgeStats) -> Value {
         "training_input_mode": stats.training_input_mode.as_str(),
         "bridge_enabled": stats.bridge_enabled,
         "bridge_observational_only": stats.bridge_observational_only,
+        "arc_source_mode": stats.arc_source_mode.as_str(),
         "train_documents": stats.train_documents,
         "eval_documents": stats.eval_documents,
         "model_facing_documents": stats.model_facing_documents,
