@@ -138,6 +138,10 @@ impl OverlayTransportBatch {
     pub fn exact_ok(&self) -> bool {
         self.pack.exact_ok()
     }
+
+    pub fn expanded_token_ids_by_document(&self) -> Result<Vec<Vec<u32>>, FractalError> {
+        self.pack.expanded_token_ids_by_document()
+    }
 }
 
 #[derive(Clone, Debug, Default)]

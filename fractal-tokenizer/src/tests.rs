@@ -26,12 +26,13 @@ use crate::{
     FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLexemeKind, FaceoffLocalCacheMode,
     FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer, LocalMacroKind,
     ModelFacingBatch, ModelFacingDocument, NativeCollationSpec, NativeCompatibilityAdapter,
-    NativeTokenizer, OverlayBatchPackingStrategy, OverlayDictionaryScope, OverlayDocumentMode,
-    OverlayModelFacingBatch, OverlayModelFacingDocument, OverlayPack, OverlaySharingPolicy,
-    OverlayTransportAdapter, OverlayTransportConfig, P1FractalHybrid, P2Mandelbrot,
-    PrimitiveRunSummary, PrototypeGranularityMode, RecursiveOverlayConfig,
-    RecursiveOverlayDocument, RecursiveOverlayMode, RecursiveTokenizer, StateSignature,
-    TokenRecord, TokenizerConfig, TokenizerSubstrateMode, FACEOFF_VOCAB_FORMAT_VERSION,
+    NativeTokenizer, OllamaEmbeddingClient, OllamaEndpointConfig, OverlayBatchPackingStrategy,
+    OverlayDictionaryScope, OverlayDocumentMode, OverlayModelFacingBatch,
+    OverlayModelFacingDocument, OverlayPack, OverlaySharingPolicy, OverlayTransportAdapter,
+    OverlayTransportConfig, P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary,
+    PrototypeGranularityMode, RecursiveOverlayConfig, RecursiveOverlayDocument,
+    RecursiveOverlayMode, RecursiveTokenizer, StateSignature, TokenRecord, TokenizerConfig,
+    TokenizerSubstrateMode, FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -1215,6 +1216,14 @@ fn overlay_transport_adapter_prepares_exact_batch_local_transport() {
     assert!(prepared.exact_ok());
     assert_eq!(prepared.summary().docs, batch.len());
     assert_eq!(prepared.summary().pack_count, 1);
+    assert_eq!(
+        prepared.expanded_token_ids_by_document().unwrap(),
+        batch
+            .documents()
+            .iter()
+            .map(|document| document.overlay().canonical.token_ids.clone())
+            .collect::<Vec<_>>()
+    );
     assert!(
         prepared.summary().transport_ratio() > document_local.transport_summary().transport_ratio(),
         "batch-local model-facing transport should amortize shared definitions better than document-local packing"
@@ -1264,6 +1273,65 @@ fn overlay_transport_adapter_respects_packing_config() {
         prepared.pack().strategy,
         OverlayBatchPackingStrategy::StructureAware
     );
+}
+
+#[test]
+fn overlay_model_facing_ollama_embedding_smoke_uses_materialized_transport_text() {
+    let Some(tokenizer_path) = local_qwen25_tokenizer_json_path() else {
+        println!("OLLAMA_OVERLAY_SKIP=no local qwen25 tokenizer.json configured/found");
+        return;
+    };
+    let Some(client) = local_ollama_embedding_client()
+        .unwrap_or_else(|error| panic!("failed to probe local Ollama embedding client: {error}"))
+    else {
+        println!("OLLAMA_OVERLAY_SKIP=no local Ollama embedding model configured/found");
+        return;
+    };
+
+    let text_a = "\
+{\"ts\":\"2026-04-01T12:00:01Z\",\"level\":\"info\",\"service\":\"auth\",\"route\":\"/ready\",\"status\":200,\"request_id\":\"abc-1\"}\n\
+{\"ts\":\"2026-04-01T12:00:02Z\",\"level\":\"info\",\"service\":\"auth\",\"route\":\"/ready\",\"status\":500,\"request_id\":\"abc-2\"}\n\
+";
+    let text_b = "\
+{\"ts\":\"2026-04-01T12:01:01Z\",\"level\":\"info\",\"service\":\"auth\",\"route\":\"/ready\",\"status\":200,\"request_id\":\"def-1\"}\n\
+{\"ts\":\"2026-04-01T12:01:02Z\",\"level\":\"info\",\"service\":\"auth\",\"route\":\"/ready\",\"status\":500,\"request_id\":\"def-2\"}\n\
+";
+    let tokenizer = HuggingFaceNativeTokenizer::from_file(&tokenizer_path).unwrap();
+    let overlays = [text_a, text_b]
+        .into_iter()
+        .map(|text| {
+            let canonical = tokenizer.tokenize_with_byte_offsets(text).unwrap();
+            let overlay = build_recursive_overlay(
+                text,
+                canonical,
+                RecursiveOverlayMode::LocalRecordMacro,
+                &RecursiveOverlayConfig::default(),
+            );
+            OverlayModelFacingDocument::new(overlay).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let batch = OverlayModelFacingBatch::new(overlays);
+    let adapter = OverlayTransportAdapter::new(OverlayTransportConfig::default());
+    let prepared = adapter.prepare_batch(&batch).unwrap();
+    let materialized = prepared
+        .expanded_token_ids_by_document()
+        .unwrap()
+        .into_iter()
+        .map(|token_ids| tokenizer.decode_token_ids(&token_ids).unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(materialized, vec![text_a.to_string(), text_b.to_string()]);
+
+    let embeddings = client.embed_texts(&materialized).unwrap();
+    assert_eq!(embeddings.len(), 2);
+    assert_eq!(embeddings[0].len(), embeddings[1].len());
+    assert!(!embeddings[0].is_empty());
+
+    println!("OLLAMA_OVERLAY_MODEL={}", client.config().embedding_model);
+    println!("OLLAMA_OVERLAY_BASE_URL={}", client.config().base_url);
+    println!("OLLAMA_OVERLAY_DOCUMENTS={}", materialized.len());
+    println!("OLLAMA_OVERLAY_EMBED_DIM={}", embeddings[0].len());
+    println!("OLLAMA_OVERLAY_ROUNDTRIP=OK");
 }
 
 fn unique_temp_path(prefix: &str, suffix: &str) -> PathBuf {
@@ -1367,6 +1435,32 @@ fn pretrained_hf_tokenizer_json_paths() -> Vec<(String, PathBuf)> {
     }
 
     dedupe_tokenizer_paths(paths)
+}
+
+fn local_qwen25_tokenizer_json_path() -> Option<PathBuf> {
+    pretrained_hf_tokenizer_json_paths()
+        .into_iter()
+        .find_map(|(label, path)| (label == "qwen25").then_some(path))
+        .or_else(|| {
+            let path = PathBuf::from("/Users/joseph/hf-tokenizers/qwen25/tokenizer.json");
+            path.is_file().then_some(path)
+        })
+}
+
+fn local_ollama_embedding_client(
+) -> Result<Option<OllamaEmbeddingClient>, fractal_core::error::FractalError> {
+    let mut config = OllamaEndpointConfig::default();
+    if let Ok(base_url) = std::env::var("OLLAMA_BASE_URL") {
+        config.base_url = base_url;
+    }
+    if let Ok(model) = std::env::var("OLLAMA_OVERLAY_EMBED_MODEL") {
+        config.embedding_model = model;
+    }
+    let client = OllamaEmbeddingClient::new(config)?;
+    if !client.embedding_model_is_available()? {
+        return Ok(None);
+    }
+    Ok(Some(client))
 }
 
 fn find_tokenizer_json_under(

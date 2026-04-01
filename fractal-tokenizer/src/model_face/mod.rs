@@ -5,6 +5,7 @@ use crate::faceoff::{EncodedDocument, FaceoffChunkLimits, FaceoffChunkedDocument
 mod batch;
 mod bridge;
 mod native;
+mod ollama;
 mod overlay;
 mod traits;
 
@@ -21,6 +22,7 @@ pub use native::{
     NativeTokenizedBatch, NativeTokenizedChunk, NativeTokenizedDocument, NativeTokenizer,
     NativeTruncationPolicy, SlowSentencePieceTokenizer, SlowSentencePieceTokenizerError,
 };
+pub use ollama::{OllamaEmbeddingClient, OllamaEndpointConfig};
 pub use overlay::{
     OverlayModelFacingBatch, OverlayModelFacingDocument, OverlayTransportAdapter,
     OverlayTransportBatch, OverlayTransportConfig,

@@ -226,6 +226,17 @@ impl HuggingFaceNativeTokenizer {
                 .collect(),
         })
     }
+
+    pub fn decode_token_ids(
+        &self,
+        token_ids: &[u32],
+    ) -> Result<String, HuggingFaceNativeTokenizerError> {
+        self.tokenizer.decode(token_ids, false).map_err(|source| {
+            HuggingFaceNativeTokenizerError::Encode {
+                reason: source.to_string(),
+            }
+        })
+    }
 }
 
 /// Errors produced by the HF-backed native tokenizer wrapper.

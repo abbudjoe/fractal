@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use fractal_core::error::FractalError;
+
 use crate::CanonicalTokenization;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -271,6 +273,8 @@ impl OverlayTransportSummary {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PackedOverlayDocumentTransport {
+    pub pack_index: usize,
+    pub pack_document_index: usize,
     pub canonical_token_count: usize,
     pub base_slice_symbols: usize,
     pub macro_ref_symbols: usize,
@@ -344,6 +348,30 @@ pub struct OverlayBatchPack {
 impl OverlayBatchPack {
     pub fn exact_ok(&self) -> bool {
         self.packs.iter().all(OverlayPack::exact_ok)
+    }
+
+    pub fn expanded_token_ids_by_document(&self) -> Result<Vec<Vec<u32>>, FractalError> {
+        self.document_views
+            .iter()
+            .map(|view| {
+                let pack = self.packs.get(view.pack_index).ok_or_else(|| {
+                    FractalError::InvalidState(format!(
+                        "overlay batch pack is missing pack {} for document transport view",
+                        view.pack_index
+                    ))
+                })?;
+                let document = pack
+                    .documents
+                    .get(view.pack_document_index)
+                    .ok_or_else(|| {
+                        FractalError::InvalidState(format!(
+                            "overlay batch pack {} is missing document {} for transport view",
+                            view.pack_index, view.pack_document_index
+                        ))
+                    })?;
+                Ok(document.expand_token_ids(&pack.shared_macros))
+            })
+            .collect()
     }
 
     pub fn summary(&self) -> OverlayBatchPackSummary {
@@ -494,6 +522,8 @@ impl OverlayPack {
                         .sum::<f64>();
 
                 PackedOverlayDocumentTransport {
+                    pack_index: 0,
+                    pack_document_index: 0,
                     canonical_token_count: document.canonical_token_count(),
                     base_slice_symbols: document.base_slice_symbol_count(),
                     macro_ref_symbols: document.macro_ref_symbol_count(),
@@ -654,6 +684,8 @@ pub fn pack_overlay_documents_in_batches(
     let mut packs = Vec::with_capacity(pack_groups.len());
     let mut document_views = vec![
         PackedOverlayDocumentTransport {
+            pack_index: 0,
+            pack_document_index: 0,
             canonical_token_count: 0,
             base_slice_symbols: 0,
             macro_ref_symbols: 0,
@@ -662,13 +694,19 @@ pub fn pack_overlay_documents_in_batches(
         documents.len()
     ];
 
-    for group in pack_groups {
+    for (pack_index, group) in pack_groups.into_iter().enumerate() {
         let pack_documents = group
             .iter()
             .map(|index| documents[*index].clone())
             .collect::<Vec<_>>();
         let pack = OverlayPack::from_documents_with_policy(scope, &pack_documents, policy);
-        for (document_index, view) in group.into_iter().zip(pack.document_transport_views()) {
+        for (pack_document_index, (document_index, mut view)) in group
+            .into_iter()
+            .zip(pack.document_transport_views())
+            .enumerate()
+        {
+            view.pack_index = pack_index;
+            view.pack_document_index = pack_document_index;
             document_views[document_index] = view;
         }
         packs.push(pack);
