@@ -476,3 +476,54 @@ Updated read:
 - it does not earn progression to adaptive signature granularity
 - if we continue on this control-plane line, the next candidate must be a more
   targeted precision function rather than a coarse admission cutoff
+
+## Document-Local Motif Cache Result
+
+After the atom-first substrate pass, the next contextual-reuse experiment added
+an exact document-local motif cache:
+
+- exact repeated UTF-8 spans only
+- cache lifetime limited to a single document encode
+- explicit mode, default off
+- no global vocab persistence
+
+Held-out local bakeoff on the lexical substrate:
+
+- baseline `--local-cache off`
+  - `prototype_hit_docs=2`
+  - `local_cache_hit_docs=0`
+  - `lexical_only_docs=21`
+  - `code.rust=0.83`
+  - `code.swift=0.96`
+  - `docs.spec=0.77`
+  - `jsonl.signals=5.16`
+  - `logs.operational_mixed=1.10`
+- experiment `--local-cache exact`
+  - `prototype_hit_docs=2`
+  - `local_cache_hit_docs=4`
+  - `lexical_only_docs=20`
+  - `code.rust=0.83`
+  - `code.swift=0.96`
+  - `docs.spec=0.77`
+  - `jsonl.signals=5.16`
+  - `logs.operational_mixed=1.10`
+
+Hard gates stayed clean:
+
+- `roundtrip_failures=0`
+- `chunk_utf8_failures=0`
+- `collation_failures=0`
+- `byte_fallback_docs=0`
+
+Interpretation:
+
+- exact document-local reuse is real
+- it produces a few honest contextual hits across logs, JSONL, Rust, and Swift
+- but it does not materially move the held-out code/docs ceiling
+
+Updated read:
+
+- the missing opportunity is probably not a simple exact local cache
+- local contextual memory may still matter, but not in this narrow form
+- the next remaining high-leverage tokenizer-internal move is more likely a
+  segmentation/substrate refinement than another local cache heuristic

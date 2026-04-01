@@ -5,11 +5,11 @@ use fractal_primitives_private::{
 };
 use fractal_tokenizer::{
     p1_dynamic_lever_factory, revived_primitive_factories, EncodedDocument, FaceoffChunkLimits,
-    FaceoffEmissionPolicy, FaceoffFallbackMode, FaceoffIdentityMode, FaceoffTokenizer,
-    FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer, ModelFacingBatch,
-    ModelFacingDocument, MotifReusePolicy, NativeCollationSpec, NativeCompatibilityAdapter,
-    PrimitiveFactory, PrototypeGranularityMode, SplitPolicy, TokenizerConfig,
-    TokenizerSubstrateMode,
+    FaceoffEmissionPolicy, FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLocalCacheMode,
+    FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer,
+    ModelFacingBatch, ModelFacingDocument, MotifReusePolicy, NativeCollationSpec,
+    NativeCompatibilityAdapter, PrimitiveFactory, PrototypeGranularityMode, SplitPolicy,
+    TokenizerConfig, TokenizerSubstrateMode,
 };
 use serde::Serialize;
 use std::{
@@ -94,6 +94,8 @@ struct FractalMetrics {
     fallback_shape_hits: usize,
     fallback_unknown_motifs: usize,
     fallback_recursed_to_children: usize,
+    fallback_local_cache_hits: usize,
+    fallback_local_cache_stores: usize,
     fallback_lexical_fallback_tokens: usize,
     fallback_byte_fallback_tokens: usize,
     roundtrip_ok: bool,
@@ -164,6 +166,7 @@ struct PrimitiveRunDigest {
     byte_fallback_docs: usize,
     exact_motif_hit_docs: usize,
     prototype_hit_docs: usize,
+    local_cache_hit_docs: usize,
     lexical_only_docs: usize,
     logs_repetition_heavy_ratio: f64,
     logs_operational_mixed_ratio: f64,
@@ -268,6 +271,7 @@ struct Args {
     identity_mode: FaceoffIdentityMode,
     prototype_granularity: PrototypeGranularityMode,
     substrate_mode: TokenizerSubstrateMode,
+    local_cache_mode: FaceoffLocalCacheMode,
 }
 
 impl Args {
@@ -283,6 +287,7 @@ impl Args {
         let mut identity_mode = FaceoffIdentityMode::Legacy;
         let mut prototype_granularity = PrototypeGranularityMode::Coarse;
         let mut substrate_mode = TokenizerSubstrateMode::RawBytes;
+        let mut local_cache_mode = FaceoffLocalCacheMode::Off;
 
         let mut args = env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -336,6 +341,11 @@ impl Args {
                     substrate_mode =
                         parse_substrate_mode(&args.next().ok_or("--substrate requires a value")?)?;
                 }
+                "--local-cache" => {
+                    local_cache_mode = parse_local_cache_mode(
+                        &args.next().ok_or("--local-cache requires a value")?,
+                    )?;
+                }
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -358,13 +368,14 @@ impl Args {
             identity_mode,
             prototype_granularity,
             substrate_mode,
+            local_cache_mode,
         })
     }
 }
 
 fn print_help() {
     eprintln!(
-        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--fawx-root DIR] [--home-state-root DIR] [--max-review-count N] [--primitive NAME] [--all-primitives] [--fallback-mode full|motif-only] [--identity-mode legacy|prototype-primary] [--prototype-granularity coarse|adaptive] [--substrate raw|lexical]"
+        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--fawx-root DIR] [--home-state-root DIR] [--max-review-count N] [--primitive NAME] [--all-primitives] [--fallback-mode full|motif-only] [--identity-mode legacy|prototype-primary] [--prototype-granularity coarse|adaptive] [--substrate raw|lexical] [--local-cache off|exact]"
     );
 }
 
@@ -406,6 +417,16 @@ fn parse_substrate_mode(value: &str) -> Result<TokenizerSubstrateMode, Box<dyn E
         "lexical" => Ok(TokenizerSubstrateMode::LexicalAtoms),
         other => {
             Err(format!("unknown substrate mode `{other}`; expected one of: raw, lexical").into())
+        }
+    }
+}
+
+fn parse_local_cache_mode(value: &str) -> Result<FaceoffLocalCacheMode, Box<dyn Error>> {
+    match value {
+        "off" => Ok(FaceoffLocalCacheMode::Off),
+        "exact" => Ok(FaceoffLocalCacheMode::ExactSpan),
+        other => {
+            Err(format!("unknown local cache mode `{other}`; expected one of: off, exact").into())
         }
     }
 }
@@ -1058,6 +1079,7 @@ fn run_primitive_bakeoff(
         args.identity_mode,
         args.prototype_granularity,
         args.substrate_mode,
+        args.local_cache_mode,
     )?;
     let model_results = run_model_bakeoff(&works, model_sources)?;
     let results = merge_results(works, model_results);
@@ -1075,6 +1097,7 @@ fn build_fractal_documents(
     identity_mode: FaceoffIdentityMode,
     prototype_granularity: PrototypeGranularityMode,
     substrate_mode: TokenizerSubstrateMode,
+    local_cache_mode: FaceoffLocalCacheMode,
 ) -> Result<(Vec<DocumentWork>, FaceoffVocab), Box<dyn Error>> {
     let device = Default::default();
     let tokenizer = FaceoffTokenizer::new(TokenizerConfig {
@@ -1112,6 +1135,7 @@ fn build_fractal_documents(
             primitive.factory.clone(),
             FaceoffEmissionPolicy::NoveltyAware,
             fallback_mode,
+            local_cache_mode,
         )?;
         let wall_time_ms = started.elapsed().as_secs_f64() * 1000.0;
         let model_facing = ModelFacingDocument::from_encoded(encoded.clone(), limits)?;
@@ -1138,6 +1162,8 @@ fn build_fractal_documents(
             fallback_shape_hits: encoded.fallback.shape_hits,
             fallback_unknown_motifs: encoded.fallback.unknown_motifs,
             fallback_recursed_to_children: encoded.fallback.recursed_to_children,
+            fallback_local_cache_hits: encoded.fallback.local_cache_hits,
+            fallback_local_cache_stores: encoded.fallback.local_cache_stores,
             fallback_lexical_fallback_tokens: encoded.fallback.lexical_fallback_tokens,
             fallback_byte_fallback_tokens: encoded.fallback.byte_fallback_tokens,
             roundtrip_ok,
@@ -1342,6 +1368,10 @@ fn print_summary(primitive: &str, results: &[BakeoffRecord], vocab: &FaceoffVoca
         .iter()
         .filter(|record| record.fractal.fallback_prototype_hits > 0)
         .count();
+    let local_cache_hit_docs = held_out
+        .iter()
+        .filter(|record| record.fractal.fallback_local_cache_hits > 0)
+        .count();
     let lexical_only_docs = held_out
         .iter()
         .filter(|record| {
@@ -1349,6 +1379,7 @@ fn print_summary(primitive: &str, results: &[BakeoffRecord], vocab: &FaceoffVoca
                 && record.fractal.fallback_prototype_hits == 0
                 && record.fractal.fallback_literal_hits == 0
                 && record.fractal.fallback_shape_hits == 0
+                && record.fractal.fallback_local_cache_hits == 0
                 && record.fractal.fallback_lexical_fallback_tokens > 0
         })
         .count();
@@ -1371,6 +1402,7 @@ fn print_summary(primitive: &str, results: &[BakeoffRecord], vocab: &FaceoffVoca
             TokenizerSubstrateMode::LexicalAtoms => "lexical",
         }
     );
+    println!("BAKEOFF_LOCAL_CACHE={}", args.local_cache_mode.as_str());
     println!("BAKEOFF_DOCUMENTS={total_docs}");
     println!("BAKEOFF_INDUCTION_DOCUMENTS={induction_docs}");
     println!("BAKEOFF_EVALUATION_DOCUMENTS={}", held_out.len());
@@ -1383,8 +1415,8 @@ fn print_summary(primitive: &str, results: &[BakeoffRecord], vocab: &FaceoffVoca
     println!("BAKEOFF_SPLIT_POLICY=boundary_aware");
     println!("BAKEOFF_VERDICT_SCOPE=evaluation");
     println!(
-        "BAKEOFF_DIAGNOSTIC split=evaluation exact_motif_hit_docs={} prototype_hit_docs={} lexical_only_docs={}",
-        exact_motif_hit_docs, prototype_hit_docs, lexical_only_docs
+        "BAKEOFF_DIAGNOSTIC split=evaluation exact_motif_hit_docs={} prototype_hit_docs={} local_cache_hit_docs={} lexical_only_docs={}",
+        exact_motif_hit_docs, prototype_hit_docs, local_cache_hit_docs, lexical_only_docs
     );
 
     let verdict = summarize_verdict(results);
@@ -1526,6 +1558,10 @@ fn print_field_summary(runs: &[PrimitiveBakeoffRun], fallback_mode: FaceoffFallb
                     .iter()
                     .filter(|record| record.fractal.fallback_prototype_hits > 0)
                     .count(),
+                local_cache_hit_docs: held_out_records(&run.results)
+                    .iter()
+                    .filter(|record| record.fractal.fallback_local_cache_hits > 0)
+                    .count(),
                 lexical_only_docs: held_out_records(&run.results)
                     .iter()
                     .filter(|record| {
@@ -1533,6 +1569,7 @@ fn print_field_summary(runs: &[PrimitiveBakeoffRun], fallback_mode: FaceoffFallb
                             && record.fractal.fallback_prototype_hits == 0
                             && record.fractal.fallback_literal_hits == 0
                             && record.fractal.fallback_shape_hits == 0
+                            && record.fractal.fallback_local_cache_hits == 0
                             && record.fractal.fallback_lexical_fallback_tokens > 0
                     })
                     .count(),
@@ -1564,13 +1601,14 @@ fn print_field_summary(runs: &[PrimitiveBakeoffRun], fallback_mode: FaceoffFallb
     println!("FIELD_SUMMARY_COUNT={}", digests.len());
     for digest in digests {
         println!(
-            "FIELD_SUMMARY primitive={} fallback_mode={} verdict={} byte_fallback_docs={} exact_motif_hit_docs={} prototype_hit_docs={} lexical_only_docs={} logs.repetition_heavy={:.2} logs.operational_mixed={:.2} jsonl.signals={:.2} code.rust={:.2} code.swift={:.2} docs.spec={:.2}",
+            "FIELD_SUMMARY primitive={} fallback_mode={} verdict={} byte_fallback_docs={} exact_motif_hit_docs={} prototype_hit_docs={} local_cache_hit_docs={} lexical_only_docs={} logs.repetition_heavy={:.2} logs.operational_mixed={:.2} jsonl.signals={:.2} code.rust={:.2} code.swift={:.2} docs.spec={:.2}",
             digest.primitive,
             digest.fallback_mode.as_str(),
             digest.verdict.as_str(),
             digest.byte_fallback_docs,
             digest.exact_motif_hit_docs,
             digest.prototype_hit_docs,
+            digest.local_cache_hit_docs,
             digest.lexical_only_docs,
             digest.logs_repetition_heavy_ratio,
             digest.logs_operational_mixed_ratio,
@@ -1848,6 +1886,7 @@ mod tests {
             identity_mode: FaceoffIdentityMode::Legacy,
             prototype_granularity: PrototypeGranularityMode::Coarse,
             substrate_mode: TokenizerSubstrateMode::RawBytes,
+            local_cache_mode: FaceoffLocalCacheMode::Off,
         }
     }
 
@@ -1948,6 +1987,28 @@ mod tests {
             .expect("unknown substrate mode should error")
             .to_string();
         assert!(error.contains("unknown substrate mode `totally-fake`"));
+    }
+
+    #[test]
+    fn parse_local_cache_defaults_to_off() {
+        assert_eq!(base_args().local_cache_mode, FaceoffLocalCacheMode::Off);
+    }
+
+    #[test]
+    fn parse_local_cache_accepts_exact() {
+        assert_eq!(
+            parse_local_cache_mode("exact").unwrap(),
+            FaceoffLocalCacheMode::ExactSpan
+        );
+    }
+
+    #[test]
+    fn parse_local_cache_rejects_unknown_value() {
+        let error = parse_local_cache_mode("totally-fake")
+            .err()
+            .expect("unknown local cache mode should error")
+            .to_string();
+        assert!(error.contains("unknown local cache mode `totally-fake`"));
     }
 
     #[test]
@@ -2202,6 +2263,8 @@ mod tests {
                 fallback_shape_hits: 0,
                 fallback_unknown_motifs: 0,
                 fallback_recursed_to_children: 0,
+                fallback_local_cache_hits: 0,
+                fallback_local_cache_stores: 0,
                 fallback_lexical_fallback_tokens: 0,
                 fallback_byte_fallback_tokens: byte_fallback_tokens,
                 roundtrip_ok,

@@ -350,6 +350,12 @@ impl FaceoffVocab {
         FaceoffTokenId::new(self.byte_fallback_base + 256 + kind.stable_index())
     }
 
+    pub fn local_motif_id(&self, ordinal: u32) -> FaceoffTokenId {
+        FaceoffTokenId::new(
+            self.byte_fallback_base + 256 + FaceoffLexemeKind::stable_cardinality() + ordinal,
+        )
+    }
+
     pub fn decode_byte_id(&self, id: FaceoffTokenId) -> Option<u8> {
         let raw = id.as_u32();
         if raw < self.byte_fallback_base {

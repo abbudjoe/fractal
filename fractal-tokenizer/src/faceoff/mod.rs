@@ -36,6 +36,13 @@ pub enum FaceoffFallbackMode {
     MotifOnly,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FaceoffLocalCacheMode {
+    #[default]
+    Off,
+    ExactSpan,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FaceoffIdentityMode {
@@ -67,6 +74,15 @@ impl FaceoffFallbackMode {
 
     pub(crate) fn allows_shape_rescue(self) -> bool {
         matches!(self, Self::Full)
+    }
+}
+
+impl FaceoffLocalCacheMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::ExactSpan => "exact",
+        }
     }
 }
 
@@ -105,6 +121,10 @@ impl FaceoffLexemeKind {
             Self::Punctuation => 5,
             Self::SymbolRun => 6,
         }
+    }
+
+    pub(crate) fn stable_cardinality() -> u32 {
+        7
     }
 }
 

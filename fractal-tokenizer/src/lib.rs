@@ -9,9 +9,9 @@ mod tokenizer;
 pub use faceoff::{
     EncodedDocument, EncodedToken, EncodedTokenKind, FaceoffChunk, FaceoffChunkLimits,
     FaceoffChunkedDocument, FaceoffEmissionPolicy, FaceoffFallbackMode, FaceoffFallbackStats,
-    FaceoffIdentityMode, FaceoffLexemeKind, FaceoffTokenId, FaceoffTokenizer, FaceoffVocab,
-    FaceoffVocabConfig, PrototypeAdmissionPolicy, PrototypeEntry, PrototypeGranularityMode,
-    ShapeEntry, VocabEntry, FACEOFF_VOCAB_FORMAT_VERSION,
+    FaceoffIdentityMode, FaceoffLexemeKind, FaceoffLocalCacheMode, FaceoffTokenId,
+    FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, PrototypeAdmissionPolicy, PrototypeEntry,
+    PrototypeGranularityMode, ShapeEntry, VocabEntry, FACEOFF_VOCAB_FORMAT_VERSION,
 };
 pub use model_face::{
     BridgeBatch, BridgeDocument, BridgeFeatureChunk, BridgeFeatureToken, EmbeddingBridgeAdapter,

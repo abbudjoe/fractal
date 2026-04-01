@@ -8,7 +8,7 @@ use crate::{
 
 use super::{
     fallback::encode_summary_document, EncodedDocument, FaceoffEmissionPolicy, FaceoffFallbackMode,
-    FaceoffVocab, FaceoffVocabConfig,
+    FaceoffLocalCacheMode, FaceoffVocab, FaceoffVocabConfig,
 };
 
 pub struct FaceoffTokenizer {
@@ -132,6 +132,25 @@ impl FaceoffTokenizer {
         policy: FaceoffEmissionPolicy,
         fallback_mode: FaceoffFallbackMode,
     ) -> Result<EncodedDocument, FractalError> {
+        self.encode_text_v2_with_policy_and_fallback_mode_and_local_cache_mode::<B>(
+            text,
+            vocab,
+            device,
+            policy,
+            fallback_mode,
+            FaceoffLocalCacheMode::Off,
+        )
+    }
+
+    pub fn encode_text_v2_with_policy_and_fallback_mode_and_local_cache_mode<B: Backend>(
+        &self,
+        text: &str,
+        vocab: &FaceoffVocab,
+        device: &B::Device,
+        policy: FaceoffEmissionPolicy,
+        fallback_mode: FaceoffFallbackMode,
+        local_cache_mode: FaceoffLocalCacheMode,
+    ) -> Result<EncodedDocument, FractalError> {
         self.encode_text_with_factory_and_policy(
             text,
             vocab,
@@ -139,6 +158,7 @@ impl FaceoffTokenizer {
             p1_dynamic_lever_factory::<B>(),
             policy,
             fallback_mode,
+            local_cache_mode,
         )
     }
 
@@ -150,6 +170,7 @@ impl FaceoffTokenizer {
         factory: PrimitiveFactory<B>,
         policy: FaceoffEmissionPolicy,
         fallback_mode: FaceoffFallbackMode,
+        local_cache_mode: FaceoffLocalCacheMode,
     ) -> Result<EncodedDocument, FractalError> {
         let summary = self.summarize_with_factory::<B>(text, device, factory)?;
         self.encode_summary_with_policy_and_fallback_mode(
@@ -158,6 +179,7 @@ impl FaceoffTokenizer {
             vocab,
             policy,
             fallback_mode,
+            local_cache_mode,
         )
     }
 
@@ -183,6 +205,7 @@ impl FaceoffTokenizer {
             vocab,
             policy,
             FaceoffFallbackMode::Full,
+            FaceoffLocalCacheMode::Off,
         )
     }
 
@@ -193,8 +216,16 @@ impl FaceoffTokenizer {
         vocab: &FaceoffVocab,
         policy: FaceoffEmissionPolicy,
         fallback_mode: FaceoffFallbackMode,
+        local_cache_mode: FaceoffLocalCacheMode,
     ) -> Result<EncodedDocument, FractalError> {
-        encode_summary_document(text, summary, vocab, policy, fallback_mode)
+        encode_summary_document(
+            text,
+            summary,
+            vocab,
+            policy,
+            fallback_mode,
+            local_cache_mode,
+        )
     }
 
     pub fn decode_document(&self, encoded: &EncodedDocument) -> Result<String, FractalError> {

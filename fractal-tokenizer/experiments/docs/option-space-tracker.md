@@ -69,12 +69,15 @@ Read:
 - typed lexical fallback above bytes
 - compositional recurring-submotif vocab
 - motif-only ablation
+- document-local motif cache
 
 Read:
 
 - this is the biggest hard win so far
 - it fixed catastrophic byte collapse on held-out docs
 - it did not by itself create enough reusable held-out structure for code/docs
+- exact document-local cache produced a few honest contextual hits, but did not
+  materially move the held-out medians
 
 ### Frontier / Emission Policy
 
@@ -151,7 +154,6 @@ Read:
 - signature-neighborhood matching
 - prototype-neighborhood membership
 - context-sensitive motif cache keys
-- document-local motif cache
 
 Read:
 
@@ -160,14 +162,13 @@ Read:
 
 ### Fallback / OOV
 
-- document-local recurrence cache
 - within-document reuse promotion before lexical fallback
 
 Read:
 
-- this is partly a fallback feature and partly a control-plane feature
-- if any local mechanism is still worth trying, this is the one that most
-  directly tests whether contextual memory can rescue held-out code/docs
+- this layer still matters
+- but the strict exact local-cache variant has already been tried and did not
+  materially move the ceiling
 
 ### Packaging / Model-Facing
 
@@ -193,62 +194,37 @@ Read:
 
 ## Ranked Remaining Options
 
-### 1. Document-Local Motif Cache
-
-Layer:
-
-- fallback / OOV
-- motif identity
-
-Why it ranks first:
-
-- it tests the most plausible missing architectural opportunity: contextual
-  reuse memory inside a document
-- it can rescue held-out repetition without weakening global exact matching
-- it is the cleanest way to tell whether the tokenizer needs a contextual cache
-  rather than another global heuristic
-
-Expected upside:
-
-- better held-out reuse on code, docs, and logs
-- lower lexical-only dominance on novel but internally repetitive documents
-- a real answer to whether the tokenizer is missing a document-local memory
-  plane
-
-Expected failure mode:
-
-- the cache improves only very local repetition and still does not move the
-  code/docs ceiling
-
-### 2. Syntax-Aware Segmentation
+### 1. Syntax-Aware Segmentation
 
 Layer:
 
 - split / segmentation
 
-Why it ranks second:
+Why it ranks first:
 
-- the code/docs failure strongly suggests the current span geometry is not
-  aligned with stable reusable units
-- balanced splitting was too blunt
-- syntax-aware boundaries could create much better motif stability
+- atom-first substrate moved the held-out line more than several earlier
+  control-plane tweaks
+- exact document-local cache produced only a tiny additional lift
+- the strongest remaining tokenizer-internal hypothesis is still that code/docs
+  need more canonical structural units
 
 Expected upside:
 
 - more stable recurring spans for code and docs
-- better motif identities without loosening matching rules
+- better motif identities without weakening exact matching
+- a cleaner substrate for any later contextual reuse plane
 
 Expected failure mode:
 
 - syntax hints still do not create enough cross-document reuse
 
-### 3. Signature-Neighborhood Matching
+### 2. Signature-Neighborhood Matching
 
 Layer:
 
 - motif identity / held-out matching
 
-Why it ranks third:
+Why it ranks second:
 
 - exact matching has been too brittle
 - a neighborhood/prototype similarity layer could recover held-out structure
@@ -258,6 +234,12 @@ Why it ranks third:
 Expected upside:
 
 - more held-out structural hits without requiring literal identity
+- a direct test of whether the missing problem is matching tolerance rather than
+  substrate quality
+
+Expected failure mode:
+
+- false positives recreate the JSONL/code overcollapse line quickly
 
 Expected failure mode:
 
@@ -364,4 +346,3 @@ document-local or syntax-local motifs without either:
 
 That is why the best first attempt now is a document-local motif cache, with
 syntax-aware segmentation as the next strongest structural probe.
-

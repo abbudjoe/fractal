@@ -6,7 +6,8 @@ use crate::{PrimitiveRunSummary, TokenRecord};
 
 use super::{
     lexeme::scan_lexemes, vocab::token_digest, EncodedDocument, EncodedToken, EncodedTokenKind,
-    FaceoffEmissionPolicy, FaceoffFallbackMode, FaceoffIdentityMode, FaceoffVocab,
+    FaceoffEmissionPolicy, FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLocalCacheMode,
+    FaceoffTokenId, FaceoffVocab,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -18,8 +19,55 @@ pub struct FaceoffFallbackStats {
     pub shape_hits: usize,
     pub unknown_motifs: usize,
     pub recursed_to_children: usize,
+    pub local_cache_hits: usize,
+    pub local_cache_stores: usize,
     pub lexical_fallback_tokens: usize,
     pub byte_fallback_tokens: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct LocalSpanKey {
+    depth: usize,
+    text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LocalMotifEntry {
+    id: FaceoffTokenId,
+    digest: String,
+}
+
+#[derive(Default)]
+struct LocalMotifCache {
+    entries: BTreeMap<LocalSpanKey, LocalMotifEntry>,
+    next_ordinal: u32,
+}
+
+impl LocalMotifCache {
+    fn lookup(&self, depth: usize, text: &str) -> Option<&LocalMotifEntry> {
+        self.entries.get(&LocalSpanKey {
+            depth,
+            text: text.to_owned(),
+        })
+    }
+
+    fn store(&mut self, vocab: &FaceoffVocab, depth: usize, text: &str, digest: &str) -> bool {
+        let key = LocalSpanKey {
+            depth,
+            text: text.to_owned(),
+        };
+        if self.entries.contains_key(&key) {
+            return false;
+        }
+
+        let entry = LocalMotifEntry {
+            id: vocab.local_motif_id(self.next_ordinal),
+            digest: format!("local:d{depth}:{digest}"),
+        };
+        self.next_ordinal += 1;
+        self.entries.insert(key, entry);
+        true
+    }
 }
 
 pub(crate) fn encode_summary_document(
@@ -28,12 +76,14 @@ pub(crate) fn encode_summary_document(
     vocab: &FaceoffVocab,
     policy: FaceoffEmissionPolicy,
     fallback_mode: FaceoffFallbackMode,
+    local_cache_mode: FaceoffLocalCacheMode,
 ) -> Result<EncodedDocument, FractalError> {
     let input = text.as_bytes();
     let tree = SummaryTree::new(summary, input.len())?;
     let root = tree.root()?;
     let mut encoded = Vec::new();
     let mut stats = FaceoffFallbackStats::default();
+    let mut local_cache = LocalMotifCache::default();
     encode_node(
         root,
         &tree,
@@ -41,8 +91,10 @@ pub(crate) fn encode_summary_document(
         vocab,
         policy,
         fallback_mode,
+        local_cache_mode,
         &mut encoded,
         &mut stats,
+        &mut local_cache,
     )?;
     encoded.sort_by_key(|token| token.start);
     Ok(EncodedDocument {
@@ -59,8 +111,10 @@ fn encode_node(
     vocab: &FaceoffVocab,
     policy: FaceoffEmissionPolicy,
     fallback_mode: FaceoffFallbackMode,
+    local_cache_mode: FaceoffLocalCacheMode,
     encoded: &mut Vec<EncodedToken>,
     stats: &mut FaceoffFallbackStats,
+    local_cache: &mut LocalMotifCache,
 ) -> Result<(), FractalError> {
     if record.end > input.len() || record.start > record.end {
         return Err(FractalError::InvalidState(format!(
@@ -94,8 +148,10 @@ fn encode_node(
                         vocab,
                         policy,
                         fallback_mode,
+                        local_cache_mode,
                         encoded,
                         stats,
+                        local_cache,
                     )?;
                 }
                 return Ok(());
@@ -126,8 +182,10 @@ fn encode_node(
                     vocab,
                     policy,
                     fallback_mode,
+                    local_cache_mode,
                     encoded,
                     stats,
+                    local_cache,
                 )?;
             }
             return Ok(());
@@ -160,8 +218,10 @@ fn encode_node(
                         vocab,
                         policy,
                         fallback_mode,
+                        local_cache_mode,
                         encoded,
                         stats,
+                        local_cache,
                     )?;
                 }
                 return Ok(());
@@ -220,8 +280,10 @@ fn encode_node(
                         vocab,
                         policy,
                         fallback_mode,
+                        local_cache_mode,
                         encoded,
                         stats,
+                        local_cache,
                     )?;
                 }
                 return Ok(());
@@ -243,6 +305,24 @@ fn encode_node(
         }
     }
 
+    if local_cache_mode == FaceoffLocalCacheMode::ExactSpan {
+        if let Some(entry) = local_cache.lookup(record.depth, literal) {
+            stats.motif_hits += 1;
+            stats.local_cache_hits += 1;
+            encoded.push(EncodedToken {
+                id: entry.id,
+                kind: EncodedTokenKind::Motif {
+                    digest: entry.digest.clone(),
+                },
+                depth: record.depth,
+                start: record.start,
+                end: record.end,
+                bytes: input[record.start..record.end].to_vec(),
+            });
+            return Ok(());
+        }
+    }
+
     stats.unknown_motifs += 1;
     if children_cover_parent {
         stats.recursed_to_children += 1;
@@ -254,15 +334,52 @@ fn encode_node(
                 vocab,
                 policy,
                 fallback_mode,
+                local_cache_mode,
                 encoded,
                 stats,
+                local_cache,
             )?;
         }
+        maybe_store_local_cache_entry(
+            local_cache_mode,
+            local_cache,
+            vocab,
+            record,
+            literal,
+            digest,
+            stats,
+        );
         return Ok(());
     }
 
     emit_lexical_or_byte_fallback(record, input, vocab, encoded, stats);
+    maybe_store_local_cache_entry(
+        local_cache_mode,
+        local_cache,
+        vocab,
+        record,
+        literal,
+        digest,
+        stats,
+    );
     Ok(())
+}
+
+fn maybe_store_local_cache_entry(
+    local_cache_mode: FaceoffLocalCacheMode,
+    local_cache: &mut LocalMotifCache,
+    vocab: &FaceoffVocab,
+    record: &TokenRecord,
+    literal: &str,
+    digest: &str,
+    stats: &mut FaceoffFallbackStats,
+) {
+    if local_cache_mode != FaceoffLocalCacheMode::ExactSpan {
+        return;
+    }
+    if local_cache.store(vocab, record.depth, literal, digest) {
+        stats.local_cache_stores += 1;
+    }
 }
 
 fn emit_lexical_or_byte_fallback(
@@ -339,8 +456,6 @@ fn should_recurse_known(
             let child_mean_num = child_bins.iter().map(|&bin| u32::from(bin)).sum::<u32>();
             let child_mean_den = child_bins.len() as u32;
 
-            // Recurse only when child frontier appears more energetic than parent
-            // by both peak and mean relational comparisons (no fixed threshold).
             child_peak > parent_bin && child_mean_num > u32::from(parent_bin) * child_mean_den
         }
         FaceoffEmissionPolicy::ReuseAware => {
@@ -352,7 +467,6 @@ fn should_recurse_known(
             }
 
             let parent_reuse = motif_reuse_count(parent, digest_counts).unwrap_or(0);
-            // If the parent motif is not reused in this summary, push to finer structure.
             if parent_reuse <= 1 {
                 return true;
             }
@@ -362,7 +476,6 @@ fn should_recurse_known(
                 .filter_map(|child| motif_reuse_count(child, digest_counts))
                 .collect::<Vec<_>>();
             if child_reuse_counts.is_empty() {
-                // Cautious fallback when we cannot score children.
                 return true;
             }
 
@@ -370,8 +483,6 @@ fn should_recurse_known(
             let child_mean_num = child_reuse_counts.iter().sum::<usize>();
             let child_mean_den = child_reuse_counts.len();
 
-            // Recurse only when children demonstrate stronger reuse structure than the parent.
-            // Otherwise, keep the parent coarse to preserve reusable phrase-level units.
             child_peak > parent_reuse || child_mean_num > parent_reuse * child_mean_den
         }
         FaceoffEmissionPolicy::NoveltyAware => {
@@ -396,11 +507,8 @@ fn should_recurse_known(
             let child_mean_den = child_reuse_counts.len();
 
             if parent_reuse <= 1 {
-                // Novel parents stay coarse when the child frontier is already familiar.
-                // Only recurse when the local children are also novel enough to justify finer structure.
                 !(child_peak > 1 || child_mean_num > child_mean_den)
             } else {
-                // Familiar parents recurse when finer known children expose stronger structure.
                 child_peak > parent_reuse || child_mean_num > parent_reuse * child_mean_den
             }
         }
@@ -447,8 +555,6 @@ fn should_recurse_known(
                 || child_mean_len_num.saturating_mul(2)
                     > parent_len.saturating_mul(child_mean_len_den);
 
-            // HybridStructural only recurses when both structure signals agree:
-            // the frontier must look meaningfully finer by reuse and by span shape.
             reuse_signal && span_signal
         }
         FaceoffEmissionPolicy::SpanLengthAware => {
@@ -475,8 +581,6 @@ fn should_recurse_known(
             let children_are_tight = child_peak.saturating_mul(2) <= parent_len
                 && child_mean_num.saturating_mul(2) <= parent_len.saturating_mul(child_mean_den);
 
-            // When the next frontier is already tight relative to the parent span,
-            // keep the parent coarse; otherwise recurse to expose finer span structure.
             !children_are_tight
         }
         FaceoffEmissionPolicy::Budgeted => {
@@ -494,8 +598,6 @@ fn should_recurse_known(
 
             let frontier_cost = children.len();
 
-            // Spend the local frontier budget only while there is still room for
-            // finer structure at this depth. Otherwise keep the parent coarse.
             frontier_cost <= remaining_budget
         }
     }

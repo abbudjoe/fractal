@@ -288,6 +288,8 @@ mod tests {
                 shape_hits: 0,
                 unknown_motifs: 0,
                 recursed_to_children: 1,
+                local_cache_hits: 0,
+                local_cache_stores: 0,
                 lexical_fallback_tokens: 0,
                 byte_fallback_tokens: 0,
             },
@@ -369,6 +371,8 @@ mod tests {
                 shape_hits: 0,
                 unknown_motifs: 0,
                 recursed_to_children: 1,
+                local_cache_hits: 0,
+                local_cache_stores: 0,
                 lexical_fallback_tokens: 0,
                 byte_fallback_tokens: 0,
             }

@@ -22,11 +22,11 @@ use crate::{
     revived_primitive_factories, tokenizer::p1_dynamic_lever_factory,
     validate_tokenizer_primitive_name, B1FractalGated, B3FractalHierarchical, B4Universal,
     EncodedDocument, EncodedTokenKind, FaceoffChunkLimits, FaceoffEmissionPolicy,
-    FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLexemeKind, FaceoffTokenizer, FaceoffVocab,
-    FaceoffVocabConfig, HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument,
-    NativeCollationSpec, NativeCompatibilityAdapter, NativeTokenizer, P1FractalHybrid,
-    P2Mandelbrot, PrimitiveRunSummary, PrototypeGranularityMode, RecursiveTokenizer,
-    StateSignature, TokenRecord, TokenizerConfig, TokenizerSubstrateMode,
+    FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLexemeKind, FaceoffLocalCacheMode,
+    FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer,
+    ModelFacingBatch, ModelFacingDocument, NativeCollationSpec, NativeCompatibilityAdapter,
+    NativeTokenizer, P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary, PrototypeGranularityMode,
+    RecursiveTokenizer, StateSignature, TokenRecord, TokenizerConfig, TokenizerSubstrateMode,
     FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
@@ -2224,6 +2224,93 @@ fn faceoff_unicode_heavy_roundtrip_is_exact() {
     assert!(encoded.tokens.len() > 1);
     assert_eq!(encoded.fallback.unknown_motifs, 0);
     assert_eq!(encoded.fallback.byte_fallback_tokens, 0);
+}
+
+#[test]
+fn faceoff_exact_local_cache_reuses_repeated_unknown_span_after_first_occurrence() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig {
+        split_policy: crate::SplitPolicy::BoundaryAware,
+        substrate_mode: TokenizerSubstrateMode::LexicalAtoms,
+        ..TokenizerConfig::default()
+    });
+    let input = "## Section Alpha\npayload_value = AuthProvider::refresh_token(2027)\n## Section Alpha\npayload_value = AuthProvider::refresh_token(2027)\n";
+    let partial_vocab = FaceoffVocab::from_token_records([].iter()).unwrap();
+
+    let without_cache = faceoff
+        .encode_text_v2_with_policy_and_fallback_mode_and_local_cache_mode::<TestBackend>(
+            input,
+            &partial_vocab,
+            &device,
+            FaceoffEmissionPolicy::NoveltyAware,
+            FaceoffFallbackMode::Full,
+            FaceoffLocalCacheMode::Off,
+        )
+        .unwrap();
+    let with_cache = faceoff
+        .encode_text_v2_with_policy_and_fallback_mode_and_local_cache_mode::<TestBackend>(
+            input,
+            &partial_vocab,
+            &device,
+            FaceoffEmissionPolicy::NoveltyAware,
+            FaceoffFallbackMode::Full,
+            FaceoffLocalCacheMode::ExactSpan,
+        )
+        .unwrap();
+
+    assert_eq!(faceoff.decode_document(&with_cache).unwrap(), input);
+    assert_eq!(without_cache.fallback.local_cache_hits, 0);
+    assert!(with_cache.fallback.local_cache_hits > 0);
+    assert!(with_cache.fallback.local_cache_stores > 0);
+    assert!(with_cache.tokens.len() < without_cache.tokens.len());
+}
+
+#[test]
+fn faceoff_exact_local_cache_does_not_leak_across_documents() {
+    let device = Default::default();
+    let faceoff = FaceoffTokenizer::new(TokenizerConfig {
+        split_policy: crate::SplitPolicy::BoundaryAware,
+        substrate_mode: TokenizerSubstrateMode::LexicalAtoms,
+        ..TokenizerConfig::default()
+    });
+    let repeated = "let auth_provider = AuthProvider::refresh_token(2027);\nlet auth_provider = AuthProvider::refresh_token(2027);\n";
+    let single = "fn render_home_screen() {\n    let oauth_flow = 2027;\n}\n";
+    let partial_vocab = FaceoffVocab::from_token_records([].iter()).unwrap();
+
+    let baseline = faceoff
+        .encode_text_v2_with_policy_and_fallback_mode_and_local_cache_mode::<TestBackend>(
+            single,
+            &partial_vocab,
+            &device,
+            FaceoffEmissionPolicy::NoveltyAware,
+            FaceoffFallbackMode::Full,
+            FaceoffLocalCacheMode::ExactSpan,
+        )
+        .unwrap();
+    let first = faceoff
+        .encode_text_v2_with_policy_and_fallback_mode_and_local_cache_mode::<TestBackend>(
+            repeated,
+            &partial_vocab,
+            &device,
+            FaceoffEmissionPolicy::NoveltyAware,
+            FaceoffFallbackMode::Full,
+            FaceoffLocalCacheMode::ExactSpan,
+        )
+        .unwrap();
+    let second = faceoff
+        .encode_text_v2_with_policy_and_fallback_mode_and_local_cache_mode::<TestBackend>(
+            single,
+            &partial_vocab,
+            &device,
+            FaceoffEmissionPolicy::NoveltyAware,
+            FaceoffFallbackMode::Full,
+            FaceoffLocalCacheMode::ExactSpan,
+        )
+        .unwrap();
+
+    assert!(first.fallback.local_cache_hits > 0);
+    assert_eq!(baseline, second);
+    assert_eq!(faceoff.decode_document(&second).unwrap(), single);
 }
 
 #[test]

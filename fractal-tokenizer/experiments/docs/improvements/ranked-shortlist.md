@@ -21,32 +21,32 @@ Candidates are ranked by:
 
 ## Latest Trial Snapshot
 
-Most recent completed trial: prototype emission gate on top of the adaptive
-state-signature prototype surface.
+Most recent completed trial: exact document-local motif cache on top of the
+atom-first lexical substrate.
 
 - `BAKEOFF_DOCUMENTS=120`
 - `BAKEOFF_INDUCTION_DOCUMENTS=63`
 - `BAKEOFF_EVALUATION_DOCUMENTS=57`
-- `BAKEOFF_VERDICT=YELLOW`
+- `BAKEOFF_VERDICT=GREEN`
 - `byte_fallback_docs=0`
 - hard-gate failures: `0`
 
 Result:
 
-- the focused regression proved selective runtime emission works in isolation
-- but the held-out bakeoff was identical between `direct` and `selective`
-- `full` mode on `p1_fractal_hybrid_dyn-state-norm_v2` stayed at:
-  - `exact_motif_hit_docs=1`
-  - `prototype_hit_docs=19`
-  - `lexical_only_docs=31`
-  - `jsonl.signals=7.60`
-  - `suspicious_nonlog_overcollapse_docs=10`
+- the cache produced a few honest contextual hits:
+  - `local_cache_hit_docs=4`
+- but the held-out medians were effectively unchanged:
+  - `code.rust=0.83`
+  - `code.swift=0.96`
+  - `docs.spec=0.77`
+  - `jsonl.signals=5.16`
 
 New read:
 
-- runtime prototype emission is not the active bottleneck
-- the remaining ceiling is upstream of emission
-- another emission-side heuristic is not justified from this line
+- exact document-local reuse is real
+- it is not enough to rescue the held-out code/docs ceiling
+- the next candidate should target segmentation/substrate quality rather than
+  another small cache heuristic
 
 ## Current Baseline
 
@@ -97,7 +97,36 @@ The ranking below applies to **next** frontier candidates. Packaging is now trea
 
 ## Ranked Candidates
 
-### 1. Primitive Comparison Pivot
+### 1. Syntax-Aware Segmentation
+
+Status:
+
+- `Active`
+
+Why it ranks first now:
+
+- atom-first substrate moved the held-out line more than several earlier
+  control-plane tweaks
+- exact document-local cache produced only a tiny additional lift
+- the strongest remaining hypothesis is still that the tokenizer needs more
+  canonical structural units for code/docs
+
+Expected upside:
+
+- better span stability for code and docs
+- more reusable held-out structure without weakening exact matching
+- a cleaner substrate for any later contextual reuse plane
+
+Expected failure mode:
+
+- even syntax-aware units still do not produce enough reusable held-out motifs,
+  which would push the primitive much closer to its kill line
+
+Decision:
+
+- active next candidate
+
+### 2. Primitive Comparison Pivot
 
 Status:
 
@@ -126,7 +155,7 @@ Decision:
 
 - keep ready as the next branch after the emission no-op
 
-### 2. Prototype Precision Guardrails
+### 3. Prototype Precision Guardrails
 
 Status:
 
@@ -156,7 +185,7 @@ Decision:
 - tried and not promoted
 - candidate 2 was the justified replacement attempt after this failure
 
-### 3. Targeted Prototype Precision
+### 4. Targeted Prototype Precision
 
 Status:
 
@@ -188,7 +217,7 @@ Decision:
 - keep coarse mode as the stable default
 - candidate 3 was later tried as a runtime emission gate and was a field no-op
 
-### 4. Prototype Emission Gate
+### 5. Prototype Emission Gate
 
 Status:
 
