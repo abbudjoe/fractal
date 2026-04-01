@@ -269,6 +269,9 @@ struct OverlayMetrics {
     base_tokenizer_path: String,
     mode: String,
     canonical_token_count: usize,
+    base_slice_symbol_count: usize,
+    macro_ref_symbol_count: usize,
+    macro_definition_symbol_count: usize,
     overlay_symbol_count: usize,
     compression_ratio_vs_canonical: f64,
     macro_count: usize,
@@ -2097,6 +2100,9 @@ fn attach_overlay_shadow(
                 base_tokenizer_path: String::new(),
                 mode: "off".to_string(),
                 canonical_token_count: 0,
+                base_slice_symbol_count: 0,
+                macro_ref_symbol_count: 0,
+                macro_definition_symbol_count: 0,
                 overlay_symbol_count: 0,
                 compression_ratio_vs_canonical: 0.0,
                 macro_count: 0,
@@ -2117,6 +2123,9 @@ fn attach_overlay_shadow(
                 base_tokenizer_path: String::new(),
                 mode: args.overlay_mode.as_str().to_string(),
                 canonical_token_count: 0,
+                base_slice_symbol_count: 0,
+                macro_ref_symbol_count: 0,
+                macro_definition_symbol_count: 0,
                 overlay_symbol_count: 0,
                 compression_ratio_vs_canonical: 0.0,
                 macro_count: 0,
@@ -2136,6 +2145,9 @@ fn attach_overlay_shadow(
                 base_tokenizer_path: source.tokenizer_json_path.display().to_string(),
                 mode: args.overlay_mode.as_str().to_string(),
                 canonical_token_count: 0,
+                base_slice_symbol_count: 0,
+                macro_ref_symbol_count: 0,
+                macro_definition_symbol_count: 0,
                 overlay_symbol_count: 0,
                 compression_ratio_vs_canonical: 0.0,
                 macro_count: 0,
@@ -2165,6 +2177,9 @@ fn attach_overlay_shadow(
                 fractal_tokenizer::OverlayDocumentMode::LocalMacro => "local-macro".to_string(),
             },
             canonical_token_count: overlay.canonical.token_ids.len(),
+            base_slice_symbol_count: overlay.base_slice_symbol_count(),
+            macro_ref_symbol_count: overlay.macro_ref_symbol_count(),
+            macro_definition_symbol_count: overlay.macro_definition_symbol_count(),
             overlay_symbol_count: overlay.overlay_symbol_count(),
             compression_ratio_vs_canonical: overlay.compression_ratio_vs_canonical(),
             macro_count: overlay.macros.len(),
@@ -2405,12 +2420,43 @@ fn print_overlay_summary(results: &[BakeoffRecord], args: &Args) {
         .iter()
         .filter(|(_, overlay)| overlay.macro_ref_count > 0)
         .count();
+    let total_canonical_tokens = ok_records
+        .iter()
+        .map(|(_, overlay)| overlay.canonical_token_count)
+        .sum::<usize>();
+    let total_transport_symbols = ok_records
+        .iter()
+        .map(|(_, overlay)| overlay.overlay_symbol_count)
+        .sum::<usize>();
+    let total_base_slice_symbols = ok_records
+        .iter()
+        .map(|(_, overlay)| overlay.base_slice_symbol_count)
+        .sum::<usize>();
+    let total_macro_ref_symbols = ok_records
+        .iter()
+        .map(|(_, overlay)| overlay.macro_ref_symbol_count)
+        .sum::<usize>();
+    let total_macro_definition_symbols = ok_records
+        .iter()
+        .map(|(_, overlay)| overlay.macro_definition_symbol_count)
+        .sum::<usize>();
     println!(
         "OVERLAY_DIAGNOSTIC split=evaluation status=ok ok_docs={} skipped_docs=0 activation_docs={} macro_hit_docs={} exact_failures={}",
         ok_records.len(),
         activation_docs,
         macro_hit_docs,
         exact_failures
+    );
+    println!(
+        "OVERLAY_TRANSPORT_SUMMARY split=evaluation scope=document_local docs={} canonical_tokens={} transport_symbols={} transport_ratio={:.2} base_slice_symbols={} macro_ref_symbols={} macro_definition_symbols={} definition_overhead_rate={:.2}",
+        ok_records.len(),
+        total_canonical_tokens,
+        total_transport_symbols,
+        total_canonical_tokens as f64 / total_transport_symbols.max(1) as f64,
+        total_base_slice_symbols,
+        total_macro_ref_symbols,
+        total_macro_definition_symbols,
+        total_macro_definition_symbols as f64 / total_transport_symbols.max(1) as f64
     );
 
     let mut per_bucket = BTreeMap::<String, Vec<&OverlayMetrics>>::new();
@@ -2430,20 +2476,29 @@ fn print_overlay_summary(results: &[BakeoffRecord], args: &Args) {
             .iter()
             .map(|overlay| overlay.repeated_token_mass_saved as f64)
             .collect::<Vec<_>>();
+        let mut definition_overhead = overlays
+            .iter()
+            .map(|overlay| {
+                overlay.macro_definition_symbol_count as f64
+                    / overlay.overlay_symbol_count.max(1) as f64
+            })
+            .collect::<Vec<_>>();
         ratios.sort_by(|left, right| left.partial_cmp(right).unwrap());
         saved.sort_by(|left, right| left.partial_cmp(right).unwrap());
+        definition_overhead.sort_by(|left, right| left.partial_cmp(right).unwrap());
         let activation_rate = overlays
             .iter()
             .filter(|overlay| overlay.mode == "local-macro" && overlay.macro_ref_count > 0)
             .count() as f64
             / overlays.len().max(1) as f64;
         println!(
-            "OVERLAY_BUCKET_SUMMARY split=evaluation bucket={} docs={} median_ratio={:.2} activation_rate={:.2} median_saved_tokens={:.2}",
+            "OVERLAY_BUCKET_SUMMARY split=evaluation bucket={} docs={} median_ratio={:.2} activation_rate={:.2} median_saved_tokens={:.2} median_definition_overhead_rate={:.2}",
             bucket,
             overlays.len(),
             median_sorted(&ratios),
             activation_rate,
-            median_sorted(&saved)
+            median_sorted(&saved),
+            median_sorted(&definition_overhead)
         );
     }
 }

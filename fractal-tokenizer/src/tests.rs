@@ -712,6 +712,12 @@ ts=3 level=info route=/health status=200\n\
     assert_eq!(overlay.expand_token_ids(), canonical.token_ids);
     assert_eq!(overlay.macros.len(), 1);
     assert!(overlay.macro_ref_count() >= 3);
+    assert_eq!(
+        overlay.overlay_symbol_count(),
+        overlay.base_slice_symbol_count()
+            + overlay.macro_ref_symbol_count()
+            + overlay.macro_definition_symbol_count()
+    );
     assert!(
         overlay.overlay_symbol_count() < canonical.token_ids.len(),
         "local macro overlay should reduce storage cost for repeated structured lines"
@@ -767,6 +773,12 @@ fn canonical_overlay_record_macros_capture_jsonl_scaffolds_exactly() {
         "record-aware mode should create scaffold macros for JSONL-like repeated structure"
     );
     assert!(overlay.macro_ref_count() >= 3);
+    assert_eq!(
+        overlay.overlay_symbol_count(),
+        overlay.base_slice_symbol_count()
+            + overlay.macro_ref_symbol_count()
+            + overlay.macro_definition_symbol_count()
+    );
     assert!(
         overlay.overlay_symbol_count() < canonical.token_ids.len(),
         "record-aware overlay should beat the canonical cost on repeated JSONL scaffolds"
