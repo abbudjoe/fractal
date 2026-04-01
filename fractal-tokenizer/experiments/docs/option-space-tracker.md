@@ -13,6 +13,7 @@ architectural layer for reusable held-out structure.
 The active post-postmortem pivot is now:
 
 - [canonical-tokenizer-recursive-overlay-spec.md](./canonical-tokenizer-recursive-overlay-spec.md)
+- [shared-overlay-dictionary-spec.md](./shared-overlay-dictionary-spec.md)
 
 This is intentionally **not** another attempt to rescue recursion as the
 primary tokenizer substrate.
@@ -51,6 +52,25 @@ Read:
   directionally useful
 - the strongest current signal is still repetitive structured text, not
   universal code/prose improvement
+- the clearest measured bottleneck is now transport overhead, not activation
+  failure
+
+Latest hybrid held-out read with `local-record-macro`:
+
+- `jsonl.signals` median overlay ratio `2.27`
+- `logs.operational_mixed` median overlay ratio `1.54`
+- exact expansion failures `0`
+- `OVERLAY_TRANSPORT_SUMMARY`
+  - `transport_ratio = 1.27`
+  - `definition_overhead_rate = 0.19`
+  - `macro_definition_symbols = 32413`
+  - `macro_ref_symbols = 4769`
+
+Read:
+
+- the overlay line is now earning its keep on the target buckets
+- the next high-leverage layer is amortizing shared scaffold definitions across
+  documents, not broadening activation heuristics
 
 ## Tried By Layer
 

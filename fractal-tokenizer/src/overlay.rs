@@ -122,21 +122,28 @@ impl RecursiveOverlayDocument {
             .count()
     }
 
-    pub fn overlay_symbol_count(&self) -> usize {
-        let base_slice_cost = self
-            .segments
+    pub fn base_slice_symbol_count(&self) -> usize {
+        self.segments
             .iter()
             .map(|segment| match segment {
                 OverlaySegment::BaseSlice { len, .. } => *len,
-                OverlaySegment::MacroRef { .. } => 1,
+                OverlaySegment::MacroRef { .. } => 0,
             })
-            .sum::<usize>();
-        let macro_def_cost = self
-            .macros
-            .iter()
-            .map(|entry| entry.token_ids.len())
-            .sum::<usize>();
-        base_slice_cost + macro_def_cost
+            .sum()
+    }
+
+    pub fn macro_ref_symbol_count(&self) -> usize {
+        self.macro_ref_count()
+    }
+
+    pub fn macro_definition_symbol_count(&self) -> usize {
+        self.macros.iter().map(|entry| entry.token_ids.len()).sum()
+    }
+
+    pub fn overlay_symbol_count(&self) -> usize {
+        self.base_slice_symbol_count()
+            + self.macro_ref_symbol_count()
+            + self.macro_definition_symbol_count()
     }
 
     pub fn repeated_token_mass_saved(&self) -> usize {
