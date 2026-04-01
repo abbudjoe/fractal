@@ -14,6 +14,7 @@ use fractal_core::{
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
+    faceoff::{scan_lexemes, LexemeSpan},
     B1FractalGated, B3FractalHierarchical, B4Universal, FaceoffLexemeKind, P1FractalHybrid,
     P2Mandelbrot,
 };
@@ -142,13 +143,6 @@ struct AtomSegment {
     depth: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct AtomSpan {
-    kind: FaceoffLexemeKind,
-    start: usize,
-    end: usize,
-}
-
 #[derive(Clone)]
 struct SeenMotif {
     depth: usize,
@@ -204,7 +198,7 @@ impl RecursiveTokenizer {
                 )?;
             }
             TokenizerSubstrateMode::LexicalAtoms => {
-                let atoms = scan_atom_spans(text);
+                let atoms = scan_lexemes(text, 0);
                 if atoms.is_empty() {
                     return Ok(tokens);
                 }
@@ -326,7 +320,7 @@ impl RecursiveTokenizer {
         &self,
         rule: &dyn FractalRule<B>,
         state: FractalState<B>,
-        atoms: &[AtomSpan],
+        atoms: &[LexemeSpan],
         text: &str,
         segment: AtomSegment,
         tokens: &mut Vec<TokenRecord>,
@@ -416,107 +410,6 @@ impl RecursiveTokenizer {
 
         Ok(())
     }
-}
-
-fn scan_atom_spans(text: &str) -> Vec<AtomSpan> {
-    let mut spans = Vec::new();
-    let mut offset = 0usize;
-
-    while offset < text.len() {
-        let (kind, end) = consume_atom_span(text, offset);
-        spans.push(AtomSpan {
-            kind,
-            start: offset,
-            end,
-        });
-        offset = end;
-    }
-
-    spans
-}
-
-fn consume_atom_span(text: &str, start: usize) -> (FaceoffLexemeKind, usize) {
-    let ch = text[start..].chars().next().unwrap_or('\0');
-    if ch == '\n' {
-        return (
-            FaceoffLexemeKind::NewlineIndent,
-            consume_newline_indent_atom(text, start),
-        );
-    }
-    if ch.is_whitespace() {
-        return (
-            FaceoffLexemeKind::Whitespace,
-            consume_atom_while(text, start, |value| value.is_whitespace() && value != '\n'),
-        );
-    }
-    if ch.is_ascii_digit() {
-        return (
-            FaceoffLexemeKind::Number,
-            consume_atom_while(text, start, |value| value.is_ascii_digit()),
-        );
-    }
-    if is_identifier_start(ch) {
-        let end = consume_atom_while(text, start, is_identifier_continue);
-        let kind = if text[start..end]
-            .chars()
-            .all(|value| value.is_alphabetic() && !value.is_uppercase())
-        {
-            FaceoffLexemeKind::Word
-        } else {
-            FaceoffLexemeKind::Identifier
-        };
-        return (kind, end);
-    }
-    if is_atom_punctuation(ch) {
-        return (
-            FaceoffLexemeKind::Punctuation,
-            consume_atom_while(text, start, is_atom_punctuation),
-        );
-    }
-    (
-        FaceoffLexemeKind::SymbolRun,
-        consume_atom_while(text, start, |value| {
-            !value.is_whitespace() && !value.is_alphanumeric() && !is_atom_punctuation(value)
-        }),
-    )
-}
-
-fn consume_atom_while(text: &str, start: usize, predicate: impl Fn(char) -> bool) -> usize {
-    let mut end = start;
-    for (offset, ch) in text[start..].char_indices() {
-        if !predicate(ch) {
-            break;
-        }
-        end = start + offset + ch.len_utf8();
-    }
-    end.max(
-        start
-            + text[start..]
-                .chars()
-                .next()
-                .map(char::len_utf8)
-                .unwrap_or(0),
-    )
-}
-
-fn consume_newline_indent_atom(text: &str, start: usize) -> usize {
-    let after_newline = start + '\n'.len_utf8();
-    consume_atom_while(text, after_newline, |value| matches!(value, ' ' | '\t'))
-}
-
-fn is_identifier_start(value: char) -> bool {
-    value.is_alphabetic() || value == '_'
-}
-
-fn is_identifier_continue(value: char) -> bool {
-    value.is_alphanumeric() || value == '_'
-}
-
-fn is_atom_punctuation(value: char) -> bool {
-    matches!(
-        value,
-        '.' | ',' | ';' | ':' | '!' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\''
-    )
 }
 
 pub fn revived_primitive_factories<B: Backend>() -> [PrimitiveFactory<B>; 5] {
@@ -839,7 +732,7 @@ fn split_point(bytes: &[u8], policy: SplitPolicy) -> Option<usize> {
     boundary_aware_split_point(bytes).or(fallback)
 }
 
-fn atom_split_point(atoms: &[AtomSpan], policy: SplitPolicy) -> Option<usize> {
+fn atom_split_point(atoms: &[LexemeSpan], policy: SplitPolicy) -> Option<usize> {
     if atoms.len() <= 1 {
         return None;
     }
@@ -867,7 +760,7 @@ fn balanced_split_point(bytes: &[u8]) -> Option<usize> {
     Some(best.map(|(index, _)| index).unwrap_or(mid.max(1)))
 }
 
-fn atom_boundary_aware_split_point(atoms: &[AtomSpan]) -> Option<usize> {
+fn atom_boundary_aware_split_point(atoms: &[LexemeSpan]) -> Option<usize> {
     if atoms.len() <= 1 {
         return None;
     }
@@ -912,7 +805,7 @@ fn boundary_aware_split_point(bytes: &[u8]) -> Option<usize> {
     best.map(|(_, _, index)| index)
 }
 
-fn classify_atom_boundary(left: &AtomSpan, right: &AtomSpan) -> u8 {
+fn classify_atom_boundary(left: &LexemeSpan, right: &LexemeSpan) -> u8 {
     if left.kind == FaceoffLexemeKind::NewlineIndent
         && right.kind == FaceoffLexemeKind::NewlineIndent
     {
@@ -1002,7 +895,7 @@ fn segment_features<B: Backend>(bytes: &[u8], dim: usize, device: &B::Device) ->
 }
 
 fn atom_segment_features<B: Backend>(
-    atoms: &[AtomSpan],
+    atoms: &[LexemeSpan],
     dim: usize,
     device: &B::Device,
 ) -> Tensor<B, 2> {
