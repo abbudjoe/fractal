@@ -1921,6 +1921,7 @@ dependencies = [
  "fractal-core",
  "fractal-primitives-private",
  "llama_cpp_rs",
+ "reqwest",
  "serde",
  "serde_json",
  "tiktoken-rs",

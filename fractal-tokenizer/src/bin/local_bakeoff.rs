@@ -11,7 +11,8 @@ use fractal_tokenizer::{
     NativeCompatibilityAdapter, PrimitiveFactory, PrototypeGranularityMode, SplitPolicy,
     TokenizerConfig, TokenizerSubstrateMode,
 };
-use serde::Serialize;
+use reqwest::blocking::Client;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
     env,
@@ -20,6 +21,8 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
     path::{Path, PathBuf},
+    thread,
+    time::Duration,
     time::Instant,
 };
 
@@ -30,11 +33,13 @@ const DEFAULT_OUTPUT_DIR: &str =
 const DEFAULT_FAWX_ROOT: &str = "/Users/joseph/fawx";
 const DEFAULT_HOME_STATE_ROOT: &str = "/Users/joseph/.fawx";
 const DEFAULT_CORPUS_LIMIT: usize = 120;
+const DEFAULT_HYBRID_CORPUS_LIMIT: usize = 240;
 const DEFAULT_LOG_WINDOW_LINES: usize = 120;
 const DEFAULT_JSON_WINDOW_LINES: usize = 100;
 const DEFAULT_PAD_MULTIPLE: usize = 8;
 const DEFAULT_CHUNK_LIMIT_TOKENS: usize = 8;
 const DEFAULT_CHUNK_LIMIT_BYTES: usize = 4096;
+const DEFAULT_HF_DATASETS_ENDPOINT: &str = "https://datasets-server.huggingface.co";
 const LOG_BUCKET_TARGET: usize = 36;
 const JSONL_BUCKET_TARGET: usize = 24;
 const CODE_BUCKET_TARGET: usize = 36;
@@ -43,17 +48,38 @@ const OVERSAMPLE_FACTOR: usize = 2;
 const WINDOW_SPLIT_GROUP_SIZE: usize = 3;
 const HELD_OUT_NONLOG_CAUTION_RATIO: f64 = 20.0;
 const HELD_OUT_NONLOG_CAUTION_REUSE: usize = 2;
+const EXTERNAL_CHAR_LIMIT: usize = 12_000;
+const EXTERNAL_PROSE_MIN_CHARS: usize = 700;
+const EXTERNAL_CODE_MIN_CHARS: usize = 400;
+const EXTERNAL_MULTILINGUAL_MIN_CHARS: usize = 700;
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 enum SourceFamily {
     LocalFawx,
+    ExternalHf,
 }
 
 impl SourceFamily {
     fn as_str(self) -> &'static str {
         match self {
             Self::LocalFawx => "local_fawx",
+            Self::ExternalHf => "external_hf",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CorpusSourceMode {
+    Local,
+    Hybrid,
+}
+
+impl CorpusSourceMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Hybrid => "hybrid",
         }
     }
 }
@@ -129,6 +155,82 @@ struct BakeoffRecord {
 struct CorpusCandidate {
     corpus: CorpusDocument,
     split_group_key: String,
+}
+
+#[derive(Clone, Debug)]
+struct ExternalDatasetPlan {
+    bucket: &'static str,
+    docs: usize,
+    slices: Vec<ExternalDatasetSlice>,
+    min_chars: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ExternalDatasetSlice {
+    dataset: &'static str,
+    config_selector: ExternalConfigSelector,
+    split: &'static str,
+    text_field: &'static str,
+    source_key_fields: &'static [&'static str],
+}
+
+#[derive(Clone, Debug)]
+enum ExternalConfigSelector {
+    Fixed(&'static str),
+    LatestSuffix(&'static str),
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedExternalSlice {
+    dataset: &'static str,
+    config: String,
+    split: &'static str,
+    text_field: &'static str,
+    source_key_fields: &'static [&'static str],
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct DatasetSplitsResponse {
+    splits: Option<Vec<DatasetSplitRef>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct DatasetSplitRef {
+    config: String,
+    split: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct DatasetSizeEnvelope {
+    size: DatasetSizePayload,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct DatasetSizePayload {
+    splits: Vec<DatasetSizeSplit>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct DatasetSizeSplit {
+    config: String,
+    split: String,
+    num_rows: usize,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct DatasetRowsResponse {
+    rows: Vec<DatasetRowsEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct DatasetRowsEntry {
+    row_idx: usize,
+    row: serde_json::Value,
+}
+
+struct HfDatasetsClient {
+    endpoint: String,
+    client: Client,
 }
 
 #[derive(Clone, Debug)]
@@ -220,6 +322,8 @@ struct VerdictSummary {
     byte_fallback_docs: usize,
     suspicious_nonlog_overcollapse_docs: usize,
     weak_log_buckets: usize,
+    external_structural_hit_docs: usize,
+    external_code_buckets_below_parity: usize,
     reasons: Vec<String>,
 }
 
@@ -229,7 +333,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let corpus = build_corpus(&args)?;
     write_jsonl(
-        args.output_dir.join("local_bakeoff_corpus.jsonl"),
+        args.output_dir
+            .join(format!("{}_bakeoff_corpus.jsonl", args.corpus_source.as_str())),
         corpus.iter().map(|candidate| &candidate.corpus),
     )?;
 
@@ -241,7 +346,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         let run = run_primitive_bakeoff(&corpus, &model_sources, &args, primitive)?;
         write_jsonl(
             args.output_dir.join(format!(
-                "{}_{}_results.jsonl",
+                "{}_{}_{}_results.jsonl",
+                args.corpus_source.as_str(),
                 run.primitive,
                 args.fallback_mode.as_str()
             )),
@@ -262,8 +368,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 struct Args {
     output_dir: PathBuf,
     corpus_limit: usize,
+    corpus_source: CorpusSourceMode,
     fawx_root: PathBuf,
     home_state_root: PathBuf,
+    hf_datasets_endpoint: String,
     max_review_count: usize,
     selected_primitives: Vec<String>,
     all_primitives: bool,
@@ -277,10 +385,21 @@ struct Args {
 
 impl Args {
     fn parse() -> Result<Self, Box<dyn Error>> {
+        Self::parse_from(env::args().skip(1))
+    }
+
+    fn parse_from<I, S>(iter: I) -> Result<Self, Box<dyn Error>>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         let mut output_dir = PathBuf::from(DEFAULT_OUTPUT_DIR);
         let mut corpus_limit = DEFAULT_CORPUS_LIMIT;
+        let mut corpus_limit_explicit = false;
+        let mut corpus_source = CorpusSourceMode::Local;
         let mut fawx_root = PathBuf::from(DEFAULT_FAWX_ROOT);
         let mut home_state_root = PathBuf::from(DEFAULT_HOME_STATE_ROOT);
+        let mut hf_datasets_endpoint = DEFAULT_HF_DATASETS_ENDPOINT.to_string();
         let mut max_review_count = 10usize;
         let mut selected_primitives = Vec::new();
         let mut all_primitives = false;
@@ -291,17 +410,23 @@ impl Args {
         let mut substrate_mode = TokenizerSubstrateMode::RawBytes;
         let mut local_cache_mode = FaceoffLocalCacheMode::Off;
 
-        let mut args = env::args().skip(1);
+        let mut args = iter.into_iter().map(Into::into);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--output-dir" => {
                     output_dir = PathBuf::from(args.next().ok_or("--output-dir requires a value")?);
                 }
                 "--corpus-limit" => {
+                    corpus_limit_explicit = true;
                     corpus_limit = args
                         .next()
                         .ok_or("--corpus-limit requires a value")?
                         .parse()?;
+                }
+                "--corpus-source" => {
+                    corpus_source = parse_corpus_source(
+                        &args.next().ok_or("--corpus-source requires a value")?,
+                    )?;
                 }
                 "--fawx-root" => {
                     fawx_root = PathBuf::from(args.next().ok_or("--fawx-root requires a value")?);
@@ -309,6 +434,11 @@ impl Args {
                 "--home-state-root" => {
                     home_state_root =
                         PathBuf::from(args.next().ok_or("--home-state-root requires a value")?);
+                }
+                "--hf-datasets-endpoint" => {
+                    hf_datasets_endpoint = args
+                        .next()
+                        .ok_or("--hf-datasets-endpoint requires a value")?;
                 }
                 "--max-review-count" => {
                     max_review_count = args
@@ -362,11 +492,17 @@ impl Args {
             }
         }
 
+        if corpus_source == CorpusSourceMode::Hybrid && !corpus_limit_explicit {
+            corpus_limit = DEFAULT_HYBRID_CORPUS_LIMIT;
+        }
+
         Ok(Self {
             output_dir,
             corpus_limit,
+            corpus_source,
             fawx_root,
             home_state_root,
+            hf_datasets_endpoint,
             max_review_count,
             selected_primitives,
             all_primitives,
@@ -382,8 +518,18 @@ impl Args {
 
 fn print_help() {
     eprintln!(
-        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--fawx-root DIR] [--home-state-root DIR] [--max-review-count N] [--primitive NAME] [--all-primitives] [--fallback-mode full|motif-only] [--identity-mode legacy|prototype-primary] [--prototype-granularity coarse|adaptive] [--split-policy balanced|boundary-aware|syntax-aware] [--substrate raw|lexical] [--local-cache off|exact]"
+        "Usage: cargo run -p fractal-tokenizer --bin local_bakeoff -- [--output-dir DIR] [--corpus-limit N] [--corpus-source local|hybrid] [--fawx-root DIR] [--home-state-root DIR] [--hf-datasets-endpoint URL] [--max-review-count N] [--primitive NAME] [--all-primitives] [--fallback-mode full|motif-only] [--identity-mode legacy|prototype-primary] [--prototype-granularity coarse|adaptive] [--split-policy balanced|boundary-aware|syntax-aware] [--substrate raw|lexical] [--local-cache off|exact]"
     );
+}
+
+fn parse_corpus_source(value: &str) -> Result<CorpusSourceMode, Box<dyn Error>> {
+    match value {
+        "local" => Ok(CorpusSourceMode::Local),
+        "hybrid" => Ok(CorpusSourceMode::Hybrid),
+        other => Err(
+            format!("unknown corpus source `{other}`; expected one of: local, hybrid").into(),
+        ),
+    }
 }
 
 fn parse_fallback_mode(value: &str) -> Result<FaceoffFallbackMode, Box<dyn Error>> {
@@ -588,38 +734,18 @@ fn shared_base_primitive_candidates() -> Vec<PrimitiveCandidate> {
 }
 
 fn build_corpus(args: &Args) -> Result<Vec<CorpusCandidate>, Box<dyn Error>> {
-    let mut seen = HashSet::<u64>::new();
-    let buckets = vec![
-        collect_log_candidates(&args.home_state_root)?,
-        collect_jsonl_candidates(&args.home_state_root)?,
-        collect_code_candidates(&args.fawx_root)?,
-        collect_markdown_candidates(&args.fawx_root)?,
-    ];
-
-    let mut candidates = Vec::new();
-    round_robin_extend(buckets, &mut candidates, args.corpus_limit * 2);
-
-    let mut deduped = Vec::new();
-    for candidate in candidates {
-        let fingerprint = fnv1a64(&candidate.corpus.text);
-        if seen.insert(fingerprint) {
-            deduped.push(candidate);
-        }
-        if deduped.len() >= args.corpus_limit {
-            break;
-        }
+    match args.corpus_source {
+        CorpusSourceMode::Local => build_local_corpus(args, args.corpus_limit),
+        CorpusSourceMode::Hybrid => build_hybrid_corpus(args),
     }
+}
 
-    if deduped.len() < args.corpus_limit {
-        return Err(format!(
-            "only built {} unique documents, wanted {}",
-            deduped.len(),
-            args.corpus_limit
-        )
-        .into());
-    }
-
-    assign_local_splits(&mut deduped);
+fn build_local_corpus(
+    args: &Args,
+    target: usize,
+) -> Result<Vec<CorpusCandidate>, Box<dyn Error>> {
+    let mut deduped = dedupe_candidates(build_local_candidate_pool(args)?, target)?;
+    assign_balanced_splits(&mut deduped);
     let induction_docs = deduped
         .iter()
         .filter(|candidate| candidate.corpus.split == CorpusSplit::Induction)
@@ -637,11 +763,110 @@ fn build_corpus(args: &Args) -> Result<Vec<CorpusCandidate>, Box<dyn Error>> {
     Ok(deduped)
 }
 
-fn assign_local_splits(candidates: &mut [CorpusCandidate]) {
-    let mut per_bucket = BTreeMap::<String, BTreeMap<String, Vec<usize>>>::new();
+fn build_hybrid_corpus(args: &Args) -> Result<Vec<CorpusCandidate>, Box<dyn Error>> {
+    let local_target = args.corpus_limit / 2;
+    let external_target = args.corpus_limit - local_target;
+    let local = dedupe_candidates(build_local_candidate_pool(args)?, local_target)?;
+    let external = collect_external_candidates(args, external_target)?;
+
+    let mut combined = Vec::with_capacity(local.len() + external.len());
+    combined.extend(local);
+    combined.extend(external);
+    assign_balanced_splits(&mut combined);
+
+    let local_docs = combined
+        .iter()
+        .filter(|candidate| candidate.corpus.source_family == SourceFamily::LocalFawx)
+        .count();
+    let external_docs = combined
+        .iter()
+        .filter(|candidate| candidate.corpus.source_family == SourceFamily::ExternalHf)
+        .count();
+    let induction_docs = combined
+        .iter()
+        .filter(|candidate| candidate.corpus.split == CorpusSplit::Induction)
+        .count();
+    let evaluation_docs = combined
+        .iter()
+        .filter(|candidate| candidate.corpus.split == CorpusSplit::Evaluation)
+        .count();
+
+    if local_docs == 0 || external_docs == 0 {
+        return Err(format!(
+            "hybrid bakeoff requires both local and external documents (local={local_docs}, external={external_docs})"
+        )
+        .into());
+    }
+    if induction_docs == 0 || evaluation_docs == 0 {
+        return Err(format!(
+            "hybrid bakeoff requires both induction and evaluation documents (induction={induction_docs}, evaluation={evaluation_docs})"
+        )
+        .into());
+    }
+
+    Ok(combined)
+}
+
+fn build_local_candidate_pool(args: &Args) -> Result<Vec<CorpusCandidate>, Box<dyn Error>> {
+    let mut seen = HashSet::<u64>::new();
+    let buckets = vec![
+        collect_log_candidates(&args.home_state_root)?,
+        collect_jsonl_candidates(&args.home_state_root)?,
+        collect_code_candidates(&args.fawx_root)?,
+        collect_markdown_candidates(&args.fawx_root)?,
+    ];
+
+    let mut candidates = Vec::new();
+    round_robin_extend(
+        buckets,
+        &mut candidates,
+        (LOG_BUCKET_TARGET + JSONL_BUCKET_TARGET + CODE_BUCKET_TARGET + DOCS_BUCKET_TARGET)
+            .saturating_mul(OVERSAMPLE_FACTOR),
+    );
+
+    let mut deduped = Vec::new();
+    for candidate in candidates {
+        let fingerprint = fnv1a64(&candidate.corpus.text);
+        if seen.insert(fingerprint) {
+            deduped.push(candidate);
+        }
+    }
+    Ok(deduped)
+}
+
+fn dedupe_candidates(
+    candidates: Vec<CorpusCandidate>,
+    target: usize,
+) -> Result<Vec<CorpusCandidate>, Box<dyn Error>> {
+    let mut seen = HashSet::<u64>::new();
+    let mut deduped = Vec::new();
+    for candidate in candidates {
+        let fingerprint = fnv1a64(&candidate.corpus.text);
+        if seen.insert(fingerprint) {
+            deduped.push(candidate);
+        }
+        if deduped.len() >= target {
+            break;
+        }
+    }
+
+    if deduped.len() < target {
+        return Err(format!(
+            "only built {} unique documents, wanted {}",
+            deduped.len(),
+            target
+        )
+        .into());
+    }
+
+    Ok(deduped)
+}
+
+fn assign_balanced_splits(candidates: &mut [CorpusCandidate]) {
+    let mut per_bucket = BTreeMap::<(SourceFamily, String), BTreeMap<String, Vec<usize>>>::new();
     for (index, candidate) in candidates.iter().enumerate() {
         per_bucket
-            .entry(candidate.corpus.bucket.clone())
+            .entry((candidate.corpus.source_family, candidate.corpus.bucket.clone()))
             .or_default()
             .entry(candidate.split_group_key.clone())
             .or_default()
@@ -673,6 +898,422 @@ fn assign_local_splits(candidates: &mut [CorpusCandidate]) {
                 candidates[index].corpus.split = split;
             }
         }
+    }
+}
+
+fn collect_external_candidates(
+    args: &Args,
+    target: usize,
+) -> Result<Vec<CorpusCandidate>, Box<dyn Error>> {
+    let client = HfDatasetsClient::new(&args.hf_datasets_endpoint)?;
+    let plans = external_dataset_plans(target);
+    let mut buckets = Vec::new();
+
+    for plan in plans {
+        let mut per_slice = Vec::new();
+        for slice in &plan.slices {
+            match fetch_external_slice_candidates(
+                &client,
+                slice,
+                plan.bucket,
+                plan.docs,
+                plan.min_chars,
+            ) {
+                Ok(candidates) => per_slice.push(candidates),
+                Err(error) => eprintln!(
+                    "EXTERNAL_SLICE_SKIP bucket={} dataset={} reason={}",
+                    plan.bucket, slice.dataset, error
+                ),
+            }
+        }
+
+        if per_slice.is_empty() {
+            return Err(format!("no external slices resolved for bucket {}", plan.bucket).into());
+        }
+
+        let mut bucket_docs = Vec::new();
+        round_robin_extend(per_slice, &mut bucket_docs, plan.docs.saturating_mul(OVERSAMPLE_FACTOR));
+        buckets.push(bucket_docs);
+    }
+
+    dedupe_candidates(
+        {
+            let mut candidates = Vec::new();
+            round_robin_extend(buckets, &mut candidates, target.saturating_mul(OVERSAMPLE_FACTOR));
+            candidates
+        },
+        target,
+    )
+}
+
+fn external_dataset_plans(target: usize) -> Vec<ExternalDatasetPlan> {
+    let counts = distribute_count(target, 4);
+    vec![
+        ExternalDatasetPlan {
+            bucket: "external.prose.web",
+            docs: counts[0],
+            slices: vec![ExternalDatasetSlice {
+                dataset: "HuggingFaceFW/fineweb-edu",
+                config_selector: ExternalConfigSelector::Fixed("default"),
+                split: "train",
+                text_field: "text",
+                source_key_fields: &["url", "id"],
+            }],
+            min_chars: EXTERNAL_PROSE_MIN_CHARS,
+        },
+        ExternalDatasetPlan {
+            bucket: "external.code.python",
+            docs: counts[1],
+            slices: vec![ExternalDatasetSlice {
+                dataset: "codeparrot/github-code-clean",
+                config_selector: ExternalConfigSelector::Fixed("Python-all"),
+                split: "train",
+                text_field: "code",
+                source_key_fields: &["repo_name", "path"],
+            }],
+            min_chars: EXTERNAL_CODE_MIN_CHARS,
+        },
+        ExternalDatasetPlan {
+            bucket: "external.code.js_ts",
+            docs: counts[2],
+            slices: vec![
+                ExternalDatasetSlice {
+                    dataset: "codeparrot/github-code-clean",
+                    config_selector: ExternalConfigSelector::Fixed("JavaScript-all"),
+                    split: "train",
+                    text_field: "code",
+                    source_key_fields: &["repo_name", "path"],
+                },
+                ExternalDatasetSlice {
+                    dataset: "codeparrot/github-code-clean",
+                    config_selector: ExternalConfigSelector::Fixed("TypeScript-all"),
+                    split: "train",
+                    text_field: "code",
+                    source_key_fields: &["repo_name", "path"],
+                },
+            ],
+            min_chars: EXTERNAL_CODE_MIN_CHARS,
+        },
+        ExternalDatasetPlan {
+            bucket: "external.multilingual",
+            docs: counts[3],
+            slices: vec![
+                ExternalDatasetSlice {
+                    dataset: "wikimedia/wikipedia",
+                    config_selector: ExternalConfigSelector::LatestSuffix(".es"),
+                    split: "train",
+                    text_field: "text",
+                    source_key_fields: &["url", "title"],
+                },
+                ExternalDatasetSlice {
+                    dataset: "wikimedia/wikipedia",
+                    config_selector: ExternalConfigSelector::LatestSuffix(".ja"),
+                    split: "train",
+                    text_field: "text",
+                    source_key_fields: &["url", "title"],
+                },
+                ExternalDatasetSlice {
+                    dataset: "wikimedia/wikipedia",
+                    config_selector: ExternalConfigSelector::LatestSuffix(".ar"),
+                    split: "train",
+                    text_field: "text",
+                    source_key_fields: &["url", "title"],
+                },
+            ],
+            min_chars: EXTERNAL_MULTILINGUAL_MIN_CHARS,
+        },
+    ]
+}
+
+fn fetch_external_slice_candidates(
+    client: &HfDatasetsClient,
+    slice: &ExternalDatasetSlice,
+    bucket: &str,
+    docs: usize,
+    min_chars: usize,
+) -> Result<Vec<CorpusCandidate>, Box<dyn Error>> {
+    let resolved = client.resolve_slice(slice)?;
+    let num_rows = client.fetch_num_rows(&resolved)?;
+    let wanted = docs.saturating_mul(OVERSAMPLE_FACTOR).max(docs);
+    let page_len = wanted.clamp(1, 25);
+    let page_starts = evenly_spaced_page_starts(num_rows, page_len, wanted.div_ceil(page_len));
+    let mut candidates = Vec::new();
+
+    for start in page_starts {
+        let entries = client.fetch_rows(&resolved, start, page_len)?;
+        for entry in entries {
+            if let Some(text) = extract_string_field(&entry.row, resolved.text_field) {
+                let normalized = normalize_external_text(&text, EXTERNAL_CHAR_LIMIT);
+                if normalized.chars().count() < min_chars {
+                    continue;
+                }
+                let source_key = external_source_key(&entry.row, resolved.source_key_fields)
+                    .unwrap_or_else(|| format!("row-{}", entry.row_idx));
+                let source_path = format!(
+                    "hf://datasets/{}/{}#split={}&row={}",
+                    resolved.dataset, resolved.config, resolved.split, entry.row_idx
+                );
+                candidates.push(CorpusCandidate {
+                    corpus: build_corpus_document(
+                        format!(
+                            "{}-{:016x}-{:08}",
+                            bucket.replace('.', "-"),
+                            fnv1a64(&source_key),
+                            entry.row_idx
+                        ),
+                        bucket.to_string(),
+                        SourceFamily::ExternalHf,
+                        CorpusSplit::Induction,
+                        source_path,
+                        1,
+                        line_count(&normalized),
+                        normalized,
+                    ),
+                    split_group_key: format!(
+                        "{}:{}:{}",
+                        resolved.dataset,
+                        resolved.config,
+                        source_key
+                    ),
+                });
+            }
+            if candidates.len() >= wanted {
+                break;
+            }
+        }
+        if candidates.len() >= wanted {
+            break;
+        }
+    }
+
+    if candidates.len() < docs {
+        return Err(format!(
+            "only collected {} external docs for bucket {} from {}:{}; needed {}",
+            candidates.len(),
+            bucket,
+            resolved.dataset,
+            resolved.config,
+            docs
+        )
+        .into());
+    }
+
+    Ok(candidates)
+}
+
+fn distribute_count(total: usize, buckets: usize) -> Vec<usize> {
+    let base = total / buckets.max(1);
+    let remainder = total % buckets.max(1);
+    (0..buckets)
+        .map(|index| base + usize::from(index < remainder))
+        .collect()
+}
+
+fn evenly_spaced_offsets(total_rows: usize, wanted: usize) -> Vec<usize> {
+    if total_rows == 0 || wanted == 0 {
+        return Vec::new();
+    }
+    if wanted >= total_rows {
+        return (0..total_rows).collect();
+    }
+
+    let stride = total_rows as f64 / wanted as f64;
+    let mut seen = HashSet::new();
+    let mut offsets = Vec::with_capacity(wanted);
+    for index in 0..wanted {
+        let offset = ((index as f64 + 0.5) * stride).floor() as usize;
+        let bounded = offset.min(total_rows.saturating_sub(1));
+        if seen.insert(bounded) {
+            offsets.push(bounded);
+        }
+    }
+    offsets
+}
+
+fn evenly_spaced_page_starts(total_rows: usize, page_len: usize, pages: usize) -> Vec<usize> {
+    if total_rows == 0 || pages == 0 {
+        return Vec::new();
+    }
+    if total_rows <= page_len {
+        return vec![0];
+    }
+    evenly_spaced_offsets(total_rows - page_len + 1, pages)
+}
+
+fn normalize_external_text(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+
+    let mut out = String::new();
+    for ch in text.chars().take(limit) {
+        out.push(ch);
+    }
+    out
+}
+
+fn extract_string_field(row: &serde_json::Value, field: &str) -> Option<String> {
+    row.get(field)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn external_source_key(row: &serde_json::Value, fields: &[&str]) -> Option<String> {
+    let parts = fields
+        .iter()
+        .filter_map(|field| extract_string_field(row, field))
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("::"))
+    }
+}
+
+impl HfDatasetsClient {
+    fn new(endpoint: &str) -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            endpoint: endpoint.trim_end_matches('/').to_string(),
+            client: Client::builder().build()?,
+        })
+    }
+
+    fn resolve_slice(
+        &self,
+        slice: &ExternalDatasetSlice,
+    ) -> Result<ResolvedExternalSlice, Box<dyn Error>> {
+        let splits = self.fetch_splits(slice.dataset)?;
+        let config =
+            select_config_for_slice(slice.dataset, &slice.config_selector, slice.split, &splits)?;
+
+        Ok(ResolvedExternalSlice {
+            dataset: slice.dataset,
+            config,
+            split: slice.split,
+            text_field: slice.text_field,
+            source_key_fields: slice.source_key_fields,
+        })
+    }
+
+    fn fetch_splits(&self, dataset: &str) -> Result<Vec<DatasetSplitRef>, Box<dyn Error>> {
+        let response = self.get_json::<DatasetSplitsResponse>("/splits", &[("dataset", dataset)])?;
+        Ok(response.splits.unwrap_or_default())
+    }
+
+    fn fetch_num_rows(&self, slice: &ResolvedExternalSlice) -> Result<usize, Box<dyn Error>> {
+        let response = self.get_json::<DatasetSizeEnvelope>(
+            "/size",
+            &[
+                ("dataset", slice.dataset),
+                ("config", slice.config.as_str()),
+                ("split", slice.split),
+            ],
+        )?;
+        response
+            .size
+            .splits
+            .into_iter()
+            .find(|candidate| candidate.config == slice.config && candidate.split == slice.split)
+            .map(|candidate| candidate.num_rows)
+            .ok_or_else(|| {
+                format!(
+                    "size endpoint missing num_rows for dataset={} config={} split={}",
+                    slice.dataset, slice.config, slice.split
+                )
+                .into()
+            })
+    }
+
+    fn fetch_rows(
+        &self,
+        slice: &ResolvedExternalSlice,
+        offset: usize,
+        length: usize,
+    ) -> Result<Vec<DatasetRowsEntry>, Box<dyn Error>> {
+        let offset_string = offset.to_string();
+        let length_string = length.to_string();
+        let response = self.get_json::<DatasetRowsResponse>(
+            "/rows",
+            &[
+                ("dataset", slice.dataset),
+                ("config", slice.config.as_str()),
+                ("split", slice.split),
+                ("offset", offset_string.as_str()),
+                ("length", length_string.as_str()),
+            ],
+        )?;
+        if response.rows.is_empty() {
+            return Err(format!(
+                "rows endpoint returned no rows for dataset={} config={} split={} offset={offset} length={length}",
+                slice.dataset, slice.config, slice.split
+            )
+            .into());
+        }
+        Ok(response.rows)
+    }
+
+    fn get_json<T>(&self, path: &str, query: &[(&str, &str)]) -> Result<T, Box<dyn Error>>
+    where
+        T: DeserializeOwned,
+    {
+        let url = format!("{}{}", self.endpoint, path);
+        let mut last_error = None;
+        for attempt in 0..5 {
+            match self.client.get(&url).query(query).send() {
+                Ok(response) => {
+                    let status = response.status();
+                    let retryable_status =
+                        status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+                    if retryable_status && attempt < 4 {
+                        thread::sleep(Duration::from_millis(500 * (attempt + 1) as u64));
+                        continue;
+                    }
+                    let response = response.error_for_status()?;
+                    return Ok(response.json::<T>()?);
+                }
+                Err(error) => {
+                    let retryable =
+                        error.is_timeout() || error.is_connect() || error.is_request();
+                    last_error = Some(error);
+                    if retryable && attempt < 4 {
+                        thread::sleep(Duration::from_millis(500 * (attempt + 1) as u64));
+                        continue;
+                    }
+                    break;
+                }
+            }
+        }
+
+        Err(last_error
+            .map(|error| error.into())
+            .unwrap_or_else(|| "dataset request failed without an error".into()))
+    }
+}
+
+fn select_config_for_slice(
+    dataset: &str,
+    selector: &ExternalConfigSelector,
+    split: &str,
+    splits: &[DatasetSplitRef],
+) -> Result<String, Box<dyn Error>> {
+    match selector {
+        ExternalConfigSelector::Fixed(config) => splits
+            .iter()
+            .find(|candidate| candidate.config == *config && candidate.split == split)
+            .map(|_| (*config).to_string())
+            .ok_or_else(|| {
+                format!("dataset {dataset} missing config={config} split={split}").into()
+            }),
+        ExternalConfigSelector::LatestSuffix(suffix) => splits
+            .iter()
+            .filter(|candidate| candidate.split == split && candidate.config.ends_with(suffix))
+            .map(|candidate| candidate.config.clone())
+            .max()
+            .ok_or_else(|| {
+                format!("dataset {dataset} missing config suffix {suffix} for split {split}").into()
+            }),
     }
 }
 
@@ -1407,6 +2048,7 @@ fn print_summary(primitive: &str, results: &[BakeoffRecord], vocab: &FaceoffVoca
 
     println!("PRIMITIVE_START name={primitive}");
     println!("BAKEOFF_PRIMITIVE={primitive}");
+    println!("BAKEOFF_CORPUS_SOURCE={}", args.corpus_source.as_str());
     println!("BAKEOFF_FALLBACK_MODE={}", args.fallback_mode.as_str());
     println!("BAKEOFF_IDENTITY_MODE={}", args.identity_mode.as_str());
     println!(
@@ -1459,6 +2101,11 @@ fn print_summary(primitive: &str, results: &[BakeoffRecord], vocab: &FaceoffVoca
         "BAKEOFF_HEURISTICS split=evaluation suspicious_nonlog_overcollapse_docs={} weak_log_buckets={}",
         verdict.suspicious_nonlog_overcollapse_docs,
         verdict.weak_log_buckets
+    );
+    println!(
+        "BAKEOFF_HYBRID_HEURISTICS split=evaluation external_structural_hit_docs={} external_code_buckets_below_parity={}",
+        verdict.external_structural_hit_docs,
+        verdict.external_code_buckets_below_parity
     );
 
     for family in summarize_families(results) {
@@ -1743,6 +2390,8 @@ fn summarize_verdict(results: &[BakeoffRecord]) -> VerdictSummary {
             byte_fallback_docs: 0,
             suspicious_nonlog_overcollapse_docs: 0,
             weak_log_buckets: 0,
+            external_structural_hit_docs: 0,
+            external_code_buckets_below_parity: 0,
             reasons: vec!["evaluation_docs=0".to_string()],
         };
     }
@@ -1763,6 +2412,14 @@ fn summarize_verdict(results: &[BakeoffRecord]) -> VerdictSummary {
         .iter()
         .filter(|record| record.fractal.fallback_byte_fallback_tokens > 0)
         .count();
+    let external_structural_hit_docs = results
+        .iter()
+        .filter(|record| {
+            record.corpus.source_family == SourceFamily::ExternalHf
+                && (record.fractal.fallback_exact_motif_hits > 0
+                    || record.fractal.fallback_prototype_hits > 0)
+        })
+        .count();
     let suspicious_nonlog_overcollapse_docs = results
         .iter()
         .filter(|record| {
@@ -1775,9 +2432,21 @@ fn summarize_verdict(results: &[BakeoffRecord]) -> VerdictSummary {
         .count();
 
     let bucket_summaries = summarize_buckets(&results);
+    let has_external = results
+        .iter()
+        .any(|record| record.corpus.source_family == SourceFamily::ExternalHf);
     let weak_log_buckets = bucket_summaries
         .iter()
         .filter(|bucket| bucket.bucket == "logs.repetition_heavy" && bucket.median_best_ratio < 5.0)
+        .count();
+    let external_code_buckets_below_parity = bucket_summaries
+        .iter()
+        .filter(|bucket| {
+            matches!(
+                bucket.bucket.as_str(),
+                "external.code.python" | "external.code.js_ts"
+            ) && bucket.median_best_ratio < 1.0
+        })
         .count();
 
     let mut reasons = Vec::new();
@@ -1795,6 +2464,8 @@ fn summarize_verdict(results: &[BakeoffRecord]) -> VerdictSummary {
     } else if byte_fallback_docs > 0
         || suspicious_nonlog_overcollapse_docs > 0
         || weak_log_buckets > 0
+        || (has_external && external_structural_hit_docs == 0)
+        || (has_external && external_code_buckets_below_parity > 0)
     {
         if byte_fallback_docs > 0 {
             reasons.push(format!("byte_fallback_docs={byte_fallback_docs}"));
@@ -1806,6 +2477,14 @@ fn summarize_verdict(results: &[BakeoffRecord]) -> VerdictSummary {
         }
         if weak_log_buckets > 0 {
             reasons.push(format!("weak_log_buckets={weak_log_buckets}"));
+        }
+        if has_external && external_structural_hit_docs == 0 {
+            reasons.push("external_structural_hit_docs=0".to_string());
+        }
+        if has_external && external_code_buckets_below_parity > 0 {
+            reasons.push(format!(
+                "external_code_buckets_below_parity={external_code_buckets_below_parity}"
+            ));
         }
         BakeoffVerdict::Yellow
     } else {
@@ -1823,6 +2502,8 @@ fn summarize_verdict(results: &[BakeoffRecord]) -> VerdictSummary {
         byte_fallback_docs,
         suspicious_nonlog_overcollapse_docs,
         weak_log_buckets,
+        external_structural_hit_docs,
+        external_code_buckets_below_parity,
         reasons,
     }
 }
@@ -1905,8 +2586,10 @@ mod tests {
         Args {
             output_dir: PathBuf::from("/tmp/out"),
             corpus_limit: DEFAULT_CORPUS_LIMIT,
+            corpus_source: CorpusSourceMode::Local,
             fawx_root: PathBuf::from(DEFAULT_FAWX_ROOT),
             home_state_root: PathBuf::from(DEFAULT_HOME_STATE_ROOT),
+            hf_datasets_endpoint: DEFAULT_HF_DATASETS_ENDPOINT.to_string(),
             max_review_count: 10,
             selected_primitives: Vec::new(),
             all_primitives: false,
@@ -1930,6 +2613,41 @@ mod tests {
     #[test]
     fn parse_fallback_mode_defaults_to_full() {
         assert_eq!(base_args().fallback_mode, FaceoffFallbackMode::Full);
+    }
+
+    #[test]
+    fn parse_corpus_source_defaults_to_local() {
+        assert_eq!(base_args().corpus_source, CorpusSourceMode::Local);
+    }
+
+    #[test]
+    fn parse_corpus_source_accepts_hybrid() {
+        assert_eq!(
+            parse_corpus_source("hybrid").unwrap(),
+            CorpusSourceMode::Hybrid
+        );
+    }
+
+    #[test]
+    fn parse_corpus_source_rejects_unknown_value() {
+        let error = parse_corpus_source("totally-fake")
+            .err()
+            .expect("unknown corpus source should error")
+            .to_string();
+        assert!(error.contains("unknown corpus source `totally-fake`"));
+    }
+
+    #[test]
+    fn parse_from_uses_hybrid_default_corpus_limit() {
+        let args = Args::parse_from(["--corpus-source", "hybrid"]).unwrap();
+        assert_eq!(args.corpus_source, CorpusSourceMode::Hybrid);
+        assert_eq!(args.corpus_limit, DEFAULT_HYBRID_CORPUS_LIMIT);
+    }
+
+    #[test]
+    fn parse_from_keeps_explicit_corpus_limit_in_hybrid_mode() {
+        let args = Args::parse_from(["--corpus-source", "hybrid", "--corpus-limit", "64"]).unwrap();
+        assert_eq!(args.corpus_limit, 64);
     }
 
     #[test]
@@ -2179,7 +2897,7 @@ mod tests {
     }
 
     #[test]
-    fn assign_local_splits_keeps_same_source_together() {
+    fn assign_balanced_splits_keeps_same_source_together() {
         let mut candidates = vec![
             CorpusCandidate {
                 corpus: build_corpus_document(
@@ -2222,14 +2940,14 @@ mod tests {
             },
         ];
 
-        assign_local_splits(&mut candidates);
+        assign_balanced_splits(&mut candidates);
 
         assert_eq!(candidates[0].corpus.split, candidates[1].corpus.split);
         assert_ne!(candidates[0].corpus.split, candidates[2].corpus.split);
     }
 
     #[test]
-    fn assign_local_splits_balances_window_groups() {
+    fn assign_balanced_splits_balances_window_groups() {
         let mut candidates = (0..8)
             .map(|index| CorpusCandidate {
                 corpus: build_corpus_document(
@@ -2246,7 +2964,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assign_local_splits(&mut candidates);
+        assign_balanced_splits(&mut candidates);
 
         let induction = candidates
             .iter()
@@ -2260,6 +2978,138 @@ mod tests {
         assert_eq!(candidates[2].corpus.split, candidates[3].corpus.split);
     }
 
+    #[test]
+    fn assign_balanced_splits_keeps_families_balanced_independently() {
+        let mut candidates = vec![
+            CorpusCandidate {
+                corpus: build_corpus_document(
+                    "local-1".to_string(),
+                    "code.rust".to_string(),
+                    SourceFamily::LocalFawx,
+                    CorpusSplit::Induction,
+                    "/tmp/local-a.rs".to_string(),
+                    1,
+                    1,
+                    "fn a() {}\n".to_string(),
+                ),
+                split_group_key: "local-a".to_string(),
+            },
+            CorpusCandidate {
+                corpus: build_corpus_document(
+                    "local-2".to_string(),
+                    "code.rust".to_string(),
+                    SourceFamily::LocalFawx,
+                    CorpusSplit::Induction,
+                    "/tmp/local-b.rs".to_string(),
+                    1,
+                    1,
+                    "fn b() {}\n".to_string(),
+                ),
+                split_group_key: "local-b".to_string(),
+            },
+            CorpusCandidate {
+                corpus: build_corpus_document(
+                    "external-1".to_string(),
+                    "code.rust".to_string(),
+                    SourceFamily::ExternalHf,
+                    CorpusSplit::Induction,
+                    "hf://datasets/demo/a".to_string(),
+                    1,
+                    1,
+                    "fn c() {}\n".to_string(),
+                ),
+                split_group_key: "external-a".to_string(),
+            },
+            CorpusCandidate {
+                corpus: build_corpus_document(
+                    "external-2".to_string(),
+                    "code.rust".to_string(),
+                    SourceFamily::ExternalHf,
+                    CorpusSplit::Induction,
+                    "hf://datasets/demo/b".to_string(),
+                    1,
+                    1,
+                    "fn d() {}\n".to_string(),
+                ),
+                split_group_key: "external-b".to_string(),
+            },
+        ];
+
+        assign_balanced_splits(&mut candidates);
+
+        let local_induction = candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.corpus.source_family == SourceFamily::LocalFawx
+                    && candidate.corpus.split == CorpusSplit::Induction
+            })
+            .count();
+        let external_induction = candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.corpus.source_family == SourceFamily::ExternalHf
+                    && candidate.corpus.split == CorpusSplit::Induction
+            })
+            .count();
+        assert_eq!(local_induction, 1);
+        assert_eq!(external_induction, 1);
+    }
+
+    #[test]
+    fn distribute_count_spreads_remainder_to_early_buckets() {
+        assert_eq!(distribute_count(10, 4), vec![3, 3, 2, 2]);
+    }
+
+    #[test]
+    fn evenly_spaced_offsets_are_unique_and_bounded() {
+        let offsets = evenly_spaced_offsets(1000, 7);
+        assert_eq!(offsets.len(), 7);
+        assert!(offsets.windows(2).all(|window| window[0] < window[1]));
+        assert!(offsets.iter().all(|offset| *offset < 1000));
+    }
+
+    #[test]
+    fn select_config_for_slice_picks_latest_suffix_match() {
+        let splits = vec![
+            DatasetSplitRef {
+                config: "20231101.es".to_string(),
+                split: "train".to_string(),
+            },
+            DatasetSplitRef {
+                config: "20240101.es".to_string(),
+                split: "train".to_string(),
+            },
+            DatasetSplitRef {
+                config: "20240101.ja".to_string(),
+                split: "train".to_string(),
+            },
+        ];
+
+        let config = select_config_for_slice(
+            "wikimedia/wikipedia",
+            &ExternalConfigSelector::LatestSuffix(".es"),
+            "train",
+            &splits,
+        )
+        .unwrap();
+
+        assert_eq!(config, "20240101.es");
+    }
+
+    #[test]
+    fn external_source_key_prefers_requested_fields() {
+        let row = serde_json::json!({
+            "repo_name": "octocat/demo",
+            "path": "src/main.py",
+            "code": "print('hi')",
+        });
+
+        assert_eq!(
+            external_source_key(&row, &["repo_name", "path"]).as_deref(),
+            Some("octocat/demo::src/main.py")
+        );
+    }
+
     fn fake_record(
         bucket: &str,
         ratio: f64,
@@ -2269,6 +3119,9 @@ mod tests {
         collation_ok: bool,
         byte_fallback_tokens: usize,
         split: CorpusSplit,
+        source_family: SourceFamily,
+        exact_hits: usize,
+        prototype_hits: usize,
     ) -> BakeoffRecord {
         let mut models = BTreeMap::new();
         models.insert(
@@ -2291,7 +3144,7 @@ mod tests {
             corpus: CorpusDocument {
                 id: format!("{bucket}-doc"),
                 bucket: bucket.to_string(),
-                source_family: SourceFamily::LocalFawx,
+                source_family,
                 split,
                 source_path: "/tmp/source".to_string(),
                 start_line: 1,
@@ -2308,8 +3161,8 @@ mod tests {
                 avg_chars_per_frontier_token: 10.0,
                 motif_reuse_count,
                 fallback_motif_hits: 0,
-                fallback_exact_motif_hits: 0,
-                fallback_prototype_hits: 0,
+                fallback_exact_motif_hits: exact_hits,
+                fallback_prototype_hits: prototype_hits,
                 fallback_literal_hits: 0,
                 fallback_shape_hits: 0,
                 fallback_unknown_motifs: 0,
@@ -2338,6 +3191,9 @@ mod tests {
             true,
             0,
             CorpusSplit::Evaluation,
+            SourceFamily::LocalFawx,
+            0,
+            0,
         )];
 
         let verdict = summarize_verdict(&results);
@@ -2357,6 +3213,9 @@ mod tests {
             true,
             0,
             CorpusSplit::Evaluation,
+            SourceFamily::LocalFawx,
+            0,
+            0,
         )];
         let suspicious_nonlogs = vec![
             fake_record(
@@ -2368,6 +3227,9 @@ mod tests {
                 true,
                 0,
                 CorpusSplit::Evaluation,
+                SourceFamily::LocalFawx,
+                0,
+                0,
             ),
             fake_record(
                 "code.rust",
@@ -2378,6 +3240,9 @@ mod tests {
                 true,
                 0,
                 CorpusSplit::Evaluation,
+                SourceFamily::LocalFawx,
+                0,
+                0,
             ),
         ];
 
@@ -2403,6 +3268,9 @@ mod tests {
                 true,
                 0,
                 CorpusSplit::Evaluation,
+                SourceFamily::LocalFawx,
+                0,
+                0,
             ),
             fake_record(
                 "docs.spec",
@@ -2413,6 +3281,9 @@ mod tests {
                 true,
                 0,
                 CorpusSplit::Evaluation,
+                SourceFamily::LocalFawx,
+                0,
+                0,
             ),
         ];
 
@@ -2434,6 +3305,9 @@ mod tests {
                 true,
                 0,
                 CorpusSplit::Evaluation,
+                SourceFamily::LocalFawx,
+                0,
+                0,
             ),
             fake_record(
                 "jsonl.signals",
@@ -2444,6 +3318,9 @@ mod tests {
                 true,
                 0,
                 CorpusSplit::Evaluation,
+                SourceFamily::LocalFawx,
+                0,
+                0,
             ),
             fake_record(
                 "code.rust",
@@ -2454,6 +3331,9 @@ mod tests {
                 true,
                 0,
                 CorpusSplit::Evaluation,
+                SourceFamily::LocalFawx,
+                0,
+                0,
             ),
             fake_record(
                 "docs.spec",
@@ -2464,6 +3344,9 @@ mod tests {
                 true,
                 0,
                 CorpusSplit::Evaluation,
+                SourceFamily::LocalFawx,
+                0,
+                0,
             ),
         ];
 
@@ -2487,6 +3370,9 @@ mod tests {
             true,
             0,
             CorpusSplit::Induction,
+            SourceFamily::LocalFawx,
+            0,
+            0,
         )];
 
         let verdict = summarize_verdict(&results);
@@ -2510,6 +3396,9 @@ mod tests {
                 false,
                 4,
                 CorpusSplit::Induction,
+                SourceFamily::LocalFawx,
+                0,
+                0,
             ),
             fake_record(
                 "logs.repetition_heavy",
@@ -2520,6 +3409,9 @@ mod tests {
                 true,
                 0,
                 CorpusSplit::Evaluation,
+                SourceFamily::LocalFawx,
+                0,
+                0,
             ),
         ];
 
@@ -2530,5 +3422,56 @@ mod tests {
         assert_eq!(verdict.chunk_utf8_failures, 0);
         assert_eq!(verdict.collation_failures, 0);
         assert_eq!(verdict.byte_fallback_docs, 0);
+    }
+
+    #[test]
+    fn verdict_is_yellow_for_hybrid_without_external_structural_hits() {
+        let results = vec![
+            fake_record(
+                "external.code.python",
+                0.9,
+                0,
+                true,
+                true,
+                true,
+                0,
+                CorpusSplit::Evaluation,
+                SourceFamily::ExternalHf,
+                0,
+                0,
+            ),
+            fake_record(
+                "external.code.js_ts",
+                0.95,
+                0,
+                true,
+                true,
+                true,
+                0,
+                CorpusSplit::Evaluation,
+                SourceFamily::ExternalHf,
+                0,
+                0,
+            ),
+            fake_record(
+                "logs.repetition_heavy",
+                8.0,
+                0,
+                true,
+                true,
+                true,
+                0,
+                CorpusSplit::Evaluation,
+                SourceFamily::LocalFawx,
+                0,
+                0,
+            ),
+        ];
+
+        let verdict = summarize_verdict(&results);
+
+        assert_eq!(verdict.verdict, BakeoffVerdict::Yellow);
+        assert_eq!(verdict.external_structural_hit_docs, 0);
+        assert_eq!(verdict.external_code_buckets_below_parity, 2);
     }
 }

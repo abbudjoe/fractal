@@ -330,5 +330,15 @@ document-local or syntax-local motifs without either:
 - collapsing to bytes, or
 - overcollapsing structured text
 
-That is why the best first attempt now is a document-local motif cache, with
-syntax-aware segmentation as the next strongest structural probe.
+The hybrid external truth test sharpens that read:
+
+- hard gates are strong
+- external held-out structural hits are still zero
+- external code remains below parity
+- external prose remains below parity
+
+That means the remaining option space is no longer “more small rescue tweaks.”
+The honest remaining choices are:
+
+- a much larger architecture pivot, or
+- ending this tokenizer line as a robust but non-breakout structural attempt

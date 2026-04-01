@@ -11,6 +11,7 @@ fractal-primitives-private = { path = "../fractal-primitives-private" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokenizers = "0.20"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 [dev-dependencies]
 tiktoken = { package = "tiktoken-rs", version = "^0.5" }
