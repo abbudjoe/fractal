@@ -360,6 +360,25 @@ Decision:
 8. If still weak, primitive comparison pivot
 9. If no primitive breaks out, broader tokenizer-architecture pivot
 
+## Hybrid External Truth Test
+
+Status:
+
+- `Tried`
+
+Outcome:
+
+- hard gates passed
+- external held-out structural hits remained `0`
+- external code buckets stayed below parity
+- external prose stayed below parity
+- runner verdict is now explicitly `YELLOW` for this configuration
+
+Decision:
+
+- do not spend more cycles on narrow tokenizer rescue heuristics
+- treat future work here as architecture pivot work, not another local tweak
+
 ## Promotion Rule
 
 A candidate should only move ahead of the current default if it:

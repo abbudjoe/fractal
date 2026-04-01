@@ -582,3 +582,83 @@ Updated read:
 - the tokenizer has not been rescued on held-out code/docs
 - if we continue inside this architecture, the next move is likely a riskier
   matching-layer experiment rather than another split heuristic
+
+## Hybrid Truth Test Result
+
+We implemented the hybrid bakeoff runner and ran the first full held-out truth
+test with:
+
+- `source_family=local_fawx`
+- `source_family=external_hf`
+- stable baseline:
+  - `primitive=p1_fractal_hybrid_dyn-state-norm_v2`
+  - `substrate=lexical`
+  - `split_policy=boundary-aware`
+  - `identity_mode=legacy`
+  - `prototype_granularity=coarse`
+  - `local_cache=off`
+  - `prototype_neighborhood=off`
+
+External buckets used in practice:
+
+- `external.prose.web`
+  - `HuggingFaceFW/fineweb-edu`
+- `external.code.python`
+  - `codeparrot/github-code-clean` `Python-all`
+- `external.code.js_ts`
+  - `codeparrot/github-code-clean` `JavaScript-all`
+  - `TypeScript-all` was unavailable from the dataset viewer and was skipped
+- `external.multilingual`
+  - `wikimedia/wikipedia`
+  - latest available `es`, `ja`, and `ar` configs
+
+Held-out result:
+
+- `BAKEOFF_DOCUMENTS=240`
+- `BAKEOFF_EVALUATION_DOCUMENTS=117`
+- hard gates all clear:
+  - `roundtrip_failures=0`
+  - `chunk_utf8_failures=0`
+  - `collation_failures=0`
+  - `byte_fallback_docs=0`
+- but structural generalization remained absent:
+  - `exact_motif_hit_docs=0`
+  - `prototype_hit_docs=0`
+  - `external_structural_hit_docs=0`
+  - `lexical_only_docs=26`
+
+Important held-out bucket medians:
+
+- local
+  - `code.rust=0.80`
+  - `code.swift=1.02`
+  - `docs.spec=0.74`
+  - `jsonl.signals=9.21`
+  - `logs.operational_mixed=1.10`
+- external
+  - `external.code.python=0.89`
+  - `external.code.js_ts=0.80`
+  - `external.multilingual=1.08`
+  - `external.prose.web=0.66`
+
+Interpretation:
+
+- the tokenizer is now robust and operationally real
+- the hybrid truth test did not show reusable held-out structural hits on
+  external data
+- external code stayed below parity
+- external prose stayed well below parity
+- the only positive external held-out bucket was multilingual, and only
+  modestly
+
+Updated read:
+
+- the control plane is robust enough for honest evaluation
+- the structural tokenizer thesis did not survive the first external held-out
+  truth test
+- this branch is now on the edge of the kill criterion
+- further local rescue heuristics are very unlikely to change the outcome
+
+See also:
+
+- [recursive-tokenizer-postmortem.md](./recursive-tokenizer-postmortem.md)
