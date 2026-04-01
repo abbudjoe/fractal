@@ -33,10 +33,35 @@ const JSONL_BUCKET_TARGET: usize = 24;
 const CODE_BUCKET_TARGET: usize = 36;
 const DOCS_BUCKET_TARGET: usize = 24;
 const OVERSAMPLE_FACTOR: usize = 2;
+const HELD_OUT_NONLOG_CAUTION_RATIO: f64 = 20.0;
+const HELD_OUT_NONLOG_CAUTION_REUSE: usize = 2;
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum SourceFamily {
+    LocalFawx,
+}
+
+impl SourceFamily {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalFawx => "local_fawx",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum CorpusSplit {
+    Induction,
+    Evaluation,
+}
 
 #[derive(Clone, Debug, Serialize)]
 struct CorpusDocument {
     id: String,
+    source_family: SourceFamily,
+    split: CorpusSplit,
     bucket: String,
     source_path: String,
     start_line: usize,
@@ -124,6 +149,15 @@ impl BakeoffVerdict {
 #[derive(Clone, Debug, PartialEq)]
 struct BucketSummary {
     bucket: String,
+    doc_count: usize,
+    median_best_ratio: f64,
+    median_motif_reuse: f64,
+    byte_fallback_docs: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct FamilySummary {
+    source_family: SourceFamily,
     doc_count: usize,
     median_best_ratio: f64,
     median_motif_reuse: f64,
@@ -267,7 +301,39 @@ fn build_corpus(args: &Args) -> Result<Vec<CorpusCandidate>, Box<dyn Error>> {
         .into());
     }
 
+    assign_local_splits(&mut deduped);
     Ok(deduped)
+}
+
+fn assign_local_splits(candidates: &mut [CorpusCandidate]) {
+    let mut per_bucket = BTreeMap::<String, BTreeMap<String, Vec<usize>>>::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        per_bucket
+            .entry(candidate.corpus.bucket.clone())
+            .or_default()
+            .entry(candidate.corpus.source_path.clone())
+            .or_default()
+            .push(index);
+    }
+
+    for source_groups in per_bucket.into_values() {
+        let mut induction_docs = 0usize;
+        let mut evaluation_docs = 0usize;
+
+        for indices in source_groups.into_values() {
+            let split = if induction_docs <= evaluation_docs {
+                induction_docs += indices.len();
+                CorpusSplit::Induction
+            } else {
+                evaluation_docs += indices.len();
+                CorpusSplit::Evaluation
+            };
+
+            for index in indices {
+                candidates[index].corpus.split = split;
+            }
+        }
+    }
 }
 
 fn collect_log_candidates(home_state_root: &Path) -> Result<Vec<CorpusCandidate>, Box<dyn Error>> {
@@ -497,9 +563,9 @@ fn line_window_documents(
         let end = (start + window_lines).min(lines.len());
         let slice = lines[start..end].join("");
         docs.push(CorpusCandidate {
-            corpus: build_corpus_document(
-                format!(
-                    "{}-{}-{:016x}-{:04}",
+        corpus: build_corpus_document(
+            format!(
+                "{}-{}-{:016x}-{:04}",
                     prefix,
                     source_path
                         .file_stem()
@@ -507,11 +573,13 @@ fn line_window_documents(
                         .unwrap_or("source"),
                     fnv1a64(&source_path.to_string_lossy()),
                     window_index
-                ),
-                bucket.to_string(),
-                source_path.to_string_lossy().to_string(),
-                start + 1,
-                end,
+            ),
+            bucket.to_string(),
+            SourceFamily::LocalFawx,
+            CorpusSplit::Induction,
+            source_path.to_string_lossy().to_string(),
+            start + 1,
+            end,
                 slice,
             ),
         });
@@ -540,6 +608,8 @@ fn whole_file_candidate(
                 fnv1a64(&source_path.to_string_lossy())
             ),
             bucket.to_string(),
+            SourceFamily::LocalFawx,
+            CorpusSplit::Induction,
             source_path.to_string_lossy().to_string(),
             1,
             line_count(text),
@@ -566,6 +636,8 @@ fn prefix_file_document(
                 fnv1a64(&source_path.to_string_lossy())
             ),
             bucket.to_string(),
+            SourceFamily::LocalFawx,
+            CorpusSplit::Induction,
             source_path.to_string_lossy().to_string(),
             1,
             end_line,
@@ -577,6 +649,8 @@ fn prefix_file_document(
 fn build_corpus_document(
     id: String,
     bucket: String,
+    source_family: SourceFamily,
+    split: CorpusSplit,
     source_path: String,
     start_line: usize,
     end_line: usize,
@@ -587,6 +661,8 @@ fn build_corpus_document(
     CorpusDocument {
         id,
         bucket,
+        source_family,
+        split,
         source_path,
         start_line,
         end_line,
@@ -668,8 +744,12 @@ fn build_fractal_documents(
     let tokenizer = FaceoffTokenizer::new(Default::default());
     let texts = corpus
         .iter()
+        .filter(|candidate| candidate.corpus.split == CorpusSplit::Induction)
         .map(|candidate| candidate.corpus.text.as_str())
         .collect::<Vec<_>>();
+    if texts.is_empty() {
+        return Err("local bakeoff needs at least one induction document".into());
+    }
     let vocab = tokenizer.induce_vocab_from_texts::<Backend>(&texts, &device)?;
     let limits = FaceoffChunkLimits::new(DEFAULT_CHUNK_LIMIT_TOKENS, DEFAULT_CHUNK_LIMIT_BYTES);
     let mut works = Vec::with_capacity(corpus.len());
@@ -883,37 +963,61 @@ fn merge_results(
 
 fn print_summary(results: &[BakeoffRecord], vocab: &FaceoffVocab, args: &Args) {
     let total_docs = results.len();
+    let induction_docs = results
+        .iter()
+        .filter(|record| record.corpus.split == CorpusSplit::Induction)
+        .count();
+    let held_out = held_out_records(results);
     let total_chars: usize = results.iter().map(|record| record.corpus.char_len).sum();
     let total_bytes: usize = results.iter().map(|record| record.corpus.byte_len).sum();
     let total_frontier: usize = results
         .iter()
         .map(|record| record.fractal.frontier_token_count)
         .sum();
+    let held_out_frontier: usize = held_out
+        .iter()
+        .map(|record| record.fractal.frontier_token_count)
+        .sum();
 
     println!("BAKEOFF_DOCUMENTS={total_docs}");
+    println!("BAKEOFF_INDUCTION_DOCUMENTS={induction_docs}");
+    println!("BAKEOFF_EVALUATION_DOCUMENTS={}", held_out.len());
     println!("BAKEOFF_CORPUS_BYTES={total_bytes}");
     println!("BAKEOFF_CORPUS_CHARS={total_chars}");
     println!("BAKEOFF_FRONTIER_TOKENS={total_frontier}");
+    println!("BAKEOFF_EVALUATION_FRONTIER_TOKENS={held_out_frontier}");
     println!("BAKEOFF_VOCAB_MOTIFS={}", vocab.motif_count());
     println!("BAKEOFF_OUTPUT_DIR={}", args.output_dir.display());
+    println!("BAKEOFF_VERDICT_SCOPE=evaluation");
 
     let verdict = summarize_verdict(results);
     println!(
-        "BAKEOFF_HARD_GATES roundtrip_failures={} chunk_utf8_failures={} collation_failures={} byte_fallback_docs={}",
+        "BAKEOFF_HARD_GATES split=evaluation roundtrip_failures={} chunk_utf8_failures={} collation_failures={} byte_fallback_docs={}",
         verdict.roundtrip_failures,
         verdict.chunk_utf8_failures,
         verdict.collation_failures,
         verdict.byte_fallback_docs
     );
     println!(
-        "BAKEOFF_HEURISTICS suspicious_nonlog_overcollapse_docs={} weak_log_buckets={}",
+        "BAKEOFF_HEURISTICS split=evaluation suspicious_nonlog_overcollapse_docs={} weak_log_buckets={}",
         verdict.suspicious_nonlog_overcollapse_docs,
         verdict.weak_log_buckets
     );
 
+    for family in summarize_families(results) {
+        println!(
+            "FAMILY_SUMMARY split=evaluation source_family={} docs={} median_best_ratio={:.2} median_motif_reuse={:.2} byte_fallback_docs={}",
+            family.source_family.as_str(),
+            family.doc_count,
+            family.median_best_ratio,
+            family.median_motif_reuse,
+            family.byte_fallback_docs
+        );
+    }
+
     for bucket in summarize_buckets(results) {
         println!(
-            "BUCKET_SUMMARY bucket={} docs={} median_best_ratio={:.2} median_motif_reuse={:.2} byte_fallback_docs={}",
+            "BUCKET_SUMMARY split=evaluation bucket={} docs={} median_best_ratio={:.2} median_motif_reuse={:.2} byte_fallback_docs={}",
             bucket.bucket,
             bucket.doc_count,
             bucket.median_best_ratio,
@@ -923,7 +1027,7 @@ fn print_summary(results: &[BakeoffRecord], vocab: &FaceoffVocab, args: &Args) {
     }
 
     let mut model_totals: BTreeMap<&str, (usize, usize, usize)> = BTreeMap::new();
-    for record in results {
+    for record in &held_out {
         for (label, metric) in &record.models {
             let entry = model_totals.entry(label.as_str()).or_insert((0, 0, 0));
             if metric.status == "ok" {
@@ -936,7 +1040,7 @@ fn print_summary(results: &[BakeoffRecord], vocab: &FaceoffVocab, args: &Args) {
 
     for (label, (native_tokens, chars, count)) in model_totals {
         println!(
-            "MODEL_SUMMARY label={label} docs={count} native_tokens={native_tokens} avg_chars_per_native_token={:.2}",
+            "MODEL_SUMMARY split=evaluation label={label} docs={count} native_tokens={native_tokens} avg_chars_per_native_token={:.2}",
             chars as f64 / native_tokens.max(1) as f64
         );
     }
@@ -948,7 +1052,8 @@ fn print_summary(results: &[BakeoffRecord], vocab: &FaceoffVocab, args: &Args) {
 }
 
 fn print_review_list(results: &[BakeoffRecord], args: &Args) {
-    let mut review = results
+    let held_out = held_out_records(results);
+    let mut review = held_out
         .iter()
         .map(|record| {
             let best_ratio = record
@@ -975,7 +1080,7 @@ fn print_review_list(results: &[BakeoffRecord], args: &Args) {
     });
 
     println!(
-        "BAKEOFF_REVIEW_SET={}",
+        "BAKEOFF_REVIEW_SET split=evaluation count={}",
         args.max_review_count.min(review.len())
     );
     for (ratio, id, bucket, motif_reuse, roundtrip_ok, chunk_utf8_ok, collation_ok) in
@@ -987,9 +1092,18 @@ fn print_review_list(results: &[BakeoffRecord], args: &Args) {
     }
 }
 
+fn held_out_records(results: &[BakeoffRecord]) -> Vec<BakeoffRecord> {
+    results
+        .iter()
+        .filter(|record| record.corpus.split == CorpusSplit::Evaluation)
+        .cloned()
+        .collect()
+}
+
 fn summarize_buckets(results: &[BakeoffRecord]) -> Vec<BucketSummary> {
+    let results = held_out_records(results);
     let mut per_bucket = BTreeMap::<String, Vec<&BakeoffRecord>>::new();
-    for record in results {
+    for record in &results {
         per_bucket
             .entry(record.corpus.bucket.clone())
             .or_default()
@@ -1024,7 +1138,46 @@ fn summarize_buckets(results: &[BakeoffRecord]) -> Vec<BucketSummary> {
         .collect()
 }
 
+fn summarize_families(results: &[BakeoffRecord]) -> Vec<FamilySummary> {
+    let results = held_out_records(results);
+    let mut per_family = BTreeMap::<SourceFamily, Vec<&BakeoffRecord>>::new();
+    for record in &results {
+        per_family
+            .entry(record.corpus.source_family)
+            .or_default()
+            .push(record);
+    }
+
+    per_family
+        .into_iter()
+        .map(|(source_family, records)| {
+            let mut ratios = records
+                .iter()
+                .filter_map(|record| best_ratio(record))
+                .collect::<Vec<_>>();
+            let mut reuses = records
+                .iter()
+                .map(|record| record.fractal.motif_reuse_count as f64)
+                .collect::<Vec<_>>();
+            ratios.sort_by(|left, right| left.partial_cmp(right).unwrap());
+            reuses.sort_by(|left, right| left.partial_cmp(right).unwrap());
+
+            FamilySummary {
+                source_family,
+                doc_count: records.len(),
+                median_best_ratio: median_sorted(&ratios),
+                median_motif_reuse: median_sorted(&reuses),
+                byte_fallback_docs: records
+                    .iter()
+                    .filter(|record| record.fractal.fallback_byte_fallback_tokens > 0)
+                    .count(),
+            }
+        })
+        .collect()
+}
+
 fn summarize_verdict(results: &[BakeoffRecord]) -> VerdictSummary {
+    let results = held_out_records(results);
     let roundtrip_failures = results
         .iter()
         .filter(|record| !record.fractal.roundtrip_ok)
@@ -1045,12 +1198,14 @@ fn summarize_verdict(results: &[BakeoffRecord]) -> VerdictSummary {
         .iter()
         .filter(|record| {
             !record.corpus.bucket.starts_with("logs.")
-                && record.fractal.motif_reuse_count > 2
-                && best_ratio(record).map(|ratio| ratio > 5.0).unwrap_or(false)
+                && (record.fractal.motif_reuse_count > HELD_OUT_NONLOG_CAUTION_REUSE
+                    || best_ratio(record)
+                        .map(|ratio| ratio > HELD_OUT_NONLOG_CAUTION_RATIO)
+                        .unwrap_or(false))
         })
         .count();
 
-    let bucket_summaries = summarize_buckets(results);
+    let bucket_summaries = summarize_buckets(&results);
     let weak_log_buckets = bucket_summaries
         .iter()
         .filter(|bucket| {
@@ -1195,6 +1350,8 @@ mod tests {
             corpus: build_corpus_document(
                 format!("{label}-{idx}"),
                 label.to_string(),
+                SourceFamily::LocalFawx,
+                CorpusSplit::Induction,
                 "/tmp/source".to_string(),
                 1,
                 1,
@@ -1243,6 +1400,15 @@ mod tests {
         assert!(docs[1].corpus.text.starts_with("line-3"));
     }
 
+    #[test]
+    fn split_for_source_path_is_stable_for_same_file() {
+        let path = Path::new("/tmp/fawx/server.log");
+        let first = split_for_source_path(path);
+        let second = split_for_source_path(path);
+
+        assert_eq!(first, second);
+    }
+
     fn fake_record(
         bucket: &str,
         ratio: f64,
@@ -1251,6 +1417,7 @@ mod tests {
         chunk_utf8_ok: bool,
         collation_ok: bool,
         byte_fallback_tokens: usize,
+        split: CorpusSplit,
     ) -> BakeoffRecord {
         let mut models = BTreeMap::new();
         models.insert(
@@ -1273,6 +1440,8 @@ mod tests {
             corpus: CorpusDocument {
                 id: format!("{bucket}-doc"),
                 bucket: bucket.to_string(),
+                source_family: SourceFamily::LocalFawx,
+                split,
                 source_path: "/tmp/source".to_string(),
                 start_line: 1,
                 end_line: 1,
@@ -1310,6 +1479,7 @@ mod tests {
             true,
             true,
             0,
+            CorpusSplit::Evaluation,
         )];
 
         let verdict = summarize_verdict(&results);
@@ -1328,10 +1498,29 @@ mod tests {
             true,
             true,
             0,
+            CorpusSplit::Evaluation,
         )];
         let suspicious_nonlogs = vec![
-            fake_record("logs.repetition_heavy", 8.0, 3, true, true, true, 0),
-            fake_record("code.rust", 6.0, 4, true, true, true, 0),
+            fake_record(
+                "logs.repetition_heavy",
+                8.0,
+                3,
+                true,
+                true,
+                true,
+                0,
+                CorpusSplit::Evaluation,
+            ),
+            fake_record(
+                "code.rust",
+                6.0,
+                4,
+                true,
+                true,
+                true,
+                0,
+                CorpusSplit::Evaluation,
+            ),
         ];
 
         assert_eq!(summarize_verdict(&weak_logs).verdict, BakeoffVerdict::Yellow);
@@ -1344,15 +1533,85 @@ mod tests {
     #[test]
     fn verdict_is_green_for_healthy_selective_run() {
         let results = vec![
-            fake_record("logs.repetition_heavy", 8.0, 3, true, true, true, 0),
-            fake_record("jsonl.signals", 2.0, 1, true, true, true, 0),
-            fake_record("code.rust", 1.8, 0, true, true, true, 0),
-            fake_record("docs.spec", 1.6, 0, true, true, true, 0),
+            fake_record(
+                "logs.repetition_heavy",
+                8.0,
+                3,
+                true,
+                true,
+                true,
+                0,
+                CorpusSplit::Evaluation,
+            ),
+            fake_record(
+                "jsonl.signals",
+                2.0,
+                1,
+                true,
+                true,
+                true,
+                0,
+                CorpusSplit::Evaluation,
+            ),
+            fake_record(
+                "code.rust",
+                1.8,
+                0,
+                true,
+                true,
+                true,
+                0,
+                CorpusSplit::Evaluation,
+            ),
+            fake_record(
+                "docs.spec",
+                1.6,
+                0,
+                true,
+                true,
+                true,
+                0,
+                CorpusSplit::Evaluation,
+            ),
         ];
 
         let verdict = summarize_verdict(&results);
 
         assert_eq!(verdict.verdict, BakeoffVerdict::Green);
         assert!(verdict.reasons.iter().any(|reason| reason == "hard_gates_clear"));
+    }
+
+    #[test]
+    fn verdict_ignores_induction_docs_when_evaluation_is_clean() {
+        let results = vec![
+            fake_record(
+                "logs.repetition_heavy",
+                1.0,
+                6,
+                false,
+                false,
+                false,
+                4,
+                CorpusSplit::Induction,
+            ),
+            fake_record(
+                "logs.repetition_heavy",
+                8.0,
+                1,
+                true,
+                true,
+                true,
+                0,
+                CorpusSplit::Evaluation,
+            ),
+        ];
+
+        let verdict = summarize_verdict(&results);
+
+        assert_eq!(verdict.verdict, BakeoffVerdict::Green);
+        assert_eq!(verdict.roundtrip_failures, 0);
+        assert_eq!(verdict.chunk_utf8_failures, 0);
+        assert_eq!(verdict.collation_failures, 0);
+        assert_eq!(verdict.byte_fallback_docs, 0);
     }
 }
