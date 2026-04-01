@@ -5,3 +5,16 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+burn = { workspace = true }
+fractal-core = { path = "../fractal-core" }
+fractal-primitives-private = { path = "../fractal-primitives-private" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokenizers = "0.20"
+
+[dev-dependencies]
+tiktoken = { package = "tiktoken-rs", version = "^0.5" }
+tokio = { version = "1.50", features = ["process", "rt"] }
+
+[target.'cfg(not(target_os = "macos"))'.dev-dependencies]
+llama-cpp-rs = { package = "llama_cpp_rs", version = "0.3.0" }

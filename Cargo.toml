@@ -36,7 +36,9 @@ rand = "0.8"
 burn-candle = { path = "vendor/burn-candle" }
 
 [dependencies]
+burn = { workspace = true }
 fractal-core = { path = "fractal-core" }
+fractal-tokenizer = { path = "fractal-tokenizer" }
 fractal-primitives-private = { path = "fractal-primitives-private" }
 fractal-eval-private = { path = "fractal-eval-private" }
 serde = { version = "1", features = ["derive"] }

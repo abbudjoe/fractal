@@ -14,20 +14,22 @@ pub use data_generator::{
 };
 pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
 pub use lifecycle::{
-    ArtifactPolicy, BatchingPolicy, BudgetSpec, BufferReusePolicy, ComparisonAuthority,
-    ComparisonContract, DecisionIntent, EvalBackendPolicy, ExecutionBackend, ExecutionTarget,
-    ExecutionTargetKind, ExperimentId, ExperimentQuestion, ExperimentSpec, ExperimentSpecTemplate,
-    ForwardExecutionPolicy, LaneIntent, LearningRateScheduleKind, LearningRateScheduleSpec,
-    OptimizerKind, OptimizerSpec, PhaseTiming, RunExecutionOutcome, RunManifest, RunOutcomeClass,
-    RunPhase, RunQualityOutcome, RuntimeBackendPolicy, RuntimeSurfaceSpec, SpeciesCompletion,
-    SpeciesRunArtifact, SpeciesRunStage, Tournament, TournamentConfig, TournamentPreset,
+    ArcSourceMode, ArcSourceSpec, ArtifactPolicy, BatchingPolicy, BudgetSpec, BufferReusePolicy,
+    ComparisonAuthority, ComparisonContract, DecisionIntent, EvalBackendPolicy, ExecutionBackend,
+    ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion, ExperimentSpec,
+    ExperimentSpecTemplate, ForwardExecutionPolicy, LaneIntent, LearningRateScheduleKind,
+    LearningRateScheduleSpec, OptimizerKind, OptimizerSpec, PhaseTiming, RunExecutionOutcome,
+    RunManifest, RunOutcomeClass, RunPhase, RunQualityOutcome, RuntimeBackendPolicy,
+    RuntimeSurfaceSpec, SpeciesCompletion, SpeciesRunArtifact, SpeciesRunStage,
+    TokenizerArtifactSpec, TokenizerBridgeSpec, Tournament, TournamentConfig, TournamentPreset,
     TournamentProgressEvent, TournamentReporter, TournamentRunArtifact, TournamentSequence,
-    VariantSpec,
+    TrainingInputMode, TrainingInputSpec, VariantSpec,
 };
 pub use model::FractalModel;
 pub use registry::{
-    is_valid_primitive_variant_name, ComputeBackend, CpuBackend, CpuTrainBackend, ExecutionMode,
-    MetalBackend, MetalTrainBackend, PrimitiveVariantName, SpeciesDefinition, SpeciesId,
+    is_valid_primitive_variant_name, run_species_with_batches, ComputeBackend, CpuBackend,
+    CpuTrainBackend, ExecutionMode, MetalBackend, MetalTrainBackend, PrimitiveVariantName,
+    SpeciesDefinition, SpeciesId, TrainingBatchSet,
 };
 pub use router::EarlyExitRouter;
 pub use state::{FractalState, StateLayout};

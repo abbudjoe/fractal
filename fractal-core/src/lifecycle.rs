@@ -9,7 +9,7 @@ use std::{
 use crate::{
     data_generator::{
         GeneratorConfig, GeneratorDepthConfig, SimpleHierarchicalGenerator, MIN_SEQUENCE_LEN,
-        MIN_VOCAB_SIZE,
+        MIN_VOCAB_SIZE, PAD_TOKEN,
     },
     error::FractalError,
     fitness::SpeciesRawMetrics,
@@ -237,6 +237,21 @@ impl OptimizerKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrainingInputMode {
+    Synthetic,
+    TokenizerBackedText,
+}
+
+impl TrainingInputMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Synthetic => "synthetic",
+            Self::TokenizerBackedText => "tokenizer-backed-text",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LearningRateScheduleKind {
     Constant,
     WarmupCosine,
@@ -247,6 +262,23 @@ impl LearningRateScheduleKind {
         match self {
             Self::Constant => "constant",
             Self::WarmupCosine => "warmup-cosine",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArcSourceMode {
+    SyntheticCanonical,
+    TokenizerBackedCanonical,
+    Unavailable,
+}
+
+impl ArcSourceMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SyntheticCanonical => "synthetic-canonical",
+            Self::TokenizerBackedCanonical => "tokenizer-backed-canonical",
+            Self::Unavailable => "unavailable",
         }
     }
 }
@@ -440,6 +472,230 @@ impl OptimizerSpec {
         }
         self.schedule.validate()?;
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArcSourceSpec {
+    pub mode: ArcSourceMode,
+}
+
+impl ArcSourceSpec {
+    pub const fn synthetic_canonical() -> Self {
+        Self {
+            mode: ArcSourceMode::SyntheticCanonical,
+        }
+    }
+
+    pub const fn tokenizer_backed_canonical() -> Self {
+        Self {
+            mode: ArcSourceMode::TokenizerBackedCanonical,
+        }
+    }
+
+    pub const fn unavailable() -> Self {
+        Self {
+            mode: ArcSourceMode::Unavailable,
+        }
+    }
+
+    pub fn validate(&self, training_input_mode: TrainingInputMode) -> Result<(), FractalError> {
+        match training_input_mode {
+            TrainingInputMode::Synthetic => Ok(()),
+            TrainingInputMode::TokenizerBackedText => match self.mode {
+                ArcSourceMode::SyntheticCanonical => Ok(()),
+                ArcSourceMode::TokenizerBackedCanonical => Err(FractalError::InvalidConfig(
+                    "tokenizer-backed Stage 0 cannot yet map canonical ARC from text batches"
+                        .into(),
+                )),
+                ArcSourceMode::Unavailable => Err(FractalError::InvalidConfig(
+                    "tokenizer-backed Stage 0 must declare an explicit canonical ARC source".into(),
+                )),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenizerArtifactSpec {
+    pub artifact_id: String,
+    pub artifact_path: Option<String>,
+    pub vocab_size: usize,
+    pub pad_token_id: usize,
+}
+
+impl TokenizerArtifactSpec {
+    pub fn validate(&self) -> Result<(), FractalError> {
+        if self.artifact_id.trim().is_empty() {
+            return Err(FractalError::InvalidConfig(
+                "tokenizer artifact_id must be non-empty".into(),
+            ));
+        }
+        if self.vocab_size == 0 {
+            return Err(FractalError::InvalidConfig(
+                "tokenizer vocab_size must be greater than zero".into(),
+            ));
+        }
+        if self.pad_token_id >= self.vocab_size {
+            return Err(FractalError::InvalidConfig(format!(
+                "tokenizer pad_token_id {} must be less than vocab_size {}",
+                self.pad_token_id, self.vocab_size
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn validate_against_model(
+        &self,
+        model_vocab_size: usize,
+        model_pad_token_id: usize,
+    ) -> Result<(), FractalError> {
+        self.validate()?;
+        if self.vocab_size != model_vocab_size {
+            return Err(FractalError::InvalidConfig(format!(
+                "tokenizer vocab_size {} must match model vocab_size {}",
+                self.vocab_size, model_vocab_size
+            )));
+        }
+        if self.pad_token_id != model_pad_token_id {
+            return Err(FractalError::InvalidConfig(format!(
+                "tokenizer pad_token_id {} must match model pad_token_id {}",
+                self.pad_token_id, model_pad_token_id
+            )));
+        }
+        if self.pad_token_id != PAD_TOKEN {
+            return Err(FractalError::InvalidConfig(format!(
+                "tokenizer pad_token_id {} must match canonical PAD_TOKEN {}",
+                self.pad_token_id, PAD_TOKEN
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TokenizerBridgeSpec {
+    pub enabled: bool,
+    pub observational_only: bool,
+}
+
+impl TokenizerBridgeSpec {
+    pub const fn disabled() -> Self {
+        Self {
+            enabled: false,
+            observational_only: false,
+        }
+    }
+
+    pub const fn observational_only() -> Self {
+        Self {
+            enabled: true,
+            observational_only: true,
+        }
+    }
+
+    pub fn validate(&self, mode: TrainingInputMode) -> Result<(), FractalError> {
+        match mode {
+            TrainingInputMode::Synthetic => Ok(()),
+            TrainingInputMode::TokenizerBackedText => {
+                if !self.enabled {
+                    return Err(FractalError::InvalidConfig(
+                        "tokenizer-backed text training requires the tokenizer bridge to be enabled"
+                            .into(),
+                    ));
+                }
+                if !self.observational_only {
+                    return Err(FractalError::InvalidConfig(
+                        "Stage 0 tokenizer bridge must remain observational only".into(),
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrainingInputSpec {
+    pub mode: TrainingInputMode,
+    pub corpus_name: Option<String>,
+    pub tokenizer: Option<TokenizerArtifactSpec>,
+    pub bridge: TokenizerBridgeSpec,
+    pub arc_source: ArcSourceSpec,
+}
+
+impl TrainingInputSpec {
+    pub fn synthetic() -> Self {
+        Self {
+            mode: TrainingInputMode::Synthetic,
+            corpus_name: None,
+            tokenizer: None,
+            bridge: TokenizerBridgeSpec::disabled(),
+            arc_source: ArcSourceSpec::synthetic_canonical(),
+        }
+    }
+
+    pub fn tokenizer_backed_text(
+        corpus_name: impl Into<String>,
+        tokenizer: TokenizerArtifactSpec,
+    ) -> Self {
+        Self {
+            mode: TrainingInputMode::TokenizerBackedText,
+            corpus_name: Some(corpus_name.into()),
+            tokenizer: Some(tokenizer),
+            bridge: TokenizerBridgeSpec::observational_only(),
+            arc_source: ArcSourceSpec::synthetic_canonical(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        self.bridge.validate(self.mode)?;
+        self.arc_source.validate(self.mode)?;
+        match self.mode {
+            TrainingInputMode::Synthetic => {
+                if self.corpus_name.is_some() || self.tokenizer.is_some() {
+                    return Err(FractalError::InvalidConfig(
+                        "synthetic training input must not carry tokenizer corpus metadata".into(),
+                    ));
+                }
+                Ok(())
+            }
+            TrainingInputMode::TokenizerBackedText => {
+                let corpus_name = self.corpus_name.as_ref().ok_or_else(|| {
+                    FractalError::InvalidConfig(
+                        "tokenizer-backed text training requires a corpus name".into(),
+                    )
+                })?;
+                if corpus_name.trim().is_empty() {
+                    return Err(FractalError::InvalidConfig(
+                        "tokenizer-backed text corpus name must be non-empty".into(),
+                    ));
+                }
+                let tokenizer = self.tokenizer.as_ref().ok_or_else(|| {
+                    FractalError::InvalidConfig(
+                        "tokenizer-backed text training requires tokenizer artifact metadata"
+                            .into(),
+                    )
+                })?;
+                tokenizer.validate()
+            }
+        }
+    }
+
+    pub fn validate_against_config(&self, config: &TournamentConfig) -> Result<(), FractalError> {
+        self.validate()?;
+        match self.mode {
+            TrainingInputMode::Synthetic => Ok(()),
+            TrainingInputMode::TokenizerBackedText => {
+                let tokenizer = self.tokenizer.as_ref().ok_or_else(|| {
+                    FractalError::InvalidConfig(
+                        "tokenizer-backed text training requires tokenizer artifact metadata"
+                            .into(),
+                    )
+                })?;
+                tokenizer.validate_against_model(config.vocab_size, PAD_TOKEN)
+            }
+        }
     }
 }
 
@@ -694,6 +950,7 @@ pub struct ExperimentSpec {
     pub experiment_id: ExperimentId,
     pub question: ExperimentQuestion,
     pub variant: VariantSpec,
+    pub training_input: TrainingInputSpec,
     pub budget: BudgetSpec,
     pub optimizer: OptimizerSpec,
     pub runtime: RuntimeSurfaceSpec,
@@ -708,6 +965,7 @@ pub struct ExperimentSpecTemplate {
     pub question: ExperimentQuestion,
     pub budget: BudgetSpec,
     pub optimizer: OptimizerSpec,
+    pub training_input: TrainingInputSpec,
     pub runtime: RuntimeSurfaceSpec,
     pub comparison: ComparisonContract,
     pub execution: ExecutionTarget,
@@ -727,6 +985,7 @@ impl ExperimentSpecTemplate {
                 species,
                 variant_name,
             },
+            training_input: self.training_input.clone(),
             budget: self.budget.clone(),
             optimizer: self.optimizer.clone(),
             runtime: self.runtime.clone(),
@@ -736,12 +995,13 @@ impl ExperimentSpecTemplate {
         }
     }
 
-    fn validate_against_config(&self, config: &TournamentConfig) -> Result<(), FractalError> {
+    pub fn validate_against_config(&self, config: &TournamentConfig) -> Result<(), FractalError> {
         if !self.budget.matches_config(config) {
             return Err(FractalError::InvalidConfig(
                 "experiment budget must match the resolved tournament config".into(),
             ));
         }
+        self.training_input.validate_against_config(config)?;
         if !self.execution.matches_config(config) {
             return Err(FractalError::InvalidConfig(
                 "experiment execution target must match the resolved tournament config".into(),

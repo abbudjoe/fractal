@@ -469,11 +469,21 @@ pub fn take_last_species_run_artifact() -> Option<SpeciesRunArtifact> {
     LAST_SPECIES_RUN_ARTIFACT.with(|slot| slot.borrow_mut().take())
 }
 
-struct RunBatches<B: AutodiffBackend> {
-    train_sentence: Vec<TokenBatch<B>>,
-    train_arc: Vec<TokenBatch<B>>,
-    eval_sentence: Vec<TokenBatch<B>>,
-    eval_arc: Vec<TokenBatch<B>>,
+#[derive(Clone, Debug)]
+pub struct TrainingBatchSet<B: AutodiffBackend> {
+    pub train_sentence: Vec<TokenBatch<B>>,
+    pub train_arc: Option<Vec<TokenBatch<B>>>,
+    pub eval_sentence: Vec<TokenBatch<B>>,
+    pub eval_arc: Vec<TokenBatch<B>>,
+}
+
+impl<B: AutodiffBackend> TrainingBatchSet<B> {
+    pub fn train_batches_for_step(&self, step: usize) -> &[TokenBatch<B>] {
+        match (&self.train_arc, step % 2) {
+            (Some(train_arc), 1) => train_arc,
+            _ => &self.train_sentence,
+        }
+    }
 }
 
 fn record_species_run_artifact(artifact: SpeciesRunArtifact) {
@@ -572,14 +582,14 @@ fn timeout_outcome_for_phase(phase: RunPhase) -> RunExecutionOutcome {
     }
 }
 
-fn run_species_with_batches<B, R>(
+pub fn run_species_with_batches<B, R>(
     species: SpeciesId,
     variant_name: PrimitiveVariantName,
     config: TournamentConfig,
     experiment: Option<ExperimentSpec>,
     device: B::Device,
     rule: R,
-    batches: RunBatches<B>,
+    batches: TrainingBatchSet<B>,
 ) -> Result<SpeciesRawMetrics, FractalError>
 where
     B: AutodiffBackend,
@@ -657,11 +667,7 @@ where
                 ));
             }
         }
-        let train_batches = if step % 2 == 0 {
-            &batches.train_sentence
-        } else {
-            &batches.train_arc
-        };
+        let train_batches = batches.train_batches_for_step(step);
         if train_batches.is_empty() {
             phase_timings.push(phase_timing(
                 RunPhase::Train,
@@ -971,18 +977,18 @@ fn prepare_batches_for_run<B: AutodiffBackend>(
     generator: &SimpleHierarchicalGenerator,
     config: &TournamentConfig,
     device: &B::Device,
-) -> Result<RunBatches<B>, FractalError> {
-    Ok(RunBatches {
+) -> Result<TrainingBatchSet<B>, FractalError> {
+    Ok(TrainingBatchSet {
         train_sentence: generator.train_batches_for::<B>(
             TaskFamily::RecursiveSentence,
             config.train_batch_size,
             device,
         )?,
-        train_arc: generator.train_batches_for::<B>(
+        train_arc: Some(generator.train_batches_for::<B>(
             TaskFamily::ArcGrid,
             config.train_batch_size,
             device,
-        )?,
+        )?),
         eval_sentence: generator.eval_batches_for::<B>(
             TaskFamily::RecursiveSentence,
             config.eval_batch_size,
@@ -1002,7 +1008,7 @@ fn prepare_candle_batches_for_run(
     generator: &SimpleHierarchicalGenerator,
     config: &TournamentConfig,
     device: &CandleDevice,
-) -> Result<RunBatches<CpuTrainBackend>, FractalError> {
+) -> Result<TrainingBatchSet<CpuTrainBackend>, FractalError> {
     let staging_device = CandleDevice::Cpu;
     let move_batches = |batches: Vec<TokenBatch<CpuTrainBackend>>| {
         batches
@@ -1011,17 +1017,19 @@ fn prepare_candle_batches_for_run(
             .collect::<Vec<_>>()
     };
 
-    Ok(RunBatches {
+    Ok(TrainingBatchSet {
         train_sentence: move_batches(generator.train_batches_for::<CpuTrainBackend>(
             TaskFamily::RecursiveSentence,
             config.train_batch_size,
             &staging_device,
         )?),
-        train_arc: move_batches(generator.train_batches_for::<CpuTrainBackend>(
-            TaskFamily::ArcGrid,
-            config.train_batch_size,
-            &staging_device,
-        )?),
+        train_arc: Some(move_batches(
+            generator.train_batches_for::<CpuTrainBackend>(
+                TaskFamily::ArcGrid,
+                config.train_batch_size,
+                &staging_device,
+            )?,
+        )),
         eval_sentence: move_batches(generator.eval_batches_for::<CpuTrainBackend>(
             TaskFamily::RecursiveSentence,
             config.eval_batch_size,
@@ -1217,18 +1225,18 @@ pub(crate) fn clip_gradients_global_norm<M, B>(
     module.visit(&mut scaler);
 }
 
-fn training_token_budget<B: AutodiffBackend>(batches: &RunBatches<B>, train_steps: usize) -> usize {
+fn training_token_budget<B: AutodiffBackend>(
+    batches: &TrainingBatchSet<B>,
+    train_steps: usize,
+) -> usize {
     if train_steps == 0 {
         return 0;
     }
 
     (0..train_steps)
         .map(|step| {
-            let batch = if step % 2 == 0 {
-                &batches.train_sentence[step % batches.train_sentence.len()]
-            } else {
-                &batches.train_arc[step % batches.train_arc.len()]
-            };
+            let train_batches = batches.train_batches_for_step(step);
+            let batch = &train_batches[step % train_batches.len()];
             batch.token_count
         })
         .sum()
