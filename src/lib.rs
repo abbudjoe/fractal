@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 mod primitive_tracker;
 mod run_artifacts;
+mod tokenizer_training;
 
 pub use fractal_core::*;
 pub use fractal_eval_private::{aggregate_results, perplexity_score, speed_score, stability_score};
@@ -13,6 +14,9 @@ pub use fractal_primitives_private::{
 };
 pub use primitive_tracker::{primitive_tracker_reminder_lines, TRACKER_PATH};
 pub use run_artifacts::{persist_run_artifacts, PersistedRunPaths};
+pub use tokenizer_training::{
+    TokenizerBridgeStats, TokenizerTrainingCorpus, TokenizerTrainingRuntime,
+};
 
 #[derive(Clone)]
 pub struct TournamentRunReport {
@@ -23,6 +27,7 @@ pub struct TournamentRunReport {
     pub species: Vec<SpeciesDefinition>,
     pub results: Vec<RankedSpeciesResult>,
     pub artifact: TournamentRunArtifact,
+    pub bridge_stats: BTreeMap<SpeciesId, TokenizerBridgeStats>,
 }
 
 impl TournamentRunReport {
@@ -34,6 +39,7 @@ impl TournamentRunReport {
         species: Vec<SpeciesDefinition>,
         results: Vec<RankedSpeciesResult>,
         artifact: TournamentRunArtifact,
+        bridge_stats: BTreeMap<SpeciesId, TokenizerBridgeStats>,
     ) -> Self {
         Self {
             preset,
@@ -43,6 +49,7 @@ impl TournamentRunReport {
             species,
             results,
             artifact,
+            bridge_stats,
         }
     }
 
@@ -226,6 +233,7 @@ mod tests {
                 fitness: 0.58,
             }],
             single_species_artifact(fractal_core::SpeciesId::P1Contractive, "p1_contractive_v1"),
+            BTreeMap::new(),
         );
 
         assert!(report.comparison.is_authoritative_same_preset());
@@ -255,6 +263,7 @@ mod tests {
                 fractal_core::SpeciesId::P3Hierarchical,
                 "p3_hierarchical_v1",
             ),
+            BTreeMap::new(),
         );
 
         assert_eq!(advisory.comparison_label(), "advisory mixed-preset");

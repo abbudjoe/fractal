@@ -27,7 +27,7 @@ use crate::{
         ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
         ExperimentSpecTemplate, LaneIntent, RunExecutionOutcome, RunOutcomeClass,
         RunQualityOutcome, RuntimeSurfaceSpec, Tournament, TournamentConfig, TournamentPreset,
-        TournamentProgressEvent, TournamentSequence,
+        TournamentProgressEvent, TournamentSequence, TrainingInputSpec,
     },
     model::FractalModel,
     primitives::complex_square,
@@ -1032,6 +1032,7 @@ fn test_experiment_template(config: TournamentConfig) -> ExperimentSpecTemplate 
             decision_intent: DecisionIntent::Benchmark,
         },
         budget: BudgetSpec::from_config(TournamentPreset::FastTest, &config),
+        training_input: TrainingInputSpec::synthetic(),
         runtime: RuntimeSurfaceSpec::default(),
         comparison: ComparisonContract::authoritative_same_preset(),
         execution: ExecutionTarget {

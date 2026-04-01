@@ -158,6 +158,7 @@ fn build_artifact_json(report: &TournamentRunReport) -> Value {
                         "tokens_per_sec": metrics.tokens_per_sec,
                     })
                 }),
+                "tokenizer_bridge": report.bridge_stats.get(&record.stage.species).map(tokenizer_bridge_json),
                 "ranked_result": report.results.iter().find(|result| result.species == record.stage.species).map(|result| {
                     json!({
                         "rank": result.rank,
@@ -198,6 +199,11 @@ fn config_json(report: &TournamentRunReport) -> Value {
         "learning_rate": report.config.learning_rate,
         "seed": report.config.seed,
         "parallelism": report.config.parallelism,
+        "training_input": report
+            .config
+            .experiment
+            .as_ref()
+            .map(|experiment| training_input_json(&experiment.training_input)),
     })
 }
 
@@ -233,6 +239,7 @@ fn experiment_json(spec: &crate::ExperimentSpec) -> Value {
             "species": spec.variant.species.as_str(),
             "variant_name": spec.variant.variant_name.as_str(),
         },
+        "training_input": training_input_json(&spec.training_input),
         "budget": {
             "preset": spec.budget.preset.name(),
             "seed": spec.budget.seed,
@@ -270,6 +277,47 @@ fn experiment_json(spec: &crate::ExperimentSpec) -> Value {
             "final_log_required": spec.artifacts.final_log_required,
             "tracker_ready_output_required": spec.artifacts.tracker_ready_output_required,
         },
+    })
+}
+
+fn training_input_json(spec: &crate::TrainingInputSpec) -> Value {
+    json!({
+        "mode": spec.mode.as_str(),
+        "corpus_name": spec.corpus_name,
+        "bridge": {
+            "enabled": spec.bridge.enabled,
+            "observational_only": spec.bridge.observational_only,
+        },
+        "tokenizer": spec.tokenizer.as_ref().map(|tokenizer| {
+            json!({
+                "artifact_id": tokenizer.artifact_id,
+                "artifact_path": tokenizer.artifact_path,
+                "vocab_size": tokenizer.vocab_size,
+                "pad_token_id": tokenizer.pad_token_id,
+            })
+        }),
+    })
+}
+
+fn tokenizer_bridge_json(stats: &crate::TokenizerBridgeStats) -> Value {
+    json!({
+        "corpus_name": stats.corpus_name,
+        "tokenizer_artifact_id": stats.tokenizer_artifact_id,
+        "training_input_mode": stats.training_input_mode.as_str(),
+        "bridge_enabled": stats.bridge_enabled,
+        "bridge_observational_only": stats.bridge_observational_only,
+        "train_documents": stats.train_documents,
+        "eval_documents": stats.eval_documents,
+        "model_facing_documents": stats.model_facing_documents,
+        "bridge_documents": stats.bridge_documents,
+        "bridge_chunks": stats.bridge_chunks,
+        "bridge_tokens": stats.bridge_tokens,
+        "native_documents": stats.native_documents,
+        "native_chunks": stats.native_chunks,
+        "native_tokens": stats.native_tokens,
+        "train_batches": stats.train_batches,
+        "eval_batches": stats.eval_batches,
+        "sequence_len": stats.sequence_len,
     })
 }
 
@@ -385,6 +433,7 @@ fn io_error(error: std::io::Error) -> FractalError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::{env, fs};
 
     use crate::{
@@ -394,7 +443,7 @@ mod tests {
     use fractal_core::{
         ArtifactPolicy, BudgetSpec, DecisionIntent, ExecutionBackend, ExecutionTarget,
         ExecutionTargetKind, ExperimentId, ExperimentQuestion, ExperimentSpec, LaneIntent,
-        RuntimeSurfaceSpec, VariantSpec,
+        RuntimeSurfaceSpec, TrainingInputSpec, VariantSpec,
     };
 
     use super::{persist_run_artifacts, ARTIFACT_FILENAME, MANIFEST_FILENAME};
@@ -460,6 +509,7 @@ mod tests {
                 fitness: 0.58,
             }],
             artifact,
+            BTreeMap::new(),
         );
 
         let paths = persist_run_artifacts(&report).unwrap();
@@ -519,6 +569,7 @@ mod tests {
                     "p1_contractive_v1",
                 ),
             },
+            training_input: TrainingInputSpec::synthetic(),
             budget: BudgetSpec::from_config(TournamentPreset::FastTest, &config),
             runtime: RuntimeSurfaceSpec::default(),
             comparison: ComparisonContract::authoritative_same_preset(),

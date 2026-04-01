@@ -420,11 +420,12 @@ pub fn take_last_species_run_artifact() -> Option<SpeciesRunArtifact> {
     LAST_SPECIES_RUN_ARTIFACT.with(|slot| slot.borrow_mut().take())
 }
 
-struct RunBatches<B: AutodiffBackend> {
-    train_sentence: Vec<TokenBatch<B>>,
-    train_arc: Vec<TokenBatch<B>>,
-    eval_sentence: Vec<TokenBatch<B>>,
-    eval_arc: Vec<TokenBatch<B>>,
+#[derive(Clone, Debug)]
+pub struct TrainingBatchSet<B: AutodiffBackend> {
+    pub train_sentence: Vec<TokenBatch<B>>,
+    pub train_arc: Vec<TokenBatch<B>>,
+    pub eval_sentence: Vec<TokenBatch<B>>,
+    pub eval_arc: Vec<TokenBatch<B>>,
 }
 
 fn record_species_run_artifact(artifact: SpeciesRunArtifact) {
@@ -523,14 +524,14 @@ fn timeout_outcome_for_phase(phase: RunPhase) -> RunExecutionOutcome {
     }
 }
 
-fn run_species_with_batches<B, R>(
+pub fn run_species_with_batches<B, R>(
     species: SpeciesId,
     variant_name: PrimitiveVariantName,
     config: TournamentConfig,
     experiment: Option<ExperimentSpec>,
     device: B::Device,
     rule: R,
-    batches: RunBatches<B>,
+    batches: TrainingBatchSet<B>,
 ) -> Result<SpeciesRawMetrics, FractalError>
 where
     B: AutodiffBackend,
@@ -912,8 +913,8 @@ fn prepare_batches_for_run<B: AutodiffBackend>(
     generator: &SimpleHierarchicalGenerator,
     config: &TournamentConfig,
     device: &B::Device,
-) -> Result<RunBatches<B>, FractalError> {
-    Ok(RunBatches {
+) -> Result<TrainingBatchSet<B>, FractalError> {
+    Ok(TrainingBatchSet {
         train_sentence: generator.train_batches_for::<B>(
             TaskFamily::RecursiveSentence,
             config.train_batch_size,
@@ -943,7 +944,7 @@ fn prepare_candle_batches_for_run(
     generator: &SimpleHierarchicalGenerator,
     config: &TournamentConfig,
     device: &CandleDevice,
-) -> Result<RunBatches<CpuTrainBackend>, FractalError> {
+) -> Result<TrainingBatchSet<CpuTrainBackend>, FractalError> {
     let staging_device = CandleDevice::Cpu;
     let move_batches = |batches: Vec<TokenBatch<CpuTrainBackend>>| {
         batches
@@ -952,7 +953,7 @@ fn prepare_candle_batches_for_run(
             .collect::<Vec<_>>()
     };
 
-    Ok(RunBatches {
+    Ok(TrainingBatchSet {
         train_sentence: move_batches(generator.train_batches_for::<CpuTrainBackend>(
             TaskFamily::RecursiveSentence,
             config.train_batch_size,

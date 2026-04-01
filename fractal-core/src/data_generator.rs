@@ -32,6 +32,7 @@ const GRID_EVAL_MAX_DEPTH: usize = 5;
 pub enum TaskFamily {
     RecursiveSentence,
     ArcGrid,
+    TokenizerBackedText,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -158,7 +159,7 @@ pub struct RawExample {
     pub target_tokens: Vec<i64>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TokenBatch<B: Backend> {
     pub input_ids: Tensor<B, 2, Int>,
     pub target_ids: Tensor<B, 2, Int>,
@@ -311,6 +312,9 @@ impl SimpleHierarchicalGenerator {
             (TaskFamily::RecursiveSentence, DatasetSplit::Eval) => &self.eval_sentences,
             (TaskFamily::ArcGrid, DatasetSplit::Train) => &self.train_grids,
             (TaskFamily::ArcGrid, DatasetSplit::Eval) => &self.eval_grids,
+            (TaskFamily::TokenizerBackedText, _) => unreachable!(
+                "tokenizer-backed text batches are supplied externally and are not generated here"
+            ),
         }
     }
 

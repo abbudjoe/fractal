@@ -1882,9 +1882,11 @@ dependencies = [
 name = "fractal"
 version = "0.1.0"
 dependencies = [
+ "burn",
  "fractal-core",
  "fractal-eval-private",
  "fractal-primitives-private",
+ "fractal-tokenizer",
  "serde",
  "serde_json",
 ]

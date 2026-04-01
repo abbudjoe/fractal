@@ -55,6 +55,8 @@ fn outcome_label(outcome: fractal_core::RunOutcomeClass) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::primitive_tracker_reminder_lines;
     use crate::{species_registry_for_species, TournamentRunReport};
     use fractal_core::{
@@ -108,6 +110,7 @@ mod tests {
                     metrics: None,
                 }],
             },
+            BTreeMap::new(),
         );
         let lines = primitive_tracker_reminder_lines(&report);
 

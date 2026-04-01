@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -14,7 +15,7 @@ use fractal::{
         ExecutionBackend, ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
         ExperimentSpecTemplate, LaneIntent, RunExecutionOutcome, RuntimeSurfaceSpec,
         SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig, TournamentPreset,
-        TournamentProgressEvent, TournamentReporter, TournamentSequence,
+        TournamentProgressEvent, TournamentReporter, TournamentSequence, TrainingInputSpec,
     },
     persist_run_artifacts, primitive_tracker_reminder_lines,
     registry::{ComputeBackend, ExecutionMode, SpeciesId},
@@ -677,8 +678,16 @@ fn run_preset(
             .filter_map(|record| record.metrics.clone())
             .collect::<Vec<_>>(),
     );
-    let report =
-        TournamentRunReport::new(preset, lane, comparison, config, species, results, artifact);
+    let report = TournamentRunReport::new(
+        preset,
+        lane,
+        comparison,
+        config,
+        species,
+        results,
+        artifact,
+        BTreeMap::new(),
+    );
     let persisted = persist_run_artifacts(&report)?;
     print_results(&report);
     print_failures(&report);
@@ -736,6 +745,7 @@ fn build_experiment_template(
             decision_intent: decision_intent_for_contract(comparison),
         },
         budget: BudgetSpec::from_config(preset, config),
+        training_input: TrainingInputSpec::synthetic(),
         runtime: options.runtime_surface_spec(),
         comparison: comparison.clone(),
         execution: ExecutionTarget {
