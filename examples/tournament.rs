@@ -13,23 +13,24 @@ use fractal::{
     lifecycle::{
         ArtifactPolicy, BenchmarkMode, BudgetSpec, ComparisonContract, DecisionIntent,
         ExecutionBackend, ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
-        ExperimentSpecTemplate, LaneIntent, OptimizerSpec, RunExecutionOutcome,
-        RuntimeSurfaceSpec, SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig,
-        TournamentPreset, TournamentProgressEvent, TournamentReporter, TournamentSequence,
-        TrainingInputMode, TrainingInputSpec,
+        ExperimentSpecTemplate, LaneIntent, OptimizerSpec, RunExecutionOutcome, RuntimeSurfaceSpec,
+        SpeciesCompletion, SpeciesRunStage, Tournament, TournamentConfig, TournamentPreset,
+        TournamentProgressEvent, TournamentReporter, TournamentSequence, TrainingInputMode,
+        TrainingInputSpec,
     },
-    load_tokenizer_training_corpus_source,
-    persist_run_artifacts, primitive_tracker_reminder_lines,
-    run_tokenizer_backed_species_from_source,
+    load_tokenizer_training_corpus_source, persist_run_artifacts, primitive_tracker_reminder_lines,
     registry::{
         resolve_precision_profile, CandleBf16TrainBackend, CandleF32TrainBackend, ComputeBackend,
         ExecutionMode, MetalF32TrainBackend, ResolvedExecutablePrecisionProfile, SpeciesId,
     },
-    species_registry_for_lane, species_registry_for_species, TournamentLane, TournamentRunReport,
+    run_tokenizer_backed_species_from_source, species_registry_for_lane,
+    species_registry_for_species, TournamentLane, TournamentRunReport,
 };
 #[cfg(feature = "cuda")]
 use fractal_core::registry::cuda_device;
-use fractal_core::registry::{cpu_device, initialize_metal_runtime, take_last_species_run_artifact};
+use fractal_core::registry::{
+    cpu_device, initialize_metal_runtime, take_last_species_run_artifact,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -959,7 +960,9 @@ fn run_preset(
         options,
         manifest_v2.as_ref(),
     );
-    let config = base_config.clone().with_experiment(experiment_template.clone());
+    let config = base_config
+        .clone()
+        .with_experiment(experiment_template.clone());
     print_header(preset, lane, species, &config, &comparison);
     if experiment_template.training_input.mode == TrainingInputMode::TokenizerBackedText {
         return run_tokenizer_backed_preset(preset, lane, species, comparison, config);
@@ -2485,14 +2488,50 @@ mod tests {
             Some(&manifest_v2),
         );
 
-        assert_eq!(template.training_input.mode, TrainingInputMode::TokenizerBackedText);
-        assert_eq!(template.training_input.corpus_name.as_deref(), Some("fineweb-stage0"));
+        assert_eq!(
+            template.training_input.mode,
+            TrainingInputMode::TokenizerBackedText
+        );
+        assert_eq!(
+            template.training_input.corpus_name.as_deref(),
+            Some("fineweb-stage0")
+        );
         assert_eq!(template.runtime.launch_policy, expected_launch_policy);
         assert_eq!(template.question.lane_intent, LaneIntent::Benchmark);
         assert_eq!(template.question.decision_intent, DecisionIntent::Benchmark);
         assert_eq!(template.artifacts, ArtifactPolicy::default());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn checked_in_stage0_canary_manifest_loads_as_v2_contract() {
+        let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("experiments/stage0/canary/seed42-p1_contractive.json");
+
+        let manifest = load_manifest_v2(&manifest_path)
+            .expect("checked-in canary manifest should parse")
+            .expect("checked-in canary manifest should use manifest v2");
+
+        assert_eq!(manifest.logical_name, "stage0-canary-s42-p1-contractive");
+        assert_eq!(manifest.preset, "full-medium-stress");
+        assert_eq!(manifest.species.as_deref(), Some("p1_contractive"));
+        assert_eq!(
+            manifest.expected_branch.as_deref(),
+            Some("codex/stage0-launch")
+        );
+        assert_eq!(
+            manifest.experiment.config.train_token_budget,
+            Some(10_000_000)
+        );
+        assert_eq!(
+            manifest
+                .experiment
+                .training_input
+                .as_ref()
+                .and_then(|training_input| training_input.corpus_name.as_deref()),
+            Some("fineweb-stage0-canary")
+        );
     }
 
     #[test]
@@ -2504,7 +2543,9 @@ mod tests {
         let train_path = guard.path().join("train.jsonl");
         let eval_path = guard.path().join("eval.jsonl");
         let tokenizer_path = build_file_backed_sentencepiece_tokenizer(guard.path());
-        let manifest_path = guard.path().join("stage0-canary-smoke-s42-p1-contractive.json");
+        let manifest_path = guard
+            .path()
+            .join("stage0-canary-smoke-s42-p1-contractive.json");
 
         write_jsonl_corpus(
             &train_path,
@@ -2674,7 +2715,8 @@ mod tests {
             serde_json::Value::String("tokenizer-backed-text".to_owned())
         );
         assert_eq!(
-            persisted_manifest["experiments"][0]["training_input"]["corpus_source"]["train"]["path"],
+            persisted_manifest["experiments"][0]["training_input"]["corpus_source"]["train"]
+                ["path"],
             serde_json::Value::String(train_path.display().to_string())
         );
         assert_eq!(
@@ -2740,7 +2782,8 @@ mod tests {
             serde_json::Value::String("fineweb-stage0-smoke".to_owned())
         );
         assert_eq!(
-            persisted_artifact["results"][0]["experiment"]["training_input"]["tokenizer"]["artifact_id"],
+            persisted_artifact["results"][0]["experiment"]["training_input"]["tokenizer"]
+                ["artifact_id"],
             serde_json::Value::String("openlm-research/open_llama_3b_v2".to_owned())
         );
     }
