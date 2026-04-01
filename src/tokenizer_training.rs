@@ -1,18 +1,11 @@
-use std::{
-    fmt, fs,
-    num::NonZeroUsize,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{fmt, fs, num::NonZeroUsize, path::PathBuf};
 
 use burn::tensor::{
     backend::{AutodiffBackend, Backend},
     Int, Tensor, TensorData,
 };
 use fractal_core::{
-    data_generator::{
-        GeneratorConfig, SimpleHierarchicalGenerator, TaskFamily, TokenBatch, PAD_TOKEN,
-    },
+    data_generator::{GeneratorConfig, SimpleHierarchicalGenerator, TaskFamily, TokenBatch},
     error::FractalError,
     lifecycle::{
         ArcSourceMode, BridgePackagingSpec, BridgeSplitPolicy, BridgeSubstrateMode, ExperimentSpec,
@@ -23,178 +16,19 @@ use fractal_core::{
     SpeciesRawMetrics,
 };
 use fractal_tokenizer::{
-    EmbeddingBridgeAdapter, FaceoffChunkLimits, FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig,
-    ModelFacingBatch, ModelFacingDocument, NativeCollationSpec, NativeCompatibilityAdapter,
-    NativeCompatibilityError, NativeTokenizer, NativeTruncationPolicy, SplitPolicy,
-    TokenizerConfig, TokenizerSubstrateMode, TypedEmbeddingBridge,
+    CanonicalPadSemantics, EmbeddingBridgeAdapter, FaceoffChunkLimits, FaceoffTokenizer,
+    FaceoffVocab, FaceoffVocabConfig, ModelFacingBatch, ModelFacingDocument, NativeCollationSpec,
+    NativeCompatibilityAdapter, NativeCompatibilityError, NativeTokenizer, NativeTruncationPolicy,
+    SlowSentencePieceTokenizer, SplitPolicy, TokenizerConfig, TokenizerSubstrateMode,
+    TypedEmbeddingBridge,
 };
-use sentencepiece::{SentencePieceError, SentencePieceProcessor};
 
 pub const STAGE0_CANONICAL_TOKENIZER_REPO_ID: &str = "openlm-research/open_llama_3b_v2";
 pub const STAGE0_CANONICAL_TOKENIZER_FILENAME: &str = "tokenizer.model";
 pub const STAGE0_CANONICAL_TOKENIZER_USE_FAST: bool = false;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Stage0PadSemantics {
-    pub native_pad_token_id: Option<u32>,
-    pub canonical_model_pad_token_id: u32,
-}
-
-impl Stage0PadSemantics {
-    pub fn canonical_default() -> Self {
-        Self {
-            native_pad_token_id: None,
-            canonical_model_pad_token_id: PAD_TOKEN as u32,
-        }
-    }
-
-    pub fn new(
-        native_pad_token_id: Option<u32>,
-        canonical_model_pad_token_id: u32,
-    ) -> Result<Self, FractalError> {
-        if canonical_model_pad_token_id != PAD_TOKEN as u32 {
-            return Err(FractalError::InvalidConfig(format!(
-                "Stage 0 canonical model pad token {} must match PAD_TOKEN {}",
-                canonical_model_pad_token_id, PAD_TOKEN
-            )));
-        }
-        Ok(Self {
-            native_pad_token_id,
-            canonical_model_pad_token_id,
-        })
-    }
-
-    pub fn from_artifact(
-        artifact: &ResolvedTokenizerArtifact,
-        native_pad_token_id: Option<u32>,
-    ) -> Result<Self, FractalError> {
-        if artifact.spec.pad_token_id != PAD_TOKEN {
-            return Err(FractalError::InvalidConfig(format!(
-                "Stage 0 tokenizer artifact pad token id {} must match canonical PAD_TOKEN {}",
-                artifact.spec.pad_token_id, PAD_TOKEN
-            )));
-        }
-        Self::new(native_pad_token_id, artifact.spec.pad_token_id as u32)
-    }
-
-    pub fn collation_pad_token_id(&self) -> u32 {
-        self.native_pad_token_id
-            .unwrap_or(self.canonical_model_pad_token_id)
-    }
-
-    pub fn uses_canonical_pad_alias(&self) -> bool {
-        self.native_pad_token_id != Some(self.canonical_model_pad_token_id)
-    }
-
-    fn canonicalize_input_from_chunk(
-        &self,
-        chunk: &fractal_tokenizer::NativeCollatedChunk<u32>,
-    ) -> Vec<i64> {
-        let valid_len = chunk.valid_token_count();
-        chunk
-            .padded_tokens
-            .iter()
-            .enumerate()
-            .map(|(index, token)| {
-                if index < valid_len {
-                    *token as i64
-                } else {
-                    self.canonical_model_pad_token_id as i64
-                }
-            })
-            .collect()
-    }
-
-    fn canonicalize_target_from_input(&self, input: &[i64], valid_len: usize) -> Vec<i64> {
-        let mut target = vec![self.canonical_model_pad_token_id as i64; input.len()];
-        if valid_len == 0 {
-            return target;
-        }
-        for index in 0..valid_len.saturating_sub(1) {
-            target[index] = input[index + 1];
-        }
-        target[valid_len - 1] = self.canonical_model_pad_token_id as i64;
-        target
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Stage0SlowTokenizer {
-    processor: Arc<SentencePieceProcessor>,
-}
-
-impl Stage0SlowTokenizer {
-    pub fn open(path: &Path) -> Result<Self, Stage0SlowTokenizerError> {
-        let processor = SentencePieceProcessor::open(path).map_err(|source| {
-            Stage0SlowTokenizerError::Load {
-                path: path.to_path_buf(),
-                reason: source,
-            }
-        })?;
-        Ok(Self {
-            processor: Arc::new(processor),
-        })
-    }
-
-    pub fn vocab_size(&self) -> usize {
-        self.processor.len()
-    }
-
-    pub fn model_pad_token_id(&self) -> Option<u32> {
-        self.processor.pad_id()
-    }
-}
-
-impl NativeTokenizer for Stage0SlowTokenizer {
-    type Token = u32;
-    type Error = Stage0SlowTokenizerError;
-
-    fn tokenize(&self, text: &str) -> Result<Vec<Self::Token>, Self::Error> {
-        self.processor
-            .encode(text)
-            .map(|pieces| pieces.into_iter().map(|piece| piece.id).collect())
-            .map_err(|source| Stage0SlowTokenizerError::Encode {
-                input_preview: text.chars().take(32).collect(),
-                reason: source,
-            })
-    }
-}
-
-#[derive(Debug)]
-pub enum Stage0SlowTokenizerError {
-    Load {
-        path: PathBuf,
-        reason: SentencePieceError,
-    },
-    Encode {
-        input_preview: String,
-        reason: SentencePieceError,
-    },
-}
-
-impl fmt::Display for Stage0SlowTokenizerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Load { path, reason } => {
-                write!(
-                    f,
-                    "failed to load slow Stage 0 tokenizer from {}: {reason}",
-                    path.display()
-                )
-            }
-            Self::Encode {
-                input_preview,
-                reason,
-            } => write!(
-                f,
-                "failed to encode text with slow Stage 0 tokenizer for input {:?}: {reason}",
-                input_preview
-            ),
-        }
-    }
-}
-
-impl std::error::Error for Stage0SlowTokenizerError {}
+pub type Stage0PadSemantics = CanonicalPadSemantics;
+pub type Stage0SlowTokenizer = SlowSentencePieceTokenizer;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextCorpusSplitSource {
@@ -540,22 +374,27 @@ pub struct TokenizerBridgeStats {
     pub sequence_len: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TokenizerBridgeBatchTotals {
+    model_facing_documents: usize,
+    bridge_documents: usize,
+    bridge_chunks: usize,
+    bridge_tokens: usize,
+    native_documents: usize,
+    native_chunks: usize,
+    native_tokens: usize,
+    train_batches: usize,
+    eval_batches: usize,
+    sequence_len: usize,
+}
+
 impl TokenizerBridgeStats {
     fn new<N>(
         training_input: &TrainingInputSpec,
         corpus: &TokenizerTrainingCorpus,
         bridge_packaging: &BridgePackagingSpec,
         runtime: &TokenizerTrainingRuntime<N>,
-        model_facing_documents: usize,
-        bridge_documents: usize,
-        bridge_chunks: usize,
-        bridge_tokens: usize,
-        native_documents: usize,
-        native_chunks: usize,
-        native_tokens: usize,
-        train_batches: usize,
-        eval_batches: usize,
-        sequence_len: usize,
+        totals: TokenizerBridgeBatchTotals,
     ) -> Result<Self, FractalError> {
         let tokenizer = training_input.tokenizer.as_ref().ok_or_else(|| {
             FractalError::InvalidState(
@@ -578,16 +417,16 @@ impl TokenizerBridgeStats {
             uses_canonical_pad_alias: runtime.pad_semantics.uses_canonical_pad_alias(),
             train_documents: corpus.train_documents.len(),
             eval_documents: corpus.eval_documents.len(),
-            model_facing_documents,
-            bridge_documents,
-            bridge_chunks,
-            bridge_tokens,
-            native_documents,
-            native_chunks,
-            native_tokens,
-            train_batches,
-            eval_batches,
-            sequence_len,
+            model_facing_documents: totals.model_facing_documents,
+            bridge_documents: totals.bridge_documents,
+            bridge_chunks: totals.bridge_chunks,
+            bridge_tokens: totals.bridge_tokens,
+            native_documents: totals.native_documents,
+            native_chunks: totals.native_chunks,
+            native_tokens: totals.native_tokens,
+            train_batches: totals.train_batches,
+            eval_batches: totals.eval_batches,
+            sequence_len: totals.sequence_len,
         })
     }
 }
@@ -648,7 +487,7 @@ pub fn load_stage0_slow_tokenizer(
     artifact: &ResolvedTokenizerArtifact,
 ) -> Result<(Stage0SlowTokenizer, Stage0PadSemantics), FractalError> {
     validate_stage0_slow_tokenizer_artifact(artifact)?;
-    let tokenizer = Stage0SlowTokenizer::open(Path::new(&artifact.local_path))
+    let tokenizer = Stage0SlowTokenizer::open(&artifact.local_path)
         .map_err(|error| FractalError::InvalidState(error.to_string()))?;
 
     if tokenizer.vocab_size() != artifact.spec.vocab_size {
@@ -660,8 +499,10 @@ pub fn load_stage0_slow_tokenizer(
         )));
     }
 
-    let pad_semantics =
-        Stage0PadSemantics::from_artifact(artifact, tokenizer.model_pad_token_id())?;
+    let pad_semantics = Stage0PadSemantics::from_expected_pad_token_id(
+        artifact.spec.pad_token_id,
+        tokenizer.model_pad_token_id(),
+    )?;
 
     Ok((tokenizer, pad_semantics))
 }
@@ -794,28 +635,28 @@ where
 
     let bridge_packaging = ResolvedBridgePackaging::from_training_input(training_input)?;
 
-    let train = build_split_batches::<B, N>(
-        &bridge_packaging.tokenizer,
-        &bridge_packaging.vocab,
-        &corpus.train_documents,
-        config.train_batch_size,
-        runtime.pad_semantics,
-        &runtime.tokenizer,
-        &runtime.chunk_limits,
-        &runtime.native_truncation_policy,
+    let train = build_split_batches::<B, N>(SplitBatchRequest {
+        tokenizer: &bridge_packaging.tokenizer,
+        vocab: &bridge_packaging.vocab,
+        documents: &corpus.train_documents,
+        batch_size: config.train_batch_size,
+        pad_semantics: runtime.pad_semantics,
+        native_tokenizer: &runtime.tokenizer,
+        chunk_limits: &runtime.chunk_limits,
+        truncation_policy: &runtime.native_truncation_policy,
         device,
-    )?;
-    let eval = build_split_batches::<B, N>(
-        &bridge_packaging.tokenizer,
-        &bridge_packaging.vocab,
-        &corpus.eval_documents,
-        config.eval_batch_size,
-        runtime.pad_semantics,
-        &runtime.tokenizer,
-        &runtime.chunk_limits,
-        &runtime.native_truncation_policy,
+    })?;
+    let eval = build_split_batches::<B, N>(SplitBatchRequest {
+        tokenizer: &bridge_packaging.tokenizer,
+        vocab: &bridge_packaging.vocab,
+        documents: &corpus.eval_documents,
+        batch_size: config.eval_batch_size,
+        pad_semantics: runtime.pad_semantics,
+        native_tokenizer: &runtime.tokenizer,
+        chunk_limits: &runtime.chunk_limits,
+        truncation_policy: &runtime.native_truncation_policy,
         device,
-    )?;
+    })?;
 
     let arc_eval_batches = build_canonical_arc_eval_batches::<B>(config, device)?;
 
@@ -824,16 +665,18 @@ where
         corpus,
         &bridge_packaging.spec,
         runtime,
-        train.model_facing_documents + eval.model_facing_documents,
-        train.bridge_documents + eval.bridge_documents,
-        train.bridge_chunks + eval.bridge_chunks,
-        train.bridge_tokens + eval.bridge_tokens,
-        train.native_documents + eval.native_documents,
-        train.native_chunks + eval.native_chunks,
-        train.native_tokens + eval.native_tokens,
-        train.batches.len(),
-        eval.batches.len(),
-        std::cmp::max(train.sequence_len, eval.sequence_len),
+        TokenizerBridgeBatchTotals {
+            model_facing_documents: train.model_facing_documents + eval.model_facing_documents,
+            bridge_documents: train.bridge_documents + eval.bridge_documents,
+            bridge_chunks: train.bridge_chunks + eval.bridge_chunks,
+            bridge_tokens: train.bridge_tokens + eval.bridge_tokens,
+            native_documents: train.native_documents + eval.native_documents,
+            native_chunks: train.native_chunks + eval.native_chunks,
+            native_tokens: train.native_tokens + eval.native_tokens,
+            train_batches: train.batches.len(),
+            eval_batches: eval.batches.len(),
+            sequence_len: std::cmp::max(train.sequence_len, eval.sequence_len),
+        },
     )?;
 
     Ok((
@@ -1049,29 +892,35 @@ struct SplitBatches<B: AutodiffBackend> {
     sequence_len: usize,
 }
 
-fn build_split_batches<B, N>(
-    tokenizer: &FaceoffTokenizer,
-    vocab: &fractal_tokenizer::FaceoffVocab,
-    documents: &[String],
+struct SplitBatchRequest<'a, B: AutodiffBackend, N: NativeTokenizer<Token = u32>> {
+    tokenizer: &'a FaceoffTokenizer,
+    vocab: &'a fractal_tokenizer::FaceoffVocab,
+    documents: &'a [String],
     batch_size: usize,
     pad_semantics: Stage0PadSemantics,
-    native_tokenizer: &N,
-    chunk_limits: &FaceoffChunkLimits,
-    truncation_policy: &NativeTruncationPolicy,
-    device: &B::Device,
+    native_tokenizer: &'a N,
+    chunk_limits: &'a FaceoffChunkLimits,
+    truncation_policy: &'a NativeTruncationPolicy,
+    device: &'a B::Device,
+}
+
+fn build_split_batches<B, N>(
+    request: SplitBatchRequest<'_, B, N>,
 ) -> Result<SplitBatches<B>, FractalError>
 where
     B: AutodiffBackend,
     N: NativeTokenizer<Token = u32>,
     N::Error: fmt::Display + fmt::Debug + Send + Sync + 'static,
 {
-    let model_facing_documents = documents
+    let model_facing_documents = request
+        .documents
         .iter()
         .map(|text| {
-            let encoded = tokenizer
-                .encode_text_v2::<B>(text, vocab, device)
+            let encoded = request
+                .tokenizer
+                .encode_text_v2::<B>(text, request.vocab, request.device)
                 .map_err(|error| FractalError::InvalidState(error.to_string()))?;
-            ModelFacingDocument::from_encoded(encoded, *chunk_limits)
+            ModelFacingDocument::from_encoded(encoded, *request.chunk_limits)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let model_facing_batch = ModelFacingBatch::from(model_facing_documents);
@@ -1079,27 +928,27 @@ where
         .bridge_batch(&model_facing_batch)
         .map_err(|error| FractalError::InvalidState(error.to_string()))?;
     let native_batch = NativeCompatibilityAdapter
-        .retokenize_batch(&model_facing_batch, native_tokenizer)
+        .retokenize_batch(&model_facing_batch, request.native_tokenizer)
         .map_err(native_error_to_state)?;
     let native_collated = native_batch
         .collate(
-            &NativeCollationSpec::new(pad_semantics.collation_pad_token_id())
+            &NativeCollationSpec::new(request.pad_semantics.collation_pad_token_id())
                 .with_max_sequence_len(
-                    NonZeroUsize::new(chunk_limits.max_tokens_per_chunk.max(1)).unwrap(),
+                    NonZeroUsize::new(request.chunk_limits.max_tokens_per_chunk.max(1)).unwrap(),
                 )
-                .with_truncation_policy(*truncation_policy),
+                .with_truncation_policy(*request.truncation_policy),
         )
         .map_err(|error| FractalError::InvalidState(error.to_string()))?;
 
     let sequences = native_collated
         .chunks()
-        .map(|chunk| sequence_from_native_chunk(chunk, pad_semantics))
+        .map(|chunk| sequence_from_native_chunk(chunk, request.pad_semantics))
         .collect::<Result<Vec<_>, _>>()?;
     let batches = sequences_into_batches::<B>(
         sequences,
-        batch_size,
+        request.batch_size,
         TaskFamily::TokenizerBackedText,
-        device,
+        request.device,
     )?;
 
     let native_documents = native_collated.len();
@@ -1254,11 +1103,11 @@ mod tests {
 
     use super::{
         build_tokenizer_backed_batches, load_stage0_tokenizer_runtime,
-        materialize_bridge_vocab_artifact,
-        run_tokenizer_backed_species_from_experiment, ResolvedTokenizerArtifact,
-        Stage0PadSemantics, TextCorpusSplitSource, TokenizerArtifactSpec, TokenizerTrainingCorpus,
-        TokenizerTrainingCorpusSource, TokenizerTrainingRuntime,
-        STAGE0_CANONICAL_TOKENIZER_FILENAME, STAGE0_CANONICAL_TOKENIZER_REPO_ID,
+        materialize_bridge_vocab_artifact, run_tokenizer_backed_species_from_experiment,
+        ResolvedTokenizerArtifact, Stage0PadSemantics, TextCorpusSplitSource,
+        TokenizerArtifactSpec, TokenizerTrainingCorpus, TokenizerTrainingCorpusSource,
+        TokenizerTrainingRuntime, STAGE0_CANONICAL_TOKENIZER_FILENAME,
+        STAGE0_CANONICAL_TOKENIZER_REPO_ID,
     };
     use fractal_core::registry::take_last_species_run_artifact;
     use fractal_core::PAD_TOKEN;
@@ -1557,19 +1406,19 @@ mod tests {
             .tokenizer
             .is_some());
 
-        let report = TournamentRunReport::new(
-            TournamentPreset::FastTest,
-            TournamentLane::Leader,
-            ComparisonContract::authoritative_same_preset(),
+        let report = TournamentRunReport::new(crate::TournamentRunReportParts {
+            preset: TournamentPreset::FastTest,
+            lane: TournamentLane::Leader,
+            comparison: ComparisonContract::authoritative_same_preset(),
             config,
-            species_registry_for_species(SpeciesId::P1Contractive),
-            aggregate_results(vec![metrics.clone()]),
-            fractal_core::TournamentRunArtifact {
+            species: species_registry_for_species(SpeciesId::P1Contractive),
+            results: aggregate_results(vec![metrics.clone()]),
+            artifact: fractal_core::TournamentRunArtifact {
                 config: TournamentPreset::FastTest.config(),
                 species: vec![artifact],
             },
-            BTreeMap::from([(SpeciesId::P1Contractive, bridge_stats.clone())]),
-        );
+            bridge_stats: BTreeMap::from([(SpeciesId::P1Contractive, bridge_stats.clone())]),
+        });
 
         let paths = persist_run_artifacts(&report).expect("tokenizer-backed report persists");
         let manifest: serde_json::Value =
@@ -1606,8 +1455,10 @@ mod tests {
 
     #[test]
     fn materialize_bridge_vocab_artifact_persists_loadable_frozen_vocab() {
-        let temp_root =
-            env::temp_dir().join(format!("fractal-tokenizer-materialize-{}", std::process::id()));
+        let temp_root = env::temp_dir().join(format!(
+            "fractal-tokenizer-materialize-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&temp_root);
         fs::create_dir_all(&temp_root).expect("temp root should exist");
         let train_path = temp_root.join("train.jsonl");
@@ -1645,11 +1496,7 @@ mod tests {
             bridge_packaging_spec_for_documents(
                 &config,
                 &bridge_vocab_path,
-                &[
-                    train_documents[0],
-                    train_documents[1],
-                    eval_documents[0],
-                ],
+                &[train_documents[0], train_documents[1], eval_documents[0]],
             ),
         );
 
@@ -1767,7 +1614,7 @@ mod tests {
         );
         assert_eq!(
             runtime.pad_semantics,
-            Stage0PadSemantics::new(None, PAD_TOKEN as u32).expect("canonical pad semantics")
+            Stage0PadSemantics::new(None, PAD_TOKEN as u32)
         );
         assert!(runtime.pad_semantics.uses_canonical_pad_alias());
         assert_eq!(

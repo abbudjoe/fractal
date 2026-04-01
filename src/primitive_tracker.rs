@@ -58,7 +58,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::primitive_tracker_reminder_lines;
-    use crate::{species_registry_for_species, TournamentRunReport};
+    use crate::{species_registry_for_species, TournamentRunReport, TournamentRunReportParts};
     use fractal_core::lifecycle::TrainingRuntimeArtifact;
     use fractal_core::{
         ComparisonContract, PhaseTiming, RankedSpeciesResult, RunExecutionOutcome, RunManifest,
@@ -68,13 +68,13 @@ mod tests {
 
     #[test]
     fn tracker_reminder_uses_report_context_and_variant_names() {
-        let report = TournamentRunReport::new(
-            crate::TournamentPreset::BullpenPolish,
-            crate::TournamentLane::Challenger,
-            ComparisonContract::authoritative_same_preset(),
-            crate::TournamentPreset::BullpenPolish.config(),
-            species_registry_for_species(SpeciesId::P1FractalHybrid),
-            vec![RankedSpeciesResult {
+        let report = TournamentRunReport::new(TournamentRunReportParts {
+            preset: crate::TournamentPreset::BullpenPolish,
+            lane: crate::TournamentLane::Challenger,
+            comparison: ComparisonContract::authoritative_same_preset(),
+            config: crate::TournamentPreset::BullpenPolish.config(),
+            species: species_registry_for_species(SpeciesId::P1FractalHybrid),
+            results: vec![RankedSpeciesResult {
                 rank: 1,
                 species: SpeciesId::P1FractalHybrid,
                 stability_score: 1.49,
@@ -83,7 +83,7 @@ mod tests {
                 tokens_per_sec: 22.0,
                 fitness: 0.40,
             }],
-            TournamentRunArtifact {
+            artifact: TournamentRunArtifact {
                 config: crate::TournamentPreset::BullpenPolish.config(),
                 species: vec![SpeciesRunArtifact {
                     stage: SpeciesRunStage {
@@ -112,8 +112,8 @@ mod tests {
                     metrics: None,
                 }],
             },
-            BTreeMap::new(),
-        );
+            bridge_stats: BTreeMap::new(),
+        });
         let lines = primitive_tracker_reminder_lines(&report);
 
         assert_eq!(

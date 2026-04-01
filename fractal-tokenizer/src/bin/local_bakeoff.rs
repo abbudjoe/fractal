@@ -5,11 +5,11 @@ use fractal_primitives_private::{
 };
 use fractal_tokenizer::{
     p1_dynamic_lever_factory, revived_primitive_factories, EncodedDocument, FaceoffChunkLimits,
-    FaceoffEmissionPolicy, FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLocalCacheMode,
-    FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer,
-    ModelFacingBatch, ModelFacingDocument, MotifReusePolicy, NativeCollationSpec,
-    NativeCompatibilityAdapter, PrimitiveFactory, PrototypeGranularityMode, SplitPolicy,
-    TokenizerConfig, TokenizerSubstrateMode,
+    FaceoffEmissionPolicy, FaceoffEncodingOptions, FaceoffFallbackMode, FaceoffIdentityMode,
+    FaceoffLocalCacheMode, FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig,
+    HuggingFaceNativeTokenizer, ModelFacingBatch, ModelFacingDocument, MotifReusePolicy,
+    NativeCollationSpec, NativeCompatibilityAdapter, PrimitiveFactory, PrototypeGranularityMode,
+    SplitPolicy, TokenizerConfig, TokenizerSubstrateMode,
 };
 use reqwest::blocking::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -20,6 +20,7 @@ use std::{
     fs,
     fs::File,
     io::{BufWriter, Write},
+    ops::RangeInclusive,
     path::{Path, PathBuf},
     thread,
     time::Duration,
@@ -247,10 +248,20 @@ struct ModelTokenizerSource {
     status: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct PrimitiveCandidate {
     name: &'static str,
     factory: PrimitiveFactory<Backend>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FractalEncodingModes {
+    fallback_mode: FaceoffFallbackMode,
+    identity_mode: FaceoffIdentityMode,
+    prototype_granularity: PrototypeGranularityMode,
+    split_policy: SplitPolicy,
+    substrate_mode: TokenizerSubstrateMode,
+    local_cache_mode: FaceoffLocalCacheMode,
 }
 
 #[derive(Clone, Debug)]
@@ -333,8 +344,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let corpus = build_corpus(&args)?;
     write_jsonl(
-        args.output_dir
-            .join(format!("{}_bakeoff_corpus.jsonl", args.corpus_source.as_str())),
+        args.output_dir.join(format!(
+            "{}_bakeoff_corpus.jsonl",
+            args.corpus_source.as_str()
+        )),
         corpus.iter().map(|candidate| &candidate.corpus),
     )?;
 
@@ -526,9 +539,9 @@ fn parse_corpus_source(value: &str) -> Result<CorpusSourceMode, Box<dyn Error>> 
     match value {
         "local" => Ok(CorpusSourceMode::Local),
         "hybrid" => Ok(CorpusSourceMode::Hybrid),
-        other => Err(
-            format!("unknown corpus source `{other}`; expected one of: local, hybrid").into(),
-        ),
+        other => {
+            Err(format!("unknown corpus source `{other}`; expected one of: local, hybrid").into())
+        }
     }
 }
 
@@ -613,8 +626,8 @@ fn selected_primitive_candidates(args: &Args) -> Result<Vec<PrimitiveCandidate>,
     for name in &args.selected_primitives {
         let candidate = available
             .iter()
-            .cloned()
             .find(|candidate| candidate.name == name)
+            .cloned()
             .ok_or_else(|| {
                 format!(
                     "unknown primitive `{name}`; available: {}",
@@ -740,10 +753,7 @@ fn build_corpus(args: &Args) -> Result<Vec<CorpusCandidate>, Box<dyn Error>> {
     }
 }
 
-fn build_local_corpus(
-    args: &Args,
-    target: usize,
-) -> Result<Vec<CorpusCandidate>, Box<dyn Error>> {
+fn build_local_corpus(args: &Args, target: usize) -> Result<Vec<CorpusCandidate>, Box<dyn Error>> {
     let mut deduped = dedupe_candidates(build_local_candidate_pool(args)?, target)?;
     assign_balanced_splits(&mut deduped);
     let induction_docs = deduped
@@ -866,7 +876,10 @@ fn assign_balanced_splits(candidates: &mut [CorpusCandidate]) {
     let mut per_bucket = BTreeMap::<(SourceFamily, String), BTreeMap<String, Vec<usize>>>::new();
     for (index, candidate) in candidates.iter().enumerate() {
         per_bucket
-            .entry((candidate.corpus.source_family, candidate.corpus.bucket.clone()))
+            .entry((
+                candidate.corpus.source_family,
+                candidate.corpus.bucket.clone(),
+            ))
             .or_default()
             .entry(candidate.split_group_key.clone())
             .or_default()
@@ -932,14 +945,22 @@ fn collect_external_candidates(
         }
 
         let mut bucket_docs = Vec::new();
-        round_robin_extend(per_slice, &mut bucket_docs, plan.docs.saturating_mul(OVERSAMPLE_FACTOR));
+        round_robin_extend(
+            per_slice,
+            &mut bucket_docs,
+            plan.docs.saturating_mul(OVERSAMPLE_FACTOR),
+        );
         buckets.push(bucket_docs);
     }
 
     dedupe_candidates(
         {
             let mut candidates = Vec::new();
-            round_robin_extend(buckets, &mut candidates, target.saturating_mul(OVERSAMPLE_FACTOR));
+            round_robin_extend(
+                buckets,
+                &mut candidates,
+                target.saturating_mul(OVERSAMPLE_FACTOR),
+            );
             candidates
         },
         target,
@@ -1065,15 +1086,12 @@ fn fetch_external_slice_candidates(
                         SourceFamily::ExternalHf,
                         CorpusSplit::Induction,
                         source_path,
-                        1,
-                        line_count(&normalized),
+                        1..=line_count(&normalized),
                         normalized,
                     ),
                     split_group_key: format!(
                         "{}:{}:{}",
-                        resolved.dataset,
-                        resolved.config,
-                        source_key
+                        resolved.dataset, resolved.config, source_key
                     ),
                 });
             }
@@ -1198,7 +1216,8 @@ impl HfDatasetsClient {
     }
 
     fn fetch_splits(&self, dataset: &str) -> Result<Vec<DatasetSplitRef>, Box<dyn Error>> {
-        let response = self.get_json::<DatasetSplitsResponse>("/splits", &[("dataset", dataset)])?;
+        let response =
+            self.get_json::<DatasetSplitsResponse>("/splits", &[("dataset", dataset)])?;
         Ok(response.splits.unwrap_or_default())
     }
 
@@ -1264,8 +1283,8 @@ impl HfDatasetsClient {
             match self.client.get(&url).query(query).send() {
                 Ok(response) => {
                     let status = response.status();
-                    let retryable_status =
-                        status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+                    let retryable_status = status.is_server_error()
+                        || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
                     if retryable_status && attempt < 4 {
                         thread::sleep(Duration::from_millis(500 * (attempt + 1) as u64));
                         continue;
@@ -1274,8 +1293,7 @@ impl HfDatasetsClient {
                     return Ok(response.json::<T>()?);
                 }
                 Err(error) => {
-                    let retryable =
-                        error.is_timeout() || error.is_connect() || error.is_request();
+                    let retryable = error.is_timeout() || error.is_connect() || error.is_request();
                     last_error = Some(error);
                     if retryable && attempt < 4 {
                         thread::sleep(Duration::from_millis(500 * (attempt + 1) as u64));
@@ -1564,8 +1582,7 @@ fn line_window_documents(
                 SourceFamily::LocalFawx,
                 CorpusSplit::Induction,
                 source_path.to_string_lossy().to_string(),
-                start + 1,
-                end,
+                (start + 1)..=end,
                 slice,
             ),
             split_group_key: split_group,
@@ -1598,8 +1615,7 @@ fn whole_file_candidate(
             SourceFamily::LocalFawx,
             CorpusSplit::Induction,
             source_path.to_string_lossy().to_string(),
-            1,
-            line_count(text),
+            1..=line_count(text),
             text.to_string(),
         ),
         split_group_key: source_path.to_string_lossy().to_string(),
@@ -1627,8 +1643,7 @@ fn prefix_file_document(
             SourceFamily::LocalFawx,
             CorpusSplit::Induction,
             source_path.to_string_lossy().to_string(),
-            1,
-            end_line,
+            1..=end_line,
             slice,
         ),
         split_group_key: source_path.to_string_lossy().to_string(),
@@ -1641,10 +1656,10 @@ fn build_corpus_document(
     source_family: SourceFamily,
     split: CorpusSplit,
     source_path: String,
-    start_line: usize,
-    end_line: usize,
+    line_range: RangeInclusive<usize>,
     text: String,
 ) -> CorpusDocument {
+    let (start_line, end_line) = (*line_range.start(), *line_range.end());
     let byte_len = text.len();
     let char_len = text.chars().count();
     CorpusDocument {
@@ -1732,16 +1747,15 @@ fn run_primitive_bakeoff(
     primitive: PrimitiveCandidate,
 ) -> Result<PrimitiveBakeoffRun, Box<dyn Error>> {
     let primitive_name = primitive.name.to_string();
-    let (works, vocab) = build_fractal_documents(
-        corpus,
-        primitive,
-        args.fallback_mode,
-        args.identity_mode,
-        args.prototype_granularity,
-        args.split_policy,
-        args.substrate_mode,
-        args.local_cache_mode,
-    )?;
+    let modes = FractalEncodingModes {
+        fallback_mode: args.fallback_mode,
+        identity_mode: args.identity_mode,
+        prototype_granularity: args.prototype_granularity,
+        split_policy: args.split_policy,
+        substrate_mode: args.substrate_mode,
+        local_cache_mode: args.local_cache_mode,
+    };
+    let (works, vocab) = build_fractal_documents(corpus, primitive, modes)?;
     let model_results = run_model_bakeoff(&works, model_sources)?;
     let results = merge_results(works, model_results);
     Ok(PrimitiveBakeoffRun {
@@ -1754,17 +1768,12 @@ fn run_primitive_bakeoff(
 fn build_fractal_documents(
     corpus: &[CorpusCandidate],
     primitive: PrimitiveCandidate,
-    fallback_mode: FaceoffFallbackMode,
-    identity_mode: FaceoffIdentityMode,
-    prototype_granularity: PrototypeGranularityMode,
-    split_policy: SplitPolicy,
-    substrate_mode: TokenizerSubstrateMode,
-    local_cache_mode: FaceoffLocalCacheMode,
+    modes: FractalEncodingModes,
 ) -> Result<(Vec<DocumentWork>, FaceoffVocab), Box<dyn Error>> {
     let device = Default::default();
     let tokenizer = FaceoffTokenizer::new(TokenizerConfig {
-        split_policy,
-        substrate_mode,
+        split_policy: modes.split_policy,
+        substrate_mode: modes.substrate_mode,
         ..TokenizerConfig::default()
     });
     let texts = corpus
@@ -1780,8 +1789,8 @@ fn build_fractal_documents(
         &device,
         primitive.factory.clone(),
         FaceoffVocabConfig {
-            identity_mode,
-            prototype_granularity,
+            identity_mode: modes.identity_mode,
+            prototype_granularity: modes.prototype_granularity,
             ..FaceoffVocabConfig::default()
         },
     )?;
@@ -1790,14 +1799,16 @@ fn build_fractal_documents(
 
     for candidate in corpus {
         let started = Instant::now();
-        let encoded = tokenizer.encode_text_with_factory_and_policy::<Backend>(
+        let encoded = tokenizer.encode_text_with_factory::<Backend>(
             &candidate.corpus.text,
             &vocab,
             &device,
             primitive.factory.clone(),
-            FaceoffEmissionPolicy::NoveltyAware,
-            fallback_mode,
-            local_cache_mode,
+            FaceoffEncodingOptions {
+                policy: FaceoffEmissionPolicy::NoveltyAware,
+                fallback_mode: modes.fallback_mode,
+                local_cache_mode: modes.local_cache_mode,
+            },
         )?;
         let wall_time_ms = started.elapsed().as_secs_f64() * 1000.0;
         let model_facing = ModelFacingDocument::from_encoded(encoded.clone(), limits)?;
@@ -2631,8 +2642,7 @@ mod tests {
     #[test]
     fn parse_corpus_source_rejects_unknown_value() {
         let error = parse_corpus_source("totally-fake")
-            .err()
-            .expect("unknown corpus source should error")
+            .expect_err("unknown corpus source should error")
             .to_string();
         assert!(error.contains("unknown corpus source `totally-fake`"));
     }
@@ -2661,8 +2671,7 @@ mod tests {
     #[test]
     fn parse_fallback_mode_rejects_unknown_value() {
         let error = parse_fallback_mode("totally-fake")
-            .err()
-            .expect("unknown fallback mode should error")
+            .expect_err("unknown fallback mode should error")
             .to_string();
         assert!(error.contains("unknown fallback mode `totally-fake`"));
     }
@@ -2683,8 +2692,7 @@ mod tests {
     #[test]
     fn parse_identity_mode_rejects_unknown_value() {
         let error = parse_identity_mode("totally-fake")
-            .err()
-            .expect("unknown identity mode should error")
+            .expect_err("unknown identity mode should error")
             .to_string();
         assert!(error.contains("unknown identity mode `totally-fake`"));
     }
@@ -2708,8 +2716,7 @@ mod tests {
     #[test]
     fn parse_prototype_granularity_rejects_unknown_value() {
         let error = parse_prototype_granularity("totally-fake")
-            .err()
-            .expect("unknown prototype granularity should error")
+            .expect_err("unknown prototype granularity should error")
             .to_string();
         assert!(error.contains("unknown prototype granularity `totally-fake`"));
     }
@@ -2730,8 +2737,7 @@ mod tests {
     #[test]
     fn parse_substrate_rejects_unknown_value() {
         let error = parse_substrate_mode("totally-fake")
-            .err()
-            .expect("unknown substrate mode should error")
+            .expect_err("unknown substrate mode should error")
             .to_string();
         assert!(error.contains("unknown substrate mode `totally-fake`"));
     }
@@ -2752,8 +2758,7 @@ mod tests {
     #[test]
     fn parse_split_policy_rejects_unknown_value() {
         let error = parse_split_policy("totally-fake")
-            .err()
-            .expect("unknown split policy should error")
+            .expect_err("unknown split policy should error")
             .to_string();
         assert!(error.contains("unknown split policy `totally-fake`"));
     }
@@ -2774,8 +2779,7 @@ mod tests {
     #[test]
     fn parse_local_cache_rejects_unknown_value() {
         let error = parse_local_cache_mode("totally-fake")
-            .err()
-            .expect("unknown local cache mode should error")
+            .expect_err("unknown local cache mode should error")
             .to_string();
         assert!(error.contains("unknown local cache mode `totally-fake`"));
     }
@@ -2815,8 +2819,7 @@ mod tests {
         let mut args = base_args();
         args.selected_primitives = vec!["totally_fake_v1".to_string()];
         let error = selected_primitive_candidates(&args)
-            .err()
-            .expect("unknown primitive should error")
+            .expect_err("unknown primitive should error")
             .to_string();
         assert!(error.contains("unknown primitive `totally_fake_v1`"));
     }
@@ -2848,8 +2851,7 @@ mod tests {
                 SourceFamily::LocalFawx,
                 CorpusSplit::Induction,
                 "/tmp/source".to_string(),
-                1,
-                1,
+                1..=1,
                 format!("{label}-{idx}"),
             ),
             split_group_key: "/tmp/source".to_string(),
@@ -2906,8 +2908,7 @@ mod tests {
                     SourceFamily::LocalFawx,
                     CorpusSplit::Induction,
                     "/tmp/a.rs".to_string(),
-                    1,
-                    10,
+                    1..=10,
                     "fn a() {}\n".to_string(),
                 ),
                 split_group_key: "/tmp/a.rs".to_string(),
@@ -2919,8 +2920,7 @@ mod tests {
                     SourceFamily::LocalFawx,
                     CorpusSplit::Induction,
                     "/tmp/a.rs".to_string(),
-                    11,
-                    20,
+                    11..=20,
                     "fn b() {}\n".to_string(),
                 ),
                 split_group_key: "/tmp/a.rs".to_string(),
@@ -2932,8 +2932,7 @@ mod tests {
                     SourceFamily::LocalFawx,
                     CorpusSplit::Induction,
                     "/tmp/b.rs".to_string(),
-                    1,
-                    10,
+                    1..=10,
                     "fn c() {}\n".to_string(),
                 ),
                 split_group_key: "/tmp/b.rs".to_string(),
@@ -2956,8 +2955,7 @@ mod tests {
                     SourceFamily::LocalFawx,
                     CorpusSplit::Induction,
                     "/tmp/server.log".to_string(),
-                    index + 1,
-                    index + 1,
+                    (index + 1)..=(index + 1),
                     format!("line-{index}\n"),
                 ),
                 split_group_key: format!("/tmp/server.log#group-{}", index / 2),
@@ -2988,8 +2986,7 @@ mod tests {
                     SourceFamily::LocalFawx,
                     CorpusSplit::Induction,
                     "/tmp/local-a.rs".to_string(),
-                    1,
-                    1,
+                    1..=1,
                     "fn a() {}\n".to_string(),
                 ),
                 split_group_key: "local-a".to_string(),
@@ -3001,8 +2998,7 @@ mod tests {
                     SourceFamily::LocalFawx,
                     CorpusSplit::Induction,
                     "/tmp/local-b.rs".to_string(),
-                    1,
-                    1,
+                    1..=1,
                     "fn b() {}\n".to_string(),
                 ),
                 split_group_key: "local-b".to_string(),
@@ -3014,8 +3010,7 @@ mod tests {
                     SourceFamily::ExternalHf,
                     CorpusSplit::Induction,
                     "hf://datasets/demo/a".to_string(),
-                    1,
-                    1,
+                    1..=1,
                     "fn c() {}\n".to_string(),
                 ),
                 split_group_key: "external-a".to_string(),
@@ -3027,8 +3022,7 @@ mod tests {
                     SourceFamily::ExternalHf,
                     CorpusSplit::Induction,
                     "hf://datasets/demo/b".to_string(),
-                    1,
-                    1,
+                    1..=1,
                     "fn d() {}\n".to_string(),
                 ),
                 split_group_key: "external-b".to_string(),
@@ -3110,18 +3104,23 @@ mod tests {
         );
     }
 
-    fn fake_record(
-        bucket: &str,
+    #[derive(Clone, Copy)]
+    struct FakeRecordMetrics {
         ratio: f64,
         motif_reuse_count: usize,
         roundtrip_ok: bool,
         chunk_utf8_ok: bool,
         collation_ok: bool,
         byte_fallback_tokens: usize,
-        split: CorpusSplit,
-        source_family: SourceFamily,
         exact_hits: usize,
         prototype_hits: usize,
+    }
+
+    fn fake_record(
+        bucket: &str,
+        split: CorpusSplit,
+        source_family: SourceFamily,
+        metrics: FakeRecordMetrics,
     ) -> BakeoffRecord {
         let mut models = BTreeMap::new();
         models.insert(
@@ -3132,11 +3131,11 @@ mod tests {
                 status: "ok".to_string(),
                 native_token_count: 100,
                 avg_chars_per_native_token: 4.0,
-                compression_ratio_vs_native: ratio,
+                compression_ratio_vs_native: metrics.ratio,
                 native_chunk_count: 1,
                 retokenize_ms: 1.0,
                 collate_ms: 1.0,
-                collation_ok,
+                collation_ok: metrics.collation_ok,
             },
         );
 
@@ -3159,10 +3158,10 @@ mod tests {
                 frontier_token_count: 10,
                 chunk_count: 1,
                 avg_chars_per_frontier_token: 10.0,
-                motif_reuse_count,
+                motif_reuse_count: metrics.motif_reuse_count,
                 fallback_motif_hits: 0,
-                fallback_exact_motif_hits: exact_hits,
-                fallback_prototype_hits: prototype_hits,
+                fallback_exact_motif_hits: metrics.exact_hits,
+                fallback_prototype_hits: metrics.prototype_hits,
                 fallback_literal_hits: 0,
                 fallback_shape_hits: 0,
                 fallback_unknown_motifs: 0,
@@ -3170,10 +3169,10 @@ mod tests {
                 fallback_local_cache_hits: 0,
                 fallback_local_cache_stores: 0,
                 fallback_lexical_fallback_tokens: 0,
-                fallback_byte_fallback_tokens: byte_fallback_tokens,
-                roundtrip_ok,
-                chunk_utf8_ok,
-                collation_ok,
+                fallback_byte_fallback_tokens: metrics.byte_fallback_tokens,
+                roundtrip_ok: metrics.roundtrip_ok,
+                chunk_utf8_ok: metrics.chunk_utf8_ok,
+                collation_ok: metrics.collation_ok,
                 wall_time_ms: 1.0,
             },
             models,
@@ -3184,16 +3183,18 @@ mod tests {
     fn verdict_is_red_on_hard_gate_failure() {
         let results = vec![fake_record(
             "logs.repetition_heavy",
-            8.0,
-            3,
-            false,
-            true,
-            true,
-            0,
             CorpusSplit::Evaluation,
             SourceFamily::LocalFawx,
-            0,
-            0,
+            FakeRecordMetrics {
+                ratio: 8.0,
+                motif_reuse_count: 3,
+                roundtrip_ok: false,
+                chunk_utf8_ok: true,
+                collation_ok: true,
+                byte_fallback_tokens: 0,
+                exact_hits: 0,
+                prototype_hits: 0,
+            },
         )];
 
         let verdict = summarize_verdict(&results);
@@ -3206,43 +3207,49 @@ mod tests {
     fn verdict_is_yellow_on_weak_logs_or_suspicious_nonlogs() {
         let weak_logs = vec![fake_record(
             "logs.repetition_heavy",
-            3.0,
-            1,
-            true,
-            true,
-            true,
-            0,
             CorpusSplit::Evaluation,
             SourceFamily::LocalFawx,
-            0,
-            0,
+            FakeRecordMetrics {
+                ratio: 3.0,
+                motif_reuse_count: 1,
+                roundtrip_ok: true,
+                chunk_utf8_ok: true,
+                collation_ok: true,
+                byte_fallback_tokens: 0,
+                exact_hits: 0,
+                prototype_hits: 0,
+            },
         )];
         let suspicious_nonlogs = vec![
             fake_record(
                 "logs.repetition_heavy",
-                8.0,
-                3,
-                true,
-                true,
-                true,
-                0,
                 CorpusSplit::Evaluation,
                 SourceFamily::LocalFawx,
-                0,
-                0,
+                FakeRecordMetrics {
+                    ratio: 8.0,
+                    motif_reuse_count: 3,
+                    roundtrip_ok: true,
+                    chunk_utf8_ok: true,
+                    collation_ok: true,
+                    byte_fallback_tokens: 0,
+                    exact_hits: 0,
+                    prototype_hits: 0,
+                },
             ),
             fake_record(
                 "code.rust",
-                6.0,
-                4,
-                true,
-                true,
-                true,
-                0,
                 CorpusSplit::Evaluation,
                 SourceFamily::LocalFawx,
-                0,
-                0,
+                FakeRecordMetrics {
+                    ratio: 6.0,
+                    motif_reuse_count: 4,
+                    roundtrip_ok: true,
+                    chunk_utf8_ok: true,
+                    collation_ok: true,
+                    byte_fallback_tokens: 0,
+                    exact_hits: 0,
+                    prototype_hits: 0,
+                },
             ),
         ];
 
@@ -3261,29 +3268,33 @@ mod tests {
         let results = vec![
             fake_record(
                 "logs.repetition_heavy",
-                8.0,
-                1,
-                true,
-                true,
-                true,
-                0,
                 CorpusSplit::Evaluation,
                 SourceFamily::LocalFawx,
-                0,
-                0,
+                FakeRecordMetrics {
+                    ratio: 8.0,
+                    motif_reuse_count: 1,
+                    roundtrip_ok: true,
+                    chunk_utf8_ok: true,
+                    collation_ok: true,
+                    byte_fallback_tokens: 0,
+                    exact_hits: 0,
+                    prototype_hits: 0,
+                },
             ),
             fake_record(
                 "docs.spec",
-                HELD_OUT_NONLOG_CAUTION_RATIO + 1.0,
-                0,
-                true,
-                true,
-                true,
-                0,
                 CorpusSplit::Evaluation,
                 SourceFamily::LocalFawx,
-                0,
-                0,
+                FakeRecordMetrics {
+                    ratio: HELD_OUT_NONLOG_CAUTION_RATIO + 1.0,
+                    motif_reuse_count: 0,
+                    roundtrip_ok: true,
+                    chunk_utf8_ok: true,
+                    collation_ok: true,
+                    byte_fallback_tokens: 0,
+                    exact_hits: 0,
+                    prototype_hits: 0,
+                },
             ),
         ];
 
@@ -3298,55 +3309,63 @@ mod tests {
         let results = vec![
             fake_record(
                 "logs.repetition_heavy",
-                8.0,
-                3,
-                true,
-                true,
-                true,
-                0,
                 CorpusSplit::Evaluation,
                 SourceFamily::LocalFawx,
-                0,
-                0,
+                FakeRecordMetrics {
+                    ratio: 8.0,
+                    motif_reuse_count: 3,
+                    roundtrip_ok: true,
+                    chunk_utf8_ok: true,
+                    collation_ok: true,
+                    byte_fallback_tokens: 0,
+                    exact_hits: 0,
+                    prototype_hits: 0,
+                },
             ),
             fake_record(
                 "jsonl.signals",
-                2.0,
-                1,
-                true,
-                true,
-                true,
-                0,
                 CorpusSplit::Evaluation,
                 SourceFamily::LocalFawx,
-                0,
-                0,
+                FakeRecordMetrics {
+                    ratio: 2.0,
+                    motif_reuse_count: 1,
+                    roundtrip_ok: true,
+                    chunk_utf8_ok: true,
+                    collation_ok: true,
+                    byte_fallback_tokens: 0,
+                    exact_hits: 0,
+                    prototype_hits: 0,
+                },
             ),
             fake_record(
                 "code.rust",
-                1.8,
-                0,
-                true,
-                true,
-                true,
-                0,
                 CorpusSplit::Evaluation,
                 SourceFamily::LocalFawx,
-                0,
-                0,
+                FakeRecordMetrics {
+                    ratio: 1.8,
+                    motif_reuse_count: 0,
+                    roundtrip_ok: true,
+                    chunk_utf8_ok: true,
+                    collation_ok: true,
+                    byte_fallback_tokens: 0,
+                    exact_hits: 0,
+                    prototype_hits: 0,
+                },
             ),
             fake_record(
                 "docs.spec",
-                1.6,
-                0,
-                true,
-                true,
-                true,
-                0,
                 CorpusSplit::Evaluation,
                 SourceFamily::LocalFawx,
-                0,
-                0,
+                FakeRecordMetrics {
+                    ratio: 1.6,
+                    motif_reuse_count: 0,
+                    roundtrip_ok: true,
+                    chunk_utf8_ok: true,
+                    collation_ok: true,
+                    byte_fallback_tokens: 0,
+                    exact_hits: 0,
+                    prototype_hits: 0,
+                },
             ),
         ];
 
@@ -3363,16 +3382,18 @@ mod tests {
     fn verdict_is_red_without_evaluation_docs() {
         let results = vec![fake_record(
             "logs.repetition_heavy",
-            8.0,
-            1,
-            true,
-            true,
-            true,
-            0,
             CorpusSplit::Induction,
             SourceFamily::LocalFawx,
-            0,
-            0,
+            FakeRecordMetrics {
+                ratio: 8.0,
+                motif_reuse_count: 1,
+                roundtrip_ok: true,
+                chunk_utf8_ok: true,
+                collation_ok: true,
+                byte_fallback_tokens: 0,
+                exact_hits: 0,
+                prototype_hits: 0,
+            },
         )];
 
         let verdict = summarize_verdict(&results);
@@ -3389,29 +3410,33 @@ mod tests {
         let results = vec![
             fake_record(
                 "logs.repetition_heavy",
-                1.0,
-                6,
-                false,
-                false,
-                false,
-                4,
                 CorpusSplit::Induction,
                 SourceFamily::LocalFawx,
-                0,
-                0,
+                FakeRecordMetrics {
+                    ratio: 1.0,
+                    motif_reuse_count: 6,
+                    roundtrip_ok: false,
+                    chunk_utf8_ok: false,
+                    collation_ok: false,
+                    byte_fallback_tokens: 4,
+                    exact_hits: 0,
+                    prototype_hits: 0,
+                },
             ),
             fake_record(
                 "logs.repetition_heavy",
-                8.0,
-                1,
-                true,
-                true,
-                true,
-                0,
                 CorpusSplit::Evaluation,
                 SourceFamily::LocalFawx,
-                0,
-                0,
+                FakeRecordMetrics {
+                    ratio: 8.0,
+                    motif_reuse_count: 1,
+                    roundtrip_ok: true,
+                    chunk_utf8_ok: true,
+                    collation_ok: true,
+                    byte_fallback_tokens: 0,
+                    exact_hits: 0,
+                    prototype_hits: 0,
+                },
             ),
         ];
 
@@ -3429,42 +3454,48 @@ mod tests {
         let results = vec![
             fake_record(
                 "external.code.python",
-                0.9,
-                0,
-                true,
-                true,
-                true,
-                0,
                 CorpusSplit::Evaluation,
                 SourceFamily::ExternalHf,
-                0,
-                0,
+                FakeRecordMetrics {
+                    ratio: 0.9,
+                    motif_reuse_count: 0,
+                    roundtrip_ok: true,
+                    chunk_utf8_ok: true,
+                    collation_ok: true,
+                    byte_fallback_tokens: 0,
+                    exact_hits: 0,
+                    prototype_hits: 0,
+                },
             ),
             fake_record(
                 "external.code.js_ts",
-                0.95,
-                0,
-                true,
-                true,
-                true,
-                0,
                 CorpusSplit::Evaluation,
                 SourceFamily::ExternalHf,
-                0,
-                0,
+                FakeRecordMetrics {
+                    ratio: 0.95,
+                    motif_reuse_count: 0,
+                    roundtrip_ok: true,
+                    chunk_utf8_ok: true,
+                    collation_ok: true,
+                    byte_fallback_tokens: 0,
+                    exact_hits: 0,
+                    prototype_hits: 0,
+                },
             ),
             fake_record(
                 "logs.repetition_heavy",
-                8.0,
-                0,
-                true,
-                true,
-                true,
-                0,
                 CorpusSplit::Evaluation,
                 SourceFamily::LocalFawx,
-                0,
-                0,
+                FakeRecordMetrics {
+                    ratio: 8.0,
+                    motif_reuse_count: 0,
+                    roundtrip_ok: true,
+                    chunk_utf8_ok: true,
+                    collation_ok: true,
+                    byte_fallback_tokens: 0,
+                    exact_hits: 0,
+                    prototype_hits: 0,
+                },
             ),
         ];
 

@@ -8,7 +8,7 @@ mod lexeme;
 mod packaging;
 mod vocab;
 
-pub use encode::FaceoffTokenizer;
+pub use encode::{FaceoffEncodingOptions, FaceoffTokenizer};
 pub use fallback::FaceoffFallbackStats;
 pub(crate) use lexeme::{scan_lexemes, LexemeSpan};
 pub use packaging::{FaceoffChunk, FaceoffChunkLimits, FaceoffChunkedDocument};

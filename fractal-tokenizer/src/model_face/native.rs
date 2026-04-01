@@ -1,7 +1,16 @@
-use std::{error::Error, fmt, num::NonZeroUsize, path::Path, str::Utf8Error};
+use std::{
+    error::Error,
+    fmt,
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+    str::Utf8Error,
+    sync::Arc,
+};
 
 use crate::{EncodedDocument, FaceoffChunk, FaceoffChunkedDocument};
 use crate::{ModelFacingBatch, ModelFacingDocument};
+use fractal_core::{data_generator::PAD_TOKEN, error::FractalError};
+use sentencepiece::{SentencePieceError, SentencePieceProcessor};
 
 /// Downstream tokenizer/retokenizer abstraction used by the native compatibility adapter.
 pub trait NativeTokenizer {
@@ -10,6 +19,160 @@ pub trait NativeTokenizer {
 
     fn tokenize(&self, text: &str) -> Result<Vec<Self::Token>, Self::Error>;
 }
+
+/// Shared canonical pad-alias semantics for model training paths that must map
+/// tokenizer-native padding onto the model's canonical pad token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanonicalPadSemantics {
+    pub native_pad_token_id: Option<u32>,
+    pub canonical_model_pad_token_id: u32,
+}
+
+impl CanonicalPadSemantics {
+    pub const fn canonical_default() -> Self {
+        Self {
+            native_pad_token_id: None,
+            canonical_model_pad_token_id: PAD_TOKEN as u32,
+        }
+    }
+
+    pub const fn new(native_pad_token_id: Option<u32>, canonical_model_pad_token_id: u32) -> Self {
+        Self {
+            native_pad_token_id,
+            canonical_model_pad_token_id,
+        }
+    }
+
+    pub fn from_expected_pad_token_id(
+        expected_pad_token_id: usize,
+        native_pad_token_id: Option<u32>,
+    ) -> Result<Self, FractalError> {
+        let canonical_model_pad_token_id = u32::try_from(expected_pad_token_id).map_err(|_| {
+            FractalError::InvalidConfig(format!(
+                "expected canonical pad token id {expected_pad_token_id} does not fit into u32"
+            ))
+        })?;
+        Ok(Self::new(native_pad_token_id, canonical_model_pad_token_id))
+    }
+
+    pub fn collation_pad_token_id(&self) -> u32 {
+        self.native_pad_token_id
+            .unwrap_or(self.canonical_model_pad_token_id)
+    }
+
+    pub fn uses_canonical_pad_alias(&self) -> bool {
+        self.native_pad_token_id != Some(self.canonical_model_pad_token_id)
+    }
+
+    pub fn canonicalize_input_from_chunk(&self, chunk: &NativeCollatedChunk<u32>) -> Vec<i64> {
+        let valid_len = chunk.valid_token_count();
+        chunk
+            .padded_tokens
+            .iter()
+            .enumerate()
+            .map(|(index, token)| {
+                if index < valid_len {
+                    *token as i64
+                } else {
+                    self.canonical_model_pad_token_id as i64
+                }
+            })
+            .collect()
+    }
+
+    pub fn canonicalize_target_from_input(&self, input: &[i64], valid_len: usize) -> Vec<i64> {
+        let mut target = vec![self.canonical_model_pad_token_id as i64; input.len()];
+        if valid_len == 0 {
+            return target;
+        }
+        let shifted_len = valid_len.saturating_sub(1);
+        if shifted_len > 0 {
+            target[..shifted_len].copy_from_slice(&input[1..(shifted_len + 1)]);
+        }
+        target[valid_len - 1] = self.canonical_model_pad_token_id as i64;
+        target
+    }
+}
+
+/// Shared slow SentencePiece wrapper used by Stage 0 and future model-facing
+/// tokenization flows that require deterministic slow-tokenizer semantics.
+#[derive(Clone, Debug)]
+pub struct SlowSentencePieceTokenizer {
+    processor: Arc<SentencePieceProcessor>,
+}
+
+impl SlowSentencePieceTokenizer {
+    pub fn open(path: &Path) -> Result<Self, SlowSentencePieceTokenizerError> {
+        let processor = SentencePieceProcessor::open(path).map_err(|source| {
+            SlowSentencePieceTokenizerError::Load {
+                path: path.to_path_buf(),
+                reason: source,
+            }
+        })?;
+        Ok(Self {
+            processor: Arc::new(processor),
+        })
+    }
+
+    pub fn vocab_size(&self) -> usize {
+        self.processor.len()
+    }
+
+    pub fn model_pad_token_id(&self) -> Option<u32> {
+        self.processor.pad_id()
+    }
+}
+
+impl NativeTokenizer for SlowSentencePieceTokenizer {
+    type Token = u32;
+    type Error = SlowSentencePieceTokenizerError;
+
+    fn tokenize(&self, text: &str) -> Result<Vec<Self::Token>, Self::Error> {
+        self.processor
+            .encode(text)
+            .map(|pieces| pieces.into_iter().map(|piece| piece.id).collect())
+            .map_err(|source| SlowSentencePieceTokenizerError::Encode {
+                input_preview: text.chars().take(32).collect(),
+                reason: source,
+            })
+    }
+}
+
+#[derive(Debug)]
+pub enum SlowSentencePieceTokenizerError {
+    Load {
+        path: PathBuf,
+        reason: SentencePieceError,
+    },
+    Encode {
+        input_preview: String,
+        reason: SentencePieceError,
+    },
+}
+
+impl fmt::Display for SlowSentencePieceTokenizerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Load { path, reason } => {
+                write!(
+                    f,
+                    "failed to load slow sentencepiece tokenizer from {}: {reason}",
+                    path.display()
+                )
+            }
+            Self::Encode {
+                input_preview,
+                reason,
+            } => write!(
+                f,
+                "failed to encode text with slow sentencepiece tokenizer for input {:?}: {reason}",
+                input_preview
+            ),
+        }
+    }
+}
+
+impl Error for SlowSentencePieceTokenizerError {}
 
 /// HF-backed native tokenizer wrapper around `tokenizers::Tokenizer`.
 #[derive(Clone)]
@@ -620,6 +783,35 @@ impl NativeTokenizer for HuggingFaceNativeTokenizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{path::PathBuf, process::Command};
+
+    fn sentencepiece_testdata_model() -> PathBuf {
+        let output = Command::new("cargo")
+            .args(["metadata", "--format-version", "1"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("cargo metadata should run");
+        assert!(
+            output.status.success(),
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("cargo metadata should be valid json");
+        let packages = metadata["packages"]
+            .as_array()
+            .expect("cargo metadata should include packages");
+        let manifest_path = packages
+            .iter()
+            .find(|package| package["name"] == "sentencepiece")
+            .and_then(|package| package["manifest_path"].as_str())
+            .expect("sentencepiece package should be present in cargo metadata");
+        PathBuf::from(manifest_path)
+            .parent()
+            .expect("sentencepiece manifest should have parent")
+            .join("testdata")
+            .join("toy.model")
+    }
 
     fn chunk(
         index: usize,
@@ -835,5 +1027,49 @@ mod tests {
             vec![2, 2, 2]
         );
         assert_eq!(collated.sequence_len, 2);
+    }
+
+    #[test]
+    fn canonical_pad_semantics_alias_missing_native_pad_tokens() {
+        let semantics = CanonicalPadSemantics::from_expected_pad_token_id(PAD_TOKEN, None)
+            .expect("canonical pad semantics should build");
+        let chunk = NativeCollatedChunk {
+            source_document_index: 0,
+            source_chunk_index: 0,
+            padded_tokens: vec![10, 11, 777],
+            attention_mask: vec![true, true, false],
+            source: NativeTokenizedChunk {
+                source: FaceoffChunk {
+                    index: 0,
+                    token_count: 2,
+                    byte_count: 3,
+                    start: 0,
+                    end: 3,
+                    payload: vec![b'x'; 3],
+                },
+                native_tokens: vec![10, 11],
+            },
+        };
+
+        let input = semantics.canonicalize_input_from_chunk(&chunk);
+        let target = semantics.canonicalize_target_from_input(&input, chunk.valid_token_count());
+
+        assert_eq!(semantics.collation_pad_token_id(), PAD_TOKEN as u32);
+        assert!(semantics.uses_canonical_pad_alias());
+        assert_eq!(input, vec![10, 11, PAD_TOKEN as i64]);
+        assert_eq!(target, vec![11, PAD_TOKEN as i64, PAD_TOKEN as i64]);
+    }
+
+    #[test]
+    fn slow_sentencepiece_tokenizer_loads_test_model() {
+        let tokenizer = SlowSentencePieceTokenizer::open(&sentencepiece_testdata_model())
+            .expect("test sentencepiece model should load");
+
+        let tokens = tokenizer
+            .tokenize("hello world")
+            .expect("slow sentencepiece tokenizer should encode");
+
+        assert!(tokenizer.vocab_size() > 0);
+        assert!(!tokens.is_empty());
     }
 }

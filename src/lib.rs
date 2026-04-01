@@ -15,8 +15,7 @@ pub use fractal_primitives_private::{
 pub use primitive_tracker::{primitive_tracker_reminder_lines, TRACKER_PATH};
 pub use run_artifacts::{persist_run_artifacts, PersistedRunPaths};
 pub use tokenizer_training::{
-    load_stage0_tokenizer_runtime, materialize_bridge_vocab_artifact,
-    run_tokenizer_backed_species,
+    load_stage0_tokenizer_runtime, materialize_bridge_vocab_artifact, run_tokenizer_backed_species,
     run_tokenizer_backed_species_from_experiment, ResolvedTokenizerArtifact, Stage0PadSemantics,
     Stage0SlowTokenizer, TextCorpusSplitSource, TokenizerBridgeStats, TokenizerTrainingCorpus,
     TokenizerTrainingCorpusSource, TokenizerTrainingRuntime, STAGE0_CANONICAL_TOKENIZER_FILENAME,
@@ -35,26 +34,29 @@ pub struct TournamentRunReport {
     pub bridge_stats: BTreeMap<SpeciesId, TokenizerBridgeStats>,
 }
 
+#[derive(Clone)]
+pub struct TournamentRunReportParts {
+    pub preset: TournamentPreset,
+    pub lane: TournamentLane,
+    pub comparison: ComparisonContract,
+    pub config: TournamentConfig,
+    pub species: Vec<SpeciesDefinition>,
+    pub results: Vec<RankedSpeciesResult>,
+    pub artifact: TournamentRunArtifact,
+    pub bridge_stats: BTreeMap<SpeciesId, TokenizerBridgeStats>,
+}
+
 impl TournamentRunReport {
-    pub fn new(
-        preset: TournamentPreset,
-        lane: TournamentLane,
-        comparison: ComparisonContract,
-        config: TournamentConfig,
-        species: Vec<SpeciesDefinition>,
-        results: Vec<RankedSpeciesResult>,
-        artifact: TournamentRunArtifact,
-        bridge_stats: BTreeMap<SpeciesId, TokenizerBridgeStats>,
-    ) -> Self {
+    pub fn new(parts: TournamentRunReportParts) -> Self {
         Self {
-            preset,
-            lane,
-            comparison,
-            config,
-            species,
-            results,
-            artifact,
-            bridge_stats,
+            preset: parts.preset,
+            lane: parts.lane,
+            comparison: parts.comparison,
+            config: parts.config,
+            species: parts.species,
+            results: parts.results,
+            artifact: parts.artifact,
+            bridge_stats: parts.bridge_stats,
         }
     }
 
@@ -223,13 +225,13 @@ mod tests {
     #[test]
     fn run_report_marks_same_preset_and_mixed_preset_comparisons() {
         let species = species_registry_for_species(fractal_core::SpeciesId::P1Contractive);
-        let report = TournamentRunReport::new(
-            TournamentPreset::GenerationFour,
-            TournamentLane::Leader,
-            ComparisonContract::authoritative_same_preset(),
-            TournamentPreset::GenerationFour.config(),
+        let report = TournamentRunReport::new(TournamentRunReportParts {
+            preset: TournamentPreset::GenerationFour,
+            lane: TournamentLane::Leader,
+            comparison: ComparisonContract::authoritative_same_preset(),
+            config: TournamentPreset::GenerationFour.config(),
             species,
-            vec![RankedSpeciesResult {
+            results: vec![RankedSpeciesResult {
                 rank: 1,
                 species: fractal_core::SpeciesId::P1Contractive,
                 stability_score: 0.53,
@@ -238,9 +240,12 @@ mod tests {
                 tokens_per_sec: 114.0,
                 fitness: 0.58,
             }],
-            single_species_artifact(fractal_core::SpeciesId::P1Contractive, "p1_contractive_v1"),
-            BTreeMap::new(),
-        );
+            artifact: single_species_artifact(
+                fractal_core::SpeciesId::P1Contractive,
+                "p1_contractive_v1",
+            ),
+            bridge_stats: BTreeMap::new(),
+        });
 
         assert!(report.comparison.is_authoritative_same_preset());
         assert_eq!(report.comparison_label(), "authoritative same-preset");
@@ -250,13 +255,13 @@ mod tests {
             "p1_contractive_v1"
         );
 
-        let advisory = TournamentRunReport::new(
-            TournamentPreset::FastTest,
-            TournamentLane::Baseline,
-            ComparisonContract::advisory_mixed_preset(),
-            TournamentPreset::FastTest.config(),
-            species_registry_for_species(fractal_core::SpeciesId::P3Hierarchical),
-            vec![RankedSpeciesResult {
+        let advisory = TournamentRunReport::new(TournamentRunReportParts {
+            preset: TournamentPreset::FastTest,
+            lane: TournamentLane::Baseline,
+            comparison: ComparisonContract::advisory_mixed_preset(),
+            config: TournamentPreset::FastTest.config(),
+            species: species_registry_for_species(fractal_core::SpeciesId::P3Hierarchical),
+            results: vec![RankedSpeciesResult {
                 rank: 1,
                 species: fractal_core::SpeciesId::P3Hierarchical,
                 stability_score: 0.55,
@@ -265,12 +270,12 @@ mod tests {
                 tokens_per_sec: 34.0,
                 fitness: 0.58,
             }],
-            single_species_artifact(
+            artifact: single_species_artifact(
                 fractal_core::SpeciesId::P3Hierarchical,
                 "p3_hierarchical_v1",
             ),
-            BTreeMap::new(),
-        );
+            bridge_stats: BTreeMap::new(),
+        });
 
         assert_eq!(advisory.comparison_label(), "advisory mixed-preset");
         assert_eq!(

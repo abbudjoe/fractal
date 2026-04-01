@@ -13,11 +13,12 @@ pub use bridge::{
     TypedEmbeddingBridge,
 };
 pub use native::{
-    HuggingFaceNativeTokenizer, HuggingFaceNativeTokenizerError, ModelFacingDocumentView,
-    NativeCollatedBatch, NativeCollatedChunk, NativeCollatedDocument, NativeCollationError,
-    NativeCollationSpec, NativeCompatibilityAdapter, NativeCompatibilityBatch,
-    NativeCompatibilityError, NativeTokenizedBatch, NativeTokenizedChunk, NativeTokenizedDocument,
-    NativeTokenizer, NativeTruncationPolicy,
+    CanonicalPadSemantics, HuggingFaceNativeTokenizer, HuggingFaceNativeTokenizerError,
+    ModelFacingDocumentView, NativeCollatedBatch, NativeCollatedChunk, NativeCollatedDocument,
+    NativeCollationError, NativeCollationSpec, NativeCompatibilityAdapter,
+    NativeCompatibilityBatch, NativeCompatibilityError, NativeTokenizedBatch, NativeTokenizedChunk,
+    NativeTokenizedDocument, NativeTokenizer, NativeTruncationPolicy, SlowSentencePieceTokenizer,
+    SlowSentencePieceTokenizerError,
 };
 pub use traits::{ModelAdapter, ModelBatch};
 

@@ -580,7 +580,7 @@ mod tests {
 
     use crate::{
         species_registry_for_species, ComparisonContract, RankedSpeciesResult, SpeciesId,
-        TournamentLane, TournamentPreset, TournamentRunReport,
+        TournamentLane, TournamentPreset, TournamentRunReport, TournamentRunReportParts,
     };
     use fractal_core::lifecycle::TrainingRuntimeArtifact;
     use fractal_core::{
@@ -637,13 +637,13 @@ mod tests {
                 }),
             }],
         };
-        let report = TournamentRunReport::new(
-            TournamentPreset::FastTest,
-            TournamentLane::Leader,
-            ComparisonContract::authoritative_same_preset(),
-            TournamentPreset::FastTest.config(),
+        let report = TournamentRunReport::new(TournamentRunReportParts {
+            preset: TournamentPreset::FastTest,
+            lane: TournamentLane::Leader,
+            comparison: ComparisonContract::authoritative_same_preset(),
+            config: TournamentPreset::FastTest.config(),
             species,
-            vec![RankedSpeciesResult {
+            results: vec![RankedSpeciesResult {
                 rank: 1,
                 species: SpeciesId::P1Contractive,
                 stability_score: 0.53,
@@ -653,8 +653,8 @@ mod tests {
                 fitness: 0.58,
             }],
             artifact,
-            BTreeMap::new(),
-        );
+            bridge_stats: BTreeMap::new(),
+        });
 
         let paths = persist_run_artifacts(&report).unwrap();
         assert!(paths.artifact_path.ends_with(ARTIFACT_FILENAME));

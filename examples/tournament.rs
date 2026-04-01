@@ -18,14 +18,13 @@ use fractal::{
         TournamentPreset, TournamentProgressEvent, TournamentReporter, TournamentSequence,
         TrainingInputMode, TrainingInputSpec,
     },
-    materialize_bridge_vocab_artifact,
-    persist_run_artifacts, primitive_tracker_reminder_lines,
+    materialize_bridge_vocab_artifact, persist_run_artifacts, primitive_tracker_reminder_lines,
     registry::{
         resolve_precision_profile, CandleBf16TrainBackend, CandleF32TrainBackend, ComputeBackend,
         ExecutionMode, MetalF32TrainBackend, ResolvedExecutablePrecisionProfile, SpeciesId,
     },
     run_tokenizer_backed_species_from_experiment, species_registry_for_lane,
-    species_registry_for_species, TournamentLane, TournamentRunReport,
+    species_registry_for_species, TournamentLane, TournamentRunReport, TournamentRunReportParts,
 };
 #[cfg(feature = "cuda")]
 use fractal_core::registry::cuda_device;
@@ -67,7 +66,7 @@ enum BackendOverride {
     Metal,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RunOptions {
     selection: Option<RunSelection>,
     lane: Option<TournamentLane>,
@@ -84,28 +83,6 @@ struct RunOptions {
     logical_name: Option<String>,
     question_summary: Option<String>,
     comparison_override: Option<ComparisonContract>,
-}
-
-impl Default for RunOptions {
-    fn default() -> Self {
-        Self {
-            selection: None,
-            lane: None,
-            species: None,
-            seed: None,
-            execution_mode: None,
-            parallelism: None,
-            backend: None,
-            perplexity_eval_batches: None,
-            arc_eval_batches: None,
-            benchmark_mode: None,
-            manifest_path: None,
-            prepare_stage0_assets: false,
-            logical_name: None,
-            question_summary: None,
-            comparison_override: None,
-        }
-    }
 }
 
 impl RunOptions {
@@ -454,8 +431,8 @@ struct ExperimentManifestFileV2 {
 
 #[derive(Clone, Debug)]
 enum LoadedManifest {
-    Legacy(ExperimentManifestFile),
-    V2(ExperimentManifestFileV2),
+    Legacy(Box<ExperimentManifestFile>),
+    V2(Box<ExperimentManifestFileV2>),
 }
 
 impl ExperimentManifestFile {
@@ -567,8 +544,8 @@ impl ExperimentManifestFileV2 {
 impl LoadedManifest {
     fn into_run_options(self, path: &Path) -> Result<RunOptions, FractalError> {
         match self {
-            Self::Legacy(manifest) => manifest.into_run_options(path),
-            Self::V2(manifest) => manifest.into_run_options(path),
+            Self::Legacy(manifest) => (*manifest).into_run_options(path),
+            Self::V2(manifest) => (*manifest).into_run_options(path),
         }
     }
 }
@@ -591,7 +568,7 @@ fn load_manifest_file(path: &Path) -> Result<LoadedManifest, FractalError> {
                     path.display()
                 ))
             })?;
-        Ok(LoadedManifest::V2(manifest))
+        Ok(LoadedManifest::V2(Box::new(manifest)))
     } else {
         let manifest: ExperimentManifestFile = serde_json::from_value(value).map_err(|error| {
             invalid_argument(format!(
@@ -599,14 +576,14 @@ fn load_manifest_file(path: &Path) -> Result<LoadedManifest, FractalError> {
                 path.display()
             ))
         })?;
-        Ok(LoadedManifest::Legacy(manifest))
+        Ok(LoadedManifest::Legacy(Box::new(manifest)))
     }
 }
 
 fn load_manifest_v2(path: &Path) -> Result<Option<ExperimentManifestFileV2>, FractalError> {
     match load_manifest_file(path)? {
         LoadedManifest::Legacy(_) => Ok(None),
-        LoadedManifest::V2(manifest) => Ok(Some(manifest)),
+        LoadedManifest::V2(manifest) => Ok(Some(*manifest)),
     }
 }
 
@@ -997,7 +974,10 @@ fn prepare_stage0_assets(options: &RunOptions) -> Result<(), FractalError> {
         }
     };
     let mut config = preset.config();
-    manifest.experiment.config.apply_without_backend(&mut config)?;
+    manifest
+        .experiment
+        .config
+        .apply_without_backend(&mut config)?;
     if let Some(optimizer) = manifest.experiment.optimizer.clone() {
         config = config.with_optimizer(optimizer);
     }
@@ -1018,7 +998,10 @@ fn prepare_stage0_assets(options: &RunOptions) -> Result<(), FractalError> {
     );
     template.validate_against_config(&config)?;
     let output_path = materialize_bridge_vocab_artifact(&template.training_input, &config)?;
-    println!("Materialized Stage 0 bridge vocab artifact at {}", output_path.display());
+    println!(
+        "Materialized Stage 0 bridge vocab artifact at {}",
+        output_path.display()
+    );
     Ok(())
 }
 
@@ -1077,7 +1060,7 @@ fn run_preset(
             .filter_map(|record| record.metrics.clone())
             .collect::<Vec<_>>(),
     );
-    let report = TournamentRunReport::new(
+    let report = TournamentRunReport::new(TournamentRunReportParts {
         preset,
         lane,
         comparison,
@@ -1085,8 +1068,8 @@ fn run_preset(
         species,
         results,
         artifact,
-        BTreeMap::new(),
-    );
+        bridge_stats: BTreeMap::new(),
+    });
     emit_persisted_report(&report)
 }
 
@@ -1204,19 +1187,19 @@ fn run_tokenizer_backed_preset(
             "tokenizer-backed Stage 0 run completed without recording a species artifact".into(),
         )
     })?;
-    let report = TournamentRunReport::new(
+    let report = TournamentRunReport::new(TournamentRunReportParts {
         preset,
         lane,
         comparison,
-        config.clone(),
-        definitions,
-        aggregate_results(vec![metrics]),
-        fractal::TournamentRunArtifact {
+        config: config.clone(),
+        species: definitions,
+        results: aggregate_results(vec![metrics]),
+        artifact: fractal::TournamentRunArtifact {
             config,
             species: vec![artifact],
         },
-        BTreeMap::from([(species, bridge_stats)]),
-    );
+        bridge_stats: BTreeMap::from([(species, bridge_stats)]),
+    });
     emit_persisted_report(&report)
 }
 

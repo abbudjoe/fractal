@@ -1936,6 +1936,7 @@ dependencies = [
  "fractal-primitives-private",
  "llama_cpp_rs",
  "reqwest",
+ "sentencepiece",
  "serde",
  "serde_json",
  "tiktoken-rs",

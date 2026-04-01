@@ -706,11 +706,10 @@ fn species_variant_name(species: SpeciesId) -> String {
         .unwrap_or_else(|| species.as_str().to_owned())
 }
 
+type CompletedRowDedupKey = (Option<u64>, String, String, String, String, String);
+
 fn dedupe_completed_rows(mut rows: Vec<CompletedRow>) -> Vec<CompletedRow> {
-    let mut best_by_key: BTreeMap<
-        (Option<u64>, String, String, String, String, String),
-        CompletedRow,
-    > = BTreeMap::new();
+    let mut best_by_key: BTreeMap<CompletedRowDedupKey, CompletedRow> = BTreeMap::new();
     for row in rows.drain(..) {
         let key = (
             row.seed,

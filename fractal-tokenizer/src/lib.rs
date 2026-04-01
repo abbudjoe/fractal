@@ -8,18 +8,20 @@ mod tokenizer;
 
 pub use faceoff::{
     EncodedDocument, EncodedToken, EncodedTokenKind, FaceoffChunk, FaceoffChunkLimits,
-    FaceoffChunkedDocument, FaceoffEmissionPolicy, FaceoffFallbackMode, FaceoffFallbackStats,
-    FaceoffIdentityMode, FaceoffLexemeKind, FaceoffLocalCacheMode, FaceoffTokenId,
-    FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, PrototypeAdmissionPolicy, PrototypeEntry,
-    PrototypeGranularityMode, ShapeEntry, VocabEntry, FACEOFF_VOCAB_FORMAT_VERSION,
+    FaceoffChunkedDocument, FaceoffEmissionPolicy, FaceoffEncodingOptions, FaceoffFallbackMode,
+    FaceoffFallbackStats, FaceoffIdentityMode, FaceoffLexemeKind, FaceoffLocalCacheMode,
+    FaceoffTokenId, FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, PrototypeAdmissionPolicy,
+    PrototypeEntry, PrototypeGranularityMode, ShapeEntry, VocabEntry, FACEOFF_VOCAB_FORMAT_VERSION,
 };
 pub use model_face::{
-    BridgeBatch, BridgeDocument, BridgeFeatureChunk, BridgeFeatureToken, EmbeddingBridgeAdapter,
-    HuggingFaceNativeTokenizer, HuggingFaceNativeTokenizerError, ModelAdapter, ModelBatch,
-    ModelFacingBatch, ModelFacingDocument, NativeCollatedBatch, NativeCollatedChunk,
-    NativeCollatedDocument, NativeCollationError, NativeCollationSpec, NativeCompatibilityAdapter,
-    NativeCompatibilityBatch, NativeCompatibilityError, NativeTokenizedBatch, NativeTokenizedChunk,
-    NativeTokenizedDocument, NativeTokenizer, NativeTruncationPolicy, TypedEmbeddingBridge,
+    BridgeBatch, BridgeDocument, BridgeFeatureChunk, BridgeFeatureToken, CanonicalPadSemantics,
+    EmbeddingBridgeAdapter, HuggingFaceNativeTokenizer, HuggingFaceNativeTokenizerError,
+    ModelAdapter, ModelBatch, ModelFacingBatch, ModelFacingDocument, NativeCollatedBatch,
+    NativeCollatedChunk, NativeCollatedDocument, NativeCollationError, NativeCollationSpec,
+    NativeCompatibilityAdapter, NativeCompatibilityBatch, NativeCompatibilityError,
+    NativeTokenizedBatch, NativeTokenizedChunk, NativeTokenizedDocument, NativeTokenizer,
+    NativeTruncationPolicy, SlowSentencePieceTokenizer, SlowSentencePieceTokenizerError,
+    TypedEmbeddingBridge,
 };
 pub use primitives::{
     B1FractalGated, B3FractalHierarchical, B4Universal, P1FractalHybrid, P2Mandelbrot,
