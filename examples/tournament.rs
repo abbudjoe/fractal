@@ -21,7 +21,10 @@ use fractal::{
     load_tokenizer_training_corpus_source,
     persist_run_artifacts, primitive_tracker_reminder_lines,
     run_tokenizer_backed_species_from_source,
-    registry::{ComputeBackend, CpuTrainBackend, ExecutionMode, MetalTrainBackend, SpeciesId},
+    registry::{
+        resolve_precision_profile, CandleBf16TrainBackend, CandleF32TrainBackend, ComputeBackend,
+        ExecutionMode, MetalF32TrainBackend, ResolvedExecutablePrecisionProfile, SpeciesId,
+    },
     species_registry_for_lane, species_registry_for_species, TournamentLane, TournamentRunReport,
 };
 #[cfg(feature = "cuda")]
@@ -1024,10 +1027,24 @@ fn run_tokenizer_backed_preset(
         })?;
     let corpus_source = load_tokenizer_training_corpus_source(&experiment.training_input)?;
 
-    let (metrics, bridge_stats) = match &config.execution_backend {
-        ComputeBackend::CpuCandle => {
+    let precision_profile =
+        resolve_precision_profile(&config.execution_backend, &config.launch_policy.precision)?;
+    let (metrics, bridge_stats) = match (&config.execution_backend, precision_profile) {
+        (ComputeBackend::CpuCandle, ResolvedExecutablePrecisionProfile::CandleF32) => {
             let (metrics, bridge_stats, _artifact) =
-                run_tokenizer_backed_species_from_source::<CpuTrainBackend>(
+                run_tokenizer_backed_species_from_source::<CandleF32TrainBackend>(
+                    species,
+                    definition.variant_name,
+                    config.clone(),
+                    Some(experiment.clone()),
+                    &corpus_source,
+                    cpu_device(),
+                )?;
+            (metrics, bridge_stats)
+        }
+        (ComputeBackend::CpuCandle, ResolvedExecutablePrecisionProfile::CandleBf16) => {
+            let (metrics, bridge_stats, _artifact) =
+                run_tokenizer_backed_species_from_source::<CandleBf16TrainBackend>(
                     species,
                     definition.variant_name,
                     config.clone(),
@@ -1038,9 +1055,12 @@ fn run_tokenizer_backed_preset(
             (metrics, bridge_stats)
         }
         #[cfg(feature = "cuda")]
-        ComputeBackend::CudaCandle { device_index } => {
+        (
+            ComputeBackend::CudaCandle { device_index },
+            ResolvedExecutablePrecisionProfile::CandleF32,
+        ) => {
             let (metrics, bridge_stats, _artifact) =
-                run_tokenizer_backed_species_from_source::<CpuTrainBackend>(
+                run_tokenizer_backed_species_from_source::<CandleF32TrainBackend>(
                     species,
                     definition.variant_name,
                     config.clone(),
@@ -1050,10 +1070,26 @@ fn run_tokenizer_backed_preset(
                 )?;
             (metrics, bridge_stats)
         }
-        ComputeBackend::MetalWgpu { device } => {
+        #[cfg(feature = "cuda")]
+        (
+            ComputeBackend::CudaCandle { device_index },
+            ResolvedExecutablePrecisionProfile::CandleBf16,
+        ) => {
+            let (metrics, bridge_stats, _artifact) =
+                run_tokenizer_backed_species_from_source::<CandleBf16TrainBackend>(
+                    species,
+                    definition.variant_name,
+                    config.clone(),
+                    Some(experiment.clone()),
+                    &corpus_source,
+                    cuda_device(*device_index),
+                )?;
+            (metrics, bridge_stats)
+        }
+        (ComputeBackend::MetalWgpu { device }, ResolvedExecutablePrecisionProfile::MetalF32) => {
             initialize_metal_runtime(device);
             let (metrics, bridge_stats, _artifact) =
-                run_tokenizer_backed_species_from_source::<MetalTrainBackend>(
+                run_tokenizer_backed_species_from_source::<MetalF32TrainBackend>(
                     species,
                     definition.variant_name,
                     config.clone(),
@@ -1062,6 +1098,13 @@ fn run_tokenizer_backed_preset(
                     device.clone(),
                 )?;
             (metrics, bridge_stats)
+        }
+        _ => {
+            return Err(FractalError::InvalidConfig(format!(
+                "resolved precision profile {} is not executable for backend {:?}",
+                precision_profile.label(),
+                config.execution_backend
+            )))
         }
     };
 
@@ -2356,7 +2399,7 @@ mod tests {
                         "backend_policy": "active-execution-backend",
                         "launch_policy": {
                             "precision": {
-                                "compute": "bf16",
+                                "compute": "fp32",
                                 "optimizer_state": "fp32",
                                 "reduction": "fp32",
                                 "tf32_enabled": true
@@ -2427,7 +2470,9 @@ mod tests {
         assert_eq!(config.vocab_size, 32000);
         assert_eq!(config.max_seq_len, 2048);
         assert_eq!(config.optimizer, OptimizerSpec::stage0_adamw());
-        assert_eq!(config.launch_policy, fractal::LaunchPolicySpec::stage0_default());
+        let mut expected_launch_policy = fractal::LaunchPolicySpec::stage0_default();
+        expected_launch_policy.precision.compute = fractal::NumericPrecisionKind::Fp32;
+        assert_eq!(config.launch_policy, expected_launch_policy);
 
         let manifest_v2 = load_manifest_v2(&manifest_path).unwrap().unwrap();
         let template = build_experiment_template(
@@ -2442,7 +2487,7 @@ mod tests {
 
         assert_eq!(template.training_input.mode, TrainingInputMode::TokenizerBackedText);
         assert_eq!(template.training_input.corpus_name.as_deref(), Some("fineweb-stage0"));
-        assert_eq!(template.runtime.launch_policy, fractal::LaunchPolicySpec::stage0_default());
+        assert_eq!(template.runtime.launch_policy, expected_launch_policy);
         assert_eq!(template.question.lane_intent, LaneIntent::Benchmark);
         assert_eq!(template.question.decision_intent, DecisionIntent::Benchmark);
         assert_eq!(template.artifacts, ArtifactPolicy::default());
@@ -2554,7 +2599,7 @@ mod tests {
                         "backend_policy": "active-execution-backend",
                         "launch_policy": {
                             "precision": {
-                                "compute": "bf16",
+                                "compute": "fp32",
                                 "optimizer_state": "fp32",
                                 "reduction": "fp32",
                                 "tf32_enabled": true

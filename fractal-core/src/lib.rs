@@ -19,8 +19,9 @@ pub use lifecycle::{
     EvalCadencePolicy, ExecutionBackend, ExecutionTarget, ExecutionTargetKind, ExperimentId,
     ExperimentQuestion, ExperimentSpec, ExperimentSpecTemplate, ForwardExecutionPolicy, LaneIntent,
     LaunchPolicySpec, LearningRateScheduleKind, LearningRateScheduleSpec, NumericPrecisionKind,
-    OptimizerKind, OptimizerSpec, PhaseTiming, PrecisionPolicy, ResumePolicy, RunExecutionOutcome,
-    RunManifest, RunOutcomeClass, RunPhase, RunQualityOutcome, RuntimeBackendPolicy,
+    OptimizerKind, OptimizerSpec, PhaseTiming, PrecisionPolicy, QuantizationPolicy,
+    QuantizedPrecisionKind, ResumePolicy, RunExecutionOutcome, RunManifest, RunOutcomeClass,
+    RunPhase, RunQualityOutcome, RuntimeBackendPolicy,
     RuntimeSurfaceSpec, SpeciesCompletion, SpeciesRunArtifact, SpeciesRunStage,
     TextCorpusFormat, TextCorpusSourceSpec, TextCorpusSplitSpec, TokenizerArtifactSpec,
     TokenizerBridgeSpec, Tournament, TournamentConfig, TournamentPreset, TournamentProgressEvent,
@@ -29,9 +30,12 @@ pub use lifecycle::{
 };
 pub use model::FractalModel;
 pub use registry::{
-    is_valid_primitive_variant_name, run_species_with_batches, ComputeBackend, CpuBackend,
-    CpuTrainBackend, ExecutionMode, MetalBackend, MetalTrainBackend, PrimitiveVariantName,
-    SpeciesDefinition, SpeciesId, TrainingBatchSet,
+    is_valid_primitive_variant_name, resolve_precision_profile, run_species_with_batches,
+    CandleBf16Backend, CandleBf16TrainBackend, CandleF32Backend, CandleF32TrainBackend,
+    ComputeBackend, CpuBackend, CpuTrainBackend, ExecutionMode, MetalBackend, MetalBf16Backend,
+    MetalBf16TrainBackend, MetalF32Backend, MetalF32TrainBackend, MetalTrainBackend,
+    PrimitiveVariantName, ResolvedExecutablePrecisionProfile, SpeciesDefinition, SpeciesId,
+    TrainingBatchSet,
 };
 pub use router::EarlyExitRouter;
 pub use state::{FractalState, StateLayout};

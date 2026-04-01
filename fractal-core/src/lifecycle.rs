@@ -17,8 +17,8 @@ use crate::{
     fitness::SpeciesRawMetrics,
     registry::{
         build_failure_artifact, build_success_artifact, classify_quality_outcome, phase_timing,
-        take_last_species_run_artifact, ComputeBackend, ExecutionMode, PrimitiveVariantName,
-        SpeciesDefinition, SpeciesId, SpeciesRunContext,
+        resolve_precision_profile, take_last_species_run_artifact, ComputeBackend, ExecutionMode,
+        PrimitiveVariantName, SpeciesDefinition, SpeciesId, SpeciesRunContext,
     },
 };
 
@@ -935,12 +935,67 @@ impl NumericPrecisionKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QuantizedPrecisionKind {
+    Int8,
+    Int4,
+    Bit1,
+}
+
+impl QuantizedPrecisionKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Int8 => "int8",
+            Self::Int4 => "int4",
+            Self::Bit1 => "bit1",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuantizationPolicy {
+    pub weights: Option<QuantizedPrecisionKind>,
+    pub activations: Option<QuantizedPrecisionKind>,
+}
+
+impl QuantizationPolicy {
+    pub const fn disabled() -> Self {
+        Self {
+            weights: None,
+            activations: None,
+        }
+    }
+
+    pub const fn is_enabled(&self) -> bool {
+        self.weights.is_some() || self.activations.is_some()
+    }
+
+    pub fn label(&self) -> String {
+        if !self.is_enabled() {
+            return "disabled".to_owned();
+        }
+
+        format!(
+            "weights={} activations={}",
+            self.weights.map(|kind| kind.as_str()).unwrap_or("none"),
+            self.activations.map(|kind| kind.as_str()).unwrap_or("none")
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrecisionPolicy {
     pub compute: NumericPrecisionKind,
     pub optimizer_state: NumericPrecisionKind,
     pub reduction: NumericPrecisionKind,
     pub tf32_enabled: bool,
+    #[serde(default)]
+    pub quantization: QuantizationPolicy,
 }
 
 impl Default for PrecisionPolicy {
@@ -956,6 +1011,7 @@ impl PrecisionPolicy {
             optimizer_state: NumericPrecisionKind::BackendDefault,
             reduction: NumericPrecisionKind::BackendDefault,
             tf32_enabled: false,
+            quantization: QuantizationPolicy::disabled(),
         }
     }
 
@@ -965,20 +1021,23 @@ impl PrecisionPolicy {
             optimizer_state: NumericPrecisionKind::Fp32,
             reduction: NumericPrecisionKind::Fp32,
             tf32_enabled: true,
+            quantization: QuantizationPolicy::disabled(),
         }
     }
 
     pub fn label(&self) -> String {
         format!(
-            "compute={} optimizer_state={} reduction={} tf32={}",
+            "compute={} optimizer_state={} reduction={} tf32={} quantization={}",
             self.compute.as_str(),
             self.optimizer_state.as_str(),
             self.reduction.as_str(),
-            self.tf32_enabled
+            self.tf32_enabled,
+            self.quantization.label()
         )
     }
 
     pub fn validate(&self) -> Result<(), FractalError> {
+        self.quantization.validate()?;
         Ok(())
     }
 }
@@ -1613,6 +1672,7 @@ impl TournamentConfig {
         }
         self.optimizer.validate()?;
         self.launch_policy.validate()?;
+        resolve_precision_profile(&self.execution_backend, &self.launch_policy.precision)?;
         if let Some(run_timeout) = self.run_timeout {
             if run_timeout.is_zero() {
                 return Err(FractalError::InvalidConfig(

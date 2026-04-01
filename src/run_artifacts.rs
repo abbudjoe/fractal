@@ -387,6 +387,10 @@ fn launch_policy_json(spec: &crate::LaunchPolicySpec) -> Value {
             "optimizer_state": spec.precision.optimizer_state.as_str(),
             "reduction": spec.precision.reduction.as_str(),
             "tf32_enabled": spec.precision.tf32_enabled,
+            "quantization": {
+                "weights": spec.precision.quantization.weights.map(|kind| kind.as_str()),
+                "activations": spec.precision.quantization.activations.map(|kind| kind.as_str()),
+            },
         },
         "checkpoint": {
             "interval_tokens": spec.checkpoint.interval_tokens,

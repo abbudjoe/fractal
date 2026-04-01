@@ -22,7 +22,7 @@ use burn::{
     },
     prelude::Backend,
     record::{BinFileRecorder, FullPrecisionSettings, Recorder},
-    tensor::{backend::AutodiffBackend, Bool, ElementConversion, Int, Tensor},
+    tensor::{backend::AutodiffBackend, bf16, Bool, ElementConversion, Int, Tensor},
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,10 +40,75 @@ use crate::{
     rule_trait::FractalRule,
 };
 
-pub type CpuBackend = Candle<f32, i64>;
-pub type CpuTrainBackend = Autodiff<CpuBackend>;
-pub type MetalBackend = BurnWgpu<f32, i32>;
-pub type MetalTrainBackend = Autodiff<MetalBackend>;
+pub type CandleF32Backend = Candle<f32, i64>;
+pub type CandleF32TrainBackend = Autodiff<CandleF32Backend>;
+pub type CandleBf16Backend = Candle<bf16, i64>;
+pub type CandleBf16TrainBackend = Autodiff<CandleBf16Backend>;
+pub type CpuBackend = CandleF32Backend;
+pub type CpuTrainBackend = CandleF32TrainBackend;
+pub type MetalF32Backend = BurnWgpu<f32, i32>;
+pub type MetalF32TrainBackend = Autodiff<MetalF32Backend>;
+pub type MetalBf16Backend = BurnWgpu<bf16, i32>;
+pub type MetalBf16TrainBackend = Autodiff<MetalBf16Backend>;
+pub type MetalBackend = MetalF32Backend;
+pub type MetalTrainBackend = MetalF32TrainBackend;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResolvedExecutablePrecisionProfile {
+    CandleF32,
+    CandleBf16,
+    MetalF32,
+}
+
+impl ResolvedExecutablePrecisionProfile {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::CandleF32 => "candle-f32",
+            Self::CandleBf16 => "candle-bf16",
+            Self::MetalF32 => "metal-f32",
+        }
+    }
+}
+
+pub fn resolve_precision_profile(
+    backend: &ComputeBackend,
+    policy: &crate::PrecisionPolicy,
+) -> Result<ResolvedExecutablePrecisionProfile, FractalError> {
+    use crate::NumericPrecisionKind;
+
+    if policy.quantization.is_enabled() {
+        return Err(FractalError::InvalidConfig(format!(
+            "quantization profile {} does not yet have an executable runtime implementation",
+            policy.quantization.label()
+        )));
+    }
+
+    match backend {
+        ComputeBackend::CpuCandle => match policy.compute {
+            NumericPrecisionKind::BackendDefault | NumericPrecisionKind::Fp32 => {
+                Ok(ResolvedExecutablePrecisionProfile::CandleF32)
+            }
+            NumericPrecisionKind::Bf16 => Err(FractalError::InvalidConfig(
+                "cpu candle backend does not yet have an executable bf16 precision profile".into(),
+            )),
+        },
+        #[cfg(feature = "cuda")]
+        ComputeBackend::CudaCandle { .. } => match policy.compute {
+            NumericPrecisionKind::BackendDefault | NumericPrecisionKind::Fp32 => {
+                Ok(ResolvedExecutablePrecisionProfile::CandleF32)
+            }
+            NumericPrecisionKind::Bf16 => Ok(ResolvedExecutablePrecisionProfile::CandleBf16),
+        },
+        ComputeBackend::MetalWgpu { .. } => match policy.compute {
+            NumericPrecisionKind::BackendDefault | NumericPrecisionKind::Fp32 => {
+                Ok(ResolvedExecutablePrecisionProfile::MetalF32)
+            }
+            NumericPrecisionKind::Bf16 => Err(FractalError::InvalidConfig(
+                "metal backend does not yet have an executable bf16 precision profile".into(),
+            )),
+        },
+    }
+}
 
 enum ConfiguredOptimizer<M, B>
 where

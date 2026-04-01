@@ -28,18 +28,19 @@ use crate::{
         ArtifactPolicy, BudgetSpec, ComparisonContract, DecisionIntent, ExecutionBackend,
         ExecutionTarget, ExecutionTargetKind, ExperimentId, ExperimentQuestion,
         ExperimentSpecTemplate, LaneIntent, LaunchPolicySpec, LearningRateScheduleSpec,
-        NumericPrecisionKind, OptimizerKind, OptimizerSpec, RunExecutionOutcome, RunOutcomeClass,
-        RunQualityOutcome, RuntimeSurfaceSpec, TextCorpusFormat, TextCorpusSourceSpec,
-        TextCorpusSplitSpec, TokenizerArtifactSpec, Tournament, TournamentConfig,
-        TournamentPreset, TournamentProgressEvent, TournamentSequence, TrainingInputSpec,
+        NumericPrecisionKind, OptimizerKind, OptimizerSpec, QuantizationPolicy,
+        QuantizedPrecisionKind, RunExecutionOutcome, RunOutcomeClass, RunQualityOutcome,
+        RuntimeSurfaceSpec, TextCorpusFormat, TextCorpusSourceSpec, TextCorpusSplitSpec,
+        TokenizerArtifactSpec, Tournament, TournamentConfig, TournamentPreset,
+        TournamentProgressEvent, TournamentSequence, TrainingInputSpec,
     },
     model::FractalModel,
     primitives::complex_square,
     registry::{
         clip_gradients_global_norm, gradient_l2_norm, is_valid_primitive_variant_name,
-        should_log_training_checkpoint, training_progress_interval, ComputeBackend,
-        CpuTrainBackend, ExecutionMode, PrimitiveVariantName, SpeciesDefinition, SpeciesId,
-        SpeciesRunContext,
+        resolve_precision_profile, should_log_training_checkpoint, training_progress_interval,
+        ComputeBackend, CpuTrainBackend, ExecutionMode, PrimitiveVariantName, SpeciesDefinition,
+        SpeciesId, SpeciesRunContext,
     },
     router::EarlyExitRouter,
     rule_trait::{ApplyContext, FractalRule},
@@ -286,6 +287,7 @@ fn precision_policy_allows_tf32_with_fp32_compute_contract() {
         optimizer_state: NumericPrecisionKind::Fp32,
         reduction: NumericPrecisionKind::Fp32,
         tf32_enabled: true,
+        quantization: QuantizationPolicy::disabled(),
     };
 
     assert!(policy.validate().is_ok());
@@ -302,6 +304,43 @@ fn eval_cadence_rejects_unsupported_partial_final_eval_contract() {
     };
 
     assert!(policy.validate().is_err());
+}
+
+#[test]
+fn precision_profile_resolves_stage0_bf16_for_candle_backends() {
+    let policy = crate::PrecisionPolicy::stage0_default();
+
+    assert!(resolve_precision_profile(&ComputeBackend::CpuCandle, &policy).is_err());
+
+    #[cfg(feature = "cuda")]
+    assert_eq!(
+        resolve_precision_profile(&ComputeBackend::cuda_default(), &policy).unwrap(),
+        ResolvedExecutablePrecisionProfile::CandleBf16
+    );
+}
+
+#[test]
+fn precision_profile_rejects_unimplemented_metal_bf16_runtime() {
+    let policy = crate::PrecisionPolicy::stage0_default();
+    let result = resolve_precision_profile(&ComputeBackend::metal_default(), &policy);
+    assert!(result.is_err());
+}
+
+#[test]
+fn precision_profile_rejects_quantized_profiles_without_runtime_support() {
+    let policy = crate::PrecisionPolicy {
+        compute: NumericPrecisionKind::Fp32,
+        optimizer_state: NumericPrecisionKind::Fp32,
+        reduction: NumericPrecisionKind::Fp32,
+        tf32_enabled: false,
+        quantization: QuantizationPolicy {
+            weights: Some(QuantizedPrecisionKind::Int4),
+            activations: Some(QuantizedPrecisionKind::Bit1),
+        },
+    };
+
+    let result = resolve_precision_profile(&ComputeBackend::CpuCandle, &policy);
+    assert!(result.is_err());
 }
 
 #[test]
