@@ -6,7 +6,7 @@ use burn::{
 
 use crate::{
     data_generator::TokenBatch,
-    diagnostics::{DiagnosticsRecorder, TrainStepDiagnosticContext},
+    diagnostics::{DiagnosticEventKind, DiagnosticsRecorder, TrainStepDiagnosticContext},
     error::FractalError,
     lifecycle::RunPhase,
     router::EarlyExitRouter,
@@ -86,16 +86,14 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
             state = self.recurse_token(state, x_t, force_depth, use_router)?;
             let readout = state.readout();
             if let (Some(context), Some(recorder)) = (step_context, diagnostics.as_deref_mut()) {
-                if recorder.should_emit_forward_position(context.step, position) {
-                    recorder.emit_forward_position(
-                        RunPhase::Train,
-                        context,
-                        position,
-                        seq_len,
-                        input_shape,
-                        readout.dims().into_iter().collect(),
-                    );
-                }
+                recorder.emit_forward_position(
+                    RunPhase::Train,
+                    context,
+                    position,
+                    seq_len,
+                    input_shape,
+                    readout.dims().into_iter().collect(),
+                )?;
             }
             let token_logits =
                 self.output
@@ -114,16 +112,68 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
         force_depth: Option<usize>,
         use_router: bool,
     ) -> Result<Tensor<B, 1>, FractalError> {
+        self.loss_with_diagnostics(batch, criterion, force_depth, use_router, None, None)
+    }
+
+    pub fn loss_with_diagnostics(
+        &self,
+        batch: &TokenBatch<B>,
+        criterion: &CrossEntropyLoss<B>,
+        force_depth: Option<usize>,
+        use_router: bool,
+        diagnostics: Option<&mut DiagnosticsRecorder>,
+        step_context: Option<TrainStepDiagnosticContext>,
+    ) -> Result<Tensor<B, 1>, FractalError> {
+        let mut diagnostics = diagnostics;
+        if let (Some(context), Some(recorder)) = (step_context, diagnostics.as_mut()) {
+            recorder.emit_event(
+                RunPhase::Train,
+                Some(context.step),
+                Some(context.tokens_seen),
+                DiagnosticEventKind::ForwardStart {
+                    input_shape: batch.input_ids.dims().into_iter().collect(),
+                },
+            )?;
+        }
         let logits = self.forward_tokens_with_controls(
             batch.input_ids.clone(),
             force_depth,
             use_router,
-            None,
-            None,
+            diagnostics.as_deref_mut(),
+            step_context,
         )?;
+        if let (Some(context), Some(recorder)) = (step_context, diagnostics.as_mut()) {
+            recorder.emit_event(
+                RunPhase::Train,
+                Some(context.step),
+                Some(context.tokens_seen),
+                DiagnosticEventKind::ForwardComplete {
+                    logits_shape: logits.dims().into_iter().collect(),
+                },
+            )?;
+            recorder.emit_event(
+                RunPhase::Train,
+                Some(context.step),
+                Some(context.tokens_seen),
+                DiagnosticEventKind::LossStart {
+                    target_shape: batch.target_ids.dims().into_iter().collect(),
+                },
+            )?;
+        }
         let [batch_size, seq_len, vocab_size] = logits.dims();
         let targets = batch.target_ids.clone().reshape([batch_size * seq_len]);
-        Ok(criterion.forward(logits.reshape([batch_size * seq_len, vocab_size]), targets))
+        let loss = criterion.forward(logits.reshape([batch_size * seq_len, vocab_size]), targets);
+        if let (Some(context), Some(recorder)) = (step_context, diagnostics.as_mut()) {
+            recorder.emit_event(
+                RunPhase::Train,
+                Some(context.step),
+                Some(context.tokens_seen),
+                DiagnosticEventKind::LossComplete {
+                    loss_shape: loss.dims().into_iter().collect(),
+                },
+            )?;
+        }
+        Ok(loss)
     }
 
     pub fn pad_token(&self) -> usize {

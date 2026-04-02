@@ -30,7 +30,6 @@ pub fn persist_run_artifacts(
     if let Some(parent) = paths.manifest_path.parent() {
         fs::create_dir_all(parent).map_err(io_error)?;
     }
-    let diagnostic_event_paths = persist_diagnostic_event_streams(report, &paths.root)?;
 
     fs::write(
         &paths.manifest_path,
@@ -40,7 +39,7 @@ pub fn persist_run_artifacts(
     .map_err(io_error)?;
     fs::write(
         &paths.artifact_path,
-        serde_json::to_vec_pretty(&build_artifact_json(report, &diagnostic_event_paths))
+        serde_json::to_vec_pretty(&build_artifact_json(report))
             .map_err(|error| FractalError::InvalidState(error.to_string()))?,
     )
     .map_err(io_error)?;
@@ -61,43 +60,6 @@ fn resolve_output_paths(report: &TournamentRunReport) -> Result<PersistedRunPath
         artifact_path: artifact_root.join(ARTIFACT_FILENAME),
         manifest_path: manifest_root.join(MANIFEST_FILENAME),
     })
-}
-
-fn persist_diagnostic_event_streams(
-    report: &TournamentRunReport,
-    artifact_root: &Path,
-) -> Result<Vec<Option<PathBuf>>, FractalError> {
-    let any_diagnostics = report
-        .artifact
-        .species
-        .iter()
-        .any(|record| record.training_runtime.diagnostics.policy.has_probes());
-    let diagnostics_root = artifact_root.join("diagnostics");
-    if any_diagnostics {
-        fs::create_dir_all(&diagnostics_root).map_err(io_error)?;
-    }
-
-    report
-        .artifact
-        .species
-        .iter()
-        .enumerate()
-        .map(|(index, record)| {
-            if !record.training_runtime.diagnostics.policy.has_probes() {
-                return Ok(None);
-            }
-            let filename = format!(
-                "{:02}-{}.jsonl",
-                index + 1,
-                sanitize_path_component(record.manifest.variant_name.as_str())
-            );
-            let path = diagnostics_root.join(filename);
-            let payload =
-                diagnostic_event_stream_bytes(&record.training_runtime.diagnostics.events)?;
-            fs::write(&path, payload).map_err(io_error)?;
-            Ok(Some(path))
-        })
-        .collect()
 }
 
 fn default_run_root(report: &TournamentRunReport) -> PathBuf {
@@ -149,17 +111,12 @@ fn build_manifest_json(report: &TournamentRunReport) -> Value {
     })
 }
 
-fn build_artifact_json(
-    report: &TournamentRunReport,
-    diagnostic_event_paths: &[Option<PathBuf>],
-) -> Value {
+fn build_artifact_json(report: &TournamentRunReport) -> Value {
     let records = report
         .artifact
         .species
         .iter()
-        .zip(diagnostic_event_paths.iter())
         .map(|record| {
-            let (record, diagnostic_event_path) = record;
             json!({
                 "variant_name": record.manifest.variant_name.as_str(),
                 "species": record.stage.species.as_str(),
@@ -200,7 +157,6 @@ fn build_artifact_json(
                         .experiment
                         .as_ref()
                         .map(|experiment| &experiment.runtime.launch_policy),
-                    diagnostic_event_path.as_ref(),
                 ),
                 "metrics": record.metrics.as_ref().map(|metrics| {
                     json!({
@@ -408,7 +364,6 @@ fn training_input_json(spec: &crate::TrainingInputSpec) -> Value {
 fn training_runtime_json(
     spec: &fractal_core::lifecycle::TrainingRuntimeArtifact,
     launch_policy: Option<&crate::LaunchPolicySpec>,
-    diagnostic_event_path: Option<&PathBuf>,
 ) -> Value {
     let missing_required_weight_exports =
         missing_required_weight_export_phases(launch_policy, &spec.weight_exports);
@@ -447,7 +402,7 @@ fn training_runtime_json(
                 "tokens_per_sec": snapshot.tokens_per_sec,
             })
         }).collect::<Vec<_>>(),
-        "diagnostics": diagnostics_runtime_json(&spec.diagnostics, diagnostic_event_path),
+        "diagnostics": diagnostics_runtime_json(&spec.diagnostics),
     })
 }
 
@@ -632,15 +587,12 @@ fn probe_cadence_json(spec: &crate::ProbeCadence) -> Value {
     }
 }
 
-fn diagnostics_runtime_json(
-    spec: &crate::DiagnosticsRuntimeArtifact,
-    diagnostic_event_path: Option<&PathBuf>,
-) -> Value {
+fn diagnostics_runtime_json(spec: &crate::DiagnosticsRuntimeArtifact) -> Value {
     json!({
         "policy": diagnostics_policy_json(&spec.policy),
         "structured_output": {
             "format": spec.policy.structured_output.as_str(),
-            "event_file": diagnostic_event_path.map(|path| path.display().to_string()),
+            "event_file": spec.event_file,
         },
         "event_count": spec.events.len(),
         "emitted_probe_kinds": spec
@@ -653,22 +605,14 @@ fn diagnostics_runtime_json(
             .iter()
             .map(|kind| kind.as_str())
             .collect::<Vec<_>>(),
+        "missing_required_boundary_completions": spec
+            .missing_required_boundary_completions
+            .iter()
+            .map(|boundary| boundary.as_str())
+            .collect::<Vec<_>>(),
         "diagnostics_incomplete": spec.diagnostics_incomplete,
         "last_event": spec.last_event.as_ref().map(diagnostic_event_json),
     })
-}
-
-fn diagnostic_event_stream_bytes(
-    events: &[crate::DiagnosticEvent],
-) -> Result<Vec<u8>, FractalError> {
-    let mut lines = Vec::with_capacity(events.len());
-    for event in events {
-        lines.push(
-            serde_json::to_string(event)
-                .map_err(|error| FractalError::InvalidState(error.to_string()))?,
-        );
-    }
-    Ok(lines.join("\n").into_bytes())
 }
 
 fn diagnostic_event_json(spec: &crate::DiagnosticEvent) -> Value {
@@ -1045,13 +989,20 @@ mod tests {
     }
 
     #[test]
-    fn persist_run_artifacts_writes_diagnostic_event_stream_and_summary() {
+    fn persist_run_artifacts_references_runtime_owned_diagnostic_event_stream_and_summary() {
         let _env_lock = ARTIFACT_ENV_MUTEX.lock().unwrap();
         let temp_root =
             env::temp_dir().join(format!("fractal-run-diagnostics-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp_root);
         let artifact_dir = temp_root.join("artifacts");
         let manifest_dir = temp_root.join("manifests");
+        let diagnostic_event_path = artifact_dir.join("diagnostics/run-123/p1_contractive.jsonl");
+        fs::create_dir_all(diagnostic_event_path.parent().unwrap()).unwrap();
+        fs::write(
+            &diagnostic_event_path,
+            "{\"event\":{\"kind\":\"train_step_start\"}}\n",
+        )
+        .unwrap();
         env::set_var("FRACTAL_RUN_ARTIFACT_DIR", &artifact_dir);
         env::set_var("FRACTAL_RUN_MANIFEST_DIR", &manifest_dir);
 
@@ -1067,6 +1018,7 @@ mod tests {
                     }],
                     structured_output: fractal_core::StructuredDiagnosticsOutput::Jsonl,
                 },
+                event_file: Some(diagnostic_event_path.display().to_string()),
                 events: vec![DiagnosticEvent {
                     experiment_run_id: "run-123".to_owned(),
                     experiment_logical_name: Some("fast-test-run".to_owned()),
@@ -1084,6 +1036,7 @@ mod tests {
                 }],
                 emitted_probe_kinds: vec![DiagnosticProbeKind::TrainStep],
                 missing_required_probe_kinds: Vec::new(),
+                missing_required_boundary_completions: Vec::new(),
                 diagnostics_incomplete: false,
                 last_event: Some(DiagnosticEvent {
                     experiment_run_id: "run-123".to_owned(),

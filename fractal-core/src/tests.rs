@@ -1,4 +1,6 @@
 use std::{
+    env, fs,
+    panic::AssertUnwindSafe,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -20,9 +22,10 @@ use burn::{
 use crate::{
     data_generator::{
         DatasetSplit, GeneratorConfig, GeneratorDepthConfig, SimpleHierarchicalGenerator,
-        TaskFamily, MIN_SEQUENCE_LEN, MIN_VOCAB_SIZE, PAD_TOKEN,
+        TaskFamily, TokenBatch, MIN_SEQUENCE_LEN, MIN_VOCAB_SIZE, PAD_TOKEN,
     },
     diagnostics::{
+        clear_last_diagnostics_runtime_artifact, take_last_diagnostics_runtime_artifact,
         DiagnosticEventKind, DiagnosticProbeKind, DiagnosticProbeRequest, DiagnosticsPolicy,
         DiagnosticsRecorder, ProbeCadence, TrainStepDiagnosticContext,
     },
@@ -59,6 +62,7 @@ static APPLY_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static CONCURRENT_SPECIES: AtomicUsize = AtomicUsize::new(0);
 static MAX_CONCURRENT_SPECIES: AtomicUsize = AtomicUsize::new(0);
 static FAILING_APPLY_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static PANICKING_APPLY_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static EXPORT_ENV_MUTEX: Mutex<()> = Mutex::new(());
 
 #[test]
@@ -1327,6 +1331,13 @@ struct FailingRule<B: Backend> {
     _marker: core::marker::PhantomData<B>,
 }
 
+#[derive(Module, Debug)]
+struct PanickingRule<B: Backend> {
+    hidden_dim: usize,
+    panic_after_apply_count: usize,
+    _marker: core::marker::PhantomData<B>,
+}
+
 impl<B: Backend> AddInputRule<B> {
     fn new(hidden_dim: usize) -> Self {
         Self {
@@ -1341,6 +1352,16 @@ impl<B: Backend> FailingRule<B> {
         Self {
             hidden_dim,
             fail_after_apply_count,
+            _marker: core::marker::PhantomData,
+        }
+    }
+}
+
+impl<B: Backend> PanickingRule<B> {
+    fn new(hidden_dim: usize, panic_after_apply_count: usize) -> Self {
+        Self {
+            hidden_dim,
+            panic_after_apply_count,
             _marker: core::marker::PhantomData,
         }
     }
@@ -1443,6 +1464,38 @@ impl<B: Backend> FractalRule<B> for CountingRule<B> {
     }
 }
 
+impl<B: Backend> FractalRule<B> for PanickingRule<B> {
+    fn apply(
+        &self,
+        state: &FractalState<B>,
+        _x: &Tensor<B, 2>,
+        _context: ApplyContext,
+    ) -> Result<FractalState<B>, FractalError> {
+        let applied = PANICKING_APPLY_COUNTER.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            applied < self.panic_after_apply_count,
+            "synthetic panic during forward"
+        );
+        Ok(state.clone())
+    }
+
+    fn name(&self) -> &'static str {
+        "panicking_rule"
+    }
+
+    fn hidden_dim(&self) -> usize {
+        self.hidden_dim
+    }
+
+    fn state_layout(&self) -> StateLayout {
+        StateLayout::Flat
+    }
+
+    fn clone_box(&self) -> Box<dyn FractalRule<B>> {
+        Box::new(Self::new(self.hidden_dim, self.panic_after_apply_count))
+    }
+}
+
 #[test]
 fn recurrent_model_uses_only_rule_apply_for_state_transitions() {
     let device = Default::default();
@@ -1521,21 +1574,147 @@ fn diagnostics_recorder_marks_required_cuda_probe_missing_when_snapshot_unavaila
         },
     );
 
-    recorder.record_cuda_memory_snapshot(
-        crate::RunPhase::Train,
-        TrainStepDiagnosticContext {
-            step: 0,
-            tokens_seen: 0,
-        },
-        crate::DiagnosticBoundary::ForwardStart,
-        None,
-    );
+    recorder
+        .record_cuda_memory_snapshot(
+            crate::RunPhase::Train,
+            TrainStepDiagnosticContext {
+                step: 0,
+                tokens_seen: 0,
+            },
+            crate::DiagnosticBoundary::ForwardStart,
+            None,
+        )
+        .unwrap();
 
     let artifact = recorder.artifact();
     assert!(artifact.diagnostics_incomplete);
     assert_eq!(
         artifact.missing_required_probe_kinds,
         vec![DiagnosticProbeKind::CudaMemorySnapshot]
+    );
+}
+
+#[test]
+fn model_loss_seam_owns_forward_and_loss_diagnostics() {
+    let device = Default::default();
+    let rule = AddInputRule::<CpuTrainBackend>::new(4);
+    let model = FractalModel::new(64, 4, 1, 1.1, PAD_TOKEN, rule, &device);
+    let criterion = nn::loss::CrossEntropyLossConfig::new()
+        .with_pad_tokens(Some(vec![PAD_TOKEN]))
+        .init(&device);
+    let batch = TokenBatch {
+        input_ids: Tensor::<CpuTrainBackend, 2, Int>::from_data(
+            TensorData::new(vec![1i64, 2, 3, 4], [1, 4]),
+            &device,
+        ),
+        target_ids: Tensor::<CpuTrainBackend, 2, Int>::from_data(
+            TensorData::new(vec![2i64, 3, 4, PAD_TOKEN as i64], [1, 4]),
+            &device,
+        ),
+        token_count: 4,
+        family: TaskFamily::RecursiveSentence,
+    };
+    let mut recorder = DiagnosticsRecorder::new(
+        DiagnosticsPolicy {
+            required: false,
+            probes: vec![
+                DiagnosticProbeRequest {
+                    kind: DiagnosticProbeKind::ForwardBoundary,
+                    cadence: ProbeCadence::EveryStep,
+                    position_interval: None,
+                },
+                DiagnosticProbeRequest {
+                    kind: DiagnosticProbeKind::LossBoundary,
+                    cadence: ProbeCadence::EveryStep,
+                    position_interval: None,
+                },
+                DiagnosticProbeRequest {
+                    kind: DiagnosticProbeKind::ForwardPosition,
+                    cadence: ProbeCadence::EveryStep,
+                    position_interval: Some(1),
+                },
+            ],
+            structured_output: crate::StructuredDiagnosticsOutput::Jsonl,
+        },
+        crate::DiagnosticIdentity {
+            experiment_run_id: "run-123".to_owned(),
+            experiment_logical_name: Some("fast-test-control".to_owned()),
+            species: SpeciesId::P1Contractive.as_str().to_owned(),
+            variant_name: "p1_contractive_v1".to_owned(),
+        },
+    );
+
+    model
+        .loss_with_diagnostics(
+            &batch,
+            &criterion,
+            None,
+            true,
+            Some(&mut recorder),
+            Some(TrainStepDiagnosticContext {
+                step: 0,
+                tokens_seen: 0,
+            }),
+        )
+        .expect("loss seam should succeed");
+
+    let event_names = recorder
+        .artifact()
+        .events
+        .iter()
+        .map(|event| event.event.name())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        event_names,
+        vec![
+            "forward_start",
+            "forward_position",
+            "forward_position",
+            "forward_position",
+            "forward_position",
+            "forward_complete",
+            "loss_start",
+            "loss_complete",
+        ]
+    );
+}
+
+#[test]
+fn diagnostics_recorder_marks_required_boundary_completion_missing_when_forward_truncates() {
+    let mut recorder = DiagnosticsRecorder::new(
+        DiagnosticsPolicy {
+            required: true,
+            probes: vec![DiagnosticProbeRequest {
+                kind: DiagnosticProbeKind::ForwardBoundary,
+                cadence: ProbeCadence::EveryStep,
+                position_interval: None,
+            }],
+            structured_output: crate::StructuredDiagnosticsOutput::Jsonl,
+        },
+        crate::DiagnosticIdentity {
+            experiment_run_id: "run-123".to_owned(),
+            experiment_logical_name: Some("fast-test-control".to_owned()),
+            species: SpeciesId::P1Contractive.as_str().to_owned(),
+            variant_name: "p1_contractive_v1".to_owned(),
+        },
+    );
+
+    recorder
+        .emit_event(
+            crate::RunPhase::Train,
+            Some(0),
+            Some(0),
+            DiagnosticEventKind::ForwardStart {
+                input_shape: vec![1, 16],
+            },
+        )
+        .unwrap();
+
+    let artifact = recorder.artifact();
+    assert!(artifact.diagnostics_incomplete);
+    assert_eq!(
+        artifact.missing_required_boundary_completions,
+        vec![crate::DiagnosticBoundary::ForwardComplete]
     );
 }
 
@@ -1579,6 +1758,11 @@ fn training_runtime_emits_typed_diagnostics_for_first_step() {
         .diagnostics
         .missing_required_probe_kinds
         .is_empty());
+    assert!(artifact
+        .training_runtime
+        .diagnostics
+        .missing_required_boundary_completions
+        .is_empty());
 }
 
 #[test]
@@ -1619,6 +1803,65 @@ fn failed_forward_records_last_successful_diagnostic_boundary() {
         last_event.event,
         DiagnosticEventKind::ForwardPosition { .. }
     ));
+}
+
+#[test]
+fn runtime_persists_structured_diagnostics_before_panic_unwind() {
+    let _export_lock = EXPORT_ENV_MUTEX.lock().unwrap();
+    let temp_root =
+        env::temp_dir().join(format!("fractal-diagnostics-unwind-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp_root);
+    env::set_var("FRACTAL_RUN_ARTIFACT_DIR", &temp_root);
+    let _ = take_last_species_run_artifact();
+    clear_last_diagnostics_runtime_artifact();
+    PANICKING_APPLY_COUNTER.store(0, Ordering::SeqCst);
+
+    let mut config = TournamentPreset::FastTest.config();
+    config.launch_policy.diagnostics = DiagnosticsPolicy {
+        required: true,
+        probes: vec![
+            DiagnosticProbeRequest {
+                kind: DiagnosticProbeKind::ForwardBoundary,
+                cadence: ProbeCadence::EveryStep,
+                position_interval: None,
+            },
+            DiagnosticProbeRequest {
+                kind: DiagnosticProbeKind::ForwardPosition,
+                cadence: ProbeCadence::FirstNSteps { steps: 1 },
+                position_interval: Some(1),
+            },
+        ],
+        structured_output: crate::StructuredDiagnosticsOutput::Jsonl,
+    };
+    let context = test_training_run_context(config.clone());
+
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        run_species_with_factory_candle::<PanickingRule<CpuTrainBackend>, _>(
+            SpeciesId::P1Contractive,
+            context,
+            Default::default(),
+            |config, _device| PanickingRule::new(config.dim, 1),
+        )
+    }));
+    assert!(panic_result.is_err());
+
+    let diagnostics =
+        take_last_diagnostics_runtime_artifact().expect("panic unwind should preserve diagnostics");
+    assert!(diagnostics.diagnostics_incomplete);
+    assert_eq!(
+        diagnostics.missing_required_boundary_completions,
+        vec![crate::DiagnosticBoundary::ForwardComplete]
+    );
+    let event_file = diagnostics
+        .event_file
+        .expect("runtime diagnostics should record an event file");
+    let event_stream = fs::read_to_string(&event_file).expect("event file should be readable");
+    assert!(event_stream.contains("\"kind\":\"forward_start\""));
+    assert!(event_stream.contains("\"kind\":\"forward_position\""));
+
+    env::remove_var("FRACTAL_RUN_ARTIFACT_DIR");
+    clear_last_diagnostics_runtime_artifact();
+    let _ = fs::remove_dir_all(&temp_root);
 }
 
 #[test]

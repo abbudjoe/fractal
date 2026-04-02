@@ -1,4 +1,10 @@
-use std::collections::BTreeSet;
+use std::{
+    cell::RefCell,
+    collections::BTreeSet,
+    fs::{self, File},
+    io::Write,
+    path::PathBuf,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -229,7 +235,7 @@ impl DiagnosticsPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticBoundary {
     TrainStepStart,
@@ -255,6 +261,20 @@ impl DiagnosticBoundary {
             Self::BackwardComplete => "backward_complete",
             Self::OptimizerStepStart => "optimizer_step_start",
             Self::OptimizerStepComplete => "optimizer_step_complete",
+        }
+    }
+
+    pub const fn required_completion(self) -> Option<Self> {
+        match self {
+            Self::ForwardStart => Some(Self::ForwardComplete),
+            Self::LossStart => Some(Self::LossComplete),
+            Self::BackwardStart => Some(Self::BackwardComplete),
+            Self::OptimizerStepStart => Some(Self::OptimizerStepComplete),
+            Self::TrainStepStart
+            | Self::ForwardComplete
+            | Self::LossComplete
+            | Self::BackwardComplete
+            | Self::OptimizerStepComplete => None,
         }
     }
 }
@@ -390,20 +410,89 @@ pub struct DiagnosticEvent {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DiagnosticsRuntimeArtifact {
     pub policy: DiagnosticsPolicy,
+    pub event_file: Option<String>,
     pub events: Vec<DiagnosticEvent>,
     pub emitted_probe_kinds: Vec<DiagnosticProbeKind>,
     pub missing_required_probe_kinds: Vec<DiagnosticProbeKind>,
+    pub missing_required_boundary_completions: Vec<DiagnosticBoundary>,
     pub diagnostics_incomplete: bool,
     pub last_event: Option<DiagnosticEvent>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiagnosticsRuntimePaths {
+    pub event_file: PathBuf,
+}
+
+#[derive(Debug)]
+struct DiagnosticsRuntimePersistence {
+    event_file: File,
+    event_file_path: PathBuf,
+}
+
+impl DiagnosticsRuntimePersistence {
+    fn new(paths: DiagnosticsRuntimePaths) -> Result<Self, FractalError> {
+        if let Some(parent) = paths.event_file.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| FractalError::InvalidState(error.to_string()))?;
+        }
+        let event_file = File::create(&paths.event_file)
+            .map_err(|error| FractalError::InvalidState(error.to_string()))?;
+        Ok(Self {
+            event_file,
+            event_file_path: paths.event_file,
+        })
+    }
+
+    fn event_file(&self) -> String {
+        self.event_file_path.display().to_string()
+    }
+
+    fn persist_event(&mut self, event: &DiagnosticEvent) -> Result<(), FractalError> {
+        let serialized = serde_json::to_string(event)
+            .map_err(|error| FractalError::InvalidState(error.to_string()))?;
+        writeln!(self.event_file, "{serialized}")
+            .map_err(|error| FractalError::InvalidState(error.to_string()))?;
+        self.event_file
+            .flush()
+            .map_err(|error| FractalError::InvalidState(error.to_string()))?;
+        self.event_file
+            .sync_data()
+            .map_err(|error| FractalError::InvalidState(error.to_string()))
+    }
+}
+
+thread_local! {
+    static LAST_DIAGNOSTICS_RUNTIME_ARTIFACT: RefCell<Option<DiagnosticsRuntimeArtifact>> = const {
+        RefCell::new(None)
+    };
+}
+
+pub(crate) fn clear_last_diagnostics_runtime_artifact() {
+    LAST_DIAGNOSTICS_RUNTIME_ARTIFACT.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+}
+
+pub(crate) fn take_last_diagnostics_runtime_artifact() -> Option<DiagnosticsRuntimeArtifact> {
+    LAST_DIAGNOSTICS_RUNTIME_ARTIFACT.with(|slot| slot.borrow_mut().take())
+}
+
+fn record_diagnostics_runtime_artifact(artifact: DiagnosticsRuntimeArtifact) {
+    LAST_DIAGNOSTICS_RUNTIME_ARTIFACT.with(|slot| {
+        *slot.borrow_mut() = Some(artifact);
+    });
+}
+
+#[derive(Debug)]
 pub struct DiagnosticsRecorder {
     policy: DiagnosticsPolicy,
     identity: DiagnosticIdentity,
     events: Vec<DiagnosticEvent>,
     emitted_probe_kinds: BTreeSet<DiagnosticProbeKind>,
     missing_required_probe_kinds: BTreeSet<DiagnosticProbeKind>,
+    missing_required_boundary_completions: BTreeSet<DiagnosticBoundary>,
+    persistence: Option<DiagnosticsRuntimePersistence>,
 }
 
 impl DiagnosticsRecorder {
@@ -414,7 +503,29 @@ impl DiagnosticsRecorder {
             events: Vec::new(),
             emitted_probe_kinds: BTreeSet::new(),
             missing_required_probe_kinds: BTreeSet::new(),
+            missing_required_boundary_completions: BTreeSet::new(),
+            persistence: None,
         }
+    }
+
+    pub(crate) fn new_with_runtime_paths(
+        policy: DiagnosticsPolicy,
+        identity: DiagnosticIdentity,
+        runtime_paths: Option<DiagnosticsRuntimePaths>,
+    ) -> Result<Self, FractalError> {
+        let persistence = runtime_paths
+            .map(DiagnosticsRuntimePersistence::new)
+            .transpose()?;
+        Self {
+            policy,
+            identity,
+            events: Vec::new(),
+            emitted_probe_kinds: BTreeSet::new(),
+            missing_required_probe_kinds: BTreeSet::new(),
+            missing_required_boundary_completions: BTreeSet::new(),
+            persistence,
+        }
+        .with_recovery_snapshot()
     }
 
     pub fn policy(&self) -> &DiagnosticsPolicy {
@@ -439,15 +550,15 @@ impl DiagnosticsRecorder {
         step: Option<usize>,
         tokens_seen: Option<usize>,
         event: DiagnosticEventKind,
-    ) {
+    ) -> Result<(), FractalError> {
         let probe_kind = event.probe_kind();
         let Some(step) = step else {
-            return;
+            return Ok(());
         };
         if !self.should_emit_step_probe(probe_kind, step) {
-            return;
+            return Ok(());
         }
-        self.push_event(phase, Some(step), tokens_seen, event);
+        self.push_event(phase, Some(step), tokens_seen, event)
     }
 
     pub fn emit_forward_position(
@@ -458,9 +569,9 @@ impl DiagnosticsRecorder {
         sequence_length: usize,
         input_shape: Vec<usize>,
         readout_shape: Vec<usize>,
-    ) {
+    ) -> Result<(), FractalError> {
         if !self.should_emit_forward_position(context.step, position) {
-            return;
+            return Ok(());
         }
         self.push_event(
             phase,
@@ -472,7 +583,7 @@ impl DiagnosticsRecorder {
                 input_shape,
                 readout_shape,
             },
-        );
+        )
     }
 
     pub fn record_cuda_memory_snapshot(
@@ -481,16 +592,17 @@ impl DiagnosticsRecorder {
         context: TrainStepDiagnosticContext,
         boundary: DiagnosticBoundary,
         snapshot: Option<CudaMemorySnapshot>,
-    ) {
+    ) -> Result<(), FractalError> {
         if !self.should_emit_step_probe(DiagnosticProbeKind::CudaMemorySnapshot, context.step) {
-            return;
+            return Ok(());
         }
         let Some(snapshot) = snapshot else {
             if self.policy.required {
                 self.missing_required_probe_kinds
                     .insert(DiagnosticProbeKind::CudaMemorySnapshot);
             }
-            return;
+            self.record_recovery_snapshot();
+            return Ok(());
         };
         self.push_event(
             phase,
@@ -502,12 +614,16 @@ impl DiagnosticsRecorder {
                 free_mib: snapshot.free_mib,
                 total_mib: snapshot.total_mib,
             },
-        );
+        )
     }
 
     pub fn artifact(&self) -> DiagnosticsRuntimeArtifact {
         DiagnosticsRuntimeArtifact {
             policy: self.policy.clone(),
+            event_file: self
+                .persistence
+                .as_ref()
+                .map(DiagnosticsRuntimePersistence::event_file),
             events: self.events.clone(),
             emitted_probe_kinds: self.emitted_probe_kinds.iter().copied().collect(),
             missing_required_probe_kinds: self
@@ -515,7 +631,13 @@ impl DiagnosticsRecorder {
                 .iter()
                 .copied()
                 .collect(),
-            diagnostics_incomplete: !self.missing_required_probe_kinds.is_empty(),
+            missing_required_boundary_completions: self
+                .missing_required_boundary_completions
+                .iter()
+                .copied()
+                .collect(),
+            diagnostics_incomplete: !self.missing_required_probe_kinds.is_empty()
+                || !self.missing_required_boundary_completions.is_empty(),
             last_event: self.events.last().cloned(),
         }
     }
@@ -526,8 +648,9 @@ impl DiagnosticsRecorder {
         step: Option<usize>,
         tokens_seen: Option<usize>,
         event: DiagnosticEventKind,
-    ) {
+    ) -> Result<(), FractalError> {
         let probe_kind = event.probe_kind();
+        let boundary = event.boundary();
         let record = DiagnosticEvent {
             experiment_run_id: self.identity.experiment_run_id.clone(),
             experiment_logical_name: self.identity.experiment_logical_name.clone(),
@@ -538,9 +661,45 @@ impl DiagnosticsRecorder {
             tokens_seen,
             event,
         };
+        if let Some(persistence) = self.persistence.as_mut() {
+            persistence.persist_event(&record)?;
+        }
         println!("{}", format_diagnostic_event(&record));
         self.emitted_probe_kinds.insert(probe_kind);
+        self.track_required_boundary_completion(boundary);
         self.events.push(record);
+        self.record_recovery_snapshot();
+        Ok(())
+    }
+
+    fn track_required_boundary_completion(&mut self, boundary: Option<DiagnosticBoundary>) {
+        if !self.policy.required {
+            return;
+        }
+        let Some(boundary) = boundary else {
+            return;
+        };
+        if let Some(required_completion) = boundary.required_completion() {
+            self.missing_required_boundary_completions
+                .insert(required_completion);
+            return;
+        }
+        self.missing_required_boundary_completions.remove(&boundary);
+    }
+
+    fn record_recovery_snapshot(&self) {
+        record_diagnostics_runtime_artifact(self.artifact());
+    }
+
+    fn with_recovery_snapshot(self) -> Result<Self, FractalError> {
+        self.record_recovery_snapshot();
+        Ok(self)
+    }
+}
+
+impl Drop for DiagnosticsRecorder {
+    fn drop(&mut self) {
+        self.record_recovery_snapshot();
     }
 }
 

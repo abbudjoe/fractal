@@ -13,7 +13,9 @@ use crate::{
         GeneratorConfig, GeneratorDepthConfig, SimpleHierarchicalGenerator, MIN_SEQUENCE_LEN,
         MIN_VOCAB_SIZE, PAD_TOKEN,
     },
-    diagnostics::{DiagnosticsPolicy, DiagnosticsRuntimeArtifact},
+    diagnostics::{
+        take_last_diagnostics_runtime_artifact, DiagnosticsPolicy, DiagnosticsRuntimeArtifact,
+    },
     error::FractalError,
     fitness::SpeciesRawMetrics,
     registry::{
@@ -3095,6 +3097,7 @@ impl Tournament {
         started: Instant,
         result: &Result<SpeciesRawMetrics, FractalError>,
     ) -> SpeciesRunArtifact {
+        let recovered_diagnostics = take_last_diagnostics_runtime_artifact();
         let mut artifact = take_last_species_run_artifact().unwrap_or_else(|| {
             let manifest = RunManifest {
                 variant_name: context.variant_name,
@@ -3118,6 +3121,12 @@ impl Tournament {
                 ),
             }
         });
+
+        if let Some(recovered_diagnostics) = recovered_diagnostics {
+            if artifact.training_runtime.diagnostics.events.is_empty() {
+                artifact.training_runtime.diagnostics = recovered_diagnostics;
+            }
+        }
 
         artifact.stage = stage;
         if artifact.phase_timings.is_empty() {

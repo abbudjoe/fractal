@@ -30,8 +30,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     data_generator::{SimpleHierarchicalGenerator, TaskFamily, TokenBatch, PAD_TOKEN},
     diagnostics::{
-        CudaMemorySnapshot, DiagnosticEventKind, DiagnosticIdentity, DiagnosticsRecorder,
-        DiagnosticsRuntimeArtifact, TrainStepDiagnosticContext,
+        clear_last_diagnostics_runtime_artifact, CudaMemorySnapshot, DiagnosticEventKind,
+        DiagnosticIdentity, DiagnosticsRecorder, DiagnosticsRuntimeArtifact,
+        DiagnosticsRuntimePaths, TrainStepDiagnosticContext,
     },
     error::FractalError,
     fitness::SpeciesRawMetrics,
@@ -989,6 +990,7 @@ where
         + std::fmt::Debug,
     <R as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend> + ModuleDisplay,
 {
+    clear_last_diagnostics_runtime_artifact();
     let manifest = build_run_manifest(
         species,
         &config,
@@ -1060,10 +1062,27 @@ where
                 return Err(error);
             }
         };
-    let mut diagnostics = DiagnosticsRecorder::new(
+    let mut diagnostics = match DiagnosticsRecorder::new_with_runtime_paths(
         config.launch_policy.diagnostics.clone(),
         build_diagnostic_identity(species, &manifest),
-    );
+        resolve_diagnostics_runtime_paths(&stage, &manifest, &config.launch_policy.diagnostics),
+    ) {
+        Ok(diagnostics) => diagnostics,
+        Err(error) => {
+            let artifact = SpeciesRunArtifact {
+                stage,
+                manifest: manifest.clone(),
+                phase_timings: Vec::new(),
+                training_runtime: TrainingRuntimeArtifact::default(),
+                execution_outcome: RunExecutionOutcome::InfraFailure,
+                quality_outcome: RunQualityOutcome::Clean,
+                error: Some(error.to_string()),
+                metrics: None,
+            };
+            record_species_run_artifact(artifact);
+            return Err(error);
+        }
+    };
     let mut phase_timings = Vec::with_capacity(4);
 
     log_species_phase_start(
@@ -1130,7 +1149,7 @@ where
             step,
             tokens_seen: launch_runtime.train_tokens_seen,
         };
-        emit_training_diagnostic(
+        if let Err(error) = emit_training_diagnostic(
             &mut diagnostics,
             step_context,
             DiagnosticEventKind::TrainStepStart {
@@ -1139,31 +1158,35 @@ where
                 input_shape: batch.input_ids.dims().into_iter().collect(),
                 target_shape: batch.target_ids.dims().into_iter().collect(),
             },
-        );
-        emit_training_diagnostic(
-            &mut diagnostics,
-            step_context,
-            DiagnosticEventKind::ForwardStart {
-                input_shape: batch.input_ids.dims().into_iter().collect(),
-            },
-        );
-        let logits = match model.forward_tokens_with_controls(
-            batch.input_ids.clone(),
+        ) {
+            phase_timings.push(phase_timing(
+                RunPhase::Train,
+                train_started.elapsed(),
+                launch_runtime.completed_steps,
+                launch_runtime.planned_steps,
+            ));
+            let artifact = SpeciesRunArtifact {
+                stage,
+                manifest: manifest.clone(),
+                phase_timings,
+                training_runtime: launch_runtime.artifact(diagnostics.artifact()),
+                execution_outcome: RunExecutionOutcome::InfraFailure,
+                quality_outcome: RunQualityOutcome::Clean,
+                error: Some(error.to_string()),
+                metrics: None,
+            };
+            record_species_run_artifact(artifact);
+            return Err(error);
+        }
+        let loss = match model.loss_with_diagnostics(
+            batch,
+            &criterion,
             None,
             true,
             Some(&mut diagnostics),
             Some(step_context),
         ) {
-            Ok(logits) => {
-                emit_training_diagnostic(
-                    &mut diagnostics,
-                    step_context,
-                    DiagnosticEventKind::ForwardComplete {
-                        logits_shape: logits.dims().into_iter().collect(),
-                    },
-                );
-                logits
-            }
+            Ok(loss) => loss,
             Err(error) => {
                 phase_timings.push(phase_timing(
                     RunPhase::Train,
@@ -1185,34 +1208,55 @@ where
                 return Err(error);
             }
         };
-        emit_training_diagnostic(
-            &mut diagnostics,
-            step_context,
-            DiagnosticEventKind::LossStart {
-                target_shape: batch.target_ids.dims().into_iter().collect(),
-            },
-        );
-        let [batch_size, seq_len, vocab_size] = logits.dims();
-        let targets = batch.target_ids.clone().reshape([batch_size * seq_len]);
-        let loss = criterion.forward(logits.reshape([batch_size * seq_len, vocab_size]), targets);
-        emit_training_diagnostic(
-            &mut diagnostics,
-            step_context,
-            DiagnosticEventKind::LossComplete {
-                loss_shape: loss.dims().into_iter().collect(),
-            },
-        );
-        emit_training_diagnostic(
+        if let Err(error) = emit_training_diagnostic(
             &mut diagnostics,
             step_context,
             DiagnosticEventKind::BackwardStart,
-        );
+        ) {
+            phase_timings.push(phase_timing(
+                RunPhase::Train,
+                train_started.elapsed(),
+                launch_runtime.completed_steps,
+                launch_runtime.planned_steps,
+            ));
+            let artifact = SpeciesRunArtifact {
+                stage,
+                manifest: manifest.clone(),
+                phase_timings,
+                training_runtime: launch_runtime.artifact(diagnostics.artifact()),
+                execution_outcome: RunExecutionOutcome::InfraFailure,
+                quality_outcome: RunQualityOutcome::Clean,
+                error: Some(error.to_string()),
+                metrics: None,
+            };
+            record_species_run_artifact(artifact);
+            return Err(error);
+        }
         let grads = GradientsParams::from_grads(loss.backward(), &model);
-        emit_training_diagnostic(
+        if let Err(error) = emit_training_diagnostic(
             &mut diagnostics,
             step_context,
             DiagnosticEventKind::BackwardComplete,
-        );
+        ) {
+            phase_timings.push(phase_timing(
+                RunPhase::Train,
+                train_started.elapsed(),
+                launch_runtime.completed_steps,
+                launch_runtime.planned_steps,
+            ));
+            let artifact = SpeciesRunArtifact {
+                stage,
+                manifest: manifest.clone(),
+                phase_timings,
+                training_runtime: launch_runtime.artifact(diagnostics.artifact()),
+                execution_outcome: RunExecutionOutcome::InfraFailure,
+                quality_outcome: RunQualityOutcome::Clean,
+                error: Some(error.to_string()),
+                metrics: None,
+            };
+            record_species_run_artifact(artifact);
+            return Err(error);
+        }
         let scheduled_learning_rate = config.optimizer.learning_rate_at_tokens(
             launch_runtime.train_tokens_seen,
             launch_runtime.target_train_tokens,
@@ -1221,18 +1265,37 @@ where
         if let Some(max_norm) = config.optimizer.gradient_clip_norm {
             clip_gradients_global_norm(&model, &mut grads, max_norm);
         }
-        emit_training_diagnostic(
+        if let Err(error) = emit_training_diagnostic(
             &mut diagnostics,
             step_context,
             DiagnosticEventKind::OptimizerStepStart {
                 scheduled_learning_rate,
             },
-        );
+        ) {
+            phase_timings.push(phase_timing(
+                RunPhase::Train,
+                train_started.elapsed(),
+                launch_runtime.completed_steps,
+                launch_runtime.planned_steps,
+            ));
+            let artifact = SpeciesRunArtifact {
+                stage,
+                manifest: manifest.clone(),
+                phase_timings,
+                training_runtime: launch_runtime.artifact(diagnostics.artifact()),
+                execution_outcome: RunExecutionOutcome::InfraFailure,
+                quality_outcome: RunQualityOutcome::Clean,
+                error: Some(error.to_string()),
+                metrics: None,
+            };
+            record_species_run_artifact(artifact);
+            return Err(error);
+        }
         model = optimizer.step(scheduled_learning_rate, model, grads);
         launch_runtime.train_tokens_seen += batch.token_count;
         launch_runtime.completed_steps = step + 1;
         let completed_step = launch_runtime.completed_steps;
-        emit_training_diagnostic(
+        if let Err(error) = emit_training_diagnostic(
             &mut diagnostics,
             step_context,
             DiagnosticEventKind::OptimizerStepComplete {
@@ -1240,7 +1303,26 @@ where
                 completed_steps: completed_step,
                 train_tokens_seen: launch_runtime.train_tokens_seen,
             },
-        );
+        ) {
+            phase_timings.push(phase_timing(
+                RunPhase::Train,
+                train_started.elapsed(),
+                launch_runtime.completed_steps,
+                launch_runtime.planned_steps,
+            ));
+            let artifact = SpeciesRunArtifact {
+                stage,
+                manifest: manifest.clone(),
+                phase_timings,
+                training_runtime: launch_runtime.artifact(diagnostics.artifact()),
+                execution_outcome: RunExecutionOutcome::InfraFailure,
+                quality_outcome: RunQualityOutcome::Clean,
+                error: Some(error.to_string()),
+                metrics: None,
+            };
+            record_species_run_artifact(artifact);
+            return Err(error);
+        }
 
         let latest_snapshot = match maybe_capture_interim_eval(
             species,
@@ -1927,22 +2009,23 @@ fn emit_training_diagnostic(
     diagnostics: &mut DiagnosticsRecorder,
     context: TrainStepDiagnosticContext,
     event: DiagnosticEventKind,
-) {
+) -> Result<(), FractalError> {
     let boundary = event.boundary();
     diagnostics.emit_event(
         RunPhase::Train,
         Some(context.step),
         Some(context.tokens_seen),
         event,
-    );
+    )?;
     if let Some(boundary) = boundary {
         diagnostics.record_cuda_memory_snapshot(
             RunPhase::Train,
             context,
             boundary,
             read_cuda_memory_snapshot(),
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn read_cuda_memory_snapshot() -> Option<CudaMemorySnapshot> {
@@ -2250,6 +2333,40 @@ fn resolve_weight_identity_prefix(manifest: &RunManifest, stage: &SpeciesRunStag
     }
 
     PathBuf::from(sanitize_path_component(logical_name)).join(sanitize_path_component(run_id))
+}
+
+fn resolve_diagnostics_runtime_paths(
+    stage: &SpeciesRunStage,
+    manifest: &RunManifest,
+    policy: &crate::DiagnosticsPolicy,
+) -> Option<DiagnosticsRuntimePaths> {
+    if !policy.has_probes() {
+        return None;
+    }
+
+    let identity_prefix = resolve_weight_identity_prefix(manifest, stage);
+    let root = if let Some(root) = std::env::var_os("FRACTAL_RUN_DIAGNOSTICS_DIR") {
+        PathBuf::from(root)
+            .join(identity_prefix)
+            .join(stage.species.as_str())
+    } else if let Some(root) = std::env::var_os("FRACTAL_RUN_ARTIFACT_DIR") {
+        PathBuf::from(root)
+            .join("diagnostics")
+            .join(identity_prefix)
+            .join(stage.species.as_str())
+    } else {
+        PathBuf::from(".fractal-run-results")
+            .join(identity_prefix)
+            .join("diagnostics")
+            .join(stage.species.as_str())
+    };
+
+    Some(DiagnosticsRuntimePaths {
+        event_file: root.join(format!(
+            "{}.jsonl",
+            sanitize_path_component(manifest.variant_name.as_str())
+        )),
+    })
 }
 
 pub(crate) fn resolve_weight_export_paths(
