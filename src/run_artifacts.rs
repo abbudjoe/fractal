@@ -524,6 +524,14 @@ fn failure_snapshot_runtime_state_json(spec: &crate::FailureSnapshotRuntimeState
             .iter()
             .map(|kind| kind.as_str())
             .collect::<Vec<_>>(),
+        "last_diagnostic_event": spec
+            .last_diagnostic_event
+            .as_ref()
+            .map(diagnostic_event_summary_json),
+        "last_rule_projection_event": spec
+            .last_rule_projection_event
+            .as_ref()
+            .map(rule_projection_diagnostic_event_summary_json),
     })
 }
 
@@ -734,7 +742,16 @@ fn diagnostics_runtime_json(spec: &crate::DiagnosticsRuntimeArtifact) -> Value {
             .as_ref()
             .map(diagnostics_runtime_failure_json),
         "diagnostics_incomplete": spec.diagnostics_incomplete,
+        "boundary_memory_deltas": spec
+            .boundary_memory_deltas
+            .iter()
+            .map(boundary_memory_delta_json)
+            .collect::<Vec<_>>(),
         "last_event": spec.last_event.as_ref().map(diagnostic_event_json),
+        "last_rule_projection_event": spec
+            .last_rule_projection_event
+            .as_ref()
+            .map(rule_projection_diagnostic_event_summary_json),
     })
 }
 
@@ -756,6 +773,7 @@ fn diagnostic_event_json(spec: &crate::DiagnosticEvent) -> Value {
         "experiment_logical_name": spec.experiment_logical_name.clone(),
         "species": spec.species.clone(),
         "variant_name": spec.variant_name.clone(),
+        "correlation_id": spec.correlation_id,
         "phase": phase_name(spec.phase),
         "step": spec.step,
         "tokens_seen": spec.tokens_seen,
@@ -793,9 +811,32 @@ fn diagnostic_event_kind_json(spec: &crate::DiagnosticEventKind) -> Value {
             "input_shape": input_shape,
             "readout_shape": readout_shape,
         }),
-        crate::DiagnosticEventKind::ForwardComplete { logits_shape } => json!({
+        crate::DiagnosticEventKind::RuleProjection {
+            position,
+            sequence_length,
+            recursion_depth,
+            max_recursion_depth,
+            projection,
+            spec,
+        } => json!({
+            "kind": "rule_projection",
+            "position": position,
+            "sequence_length": sequence_length,
+            "recursion_depth": recursion_depth,
+            "max_recursion_depth": max_recursion_depth,
+            "projection": projection.as_str(),
+            "identity": rule_projection_identity_json(&spec.identity),
+            "input_layout": tensor_layout_metadata_json(&spec.input_layout),
+            "output_layout": tensor_layout_metadata_json(&spec.output_layout),
+            "linear_layout": linear_projection_layout_metadata_json(spec.linear_layout.as_ref()),
+        }),
+        crate::DiagnosticEventKind::ForwardComplete {
+            logits_shape,
+            graph_burden,
+        } => json!({
             "kind": "forward_complete",
             "logits_shape": logits_shape,
+            "graph_burden": forward_graph_burden_json(graph_burden),
         }),
         crate::DiagnosticEventKind::LossStart { target_shape } => json!({
             "kind": "loss_start",
@@ -840,6 +881,104 @@ fn diagnostic_event_kind_json(spec: &crate::DiagnosticEventKind) -> Value {
             "total_mib": total_mib,
         }),
     }
+}
+
+fn diagnostic_event_summary_json(spec: &crate::DiagnosticEventSummary) -> Value {
+    json!({
+        "correlation_id": spec.correlation_id,
+        "phase": phase_name(spec.phase),
+        "step": spec.step,
+        "tokens_seen": spec.tokens_seen,
+        "event_name": spec.event_name,
+    })
+}
+
+fn rule_projection_diagnostic_event_summary_json(
+    spec: &crate::RuleProjectionDiagnosticEventSummary,
+) -> Value {
+    json!({
+        "correlation_id": spec.correlation_id,
+        "phase": phase_name(spec.phase),
+        "step": spec.step,
+        "tokens_seen": spec.tokens_seen,
+        "position": spec.position,
+        "sequence_length": spec.sequence_length,
+        "recursion_depth": spec.recursion_depth,
+        "max_recursion_depth": spec.max_recursion_depth,
+        "projection": spec.projection.as_str(),
+        "identity": rule_projection_identity_json(&spec.identity),
+        "input_layout": tensor_layout_metadata_json(&spec.input_layout),
+        "output_layout": tensor_layout_metadata_json(&spec.output_layout),
+        "linear_layout": linear_projection_layout_metadata_json(spec.linear_layout.as_ref()),
+    })
+}
+
+fn rule_projection_identity_json(spec: &crate::RuleProjectionIdentity) -> Value {
+    json!({
+        "rule_name": spec.rule_name,
+        "projection_name": spec.projection_name,
+    })
+}
+
+fn tensor_layout_metadata_json(spec: &crate::TensorLayoutMetadata) -> Value {
+    json!({
+        "origin": match spec.origin {
+            crate::TensorLayoutOrigin::RuntimeObserved => "runtime_observed",
+            crate::TensorLayoutOrigin::LinearContract => "linear_contract",
+        },
+        "transform": match spec.transform {
+            crate::TensorLayoutTransform::Identity => "identity",
+            crate::TensorLayoutTransform::UnsqueezedView => "unsqueezed_view",
+            crate::TensorLayoutTransform::TransposedView => "transposed_view",
+        },
+        "shape": spec.shape,
+        "strides": spec.strides,
+        "is_contiguous": spec.is_contiguous,
+    })
+}
+
+fn linear_projection_layout_metadata_json(
+    spec: Option<&crate::LinearProjectionLayoutMetadata>,
+) -> Value {
+    match spec {
+        Some(spec) => json!({
+            "stored_weight": tensor_layout_metadata_json(&spec.stored_weight),
+            "forward_rhs": tensor_layout_metadata_json(&spec.forward_rhs),
+            "backward_input_grad_rhs": tensor_layout_metadata_json(&spec.backward_input_grad_rhs),
+        }),
+        None => Value::Null,
+    }
+}
+
+fn forward_graph_burden_json(spec: &crate::ForwardGraphBurden) -> Value {
+    json!({
+        "batch_size": spec.batch_size,
+        "sequence_length": spec.sequence_length,
+        "positions_processed": spec.positions_processed,
+        "rule_invocations": spec.rule_invocations,
+        "max_recursion_depth_observed": spec.max_recursion_depth_observed,
+        "router_enabled": spec.router_enabled,
+        "forced_depth": spec.forced_depth,
+        "positions_early_exited": spec.positions_early_exited,
+        "positions_reached_depth_limit": spec.positions_reached_depth_limit,
+        "router_exit_elements": spec.router_exit_elements,
+        "router_continue_elements": spec.router_continue_elements,
+    })
+}
+
+fn boundary_memory_delta_json(spec: &crate::BoundaryMemoryDelta) -> Value {
+    json!({
+        "boundary": spec.boundary.as_str(),
+        "step": spec.step,
+        "tokens_seen": spec.tokens_seen,
+        "correlation_id": spec.correlation_id,
+        "used_mib": spec.used_mib,
+        "free_mib": spec.free_mib,
+        "total_mib": spec.total_mib,
+        "delta_used_mib": spec.delta_used_mib,
+        "delta_free_mib": spec.delta_free_mib,
+        "delta_total_mib": spec.delta_total_mib,
+    })
 }
 
 fn tokenizer_bridge_json(stats: &crate::TokenizerBridgeStats) -> Value {
@@ -1159,6 +1298,7 @@ mod tests {
                     experiment_logical_name: Some("fast-test-run".to_owned()),
                     species: SpeciesId::P1Contractive.as_str().to_owned(),
                     variant_name: "p1_contractive_v1".to_owned(),
+                    correlation_id: 1,
                     phase: RunPhase::Train,
                     step: Some(0),
                     tokens_seen: Some(0),
@@ -1174,11 +1314,13 @@ mod tests {
                 missing_required_boundary_completions: Vec::new(),
                 runtime_failure: None,
                 diagnostics_incomplete: false,
+                boundary_memory_deltas: Vec::new(),
                 last_event: Some(DiagnosticEvent {
                     experiment_run_id: "run-123".to_owned(),
                     experiment_logical_name: Some("fast-test-run".to_owned()),
                     species: SpeciesId::P1Contractive.as_str().to_owned(),
                     variant_name: "p1_contractive_v1".to_owned(),
+                    correlation_id: 1,
                     phase: RunPhase::Train,
                     step: Some(0),
                     tokens_seen: Some(0),
@@ -1189,6 +1331,7 @@ mod tests {
                         target_shape: vec![1, 16],
                     },
                 }),
+                last_rule_projection_event: None,
             },
             ..TrainingRuntimeArtifact::default()
         };

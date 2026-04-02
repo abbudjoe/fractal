@@ -4,9 +4,15 @@ use burn::{
     tensor::{Tensor, TensorData},
 };
 use fractal_core::{
+    diagnostics::{
+        DiagnosticIdentity, DiagnosticProbeKind, DiagnosticProbeRequest, DiagnosticsPolicy,
+        DiagnosticsRecorder, ProbeCadence, RuleProjectionDiagnosticContext, RuleProjectionKind,
+        TensorLayoutTransform,
+    },
     registry::SpeciesId,
     rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
+    StructuredDiagnosticsOutput, RunPhase,
 };
 
 use crate::{
@@ -92,6 +98,95 @@ fn hierarchical_rules_update_all_levels_without_shape_collapse() {
         FractalState::Hierarchical(tensor) => assert_eq!(tensor.dims(), [2, 4, 8]),
         _ => panic!("expected hierarchical state"),
     }
+}
+
+#[test]
+fn p1_contractive_emits_typed_rule_projection_diagnostics() {
+    let device = Default::default();
+    let x = Tensor::<TestBackend, 2>::ones([1, 8], &device);
+    let state = FractalState::zeros(StateLayout::Flat, 1, 8, &device).unwrap();
+    let rule = P1Contractive::new(8, &device);
+    let mut recorder = DiagnosticsRecorder::new(
+        DiagnosticsPolicy {
+            required: false,
+            probes: vec![DiagnosticProbeRequest {
+                kind: DiagnosticProbeKind::RuleProjection,
+                cadence: ProbeCadence::EveryStep,
+                position_interval: Some(1),
+            }],
+            structured_output: StructuredDiagnosticsOutput::Jsonl,
+        },
+        DiagnosticIdentity {
+            experiment_run_id: "run-123".to_owned(),
+            experiment_logical_name: Some("rule-projection-test".to_owned()),
+            species: SpeciesId::P1Contractive.as_str().to_owned(),
+            variant_name: "p1_contractive_v1".to_owned(),
+        },
+    );
+
+    let next = rule
+        .apply_with_diagnostics(
+            &state,
+            &x,
+            ApplyContext {
+                depth: 2,
+                max_depth: 4,
+            },
+            Some(&mut recorder),
+            Some(RuleProjectionDiagnosticContext {
+                step: 0,
+                tokens_seen: 0,
+                position: 3,
+                sequence_length: 4,
+                recursion_depth: 2,
+                max_recursion_depth: 4,
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(next.layout(), StateLayout::Flat);
+    let artifact = recorder.artifact();
+    let events = artifact.events;
+    assert_eq!(events.len(), 3);
+    assert!(events.iter().all(|event| event.phase == RunPhase::Train));
+    let projections = events
+        .iter()
+        .map(|event| match &event.event {
+            fractal_core::DiagnosticEventKind::RuleProjection {
+                position,
+                sequence_length,
+                recursion_depth,
+                max_recursion_depth,
+                projection,
+                spec,
+            } => {
+                assert_eq!((*position, *sequence_length), (3, 4));
+                assert_eq!((*recursion_depth, *max_recursion_depth), (2, 4));
+                assert_eq!(spec.identity.rule_name, "p1_contractive");
+                assert_eq!(spec.input_layout.shape, vec![1, 8]);
+                assert_eq!(spec.output_layout.shape, vec![1, 8]);
+                assert_eq!(
+                    spec.linear_layout
+                        .as_ref()
+                        .expect("linear contract metadata should exist")
+                        .backward_input_grad_rhs
+                        .transform,
+                    TensorLayoutTransform::TransposedView
+                );
+                *projection
+            }
+            other => panic!("expected rule projection event, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        projections,
+        vec![
+            RuleProjectionKind::Gate,
+            RuleProjectionKind::StateMix,
+            RuleProjectionKind::InputMix,
+        ]
+    );
 }
 
 #[test]

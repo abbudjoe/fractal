@@ -5,6 +5,7 @@
 use burn::tensor::{backend::Backend, Tensor};
 
 use crate::{
+    diagnostics::{RuleProjectionDiagnosticContext, RuleProjectionDiagnosticsSink},
     error::FractalError,
     state::{FractalState, StateLayout},
 };
@@ -22,6 +23,17 @@ pub trait FractalRule<B: Backend>: Send + 'static {
         x: &Tensor<B, 2>,
         context: ApplyContext,
     ) -> Result<FractalState<B>, FractalError>;
+
+    fn apply_with_diagnostics(
+        &self,
+        state: &FractalState<B>,
+        x: &Tensor<B, 2>,
+        context: ApplyContext,
+        _diagnostics: Option<&mut dyn RuleProjectionDiagnosticsSink>,
+        _diagnostic_context: Option<RuleProjectionDiagnosticContext>,
+    ) -> Result<FractalState<B>, FractalError> {
+        self.apply(state, x, context)
+    }
 
     fn name(&self) -> &'static str;
     fn hidden_dim(&self) -> usize;

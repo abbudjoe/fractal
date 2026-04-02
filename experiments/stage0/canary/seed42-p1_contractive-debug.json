@@ -162,6 +162,14 @@
               "position_interval": 64
             },
             {
+              "kind": "rule_projection",
+              "cadence": {
+                "kind": "first_n_steps",
+                "steps": 1
+              },
+              "position_interval": 64
+            },
+            {
               "kind": "loss_boundary",
               "cadence": {
                 "kind": "step_interval",
@@ -190,6 +198,13 @@
               }
             }
           ]
+        },
+        "failure_snapshot": {
+          "enabled": true,
+          "required": false,
+          "capture_model_weights": false,
+          "capture_runtime_state": true,
+          "capture_diagnostics_tail": true
         }
       }
     },

@@ -3444,6 +3444,7 @@ where
     if !policy.enabled {
         return state;
     }
+    state.record_diagnostic_summaries(&training_runtime.diagnostics);
 
     let contract = match build_failure_snapshot_contract(
         stage.clone(),
@@ -3552,6 +3553,7 @@ fn capture_failure_snapshot_without_model(
     if !policy.enabled {
         return state;
     }
+    state.record_diagnostic_summaries(&training_runtime.diagnostics);
 
     let contract = match build_failure_snapshot_contract(
         stage.clone(),

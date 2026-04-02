@@ -27,9 +27,14 @@ use crate::{
     diagnostics::{
         clear_last_diagnostics_runtime_artifact, clear_test_diagnostics_persistence_failure,
         set_test_diagnostics_persistence_failure_after_successful_events,
-        take_last_diagnostics_runtime_artifact, DiagnosticEventKind, DiagnosticProbeKind,
-        DiagnosticProbeRequest, DiagnosticsPolicy, DiagnosticsRecorder,
-        DiagnosticsRuntimeFailureKind, ProbeCadence, TrainStepDiagnosticContext,
+        take_last_diagnostics_runtime_artifact, CudaMemorySnapshot, DiagnosticEvent,
+        DiagnosticEventKind, DiagnosticProbeKind, DiagnosticProbeRequest, DiagnosticsPolicy,
+        DiagnosticsRecorder, DiagnosticsRuntimeArtifact, DiagnosticsRuntimeFailureKind,
+        ForwardGraphBurden, ProbeCadence, RuleProjectionDiagnosticContext,
+        RuleProjectionDiagnosticEventSummary, RuleProjectionDiagnosticSpec,
+        RuleProjectionDiagnosticsSink, RuleProjectionIdentity, RuleProjectionKind,
+        TensorLayoutMetadata, TensorLayoutOrigin, TensorLayoutTransform,
+        TrainStepDiagnosticContext,
     },
     error::FractalError,
     fitness::SpeciesRawMetrics,
@@ -37,14 +42,14 @@ use crate::{
         ArtifactPolicy, BridgePackagingSpec, BridgeSplitPolicy, BridgeSubstrateMode, BudgetSpec,
         ComparisonContract, DecisionIntent, ExecutionBackend, ExecutionTarget, ExecutionTargetKind,
         ExperimentId, ExperimentQuestion, ExperimentSpecTemplate, FailureSnapshotArtifactFormat,
-        FailureSnapshotCaptureTiming, FailureSnapshotPolicy, LaneIntent, LaunchPolicySpec,
-        LearningRateScheduleSpec, ModelContractSpec, NumericPrecisionKind, OptimizerKind,
-        OptimizerSpec, QuantizationPolicy, QuantizedPrecisionKind, RunExecutionOutcome,
-        RunOutcomeClass, RunQualityOutcome, RuntimeSurfaceSpec, TextCorpusFormat,
-        TextCorpusSourceSpec, TextCorpusSplitSpec, TokenizerArtifactSpec, Tournament,
-        TournamentConfig, TournamentPreset, TournamentProgressEvent, TournamentSequence,
-        TrainingInputSpec, WeightExportFormat, WeightExportPhase, WeightExportPolicy,
-        WeightExportRuntimeState,
+        FailureSnapshotCaptureTiming, FailureSnapshotPolicy, FailureSnapshotRuntimeState,
+        LaneIntent, LaunchPolicySpec, LearningRateScheduleSpec, ModelContractSpec,
+        NumericPrecisionKind, OptimizerKind, OptimizerSpec, QuantizationPolicy,
+        QuantizedPrecisionKind, RunExecutionOutcome, RunOutcomeClass, RunQualityOutcome,
+        RunPhase, RuntimeSurfaceSpec, TextCorpusFormat, TextCorpusSourceSpec, TextCorpusSplitSpec,
+        TokenizerArtifactSpec, Tournament, TournamentConfig, TournamentPreset,
+        TournamentProgressEvent, TournamentSequence, TrainingInputSpec, WeightExportFormat,
+        WeightExportPhase, WeightExportPolicy, WeightExportRuntimeState,
     },
     model::FractalModel,
     primitives::complex_square,
@@ -1021,6 +1026,17 @@ fn launch_policy_rejects_invalid_diagnostics_policy() {
     launch_policy.diagnostics = DiagnosticsPolicy {
         required: false,
         probes: vec![DiagnosticProbeRequest {
+            kind: DiagnosticProbeKind::RuleProjection,
+            cadence: ProbeCadence::StepInterval { steps: 1 },
+            position_interval: None,
+        }],
+        structured_output: crate::StructuredDiagnosticsOutput::Jsonl,
+    };
+    assert!(launch_policy.validate().is_err());
+
+    launch_policy.diagnostics = DiagnosticsPolicy {
+        required: false,
+        probes: vec![DiagnosticProbeRequest {
             kind: DiagnosticProbeKind::TrainStep,
             cadence: ProbeCadence::StepInterval { steps: 0 },
             position_interval: None,
@@ -1933,6 +1949,240 @@ fn diagnostics_recorder_marks_required_cuda_probe_missing_when_snapshot_unavaila
 }
 
 #[test]
+fn diagnostics_artifact_derives_boundary_memory_deltas_and_rule_projection_summary() {
+    let mut recorder = DiagnosticsRecorder::new(
+        DiagnosticsPolicy {
+            required: false,
+            probes: vec![
+                DiagnosticProbeRequest {
+                    kind: DiagnosticProbeKind::ForwardBoundary,
+                    cadence: ProbeCadence::EveryStep,
+                    position_interval: None,
+                },
+                DiagnosticProbeRequest {
+                    kind: DiagnosticProbeKind::RuleProjection,
+                    cadence: ProbeCadence::EveryStep,
+                    position_interval: Some(1),
+                },
+                DiagnosticProbeRequest {
+                    kind: DiagnosticProbeKind::CudaMemorySnapshot,
+                    cadence: ProbeCadence::EveryStep,
+                    position_interval: None,
+                },
+            ],
+            structured_output: crate::StructuredDiagnosticsOutput::Jsonl,
+        },
+        crate::DiagnosticIdentity {
+            experiment_run_id: "run-123".to_owned(),
+            experiment_logical_name: Some("fast-test-control".to_owned()),
+            species: SpeciesId::P1Contractive.as_str().to_owned(),
+            variant_name: "p1_contractive_v1".to_owned(),
+        },
+    );
+    let context = TrainStepDiagnosticContext {
+        step: 0,
+        tokens_seen: 0,
+    };
+
+    recorder
+        .emit_event(
+            crate::RunPhase::Train,
+            Some(context.step),
+            Some(context.tokens_seen),
+            DiagnosticEventKind::ForwardStart {
+                input_shape: vec![1, 8],
+            },
+        )
+        .unwrap();
+    recorder
+        .record_cuda_memory_snapshot(
+            crate::RunPhase::Train,
+            context,
+            crate::DiagnosticBoundary::ForwardStart,
+            Some(CudaMemorySnapshot {
+                used_mib: 256,
+                free_mib: 1024,
+                total_mib: 1280,
+            }),
+        )
+        .unwrap();
+    recorder
+        .emit_rule_projection(
+            crate::RunPhase::Train,
+            RuleProjectionDiagnosticContext {
+                step: 0,
+                tokens_seen: 0,
+                position: 3,
+                sequence_length: 4,
+                recursion_depth: 2,
+                max_recursion_depth: 4,
+            },
+            RuleProjectionKind::StateMix,
+            RuleProjectionDiagnosticSpec::linear(
+                "p1_contractive",
+                "w_h",
+                vec![1, 8],
+                vec![1, 8],
+                vec![8, 8],
+            ),
+        )
+        .unwrap();
+    recorder
+        .emit_event(
+            crate::RunPhase::Train,
+            Some(context.step),
+            Some(context.tokens_seen),
+            DiagnosticEventKind::ForwardComplete {
+                logits_shape: vec![1, 4, 32],
+                graph_burden: Box::new(ForwardGraphBurden {
+                    batch_size: 1,
+                    sequence_length: 4,
+                    positions_processed: 4,
+                    rule_invocations: 12,
+                    max_recursion_depth_observed: 4,
+                    router_enabled: true,
+                    forced_depth: None,
+                    positions_early_exited: 1,
+                    positions_reached_depth_limit: 3,
+                    router_exit_elements: 2,
+                    router_continue_elements: 2,
+                }),
+            },
+        )
+        .unwrap();
+    recorder
+        .record_cuda_memory_snapshot(
+            crate::RunPhase::Train,
+            context,
+            crate::DiagnosticBoundary::ForwardComplete,
+            Some(CudaMemorySnapshot {
+                used_mib: 384,
+                free_mib: 896,
+                total_mib: 1280,
+            }),
+        )
+        .unwrap();
+
+    let artifact = recorder.artifact();
+    assert_eq!(artifact.boundary_memory_deltas.len(), 2);
+    assert_eq!(artifact.boundary_memory_deltas[0].delta_used_mib, None);
+    assert_eq!(artifact.boundary_memory_deltas[1].delta_used_mib, Some(128));
+    assert_eq!(
+        artifact
+            .last_rule_projection_event
+            .as_ref()
+            .expect("last rule projection summary should exist")
+            .identity
+            .projection_name,
+        "w_h"
+    );
+    assert_eq!(
+        artifact
+            .last_rule_projection_event
+            .as_ref()
+            .and_then(|event| event.linear_layout.as_ref())
+            .expect("linear layout metadata should exist")
+            .backward_input_grad_rhs
+            .transform,
+        TensorLayoutTransform::TransposedView
+    );
+}
+
+#[test]
+fn failure_snapshot_runtime_state_records_last_rule_projection_summary() {
+    let mut state = FailureSnapshotRuntimeState::from_policy(FailureSnapshotPolicy {
+        enabled: true,
+        required: false,
+        capture_model_weights: false,
+        capture_runtime_state: true,
+        capture_diagnostics_tail: true,
+    });
+    let diagnostics = DiagnosticsRuntimeArtifact {
+        policy: DiagnosticsPolicy::disabled(),
+        event_file: None,
+        events: Vec::new(),
+        emitted_probe_kinds: Vec::new(),
+        missing_required_probe_kinds: Vec::new(),
+        missing_required_boundary_completions: Vec::new(),
+        runtime_failure: None,
+        diagnostics_incomplete: false,
+        boundary_memory_deltas: Vec::new(),
+        last_event: Some(DiagnosticEvent {
+            experiment_run_id: "run-123".to_owned(),
+            experiment_logical_name: Some("fast-test-control".to_owned()),
+            species: SpeciesId::P1Contractive.as_str().to_owned(),
+            variant_name: "p1_contractive_v1".to_owned(),
+            correlation_id: 7,
+            phase: RunPhase::Train,
+            step: Some(0),
+            tokens_seen: Some(0),
+            event: DiagnosticEventKind::BackwardStart,
+        }),
+        last_rule_projection_event: Some(RuleProjectionDiagnosticEventSummary {
+            correlation_id: 6,
+            phase: RunPhase::Train,
+            step: Some(0),
+            tokens_seen: Some(0),
+            position: 3,
+            sequence_length: 4,
+            recursion_depth: 2,
+            max_recursion_depth: 4,
+            projection: RuleProjectionKind::Gate,
+            identity: RuleProjectionIdentity {
+                rule_name: "p1_contractive".to_owned(),
+                projection_name: "g_proj".to_owned(),
+            },
+            input_layout: TensorLayoutMetadata {
+                origin: TensorLayoutOrigin::RuntimeObserved,
+                transform: TensorLayoutTransform::Identity,
+                shape: vec![1, 8],
+                strides: None,
+                is_contiguous: None,
+            },
+            output_layout: TensorLayoutMetadata {
+                origin: TensorLayoutOrigin::RuntimeObserved,
+                transform: TensorLayoutTransform::Identity,
+                shape: vec![1, 8],
+                strides: None,
+                is_contiguous: None,
+            },
+            linear_layout: Some(
+                RuleProjectionDiagnosticSpec::linear(
+                    "p1_contractive",
+                    "g_proj",
+                    vec![1, 8],
+                    vec![1, 8],
+                    vec![8, 8],
+                )
+                .linear_layout
+                .expect("linear layout contract should exist"),
+            ),
+        }),
+    };
+
+    state.record_diagnostic_summaries(&diagnostics);
+
+    assert_eq!(
+        state
+            .last_diagnostic_event
+            .as_ref()
+            .expect("last diagnostic event should be recorded")
+            .correlation_id,
+        7
+    );
+    assert_eq!(
+        state
+            .last_rule_projection_event
+            .as_ref()
+            .expect("last rule projection event should be recorded")
+            .identity
+            .projection_name,
+        "g_proj"
+    );
+    assert!(state.validate().is_ok());
+}
+
+#[test]
 fn model_loss_seam_owns_forward_and_loss_diagnostics() {
     let device = Default::default();
     let rule = AddInputRule::<CpuTrainBackend>::new(4);
@@ -2058,6 +2308,7 @@ fn diagnostics_recorder_marks_required_boundary_completion_missing_when_forward_
 
 #[test]
 fn training_runtime_emits_typed_diagnostics_for_first_step() {
+    let _export_lock = EXPORT_ENV_MUTEX.lock().unwrap();
     let _ = take_last_species_run_artifact();
     let mut config = TournamentPreset::FastTest.config();
     config.launch_policy.diagnostics = test_training_diagnostics_policy();
@@ -2110,6 +2361,7 @@ fn training_runtime_emits_typed_diagnostics_for_first_step() {
 
 #[test]
 fn failed_forward_records_last_successful_diagnostic_boundary() {
+    let _export_lock = EXPORT_ENV_MUTEX.lock().unwrap();
     let _ = take_last_species_run_artifact();
     FAILING_APPLY_COUNTER.store(0, Ordering::SeqCst);
     let mut config = TournamentPreset::FastTest.config();
@@ -2641,6 +2893,11 @@ fn test_training_diagnostics_policy() -> DiagnosticsPolicy {
             },
             DiagnosticProbeRequest {
                 kind: DiagnosticProbeKind::ForwardPosition,
+                cadence: ProbeCadence::FirstNSteps { steps: 1 },
+                position_interval: Some(1),
+            },
+            DiagnosticProbeRequest {
+                kind: DiagnosticProbeKind::RuleProjection,
                 cadence: ProbeCadence::FirstNSteps { steps: 1 },
                 position_interval: Some(1),
             },

@@ -14,7 +14,8 @@ use crate::{
         MIN_VOCAB_SIZE, PAD_TOKEN,
     },
     diagnostics::{
-        take_last_diagnostics_runtime_artifact, DiagnosticsPolicy, DiagnosticsRuntimeArtifact,
+        take_last_diagnostics_runtime_artifact, DiagnosticEventSummary, DiagnosticsPolicy,
+        DiagnosticsRuntimeArtifact, RuleProjectionDiagnosticEventSummary,
     },
     error::FractalError,
     fitness::SpeciesRawMetrics,
@@ -1872,6 +1873,8 @@ pub struct FailureSnapshotRuntimeState {
     pub contract: Option<FailureSnapshotContract>,
     pub attempts: Vec<FailureSnapshotAttempt>,
     pub missing_required_artifacts: Vec<FailureSnapshotArtifactKind>,
+    pub last_diagnostic_event: Option<DiagnosticEventSummary>,
+    pub last_rule_projection_event: Option<RuleProjectionDiagnosticEventSummary>,
 }
 
 impl Default for FailureSnapshotRuntimeState {
@@ -1889,6 +1892,8 @@ impl FailureSnapshotRuntimeState {
             contract: None,
             attempts: Vec::new(),
             missing_required_artifacts: Vec::new(),
+            last_diagnostic_event: None,
+            last_rule_projection_event: None,
         };
         state.refresh();
         state
@@ -1945,6 +1950,16 @@ impl FailureSnapshotRuntimeState {
         if let Some(contract) = &self.contract {
             contract.validate()?;
         }
+        if let Some(last_rule_projection_event) = &self.last_rule_projection_event {
+            if last_rule_projection_event.identity.rule_name.trim().is_empty()
+                || last_rule_projection_event.identity.projection_name.trim().is_empty()
+            {
+                return Err(FractalError::InvalidConfig(
+                    "failure snapshot last_rule_projection_event must record a non-empty rule identity"
+                        .into(),
+                ));
+            }
+        }
 
         let mut seen = HashSet::new();
         let requested = self.policy.requested_artifact_kinds();
@@ -1994,6 +2009,11 @@ impl FailureSnapshotRuntimeState {
             ));
         }
         Ok(())
+    }
+
+    pub fn record_diagnostic_summaries(&mut self, diagnostics: &DiagnosticsRuntimeArtifact) {
+        self.last_diagnostic_event = diagnostics.last_event.as_ref().map(|event| event.summary());
+        self.last_rule_projection_event = diagnostics.last_rule_projection_event.clone();
     }
 
     fn upsert_attempt(&mut self, attempt: FailureSnapshotAttempt) {

@@ -16,6 +16,7 @@ pub enum DiagnosticProbeKind {
     TrainStep,
     ForwardBoundary,
     ForwardPosition,
+    RuleProjection,
     LossBoundary,
     BackwardBoundary,
     OptimizerBoundary,
@@ -28,6 +29,7 @@ impl DiagnosticProbeKind {
             Self::TrainStep => "train_step",
             Self::ForwardBoundary => "forward_boundary",
             Self::ForwardPosition => "forward_position",
+            Self::RuleProjection => "rule_projection",
             Self::LossBoundary => "loss_boundary",
             Self::BackwardBoundary => "backward_boundary",
             Self::OptimizerBoundary => "optimizer_boundary",
@@ -78,13 +80,21 @@ impl DiagnosticProbeRequest {
     pub fn validate(&self) -> Result<(), FractalError> {
         self.cadence.validate()?;
         match (self.kind, self.position_interval) {
-            (DiagnosticProbeKind::ForwardPosition, Some(0)) => Err(FractalError::InvalidConfig(
-                "forward_position position_interval must be greater than zero".into(),
-            )),
-            (DiagnosticProbeKind::ForwardPosition, None) => Err(FractalError::InvalidConfig(
-                "forward_position diagnostics require position_interval".into(),
-            )),
-            (DiagnosticProbeKind::ForwardPosition, Some(_)) => Ok(()),
+            (DiagnosticProbeKind::ForwardPosition | DiagnosticProbeKind::RuleProjection, Some(0)) => {
+                Err(FractalError::InvalidConfig(format!(
+                    "{} position_interval must be greater than zero",
+                    self.kind.as_str()
+                )))
+            }
+            (DiagnosticProbeKind::ForwardPosition | DiagnosticProbeKind::RuleProjection, None) => {
+                Err(FractalError::InvalidConfig(format!(
+                    "{} diagnostics require position_interval",
+                    self.kind.as_str()
+                )))
+            }
+            (DiagnosticProbeKind::ForwardPosition | DiagnosticProbeKind::RuleProjection, Some(_)) => {
+                Ok(())
+            }
             (_, Some(_)) => Err(FractalError::InvalidConfig(format!(
                 "{} does not support position_interval",
                 self.kind.as_str()
@@ -286,10 +296,181 @@ pub struct TrainStepDiagnosticContext {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleProjectionDiagnosticContext {
+    pub step: usize,
+    pub tokens_seen: usize,
+    pub position: usize,
+    pub sequence_length: usize,
+    pub recursion_depth: usize,
+    pub max_recursion_depth: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleProjectionKind {
+    Gate,
+    StateMix,
+    InputMix,
+}
+
+impl RuleProjectionKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Gate => "gate",
+            Self::StateMix => "state_mix",
+            Self::InputMix => "input_mix",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleProjectionIdentity {
+    pub rule_name: String,
+    pub projection_name: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TensorLayoutOrigin {
+    RuntimeObserved,
+    LinearContract,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TensorLayoutTransform {
+    Identity,
+    UnsqueezedView,
+    TransposedView,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TensorLayoutMetadata {
+    pub origin: TensorLayoutOrigin,
+    pub transform: TensorLayoutTransform,
+    pub shape: Vec<usize>,
+    pub strides: Option<Vec<usize>>,
+    pub is_contiguous: Option<bool>,
+}
+
+impl TensorLayoutMetadata {
+    pub fn observed(shape: Vec<usize>) -> Self {
+        Self {
+            origin: TensorLayoutOrigin::RuntimeObserved,
+            transform: TensorLayoutTransform::Identity,
+            shape,
+            strides: None,
+            is_contiguous: None,
+        }
+    }
+
+    pub fn linear_contract(shape: Vec<usize>, transform: TensorLayoutTransform) -> Self {
+        Self {
+            origin: TensorLayoutOrigin::LinearContract,
+            transform,
+            shape,
+            strides: None,
+            is_contiguous: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinearProjectionLayoutMetadata {
+    pub stored_weight: TensorLayoutMetadata,
+    pub forward_rhs: TensorLayoutMetadata,
+    pub backward_input_grad_rhs: TensorLayoutMetadata,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleProjectionDiagnosticSpec {
+    pub identity: RuleProjectionIdentity,
+    pub input_layout: TensorLayoutMetadata,
+    pub output_layout: TensorLayoutMetadata,
+    pub linear_layout: Option<LinearProjectionLayoutMetadata>,
+}
+
+impl RuleProjectionDiagnosticSpec {
+    pub fn linear(
+        rule_name: impl Into<String>,
+        projection_name: impl Into<String>,
+        input_shape: Vec<usize>,
+        output_shape: Vec<usize>,
+        weight_shape: Vec<usize>,
+    ) -> Self {
+        let [d_input, d_output]: [usize; 2] = weight_shape
+            .clone()
+            .try_into()
+            .expect("linear weight shape should be rank 2");
+        Self {
+            identity: RuleProjectionIdentity {
+                rule_name: rule_name.into(),
+                projection_name: projection_name.into(),
+            },
+            input_layout: TensorLayoutMetadata::observed(input_shape),
+            output_layout: TensorLayoutMetadata::observed(output_shape),
+            linear_layout: Some(LinearProjectionLayoutMetadata {
+                stored_weight: TensorLayoutMetadata::linear_contract(
+                    vec![d_input, d_output],
+                    TensorLayoutTransform::Identity,
+                ),
+                forward_rhs: TensorLayoutMetadata::linear_contract(
+                    vec![1, d_input, d_output],
+                    TensorLayoutTransform::UnsqueezedView,
+                ),
+                backward_input_grad_rhs: TensorLayoutMetadata::linear_contract(
+                    vec![d_output, d_input],
+                    TensorLayoutTransform::TransposedView,
+                ),
+            }),
+        }
+    }
+}
+
+pub trait RuleProjectionDiagnosticsSink {
+    fn emit_rule_projection(
+        &mut self,
+        phase: RunPhase,
+        context: RuleProjectionDiagnosticContext,
+        projection: RuleProjectionKind,
+        spec: RuleProjectionDiagnosticSpec,
+    ) -> Result<(), FractalError>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CudaMemorySnapshot {
     pub used_mib: usize,
     pub free_mib: usize,
     pub total_mib: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardGraphBurden {
+    pub batch_size: usize,
+    pub sequence_length: usize,
+    pub positions_processed: usize,
+    pub rule_invocations: usize,
+    pub max_recursion_depth_observed: usize,
+    pub router_enabled: bool,
+    pub forced_depth: Option<usize>,
+    pub positions_early_exited: usize,
+    pub positions_reached_depth_limit: usize,
+    pub router_exit_elements: usize,
+    pub router_continue_elements: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundaryMemoryDelta {
+    pub boundary: DiagnosticBoundary,
+    pub step: usize,
+    pub tokens_seen: usize,
+    pub correlation_id: u64,
+    pub used_mib: usize,
+    pub free_mib: usize,
+    pub total_mib: usize,
+    pub delta_used_mib: Option<i64>,
+    pub delta_free_mib: Option<i64>,
+    pub delta_total_mib: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -318,8 +499,17 @@ pub enum DiagnosticEventKind {
         input_shape: Vec<usize>,
         readout_shape: Vec<usize>,
     },
+    RuleProjection {
+        position: usize,
+        sequence_length: usize,
+        recursion_depth: usize,
+        max_recursion_depth: usize,
+        projection: RuleProjectionKind,
+        spec: Box<RuleProjectionDiagnosticSpec>,
+    },
     ForwardComplete {
         logits_shape: Vec<usize>,
+        graph_burden: Box<ForwardGraphBurden>,
     },
     LossStart {
         target_shape: Vec<usize>,
@@ -353,6 +543,7 @@ impl DiagnosticEventKind {
                 DiagnosticProbeKind::ForwardBoundary
             }
             Self::ForwardPosition { .. } => DiagnosticProbeKind::ForwardPosition,
+            Self::RuleProjection { .. } => DiagnosticProbeKind::RuleProjection,
             Self::LossStart { .. } | Self::LossComplete { .. } => DiagnosticProbeKind::LossBoundary,
             Self::BackwardStart | Self::BackwardComplete => DiagnosticProbeKind::BackwardBoundary,
             Self::OptimizerStepStart { .. } | Self::OptimizerStepComplete { .. } => {
@@ -367,6 +558,7 @@ impl DiagnosticEventKind {
             Self::TrainStepStart { .. } => "train_step_start",
             Self::ForwardStart { .. } => "forward_start",
             Self::ForwardPosition { .. } => "forward_position",
+            Self::RuleProjection { .. } => "rule_projection",
             Self::ForwardComplete { .. } => "forward_complete",
             Self::LossStart { .. } => "loss_start",
             Self::LossComplete { .. } => "loss_complete",
@@ -382,7 +574,7 @@ impl DiagnosticEventKind {
         match self {
             Self::TrainStepStart { .. } => Some(DiagnosticBoundary::TrainStepStart),
             Self::ForwardStart { .. } => Some(DiagnosticBoundary::ForwardStart),
-            Self::ForwardPosition { .. } => None,
+            Self::ForwardPosition { .. } | Self::RuleProjection { .. } => None,
             Self::ForwardComplete { .. } => Some(DiagnosticBoundary::ForwardComplete),
             Self::LossStart { .. } => Some(DiagnosticBoundary::LossStart),
             Self::LossComplete { .. } => Some(DiagnosticBoundary::LossComplete),
@@ -401,10 +593,78 @@ pub struct DiagnosticEvent {
     pub experiment_logical_name: Option<String>,
     pub species: String,
     pub variant_name: String,
+    pub correlation_id: u64,
     pub phase: RunPhase,
     pub step: Option<usize>,
     pub tokens_seen: Option<usize>,
     pub event: DiagnosticEventKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticEventSummary {
+    pub correlation_id: u64,
+    pub phase: RunPhase,
+    pub step: Option<usize>,
+    pub tokens_seen: Option<usize>,
+    pub event_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleProjectionDiagnosticEventSummary {
+    pub correlation_id: u64,
+    pub phase: RunPhase,
+    pub step: Option<usize>,
+    pub tokens_seen: Option<usize>,
+    pub position: usize,
+    pub sequence_length: usize,
+    pub recursion_depth: usize,
+    pub max_recursion_depth: usize,
+    pub projection: RuleProjectionKind,
+    pub identity: RuleProjectionIdentity,
+    pub input_layout: TensorLayoutMetadata,
+    pub output_layout: TensorLayoutMetadata,
+    pub linear_layout: Option<LinearProjectionLayoutMetadata>,
+}
+
+impl DiagnosticEvent {
+    pub fn summary(&self) -> DiagnosticEventSummary {
+        DiagnosticEventSummary {
+            correlation_id: self.correlation_id,
+            phase: self.phase,
+            step: self.step,
+            tokens_seen: self.tokens_seen,
+            event_name: self.event.name().to_owned(),
+        }
+    }
+
+    pub fn rule_projection_summary(&self) -> Option<RuleProjectionDiagnosticEventSummary> {
+        let DiagnosticEventKind::RuleProjection {
+            position,
+            sequence_length,
+            recursion_depth,
+            max_recursion_depth,
+            projection,
+            spec,
+        } = &self.event
+        else {
+            return None;
+        };
+        Some(RuleProjectionDiagnosticEventSummary {
+            correlation_id: self.correlation_id,
+            phase: self.phase,
+            step: self.step,
+            tokens_seen: self.tokens_seen,
+            position: *position,
+            sequence_length: *sequence_length,
+            recursion_depth: *recursion_depth,
+            max_recursion_depth: *max_recursion_depth,
+            projection: *projection,
+            identity: spec.identity.clone(),
+            input_layout: spec.input_layout.clone(),
+            output_layout: spec.output_layout.clone(),
+            linear_layout: spec.linear_layout.clone(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -417,7 +677,9 @@ pub struct DiagnosticsRuntimeArtifact {
     pub missing_required_boundary_completions: Vec<DiagnosticBoundary>,
     pub runtime_failure: Option<DiagnosticsRuntimeFailure>,
     pub diagnostics_incomplete: bool,
+    pub boundary_memory_deltas: Vec<BoundaryMemoryDelta>,
     pub last_event: Option<DiagnosticEvent>,
+    pub last_rule_projection_event: Option<RuleProjectionDiagnosticEventSummary>,
 }
 
 impl DiagnosticsRuntimeArtifact {
@@ -431,7 +693,9 @@ impl DiagnosticsRuntimeArtifact {
             missing_required_boundary_completions: Vec::new(),
             runtime_failure: None,
             diagnostics_incomplete: false,
+            boundary_memory_deltas: Vec::new(),
             last_event: None,
+            last_rule_projection_event: None,
         }
     }
 
@@ -454,7 +718,9 @@ impl DiagnosticsRuntimeArtifact {
                 message: message.into(),
             }),
             diagnostics_incomplete: true,
+            boundary_memory_deltas: Vec::new(),
             last_event: None,
+            last_rule_projection_event: None,
         }
     }
 }
@@ -568,6 +834,7 @@ pub struct DiagnosticsRecorder {
     policy: DiagnosticsPolicy,
     identity: DiagnosticIdentity,
     events: Vec<DiagnosticEvent>,
+    next_correlation_id: u64,
     emitted_probe_kinds: BTreeSet<DiagnosticProbeKind>,
     missing_required_probe_kinds: BTreeSet<DiagnosticProbeKind>,
     missing_required_boundary_completions: BTreeSet<DiagnosticBoundary>,
@@ -581,6 +848,7 @@ impl DiagnosticsRecorder {
             policy,
             identity,
             events: Vec::new(),
+            next_correlation_id: 1,
             emitted_probe_kinds: BTreeSet::new(),
             missing_required_probe_kinds: BTreeSet::new(),
             missing_required_boundary_completions: BTreeSet::new(),
@@ -601,6 +869,7 @@ impl DiagnosticsRecorder {
             policy,
             identity,
             events: Vec::new(),
+            next_correlation_id: 1,
             emitted_probe_kinds: BTreeSet::new(),
             missing_required_probe_kinds: BTreeSet::new(),
             missing_required_boundary_completions: BTreeSet::new(),
@@ -624,6 +893,20 @@ impl DiagnosticsRecorder {
         self.policy
             .probe(DiagnosticProbeKind::ForwardPosition)
             .is_some_and(|probe| probe.matches_step(step) && probe.matches_position(position))
+    }
+
+    pub fn should_emit_rule_projection(
+        &self,
+        step: usize,
+        position: usize,
+        sequence_length: usize,
+    ) -> bool {
+        self.policy
+            .probe(DiagnosticProbeKind::RuleProjection)
+            .is_some_and(|probe| {
+                probe.matches_step(step)
+                    && (probe.matches_position(position) || position + 1 == sequence_length)
+            })
     }
 
     pub fn emit_event(
@@ -664,6 +947,32 @@ impl DiagnosticsRecorder {
                 sequence_length,
                 input_shape,
                 readout_shape,
+            },
+        )
+    }
+
+    fn emit_rule_projection_inner(
+        &mut self,
+        phase: RunPhase,
+        context: RuleProjectionDiagnosticContext,
+        projection: RuleProjectionKind,
+        spec: RuleProjectionDiagnosticSpec,
+    ) -> Result<(), FractalError> {
+        if !self.should_emit_rule_projection(context.step, context.position, context.sequence_length)
+        {
+            return Ok(());
+        }
+        self.push_event(
+            phase,
+            Some(context.step),
+            Some(context.tokens_seen),
+            DiagnosticEventKind::RuleProjection {
+                position: context.position,
+                sequence_length: context.sequence_length,
+                recursion_depth: context.recursion_depth,
+                max_recursion_depth: context.max_recursion_depth,
+                projection,
+                spec: Box::new(spec),
             },
         )
     }
@@ -722,7 +1031,13 @@ impl DiagnosticsRecorder {
             diagnostics_incomplete: !self.missing_required_probe_kinds.is_empty()
                 || !self.missing_required_boundary_completions.is_empty()
                 || self.runtime_failure.is_some(),
+            boundary_memory_deltas: derive_boundary_memory_deltas(&self.events),
             last_event: self.events.last().cloned(),
+            last_rule_projection_event: self
+                .events
+                .iter()
+                .rev()
+                .find_map(DiagnosticEvent::rule_projection_summary),
         }
     }
 
@@ -740,11 +1055,13 @@ impl DiagnosticsRecorder {
             experiment_logical_name: self.identity.experiment_logical_name.clone(),
             species: self.identity.species.clone(),
             variant_name: self.identity.variant_name.clone(),
+            correlation_id: self.next_correlation_id,
             phase,
             step,
             tokens_seen,
             event,
         };
+        self.next_correlation_id += 1;
         if let Some(persistence) = self.persistence.as_mut() {
             if let Err(error) = persistence.persist_event(&record) {
                 self.record_runtime_failure(DiagnosticsRuntimeFailure {
@@ -802,6 +1119,18 @@ impl Drop for DiagnosticsRecorder {
     }
 }
 
+impl RuleProjectionDiagnosticsSink for DiagnosticsRecorder {
+    fn emit_rule_projection(
+        &mut self,
+        phase: RunPhase,
+        context: RuleProjectionDiagnosticContext,
+        projection: RuleProjectionKind,
+        spec: RuleProjectionDiagnosticSpec,
+    ) -> Result<(), FractalError> {
+        self.emit_rule_projection_inner(phase, context, projection, spec)
+    }
+}
+
 #[cfg(test)]
 fn maybe_fail_test_diagnostics_persistence() -> Result<(), FractalError> {
     TEST_PERSISTENCE_FAILURE_AFTER_SUCCESSFUL_EVENTS.with(|slot| match slot.get() {
@@ -827,6 +1156,7 @@ fn format_diagnostic_event(event: &DiagnosticEvent) -> String {
         format!("species={}", event.species),
         format!("phase={}", format_phase(event.phase)),
         format!("event={}", event.event.name()),
+        format!("correlation_id={}", event.correlation_id),
     ];
     if let Some(step) = event.step {
         parts.push(format!("step={step}"));
@@ -859,8 +1189,56 @@ fn format_diagnostic_event(event: &DiagnosticEvent) -> String {
             parts.push(format!("input_shape={input_shape:?}"));
             parts.push(format!("readout_shape={readout_shape:?}"));
         }
-        DiagnosticEventKind::ForwardComplete { logits_shape } => {
+        DiagnosticEventKind::RuleProjection {
+            position,
+            sequence_length,
+            recursion_depth,
+            max_recursion_depth,
+            projection,
+            spec,
+        } => {
+            parts.push(format!("position={position}/{sequence_length}"));
+            parts.push(format!("recursion_depth={recursion_depth}/{max_recursion_depth}"));
+            parts.push(format!(
+                "projection_path={}.{}",
+                spec.identity.rule_name, spec.identity.projection_name
+            ));
+            parts.push(format!("projection={}", projection.as_str()));
+            parts.push(format!("input_shape={:?}", spec.input_layout.shape));
+            parts.push(format!("output_shape={:?}", spec.output_layout.shape));
+            if let Some(linear_layout) = &spec.linear_layout {
+                parts.push(format!(
+                    "weight_shape={:?}",
+                    linear_layout.stored_weight.shape
+                ));
+                parts.push(format!(
+                    "backward_rhs_shape={:?}",
+                    linear_layout.backward_input_grad_rhs.shape
+                ));
+                parts.push(format!(
+                    "backward_rhs_transform={:?}",
+                    linear_layout.backward_input_grad_rhs.transform
+                ));
+            }
+        }
+        DiagnosticEventKind::ForwardComplete { logits_shape, graph_burden } => {
             parts.push(format!("logits_shape={logits_shape:?}"));
+            parts.push(format!(
+                "rule_invocations={}",
+                graph_burden.rule_invocations
+            ));
+            parts.push(format!(
+                "positions_processed={}",
+                graph_burden.positions_processed
+            ));
+            parts.push(format!(
+                "positions_early_exited={}",
+                graph_burden.positions_early_exited
+            ));
+            parts.push(format!(
+                "positions_reached_depth_limit={}",
+                graph_burden.positions_reached_depth_limit
+            ));
         }
         DiagnosticEventKind::LossStart { target_shape } => {
             parts.push(format!("target_shape={target_shape:?}"));
@@ -909,4 +1287,35 @@ fn format_phase(phase: RunPhase) -> &'static str {
         RunPhase::Perplexity => "perplexity",
         RunPhase::ArcSpeed => "arc_speed",
     }
+}
+
+fn derive_boundary_memory_deltas(events: &[DiagnosticEvent]) -> Vec<BoundaryMemoryDelta> {
+    let mut deltas = Vec::new();
+    let mut previous_snapshot: Option<(usize, usize, usize)> = None;
+    for event in events {
+        let DiagnosticEventKind::CudaMemorySnapshot {
+            boundary,
+            used_mib,
+            free_mib,
+            total_mib,
+        } = event.event
+        else {
+            continue;
+        };
+        deltas.push(BoundaryMemoryDelta {
+            boundary,
+            step: event.step.unwrap_or_default(),
+            tokens_seen: event.tokens_seen.unwrap_or_default(),
+            correlation_id: event.correlation_id,
+            used_mib,
+            free_mib,
+            total_mib,
+            delta_used_mib: previous_snapshot.map(|(used, _, _)| used_mib as i64 - used as i64),
+            delta_free_mib: previous_snapshot.map(|(_, free, _)| free_mib as i64 - free as i64),
+            delta_total_mib: previous_snapshot
+                .map(|(_, _, total)| total_mib as i64 - total as i64),
+        });
+        previous_snapshot = Some((used_mib, free_mib, total_mib));
+    }
+    deltas
 }

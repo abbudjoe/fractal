@@ -14,11 +14,15 @@ pub use data_generator::{
     GeneratorDepthConfig, SimpleHierarchicalGenerator, TaskFamily, TokenBatch, PAD_TOKEN,
 };
 pub use diagnostics::{
-    CudaMemorySnapshot, DiagnosticBoundary, DiagnosticEvent, DiagnosticEventKind,
-    DiagnosticIdentity, DiagnosticProbeKind, DiagnosticProbeRequest, DiagnosticsPolicy,
-    DiagnosticsRecorder, DiagnosticsRuntimeArtifact, DiagnosticsRuntimeFailure,
-    DiagnosticsRuntimeFailureKind, ProbeCadence, StructuredDiagnosticsOutput,
-    TrainStepDiagnosticContext,
+    BoundaryMemoryDelta, CudaMemorySnapshot, DiagnosticBoundary, DiagnosticEvent,
+    DiagnosticEventKind, DiagnosticEventSummary, DiagnosticIdentity, DiagnosticProbeKind,
+    DiagnosticProbeRequest, DiagnosticsPolicy, DiagnosticsRecorder, DiagnosticsRuntimeArtifact,
+    DiagnosticsRuntimeFailure, DiagnosticsRuntimeFailureKind, ForwardGraphBurden, ProbeCadence,
+    LinearProjectionLayoutMetadata, RuleProjectionDiagnosticContext,
+    RuleProjectionDiagnosticEventSummary, RuleProjectionDiagnosticSpec,
+    RuleProjectionDiagnosticsSink, RuleProjectionIdentity, RuleProjectionKind,
+    StructuredDiagnosticsOutput, TensorLayoutMetadata, TensorLayoutOrigin,
+    TensorLayoutTransform, TrainStepDiagnosticContext,
 };
 pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
 pub use lifecycle::{
