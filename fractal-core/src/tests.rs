@@ -25,9 +25,11 @@ use crate::{
         TaskFamily, TokenBatch, MIN_SEQUENCE_LEN, MIN_VOCAB_SIZE, PAD_TOKEN,
     },
     diagnostics::{
-        clear_last_diagnostics_runtime_artifact, take_last_diagnostics_runtime_artifact,
-        DiagnosticEventKind, DiagnosticProbeKind, DiagnosticProbeRequest, DiagnosticsPolicy,
-        DiagnosticsRecorder, ProbeCadence, TrainStepDiagnosticContext,
+        clear_last_diagnostics_runtime_artifact, clear_test_diagnostics_persistence_failure,
+        set_test_diagnostics_persistence_failure_after_successful_events,
+        take_last_diagnostics_runtime_artifact, DiagnosticEventKind, DiagnosticProbeKind,
+        DiagnosticProbeRequest, DiagnosticsPolicy, DiagnosticsRecorder,
+        DiagnosticsRuntimeFailureKind, ProbeCadence, TrainStepDiagnosticContext,
     },
     error::FractalError,
     fitness::SpeciesRawMetrics,
@@ -1763,6 +1765,11 @@ fn training_runtime_emits_typed_diagnostics_for_first_step() {
         .diagnostics
         .missing_required_boundary_completions
         .is_empty());
+    assert!(artifact
+        .training_runtime
+        .diagnostics
+        .runtime_failure
+        .is_none());
 }
 
 #[test]
@@ -1803,6 +1810,151 @@ fn failed_forward_records_last_successful_diagnostic_boundary() {
         last_event.event,
         DiagnosticEventKind::ForwardPosition { .. }
     ));
+}
+
+#[test]
+fn training_artifact_marks_diagnostics_incomplete_when_event_persistence_fails() {
+    let _export_lock = EXPORT_ENV_MUTEX.lock().unwrap();
+    let temp_root = env::temp_dir().join(format!(
+        "fractal-diagnostics-persist-failure-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp_root);
+    env::set_var("FRACTAL_RUN_ARTIFACT_DIR", &temp_root);
+    let _ = take_last_species_run_artifact();
+    clear_last_diagnostics_runtime_artifact();
+    clear_test_diagnostics_persistence_failure();
+    set_test_diagnostics_persistence_failure_after_successful_events(0);
+
+    let mut config = TournamentPreset::FastTest.config();
+    config.launch_policy.diagnostics = DiagnosticsPolicy {
+        required: false,
+        probes: vec![DiagnosticProbeRequest {
+            kind: DiagnosticProbeKind::TrainStep,
+            cadence: ProbeCadence::EveryStep,
+            position_interval: None,
+        }],
+        structured_output: crate::StructuredDiagnosticsOutput::Jsonl,
+    };
+    let expected_policy = config.launch_policy.diagnostics.clone();
+    let context = test_training_run_context(config);
+
+    let error = run_species_with_factory_candle::<CountingRule<CpuTrainBackend>, _>(
+        SpeciesId::P1Contractive,
+        context,
+        Default::default(),
+        |config, _device| CountingRule::new(config.dim),
+    )
+    .expect_err("synthetic diagnostics persistence failure should fail the run");
+
+    let artifact =
+        take_last_species_run_artifact().expect("persistence failure should record an artifact");
+
+    clear_test_diagnostics_persistence_failure();
+    env::remove_var("FRACTAL_RUN_ARTIFACT_DIR");
+    clear_last_diagnostics_runtime_artifact();
+    let _ = fs::remove_dir_all(&temp_root);
+
+    assert!(error
+        .to_string()
+        .contains("synthetic diagnostics persistence failure"));
+    assert!(matches!(
+        artifact.execution_outcome,
+        RunExecutionOutcome::InfraFailure
+    ));
+    assert_eq!(
+        artifact.training_runtime.diagnostics.policy,
+        expected_policy
+    );
+    assert!(artifact.training_runtime.diagnostics.diagnostics_incomplete);
+    assert!(artifact
+        .training_runtime
+        .diagnostics
+        .missing_required_probe_kinds
+        .is_empty());
+    assert!(artifact
+        .training_runtime
+        .diagnostics
+        .missing_required_boundary_completions
+        .is_empty());
+    assert!(artifact.training_runtime.diagnostics.events.is_empty());
+    let failure = artifact
+        .training_runtime
+        .diagnostics
+        .runtime_failure
+        .as_ref()
+        .expect("runtime failure should be captured");
+    assert_eq!(
+        failure.kind,
+        DiagnosticsRuntimeFailureKind::EventPersistence
+    );
+    assert_eq!(failure.probe_kind, Some(DiagnosticProbeKind::TrainStep));
+    assert_eq!(
+        failure.boundary,
+        Some(crate::DiagnosticBoundary::TrainStepStart)
+    );
+}
+
+#[test]
+fn diagnostics_initialization_failure_preserves_requested_policy_in_artifact() {
+    let _export_lock = EXPORT_ENV_MUTEX.lock().unwrap();
+    let temp_root = env::temp_dir().join(format!(
+        "fractal-diagnostics-init-failure-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp_root);
+    fs::create_dir_all(&temp_root).unwrap();
+    let blocking_file = temp_root.join("not-a-directory");
+    fs::write(&blocking_file, b"block diagnostics init").unwrap();
+    env::set_var("FRACTAL_RUN_ARTIFACT_DIR", &blocking_file);
+    let _ = take_last_species_run_artifact();
+    clear_last_diagnostics_runtime_artifact();
+
+    let mut config = TournamentPreset::FastTest.config();
+    config.launch_policy.diagnostics = test_training_diagnostics_policy();
+    let expected_policy = config.launch_policy.diagnostics.clone();
+    let context = test_training_run_context(config);
+
+    let error = run_species_with_factory_candle::<CountingRule<CpuTrainBackend>, _>(
+        SpeciesId::P1Contractive,
+        context,
+        Default::default(),
+        |config, _device| CountingRule::new(config.dim),
+    )
+    .expect_err("diagnostics init failure should fail the run");
+
+    let artifact =
+        take_last_species_run_artifact().expect("init failure should record an artifact");
+
+    env::remove_var("FRACTAL_RUN_ARTIFACT_DIR");
+    clear_last_diagnostics_runtime_artifact();
+    let _ = fs::remove_dir_all(&temp_root);
+
+    assert!(matches!(
+        artifact.execution_outcome,
+        RunExecutionOutcome::InfraFailure
+    ));
+    assert!(!error.to_string().is_empty());
+    assert_eq!(
+        artifact.training_runtime.diagnostics.policy,
+        expected_policy
+    );
+    assert!(artifact.training_runtime.diagnostics.diagnostics_incomplete);
+    assert!(artifact.training_runtime.diagnostics.events.is_empty());
+    let failure = artifact
+        .training_runtime
+        .diagnostics
+        .runtime_failure
+        .as_ref()
+        .expect("initialization failure should be captured");
+    assert_eq!(failure.kind, DiagnosticsRuntimeFailureKind::Initialization);
+    assert!(failure.message.contains("diagnostics") || !failure.message.is_empty());
+    assert!(artifact
+        .training_runtime
+        .diagnostics
+        .event_file
+        .as_deref()
+        .is_some_and(|path| path.contains("diagnostics")));
 }
 
 #[test]

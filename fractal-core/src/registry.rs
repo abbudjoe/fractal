@@ -1062,10 +1062,12 @@ where
                 return Err(error);
             }
         };
+    let diagnostics_runtime_paths =
+        resolve_diagnostics_runtime_paths(&stage, &manifest, &config.launch_policy.diagnostics);
     let mut diagnostics = match DiagnosticsRecorder::new_with_runtime_paths(
         config.launch_policy.diagnostics.clone(),
         build_diagnostic_identity(species, &manifest),
-        resolve_diagnostics_runtime_paths(&stage, &manifest, &config.launch_policy.diagnostics),
+        diagnostics_runtime_paths.clone(),
     ) {
         Ok(diagnostics) => diagnostics,
         Err(error) => {
@@ -1073,7 +1075,14 @@ where
                 stage,
                 manifest: manifest.clone(),
                 phase_timings: Vec::new(),
-                training_runtime: TrainingRuntimeArtifact::default(),
+                training_runtime: TrainingRuntimeArtifact {
+                    diagnostics: DiagnosticsRuntimeArtifact::initialization_failure(
+                        config.launch_policy.diagnostics.clone(),
+                        diagnostics_runtime_paths.as_ref(),
+                        error.to_string(),
+                    ),
+                    ..TrainingRuntimeArtifact::default()
+                },
                 execution_outcome: RunExecutionOutcome::InfraFailure,
                 quality_outcome: RunQualityOutcome::Clean,
                 error: Some(error.to_string()),

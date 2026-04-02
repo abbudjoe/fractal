@@ -415,8 +415,49 @@ pub struct DiagnosticsRuntimeArtifact {
     pub emitted_probe_kinds: Vec<DiagnosticProbeKind>,
     pub missing_required_probe_kinds: Vec<DiagnosticProbeKind>,
     pub missing_required_boundary_completions: Vec<DiagnosticBoundary>,
+    pub runtime_failure: Option<DiagnosticsRuntimeFailure>,
     pub diagnostics_incomplete: bool,
     pub last_event: Option<DiagnosticEvent>,
+}
+
+impl DiagnosticsRuntimeArtifact {
+    pub(crate) fn initialization_failure(
+        policy: DiagnosticsPolicy,
+        runtime_paths: Option<&DiagnosticsRuntimePaths>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            policy,
+            event_file: runtime_paths.map(|paths| paths.event_file.display().to_string()),
+            events: Vec::new(),
+            emitted_probe_kinds: Vec::new(),
+            missing_required_probe_kinds: Vec::new(),
+            missing_required_boundary_completions: Vec::new(),
+            runtime_failure: Some(DiagnosticsRuntimeFailure {
+                kind: DiagnosticsRuntimeFailureKind::Initialization,
+                probe_kind: None,
+                boundary: None,
+                message: message.into(),
+            }),
+            diagnostics_incomplete: true,
+            last_event: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticsRuntimeFailureKind {
+    Initialization,
+    EventPersistence,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticsRuntimeFailure {
+    pub kind: DiagnosticsRuntimeFailureKind,
+    pub probe_kind: Option<DiagnosticProbeKind>,
+    pub boundary: Option<DiagnosticBoundary>,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -449,6 +490,7 @@ impl DiagnosticsRuntimePersistence {
     }
 
     fn persist_event(&mut self, event: &DiagnosticEvent) -> Result<(), FractalError> {
+        maybe_fail_test_diagnostics_persistence()?;
         let serialized = serde_json::to_string(event)
             .map_err(|error| FractalError::InvalidState(error.to_string()))?;
         writeln!(self.event_file, "{serialized}")
@@ -468,6 +510,13 @@ thread_local! {
     };
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_PERSISTENCE_FAILURE_AFTER_SUCCESSFUL_EVENTS: std::cell::Cell<Option<usize>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
 pub(crate) fn clear_last_diagnostics_runtime_artifact() {
     LAST_DIAGNOSTICS_RUNTIME_ARTIFACT.with(|slot| {
         *slot.borrow_mut() = None;
@@ -476,6 +525,22 @@ pub(crate) fn clear_last_diagnostics_runtime_artifact() {
 
 pub(crate) fn take_last_diagnostics_runtime_artifact() -> Option<DiagnosticsRuntimeArtifact> {
     LAST_DIAGNOSTICS_RUNTIME_ARTIFACT.with(|slot| slot.borrow_mut().take())
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_diagnostics_persistence_failure_after_successful_events(
+    successful_events_before_failure: usize,
+) {
+    TEST_PERSISTENCE_FAILURE_AFTER_SUCCESSFUL_EVENTS.with(|slot| {
+        slot.set(Some(successful_events_before_failure));
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn clear_test_diagnostics_persistence_failure() {
+    TEST_PERSISTENCE_FAILURE_AFTER_SUCCESSFUL_EVENTS.with(|slot| {
+        slot.set(None);
+    });
 }
 
 fn record_diagnostics_runtime_artifact(artifact: DiagnosticsRuntimeArtifact) {
@@ -492,6 +557,7 @@ pub struct DiagnosticsRecorder {
     emitted_probe_kinds: BTreeSet<DiagnosticProbeKind>,
     missing_required_probe_kinds: BTreeSet<DiagnosticProbeKind>,
     missing_required_boundary_completions: BTreeSet<DiagnosticBoundary>,
+    runtime_failure: Option<DiagnosticsRuntimeFailure>,
     persistence: Option<DiagnosticsRuntimePersistence>,
 }
 
@@ -504,6 +570,7 @@ impl DiagnosticsRecorder {
             emitted_probe_kinds: BTreeSet::new(),
             missing_required_probe_kinds: BTreeSet::new(),
             missing_required_boundary_completions: BTreeSet::new(),
+            runtime_failure: None,
             persistence: None,
         }
     }
@@ -523,6 +590,7 @@ impl DiagnosticsRecorder {
             emitted_probe_kinds: BTreeSet::new(),
             missing_required_probe_kinds: BTreeSet::new(),
             missing_required_boundary_completions: BTreeSet::new(),
+            runtime_failure: None,
             persistence,
         }
         .with_recovery_snapshot()
@@ -636,8 +704,10 @@ impl DiagnosticsRecorder {
                 .iter()
                 .copied()
                 .collect(),
+            runtime_failure: self.runtime_failure.clone(),
             diagnostics_incomplete: !self.missing_required_probe_kinds.is_empty()
-                || !self.missing_required_boundary_completions.is_empty(),
+                || !self.missing_required_boundary_completions.is_empty()
+                || self.runtime_failure.is_some(),
             last_event: self.events.last().cloned(),
         }
     }
@@ -662,7 +732,15 @@ impl DiagnosticsRecorder {
             event,
         };
         if let Some(persistence) = self.persistence.as_mut() {
-            persistence.persist_event(&record)?;
+            if let Err(error) = persistence.persist_event(&record) {
+                self.record_runtime_failure(DiagnosticsRuntimeFailure {
+                    kind: DiagnosticsRuntimeFailureKind::EventPersistence,
+                    probe_kind: Some(probe_kind),
+                    boundary,
+                    message: error.to_string(),
+                });
+                return Err(error);
+            }
         }
         println!("{}", format_diagnostic_event(&record));
         self.emitted_probe_kinds.insert(probe_kind);
@@ -691,6 +769,13 @@ impl DiagnosticsRecorder {
         record_diagnostics_runtime_artifact(self.artifact());
     }
 
+    fn record_runtime_failure(&mut self, failure: DiagnosticsRuntimeFailure) {
+        if self.runtime_failure.is_none() {
+            self.runtime_failure = Some(failure);
+        }
+        self.record_recovery_snapshot();
+    }
+
     fn with_recovery_snapshot(self) -> Result<Self, FractalError> {
         self.record_recovery_snapshot();
         Ok(self)
@@ -701,6 +786,25 @@ impl Drop for DiagnosticsRecorder {
     fn drop(&mut self) {
         self.record_recovery_snapshot();
     }
+}
+
+#[cfg(test)]
+fn maybe_fail_test_diagnostics_persistence() -> Result<(), FractalError> {
+    TEST_PERSISTENCE_FAILURE_AFTER_SUCCESSFUL_EVENTS.with(|slot| match slot.get() {
+        None => Ok(()),
+        Some(0) => Err(FractalError::InvalidState(
+            "synthetic diagnostics persistence failure".into(),
+        )),
+        Some(remaining) => {
+            slot.set(Some(remaining - 1));
+            Ok(())
+        }
+    })
+}
+
+#[cfg(not(test))]
+fn maybe_fail_test_diagnostics_persistence() -> Result<(), FractalError> {
+    Ok(())
 }
 
 fn format_diagnostic_event(event: &DiagnosticEvent) -> String {

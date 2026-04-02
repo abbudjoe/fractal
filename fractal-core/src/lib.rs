@@ -16,7 +16,8 @@ pub use data_generator::{
 pub use diagnostics::{
     CudaMemorySnapshot, DiagnosticBoundary, DiagnosticEvent, DiagnosticEventKind,
     DiagnosticIdentity, DiagnosticProbeKind, DiagnosticProbeRequest, DiagnosticsPolicy,
-    DiagnosticsRecorder, DiagnosticsRuntimeArtifact, ProbeCadence, StructuredDiagnosticsOutput,
+    DiagnosticsRecorder, DiagnosticsRuntimeArtifact, DiagnosticsRuntimeFailure,
+    DiagnosticsRuntimeFailureKind, ProbeCadence, StructuredDiagnosticsOutput,
     TrainStepDiagnosticContext,
 };
 pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};

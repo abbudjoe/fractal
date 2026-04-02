@@ -610,8 +610,24 @@ fn diagnostics_runtime_json(spec: &crate::DiagnosticsRuntimeArtifact) -> Value {
             .iter()
             .map(|boundary| boundary.as_str())
             .collect::<Vec<_>>(),
+        "runtime_failure": spec
+            .runtime_failure
+            .as_ref()
+            .map(diagnostics_runtime_failure_json),
         "diagnostics_incomplete": spec.diagnostics_incomplete,
         "last_event": spec.last_event.as_ref().map(diagnostic_event_json),
+    })
+}
+
+fn diagnostics_runtime_failure_json(spec: &crate::DiagnosticsRuntimeFailure) -> Value {
+    json!({
+        "kind": match spec.kind {
+            crate::DiagnosticsRuntimeFailureKind::Initialization => "initialization",
+            crate::DiagnosticsRuntimeFailureKind::EventPersistence => "event_persistence",
+        },
+        "probe_kind": spec.probe_kind.map(|kind| kind.as_str()),
+        "boundary": spec.boundary.map(|boundary| boundary.as_str()),
+        "message": spec.message.clone(),
     })
 }
 
@@ -1037,6 +1053,7 @@ mod tests {
                 emitted_probe_kinds: vec![DiagnosticProbeKind::TrainStep],
                 missing_required_probe_kinds: Vec::new(),
                 missing_required_boundary_completions: Vec::new(),
+                runtime_failure: None,
                 diagnostics_incomplete: false,
                 last_event: Some(DiagnosticEvent {
                     experiment_run_id: "run-123".to_owned(),
