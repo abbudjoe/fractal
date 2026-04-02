@@ -9,7 +9,7 @@ use fractal_tokenizer::{
     FaceoffEncodingOptions, FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLocalCacheMode,
     FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer,
     ModelFacingBatch, ModelFacingDocument, MotifReusePolicy, NativeCollationSpec,
-    NativeCompatibilityAdapter, OverlayBatchPackingStrategy, OverlayDictionaryScope, OverlayPack,
+    NativeCompatibilityAdapter, OverlayBatchPackingStrategy, OverlayDictionaryScope,
     OverlaySharingPolicy, PrimitiveFactory, PrototypeGranularityMode, RecursiveOverlayConfig,
     RecursiveOverlayMode, SplitPolicy, TokenizerConfig, TokenizerSubstrateMode,
 };
@@ -276,6 +276,14 @@ struct PrimitiveBakeoffRun {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct OverlayTimingMetrics {
+    discovery_ms: f64,
+    allocated_pack_ms: f64,
+    allocated_materialize_ms: f64,
+    client_overhead_ms: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct OverlayMetrics {
     status: String,
     base_tokenizer_label: String,
@@ -302,7 +310,34 @@ struct OverlayMetrics {
     structure_aware_pack_transport_ratio: f64,
     structure_aware_pack_allocated_definition_symbols: f64,
     structure_aware_pack_definition_overhead_rate: f64,
+    timing: OverlayTimingMetrics,
     exact_ok: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverlayOfflineBenchmarkVerdict {
+    Inactive,
+    Fail,
+    Pass,
+    Strong,
+}
+
+impl OverlayOfflineBenchmarkVerdict {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Inactive => "inactive",
+            Self::Fail => "fail",
+            Self::Pass => "pass",
+            Self::Strong => "strong",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverlayBenchmarkBucketRole {
+    PrimaryWin,
+    NeutralControl,
+    Other,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2104,6 +2139,60 @@ fn merge_results(
         .collect()
 }
 
+fn overlay_placeholder_metrics(
+    status: &str,
+    base_tokenizer_label: String,
+    base_tokenizer_path: String,
+    mode: String,
+) -> OverlayMetrics {
+    OverlayMetrics {
+        status: status.to_string(),
+        base_tokenizer_label,
+        base_tokenizer_path,
+        mode,
+        canonical_token_count: 0,
+        base_slice_symbol_count: 0,
+        macro_ref_symbol_count: 0,
+        macro_definition_symbol_count: 0,
+        overlay_symbol_count: 0,
+        compression_ratio_vs_canonical: 0.0,
+        macro_count: 0,
+        macro_ref_count: 0,
+        repeated_token_mass_saved: 0,
+        batch_local_transport_symbols: 0.0,
+        batch_local_transport_ratio: 0.0,
+        batch_local_allocated_definition_symbols: 0.0,
+        batch_local_definition_overhead_rate: 0.0,
+        sequential_pack_transport_symbols: 0.0,
+        sequential_pack_transport_ratio: 0.0,
+        sequential_pack_allocated_definition_symbols: 0.0,
+        sequential_pack_definition_overhead_rate: 0.0,
+        structure_aware_pack_transport_symbols: 0.0,
+        structure_aware_pack_transport_ratio: 0.0,
+        structure_aware_pack_allocated_definition_symbols: 0.0,
+        structure_aware_pack_definition_overhead_rate: 0.0,
+        timing: OverlayTimingMetrics {
+            discovery_ms: 0.0,
+            allocated_pack_ms: 0.0,
+            allocated_materialize_ms: 0.0,
+            client_overhead_ms: 0.0,
+        },
+        exact_ok: true,
+    }
+}
+
+fn overlay_bucket_role(bucket: &str) -> OverlayBenchmarkBucketRole {
+    match bucket {
+        "jsonl.signals" | "logs.operational_mixed" => OverlayBenchmarkBucketRole::PrimaryWin,
+        "docs.spec"
+        | "external.prose.web"
+        | "external.code.python"
+        | "external.code.js_ts"
+        | "external.multilingual" => OverlayBenchmarkBucketRole::NeutralControl,
+        _ => OverlayBenchmarkBucketRole::Other,
+    }
+}
+
 fn attach_overlay_shadow(
     results: &mut [BakeoffRecord],
     model_sources: &[ModelTokenizerSource],
@@ -2111,34 +2200,12 @@ fn attach_overlay_shadow(
 ) -> Result<(), Box<dyn Error>> {
     if args.overlay_mode == OverlaySummaryMode::Off {
         for record in results {
-            record.overlay = Some(OverlayMetrics {
-                status: "off".to_string(),
-                base_tokenizer_label: args.overlay_base_tokenizer.clone(),
-                base_tokenizer_path: String::new(),
-                mode: "off".to_string(),
-                canonical_token_count: 0,
-                base_slice_symbol_count: 0,
-                macro_ref_symbol_count: 0,
-                macro_definition_symbol_count: 0,
-                overlay_symbol_count: 0,
-                compression_ratio_vs_canonical: 0.0,
-                macro_count: 0,
-                macro_ref_count: 0,
-                repeated_token_mass_saved: 0,
-                batch_local_transport_symbols: 0.0,
-                batch_local_transport_ratio: 0.0,
-                batch_local_allocated_definition_symbols: 0.0,
-                batch_local_definition_overhead_rate: 0.0,
-                sequential_pack_transport_symbols: 0.0,
-                sequential_pack_transport_ratio: 0.0,
-                sequential_pack_allocated_definition_symbols: 0.0,
-                sequential_pack_definition_overhead_rate: 0.0,
-                structure_aware_pack_transport_symbols: 0.0,
-                structure_aware_pack_transport_ratio: 0.0,
-                structure_aware_pack_allocated_definition_symbols: 0.0,
-                structure_aware_pack_definition_overhead_rate: 0.0,
-                exact_ok: true,
-            });
+            record.overlay = Some(overlay_placeholder_metrics(
+                "off",
+                args.overlay_base_tokenizer.clone(),
+                String::new(),
+                "off".to_string(),
+            ));
         }
         return Ok(());
     }
@@ -2146,90 +2213,59 @@ fn attach_overlay_shadow(
     let Some(source) = select_overlay_base_tokenizer(model_sources, &args.overlay_base_tokenizer)?
     else {
         for record in results {
-            record.overlay = Some(OverlayMetrics {
-                status: "skipped".to_string(),
-                base_tokenizer_label: args.overlay_base_tokenizer.clone(),
-                base_tokenizer_path: String::new(),
-                mode: args.overlay_mode.as_str().to_string(),
-                canonical_token_count: 0,
-                base_slice_symbol_count: 0,
-                macro_ref_symbol_count: 0,
-                macro_definition_symbol_count: 0,
-                overlay_symbol_count: 0,
-                compression_ratio_vs_canonical: 0.0,
-                macro_count: 0,
-                macro_ref_count: 0,
-                repeated_token_mass_saved: 0,
-                batch_local_transport_symbols: 0.0,
-                batch_local_transport_ratio: 0.0,
-                batch_local_allocated_definition_symbols: 0.0,
-                batch_local_definition_overhead_rate: 0.0,
-                sequential_pack_transport_symbols: 0.0,
-                sequential_pack_transport_ratio: 0.0,
-                sequential_pack_allocated_definition_symbols: 0.0,
-                sequential_pack_definition_overhead_rate: 0.0,
-                structure_aware_pack_transport_symbols: 0.0,
-                structure_aware_pack_transport_ratio: 0.0,
-                structure_aware_pack_allocated_definition_symbols: 0.0,
-                structure_aware_pack_definition_overhead_rate: 0.0,
-                exact_ok: true,
-            });
+            record.overlay = Some(overlay_placeholder_metrics(
+                "skipped",
+                args.overlay_base_tokenizer.clone(),
+                String::new(),
+                args.overlay_mode.as_str().to_string(),
+            ));
         }
         return Ok(());
     };
 
     let Some(tokenizer) = &source.tokenizer else {
         for record in results {
-            record.overlay = Some(OverlayMetrics {
-                status: "skipped".to_string(),
-                base_tokenizer_label: source.label.clone(),
-                base_tokenizer_path: source.tokenizer_json_path.display().to_string(),
-                mode: args.overlay_mode.as_str().to_string(),
-                canonical_token_count: 0,
-                base_slice_symbol_count: 0,
-                macro_ref_symbol_count: 0,
-                macro_definition_symbol_count: 0,
-                overlay_symbol_count: 0,
-                compression_ratio_vs_canonical: 0.0,
-                macro_count: 0,
-                macro_ref_count: 0,
-                repeated_token_mass_saved: 0,
-                batch_local_transport_symbols: 0.0,
-                batch_local_transport_ratio: 0.0,
-                batch_local_allocated_definition_symbols: 0.0,
-                batch_local_definition_overhead_rate: 0.0,
-                sequential_pack_transport_symbols: 0.0,
-                sequential_pack_transport_ratio: 0.0,
-                sequential_pack_allocated_definition_symbols: 0.0,
-                sequential_pack_definition_overhead_rate: 0.0,
-                structure_aware_pack_transport_symbols: 0.0,
-                structure_aware_pack_transport_ratio: 0.0,
-                structure_aware_pack_allocated_definition_symbols: 0.0,
-                structure_aware_pack_definition_overhead_rate: 0.0,
-                exact_ok: true,
-            });
+            record.overlay = Some(overlay_placeholder_metrics(
+                "skipped",
+                source.label.clone(),
+                source.tokenizer_json_path.display().to_string(),
+                args.overlay_mode.as_str().to_string(),
+            ));
         }
         return Ok(());
     };
 
     let config = RecursiveOverlayConfig::default();
-    let overlays = results
-        .iter()
-        .map(|record| {
-            let canonical = tokenizer.tokenize_with_byte_offsets(&record.corpus.text)?;
-            Ok(build_recursive_overlay(
-                &record.corpus.text,
-                canonical,
-                args.overlay_mode.recursive_mode(),
-                &config,
-            ))
-        })
-        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
-    let batch_local_pack =
-        OverlayPack::from_documents(OverlayDictionaryScope::BatchLocal, &overlays);
-    let batch_local_views = batch_local_pack.document_transport_views();
-    let batch_local_exact_ok = batch_local_pack.exact_ok();
+    let mut overlays = Vec::with_capacity(results.len());
+    let mut discovery_ms = Vec::with_capacity(results.len());
+    for record in results.iter() {
+        let started = Instant::now();
+        let canonical = tokenizer.tokenize_with_byte_offsets(&record.corpus.text)?;
+        let overlay = build_recursive_overlay(
+            &record.corpus.text,
+            canonical,
+            args.overlay_mode.recursive_mode(),
+            &config,
+        );
+        discovery_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+        overlays.push(overlay);
+    }
+
     let sharing_policy = OverlaySharingPolicy::default();
+    let batch_pack_started = Instant::now();
+    let batch_local_pack = pack_overlay_documents_in_batches(
+        OverlayDictionaryScope::BatchLocal,
+        &overlays,
+        &sharing_policy,
+        overlays.len().max(1),
+        OverlayBatchPackingStrategy::Sequential,
+    );
+    let batch_local_pack_ms = batch_pack_started.elapsed().as_secs_f64() * 1000.0;
+    let batch_materialize_started = Instant::now();
+    let batch_materialize_exact_ok = batch_local_pack.expanded_token_ids_by_document().is_ok();
+    let batch_materialize_ms = batch_materialize_started.elapsed().as_secs_f64() * 1000.0;
+    let batch_local_views = batch_local_pack.document_views.clone();
+    let batch_local_exact_ok = batch_local_pack.exact_ok();
     let sequential_pack = pack_overlay_documents_in_batches(
         OverlayDictionaryScope::BatchLocal,
         &overlays,
@@ -2246,14 +2282,27 @@ fn attach_overlay_shadow(
         OverlayBatchPackingStrategy::StructureAware,
     );
     let structure_aware_pack_exact_ok = structure_aware_pack.exact_ok();
+    let total_canonical_tokens = overlays
+        .iter()
+        .map(|overlay| overlay.canonical.token_ids.len())
+        .sum::<usize>()
+        .max(1) as f64;
 
-    for ((((record, overlay), batch_view), sequential_view), structure_aware_view) in results
+    for (
+        ((((record, overlay), batch_view), sequential_view), structure_aware_view),
+        discovery_ms,
+    ) in results
         .iter_mut()
         .zip(overlays.into_iter())
         .zip(batch_local_views.into_iter())
         .zip(sequential_pack.document_views.into_iter())
         .zip(structure_aware_pack.document_views.into_iter())
+        .zip(discovery_ms.into_iter())
     {
+        let canonical_token_count = overlay.canonical.token_ids.len();
+        let allocation_weight = canonical_token_count as f64 / total_canonical_tokens;
+        let allocated_pack_ms = batch_local_pack_ms * allocation_weight;
+        let allocated_materialize_ms = batch_materialize_ms * allocation_weight;
         record.overlay = Some(OverlayMetrics {
             status: "ok".to_string(),
             base_tokenizer_label: source.label.clone(),
@@ -2262,7 +2311,7 @@ fn attach_overlay_shadow(
                 fractal_tokenizer::OverlayDocumentMode::Passthrough => "passthrough".to_string(),
                 fractal_tokenizer::OverlayDocumentMode::LocalMacro => "local-macro".to_string(),
             },
-            canonical_token_count: overlay.canonical.token_ids.len(),
+            canonical_token_count,
             base_slice_symbol_count: overlay.base_slice_symbol_count(),
             macro_ref_symbol_count: overlay.macro_ref_symbol_count(),
             macro_definition_symbol_count: overlay.macro_definition_symbol_count(),
@@ -2286,8 +2335,15 @@ fn attach_overlay_shadow(
                 .allocated_macro_definition_symbols,
             structure_aware_pack_definition_overhead_rate: structure_aware_view
                 .definition_overhead_rate(),
+            timing: OverlayTimingMetrics {
+                discovery_ms,
+                allocated_pack_ms,
+                allocated_materialize_ms,
+                client_overhead_ms: discovery_ms + allocated_pack_ms + allocated_materialize_ms,
+            },
             exact_ok: overlay.exact_ok()
                 && batch_local_exact_ok
+                && batch_materialize_exact_ok
                 && sequential_pack_exact_ok
                 && structure_aware_pack_exact_ok,
         });
@@ -2481,6 +2537,89 @@ fn print_summary(primitive: &str, results: &[BakeoffRecord], vocab: &FaceoffVoca
     println!("PRIMITIVE_END name={primitive}");
 }
 
+#[derive(Clone, Debug)]
+struct OverlayOfflineBucketSummary {
+    bucket: String,
+    role: OverlayBenchmarkBucketRole,
+    doc_count: usize,
+    activation_rate: f64,
+    median_transport_ratio: f64,
+    median_definition_overhead_rate: f64,
+    median_client_overhead_ms: f64,
+    p95_client_overhead_ms: f64,
+}
+
+fn build_overlay_offline_bucket_summary(
+    bucket: String,
+    overlays: &[&OverlayMetrics],
+) -> OverlayOfflineBucketSummary {
+    let mut transport_ratios = overlays
+        .iter()
+        .map(|overlay| overlay.batch_local_transport_ratio)
+        .collect::<Vec<_>>();
+    let mut definition_overhead = overlays
+        .iter()
+        .map(|overlay| overlay.batch_local_definition_overhead_rate)
+        .collect::<Vec<_>>();
+    let mut client_overhead_ms = overlays
+        .iter()
+        .map(|overlay| overlay.timing.client_overhead_ms)
+        .collect::<Vec<_>>();
+    transport_ratios.sort_by(|left, right| left.partial_cmp(right).unwrap());
+    definition_overhead.sort_by(|left, right| left.partial_cmp(right).unwrap());
+    client_overhead_ms.sort_by(|left, right| left.partial_cmp(right).unwrap());
+    OverlayOfflineBucketSummary {
+        role: overlay_bucket_role(&bucket),
+        bucket,
+        doc_count: overlays.len(),
+        activation_rate: overlays
+            .iter()
+            .filter(|overlay| overlay.mode == "local-macro" && overlay.macro_ref_count > 0)
+            .count() as f64
+            / overlays.len().max(1) as f64,
+        median_transport_ratio: median_sorted(&transport_ratios),
+        median_definition_overhead_rate: median_sorted(&definition_overhead),
+        median_client_overhead_ms: median_sorted(&client_overhead_ms),
+        p95_client_overhead_ms: percentile_sorted(&client_overhead_ms, 0.95),
+    }
+}
+
+fn overlay_offline_benchmark_verdict(
+    bucket_summaries: &[OverlayOfflineBucketSummary],
+    exact_failures: usize,
+    overall_batch_transport_ratio: f64,
+    overall_batch_definition_overhead_rate: f64,
+) -> OverlayOfflineBenchmarkVerdict {
+    if bucket_summaries.is_empty() {
+        return OverlayOfflineBenchmarkVerdict::Inactive;
+    }
+    if exact_failures > 0 {
+        return OverlayOfflineBenchmarkVerdict::Fail;
+    }
+
+    let primary_ok = bucket_summaries.iter().all(|summary| {
+        if summary.role != OverlayBenchmarkBucketRole::PrimaryWin {
+            return true;
+        }
+        match summary.bucket.as_str() {
+            "jsonl.signals" => summary.median_transport_ratio >= 2.0,
+            "logs.operational_mixed" => summary.median_transport_ratio >= 1.5,
+            _ => true,
+        }
+    });
+    let controls_ok = bucket_summaries.iter().all(|summary| {
+        summary.role != OverlayBenchmarkBucketRole::NeutralControl
+            || summary.median_transport_ratio >= 0.98
+    });
+    if !(primary_ok && controls_ok) {
+        return OverlayOfflineBenchmarkVerdict::Fail;
+    }
+    if overall_batch_transport_ratio >= 1.40 && overall_batch_definition_overhead_rate <= 0.10 {
+        return OverlayOfflineBenchmarkVerdict::Strong;
+    }
+    OverlayOfflineBenchmarkVerdict::Pass
+}
+
 fn print_overlay_summary(results: &[BakeoffRecord], args: &Args) {
     let held_out = held_out_records(results);
     let overlay_records = held_out
@@ -2508,6 +2647,10 @@ fn print_overlay_summary(results: &[BakeoffRecord], args: &Args) {
         println!(
             "OVERLAY_DIAGNOSTIC split=evaluation status=inactive ok_docs=0 skipped_docs={} activation_docs=0 macro_hit_docs=0 exact_failures=0",
             skipped
+        );
+        println!(
+            "OVERLAY_OFFLINE_BENCHMARK split=evaluation verdict={} ok_docs=0 primary_win_buckets=0 neutral_control_buckets=0 exact_failures=0 overall_batch_transport_ratio=0.00 overall_batch_definition_overhead_rate=0.00 median_client_overhead_ms=0.00 p95_client_overhead_ms=0.00",
+            OverlayOfflineBenchmarkVerdict::Inactive.as_str()
         );
         return;
     }
@@ -2570,16 +2713,20 @@ fn print_overlay_summary(results: &[BakeoffRecord], args: &Args) {
         .iter()
         .map(|(_, overlay)| overlay.batch_local_allocated_definition_symbols)
         .sum::<f64>();
+    let overall_batch_transport_ratio =
+        total_canonical_tokens as f64 / total_batch_transport_symbols.max(1.0);
+    let overall_batch_definition_overhead_rate =
+        total_batch_definition_symbols / total_batch_transport_symbols.max(1.0);
     println!(
         "OVERLAY_TRANSPORT_SUMMARY split=evaluation scope=batch_local docs={} canonical_tokens={} transport_symbols={:.2} transport_ratio={:.2} base_slice_symbols={} macro_ref_symbols={} macro_definition_symbols={:.2} definition_overhead_rate={:.2}",
         ok_records.len(),
         total_canonical_tokens,
         total_batch_transport_symbols,
-        total_canonical_tokens as f64 / total_batch_transport_symbols.max(1.0),
+        overall_batch_transport_ratio,
         total_base_slice_symbols,
         total_macro_ref_symbols,
         total_batch_definition_symbols,
-        total_batch_definition_symbols / total_batch_transport_symbols.max(1.0)
+        overall_batch_definition_overhead_rate
     );
     let total_sequential_pack_transport_symbols = ok_records
         .iter()
@@ -2624,11 +2771,63 @@ fn print_overlay_summary(results: &[BakeoffRecord], args: &Args) {
     );
 
     let mut per_bucket = BTreeMap::<String, Vec<&OverlayMetrics>>::new();
-    for (bucket, overlay) in ok_records {
+    for (bucket, overlay) in &ok_records {
         per_bucket
             .entry((*bucket).clone())
             .or_default()
             .push(*overlay);
+    }
+
+    let bucket_summaries = per_bucket
+        .iter()
+        .map(|(bucket, overlays)| build_overlay_offline_bucket_summary(bucket.clone(), overlays))
+        .collect::<Vec<_>>();
+    let offline_verdict = overlay_offline_benchmark_verdict(
+        &bucket_summaries,
+        exact_failures,
+        overall_batch_transport_ratio,
+        overall_batch_definition_overhead_rate,
+    );
+    let mut client_overheads = ok_records
+        .iter()
+        .map(|(_, overlay)| overlay.timing.client_overhead_ms)
+        .collect::<Vec<_>>();
+    client_overheads.sort_by(|left, right| left.partial_cmp(right).unwrap());
+    println!(
+        "OVERLAY_OFFLINE_BENCHMARK split=evaluation verdict={} ok_docs={} primary_win_buckets={} neutral_control_buckets={} exact_failures={} overall_batch_transport_ratio={:.2} overall_batch_definition_overhead_rate={:.2} median_client_overhead_ms={:.2} p95_client_overhead_ms={:.2}",
+        offline_verdict.as_str(),
+        ok_records.len(),
+        bucket_summaries
+            .iter()
+            .filter(|summary| summary.role == OverlayBenchmarkBucketRole::PrimaryWin)
+            .count(),
+        bucket_summaries
+            .iter()
+            .filter(|summary| summary.role == OverlayBenchmarkBucketRole::NeutralControl)
+            .count(),
+        exact_failures,
+        overall_batch_transport_ratio,
+        overall_batch_definition_overhead_rate,
+        median_sorted(&client_overheads),
+        percentile_sorted(&client_overheads, 0.95)
+    );
+
+    for summary in &bucket_summaries {
+        println!(
+            "OVERLAY_OFFLINE_BUCKET split=evaluation role={} bucket={} docs={} activation_rate={:.2} median_transport_ratio={:.2} median_definition_overhead_rate={:.2} median_client_overhead_ms={:.2} p95_client_overhead_ms={:.2}",
+            match summary.role {
+                OverlayBenchmarkBucketRole::PrimaryWin => "primary_win",
+                OverlayBenchmarkBucketRole::NeutralControl => "neutral_control",
+                OverlayBenchmarkBucketRole::Other => "other",
+            },
+            summary.bucket,
+            summary.doc_count,
+            summary.activation_rate,
+            summary.median_transport_ratio,
+            summary.median_definition_overhead_rate,
+            summary.median_client_overhead_ms,
+            summary.p95_client_overhead_ms,
+        );
     }
 
     for (bucket, overlays) in per_bucket {
@@ -3106,6 +3305,15 @@ fn median_sorted(values: &[f64]) -> f64 {
     } else {
         (values[mid - 1] + values[mid]) / 2.0
     }
+}
+
+fn percentile_sorted(values: &[f64], percentile: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let clamped = percentile.clamp(0.0, 1.0);
+    let index = ((values.len() - 1) as f64 * clamped).ceil() as usize;
+    values[index.min(values.len() - 1)]
 }
 
 fn write_jsonl<'a, I, T>(path: PathBuf, items: I) -> Result<(), Box<dyn Error>>
@@ -3769,6 +3977,97 @@ mod tests {
             overlay: None,
             models,
         }
+    }
+
+    fn fake_overlay_metrics(
+        batch_local_transport_ratio: f64,
+        batch_local_definition_overhead_rate: f64,
+        client_overhead_ms: f64,
+        macro_ref_count: usize,
+    ) -> OverlayMetrics {
+        OverlayMetrics {
+            status: "ok".to_string(),
+            base_tokenizer_label: "qwen25".to_string(),
+            base_tokenizer_path: "/tmp/tokenizer.json".to_string(),
+            mode: "local-macro".to_string(),
+            canonical_token_count: 100,
+            base_slice_symbol_count: 60,
+            macro_ref_symbol_count: 10,
+            macro_definition_symbol_count: 15,
+            overlay_symbol_count: 85,
+            compression_ratio_vs_canonical: 1.18,
+            macro_count: 2,
+            macro_ref_count,
+            repeated_token_mass_saved: 15,
+            batch_local_transport_symbols: 100.0 / batch_local_transport_ratio,
+            batch_local_transport_ratio,
+            batch_local_allocated_definition_symbols: batch_local_definition_overhead_rate
+                * (100.0 / batch_local_transport_ratio),
+            batch_local_definition_overhead_rate,
+            sequential_pack_transport_symbols: 0.0,
+            sequential_pack_transport_ratio: 0.0,
+            sequential_pack_allocated_definition_symbols: 0.0,
+            sequential_pack_definition_overhead_rate: 0.0,
+            structure_aware_pack_transport_symbols: 0.0,
+            structure_aware_pack_transport_ratio: 0.0,
+            structure_aware_pack_allocated_definition_symbols: 0.0,
+            structure_aware_pack_definition_overhead_rate: 0.0,
+            timing: OverlayTimingMetrics {
+                discovery_ms: 4.0,
+                allocated_pack_ms: 1.0,
+                allocated_materialize_ms: 0.5,
+                client_overhead_ms,
+            },
+            exact_ok: true,
+        }
+    }
+
+    #[test]
+    fn overlay_offline_benchmark_is_strong_for_target_wins_and_neutral_controls() {
+        let summaries = vec![
+            build_overlay_offline_bucket_summary(
+                "jsonl.signals".to_string(),
+                &[&fake_overlay_metrics(3.2, 0.07, 7.0, 2)],
+            ),
+            build_overlay_offline_bucket_summary(
+                "logs.operational_mixed".to_string(),
+                &[&fake_overlay_metrics(2.1, 0.08, 8.0, 2)],
+            ),
+            build_overlay_offline_bucket_summary(
+                "docs.spec".to_string(),
+                &[&fake_overlay_metrics(1.0, 0.02, 2.0, 0)],
+            ),
+            build_overlay_offline_bucket_summary(
+                "external.prose.web".to_string(),
+                &[&fake_overlay_metrics(1.0, 0.01, 2.0, 0)],
+            ),
+        ];
+
+        let verdict = overlay_offline_benchmark_verdict(&summaries, 0, 1.43, 0.07);
+
+        assert_eq!(verdict, OverlayOfflineBenchmarkVerdict::Strong);
+    }
+
+    #[test]
+    fn overlay_offline_benchmark_fails_on_control_regression() {
+        let summaries = vec![
+            build_overlay_offline_bucket_summary(
+                "jsonl.signals".to_string(),
+                &[&fake_overlay_metrics(2.5, 0.08, 7.0, 2)],
+            ),
+            build_overlay_offline_bucket_summary(
+                "logs.operational_mixed".to_string(),
+                &[&fake_overlay_metrics(1.6, 0.09, 8.0, 2)],
+            ),
+            build_overlay_offline_bucket_summary(
+                "external.prose.web".to_string(),
+                &[&fake_overlay_metrics(0.90, 0.01, 2.0, 0)],
+            ),
+        ];
+
+        let verdict = overlay_offline_benchmark_verdict(&summaries, 0, 1.38, 0.09);
+
+        assert_eq!(verdict, OverlayOfflineBenchmarkVerdict::Fail);
     }
 
     #[test]

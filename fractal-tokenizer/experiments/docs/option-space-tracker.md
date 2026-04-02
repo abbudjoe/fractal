@@ -15,6 +15,7 @@ The active post-postmortem pivot is now:
 - [canonical-tokenizer-recursive-overlay-spec.md](./canonical-tokenizer-recursive-overlay-spec.md)
 - [shared-overlay-dictionary-spec.md](./shared-overlay-dictionary-spec.md)
 - [overlay-model-facing-transport-spec.md](./overlay-model-facing-transport-spec.md)
+- [overlay-offline-benchmark-spec.md](./overlay-offline-benchmark-spec.md)
 
 This is intentionally **not** another attempt to rescue recursion as the
 primary tokenizer substrate.
@@ -184,6 +185,64 @@ Read:
   typed adapter layer over that transport
 - this moves the overlay line from shadow-only analysis toward runtime
   integration without inventing a second tokenizer ABI
+
+Latest `local Ollama embedding + instruct smoke` read on
+`codex/shared-overlay-dictionary-impl`:
+
+- embedding smoke:
+  - exact materialization remains `OK`
+  - warmed request delta is effectively neutral
+  - current extra client overhead is small and measurable
+- instruct smoke:
+  - exact materialization remains `OK`
+  - deterministic base and overlay outputs match exactly
+  - warmed base/overlay request times remain in the same band
+
+Read:
+
+- the overlay runtime seam is now proven operational on a real local model path
+- that does **not** make model benchmarking the primary evaluation yet
+- because the model still sees identical materialized text on both paths, the
+  current primary benchmark should remain offline and transport-focused
+- the new primary evaluation contract is defined in
+  [overlay-offline-benchmark-spec.md](./overlay-offline-benchmark-spec.md)
+
+Latest `offline overlay benchmark` read on
+`codex/shared-overlay-dictionary-impl`:
+
+- overall benchmark verdict:
+  - `OVERLAY_OFFLINE_BENCHMARK verdict=strong`
+  - `exact_failures = 0`
+  - `overall_batch_transport_ratio = 1.43`
+  - `overall_batch_definition_overhead_rate = 0.07`
+  - `median_client_overhead_ms = 54.55`
+  - `p95_client_overhead_ms = 493.37`
+- primary win buckets:
+  - `jsonl.signals`
+    - `median_transport_ratio = 3.65`
+    - `median_definition_overhead_rate = 0.37`
+    - `activation_rate = 1.00`
+  - `logs.operational_mixed`
+    - `median_transport_ratio = 2.52`
+    - `median_definition_overhead_rate = 0.24`
+    - `activation_rate = 1.00`
+- neutral controls:
+  - `docs.spec median_transport_ratio = 1.00`
+  - `external.prose.web median_transport_ratio = 1.00`
+  - `external.code.python median_transport_ratio = 1.00`
+  - `external.code.js_ts median_transport_ratio = 1.01`
+  - `external.multilingual median_transport_ratio = 1.00`
+
+Read:
+
+- the offline benchmark contract is now implemented and grounded in a real
+  hybrid held-out run, not just unit-test verdict logic
+- the overlay line now has a credible primary scorecard that matches the
+  current architecture: strong structured-text transport gains, perfect
+  exactness, and neutral control buckets
+- the next uncertainty is no longer whether the overlay works offline; it is
+  whether the runtime path can preserve these wins without adding enough
+  client/server complexity to erase them
 
 ## Tried By Layer
 
