@@ -5,7 +5,7 @@ use burn::{
 
 use fractal_core::{
     diagnostics::{
-        RuleProjectionDiagnosticContext, RuleProjectionDiagnosticsSink, RuleProjectionKind,
+        ProjectionDiagnosticsSink, RuleProjectionDiagnosticContext, RuleProjectionKind,
     },
     error::FractalError,
     primitives::{gated_sigmoid, one_minus},
@@ -54,7 +54,7 @@ impl<B: Backend> FractalRule<B> for P1Contractive<B> {
         state: &FractalState<B>,
         x: &Tensor<B, 2>,
         _context: ApplyContext,
-        mut diagnostics: Option<&mut dyn RuleProjectionDiagnosticsSink>,
+        mut diagnostics: Option<&mut dyn ProjectionDiagnosticsSink>,
         diagnostic_context: Option<RuleProjectionDiagnosticContext>,
     ) -> Result<FractalState<B>, FractalError> {
         let state = state.flat()?;

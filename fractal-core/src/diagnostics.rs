@@ -17,6 +17,7 @@ pub enum DiagnosticProbeKind {
     ForwardBoundary,
     ForwardPosition,
     RuleProjection,
+    OutputProjection,
     LossBoundary,
     BackwardBoundary,
     OptimizerBoundary,
@@ -30,6 +31,7 @@ impl DiagnosticProbeKind {
             Self::ForwardBoundary => "forward_boundary",
             Self::ForwardPosition => "forward_position",
             Self::RuleProjection => "rule_projection",
+            Self::OutputProjection => "output_projection",
             Self::LossBoundary => "loss_boundary",
             Self::BackwardBoundary => "backward_boundary",
             Self::OptimizerBoundary => "optimizer_boundary",
@@ -80,19 +82,34 @@ impl DiagnosticProbeRequest {
     pub fn validate(&self) -> Result<(), FractalError> {
         self.cadence.validate()?;
         match (self.kind, self.position_interval) {
-            (DiagnosticProbeKind::ForwardPosition | DiagnosticProbeKind::RuleProjection, Some(0)) => {
+            (
+                DiagnosticProbeKind::ForwardPosition
+                | DiagnosticProbeKind::RuleProjection
+                | DiagnosticProbeKind::OutputProjection,
+                Some(0),
+            ) => {
                 Err(FractalError::InvalidConfig(format!(
                     "{} position_interval must be greater than zero",
                     self.kind.as_str()
                 )))
             }
-            (DiagnosticProbeKind::ForwardPosition | DiagnosticProbeKind::RuleProjection, None) => {
+            (
+                DiagnosticProbeKind::ForwardPosition
+                | DiagnosticProbeKind::RuleProjection
+                | DiagnosticProbeKind::OutputProjection,
+                None,
+            ) => {
                 Err(FractalError::InvalidConfig(format!(
                     "{} diagnostics require position_interval",
                     self.kind.as_str()
                 )))
             }
-            (DiagnosticProbeKind::ForwardPosition | DiagnosticProbeKind::RuleProjection, Some(_)) => {
+            (
+                DiagnosticProbeKind::ForwardPosition
+                | DiagnosticProbeKind::RuleProjection
+                | DiagnosticProbeKind::OutputProjection,
+                Some(_),
+            ) => {
                 Ok(())
             }
             (_, Some(_)) => Err(FractalError::InvalidConfig(format!(
@@ -383,6 +400,29 @@ pub struct LinearProjectionLayoutMetadata {
     pub backward_input_grad_rhs: TensorLayoutMetadata,
 }
 
+impl LinearProjectionLayoutMetadata {
+    pub fn burn_linear_contract(weight_shape: Vec<usize>) -> Self {
+        let [d_input, d_output]: [usize; 2] = weight_shape
+            .clone()
+            .try_into()
+            .expect("linear weight shape should be rank 2");
+        Self {
+            stored_weight: TensorLayoutMetadata::linear_contract(
+                vec![d_input, d_output],
+                TensorLayoutTransform::Identity,
+            ),
+            forward_rhs: TensorLayoutMetadata::linear_contract(
+                vec![1, d_input, d_output],
+                TensorLayoutTransform::UnsqueezedView,
+            ),
+            backward_input_grad_rhs: TensorLayoutMetadata::linear_contract(
+                vec![d_output, d_input],
+                TensorLayoutTransform::TransposedView,
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleProjectionDiagnosticSpec {
     pub identity: RuleProjectionIdentity,
@@ -399,29 +439,12 @@ impl RuleProjectionDiagnosticSpec {
         output_shape: Vec<usize>,
         weight_shape: Vec<usize>,
     ) -> Self {
-        let [d_input, d_output]: [usize; 2] = weight_shape
-            .clone()
-            .try_into()
-            .expect("linear weight shape should be rank 2");
         Self::linear_with_layout(
             rule_name,
             projection_name,
             input_shape,
             output_shape,
-            LinearProjectionLayoutMetadata {
-                stored_weight: TensorLayoutMetadata::linear_contract(
-                    vec![d_input, d_output],
-                    TensorLayoutTransform::Identity,
-                ),
-                forward_rhs: TensorLayoutMetadata::linear_contract(
-                    vec![1, d_input, d_output],
-                    TensorLayoutTransform::UnsqueezedView,
-                ),
-                backward_input_grad_rhs: TensorLayoutMetadata::linear_contract(
-                    vec![d_output, d_input],
-                    TensorLayoutTransform::TransposedView,
-                ),
-            },
+            LinearProjectionLayoutMetadata::burn_linear_contract(weight_shape),
         )
     }
 
@@ -444,7 +467,65 @@ impl RuleProjectionDiagnosticSpec {
     }
 }
 
-pub trait RuleProjectionDiagnosticsSink {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputProjectionDiagnosticContext {
+    pub step: usize,
+    pub tokens_seen: usize,
+    pub position: usize,
+    pub sequence_length: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputProjectionIdentity {
+    pub model_name: String,
+    pub projection_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputProjectionDiagnosticSpec {
+    pub identity: OutputProjectionIdentity,
+    pub input_layout: TensorLayoutMetadata,
+    pub output_layout: TensorLayoutMetadata,
+    pub linear_layout: Option<LinearProjectionLayoutMetadata>,
+}
+
+impl OutputProjectionDiagnosticSpec {
+    pub fn linear(
+        model_name: impl Into<String>,
+        projection_name: impl Into<String>,
+        input_shape: Vec<usize>,
+        output_shape: Vec<usize>,
+        weight_shape: Vec<usize>,
+    ) -> Self {
+        Self::linear_with_layout(
+            model_name,
+            projection_name,
+            input_shape,
+            output_shape,
+            LinearProjectionLayoutMetadata::burn_linear_contract(weight_shape),
+        )
+    }
+
+    pub fn linear_with_layout(
+        model_name: impl Into<String>,
+        projection_name: impl Into<String>,
+        input_shape: Vec<usize>,
+        output_shape: Vec<usize>,
+        linear_layout: LinearProjectionLayoutMetadata,
+    ) -> Self {
+        Self {
+            identity: OutputProjectionIdentity {
+                model_name: model_name.into(),
+                projection_name: projection_name.into(),
+            },
+            input_layout: TensorLayoutMetadata::observed(input_shape),
+            output_layout: TensorLayoutMetadata::observed(output_shape),
+            linear_layout: Some(linear_layout),
+        }
+    }
+}
+
+pub trait ProjectionDiagnosticsSink {
     fn emit_rule_projection(
         &mut self,
         phase: RunPhase,
@@ -452,7 +533,18 @@ pub trait RuleProjectionDiagnosticsSink {
         projection: RuleProjectionKind,
         spec: RuleProjectionDiagnosticSpec,
     ) -> Result<(), FractalError>;
+
+    fn emit_output_projection(
+        &mut self,
+        phase: RunPhase,
+        context: OutputProjectionDiagnosticContext,
+        spec: OutputProjectionDiagnosticSpec,
+    ) -> Result<(), FractalError>;
 }
+
+pub trait RuleProjectionDiagnosticsSink: ProjectionDiagnosticsSink {}
+
+impl<T: ProjectionDiagnosticsSink + ?Sized> RuleProjectionDiagnosticsSink for T {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CudaMemorySnapshot {
@@ -524,6 +616,11 @@ pub enum DiagnosticEventKind {
         projection: RuleProjectionKind,
         spec: Box<RuleProjectionDiagnosticSpec>,
     },
+    OutputProjection {
+        position: usize,
+        sequence_length: usize,
+        spec: Box<OutputProjectionDiagnosticSpec>,
+    },
     ForwardComplete {
         logits_shape: Vec<usize>,
         graph_burden: Box<ForwardGraphBurden>,
@@ -561,6 +658,7 @@ impl DiagnosticEventKind {
             }
             Self::ForwardPosition { .. } => DiagnosticProbeKind::ForwardPosition,
             Self::RuleProjection { .. } => DiagnosticProbeKind::RuleProjection,
+            Self::OutputProjection { .. } => DiagnosticProbeKind::OutputProjection,
             Self::LossStart { .. } | Self::LossComplete { .. } => DiagnosticProbeKind::LossBoundary,
             Self::BackwardStart | Self::BackwardComplete => DiagnosticProbeKind::BackwardBoundary,
             Self::OptimizerStepStart { .. } | Self::OptimizerStepComplete { .. } => {
@@ -576,6 +674,7 @@ impl DiagnosticEventKind {
             Self::ForwardStart { .. } => "forward_start",
             Self::ForwardPosition { .. } => "forward_position",
             Self::RuleProjection { .. } => "rule_projection",
+            Self::OutputProjection { .. } => "output_projection",
             Self::ForwardComplete { .. } => "forward_complete",
             Self::LossStart { .. } => "loss_start",
             Self::LossComplete { .. } => "loss_complete",
@@ -591,7 +690,9 @@ impl DiagnosticEventKind {
         match self {
             Self::TrainStepStart { .. } => Some(DiagnosticBoundary::TrainStepStart),
             Self::ForwardStart { .. } => Some(DiagnosticBoundary::ForwardStart),
-            Self::ForwardPosition { .. } | Self::RuleProjection { .. } => None,
+            Self::ForwardPosition { .. }
+            | Self::RuleProjection { .. }
+            | Self::OutputProjection { .. } => None,
             Self::ForwardComplete { .. } => Some(DiagnosticBoundary::ForwardComplete),
             Self::LossStart { .. } => Some(DiagnosticBoundary::LossStart),
             Self::LossComplete { .. } => Some(DiagnosticBoundary::LossComplete),
@@ -643,6 +744,20 @@ pub struct RuleProjectionDiagnosticEventSummary {
     pub linear_layout: Option<LinearProjectionLayoutMetadata>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputProjectionDiagnosticEventSummary {
+    pub correlation_id: u64,
+    pub phase: RunPhase,
+    pub step: Option<usize>,
+    pub tokens_seen: Option<usize>,
+    pub position: usize,
+    pub sequence_length: usize,
+    pub identity: OutputProjectionIdentity,
+    pub input_layout: TensorLayoutMetadata,
+    pub output_layout: TensorLayoutMetadata,
+    pub linear_layout: Option<LinearProjectionLayoutMetadata>,
+}
+
 impl DiagnosticEvent {
     pub fn summary(&self) -> DiagnosticEventSummary {
         DiagnosticEventSummary {
@@ -682,6 +797,29 @@ impl DiagnosticEvent {
             linear_layout: spec.linear_layout.clone(),
         })
     }
+
+    pub fn output_projection_summary(&self) -> Option<OutputProjectionDiagnosticEventSummary> {
+        let DiagnosticEventKind::OutputProjection {
+            position,
+            sequence_length,
+            spec,
+        } = &self.event
+        else {
+            return None;
+        };
+        Some(OutputProjectionDiagnosticEventSummary {
+            correlation_id: self.correlation_id,
+            phase: self.phase,
+            step: self.step,
+            tokens_seen: self.tokens_seen,
+            position: *position,
+            sequence_length: *sequence_length,
+            identity: spec.identity.clone(),
+            input_layout: spec.input_layout.clone(),
+            output_layout: spec.output_layout.clone(),
+            linear_layout: spec.linear_layout.clone(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -697,6 +835,7 @@ pub struct DiagnosticsRuntimeArtifact {
     pub boundary_memory_deltas: Vec<BoundaryMemoryDelta>,
     pub last_event: Option<DiagnosticEvent>,
     pub last_rule_projection_event: Option<RuleProjectionDiagnosticEventSummary>,
+    pub last_output_projection_event: Option<OutputProjectionDiagnosticEventSummary>,
 }
 
 impl DiagnosticsRuntimeArtifact {
@@ -713,6 +852,7 @@ impl DiagnosticsRuntimeArtifact {
             boundary_memory_deltas: Vec::new(),
             last_event: None,
             last_rule_projection_event: None,
+            last_output_projection_event: None,
         }
     }
 
@@ -738,6 +878,7 @@ impl DiagnosticsRuntimeArtifact {
             boundary_memory_deltas: Vec::new(),
             last_event: None,
             last_rule_projection_event: None,
+            last_output_projection_event: None,
         }
     }
 }
@@ -907,9 +1048,12 @@ impl DiagnosticsRecorder {
     }
 
     pub fn should_emit_forward_position(&self, step: usize, position: usize) -> bool {
-        self.policy
-            .probe(DiagnosticProbeKind::ForwardPosition)
-            .is_some_and(|probe| probe.matches_step(step) && probe.matches_position(position))
+        self.should_emit_position_probe(
+            DiagnosticProbeKind::ForwardPosition,
+            step,
+            position,
+            None,
+        )
     }
 
     pub fn should_emit_rule_projection(
@@ -918,12 +1062,26 @@ impl DiagnosticsRecorder {
         position: usize,
         sequence_length: usize,
     ) -> bool {
-        self.policy
-            .probe(DiagnosticProbeKind::RuleProjection)
-            .is_some_and(|probe| {
-                probe.matches_step(step)
-                    && (probe.matches_position(position) || position + 1 == sequence_length)
-            })
+        self.should_emit_position_probe(
+            DiagnosticProbeKind::RuleProjection,
+            step,
+            position,
+            Some(sequence_length),
+        )
+    }
+
+    pub fn should_emit_output_projection(
+        &self,
+        step: usize,
+        position: usize,
+        sequence_length: usize,
+    ) -> bool {
+        self.should_emit_position_probe(
+            DiagnosticProbeKind::OutputProjection,
+            step,
+            position,
+            Some(sequence_length),
+        )
     }
 
     pub fn emit_event(
@@ -994,6 +1152,28 @@ impl DiagnosticsRecorder {
         )
     }
 
+    fn emit_output_projection_inner(
+        &mut self,
+        phase: RunPhase,
+        context: OutputProjectionDiagnosticContext,
+        spec: OutputProjectionDiagnosticSpec,
+    ) -> Result<(), FractalError> {
+        if !self.should_emit_output_projection(context.step, context.position, context.sequence_length)
+        {
+            return Ok(());
+        }
+        self.push_event(
+            phase,
+            Some(context.step),
+            Some(context.tokens_seen),
+            DiagnosticEventKind::OutputProjection {
+                position: context.position,
+                sequence_length: context.sequence_length,
+                spec: Box::new(spec),
+            },
+        )
+    }
+
     pub fn record_cuda_memory_snapshot(
         &mut self,
         phase: RunPhase,
@@ -1055,7 +1235,26 @@ impl DiagnosticsRecorder {
                 .iter()
                 .rev()
                 .find_map(DiagnosticEvent::rule_projection_summary),
+            last_output_projection_event: self
+                .events
+                .iter()
+                .rev()
+                .find_map(DiagnosticEvent::output_projection_summary),
         }
+    }
+
+    fn should_emit_position_probe(
+        &self,
+        kind: DiagnosticProbeKind,
+        step: usize,
+        position: usize,
+        sequence_length: Option<usize>,
+    ) -> bool {
+        self.policy.probe(kind).is_some_and(|probe| {
+            probe.matches_step(step)
+                && (probe.matches_position(position)
+                    || sequence_length.is_some_and(|length| position + 1 == length))
+        })
     }
 
     fn push_event(
@@ -1136,7 +1335,7 @@ impl Drop for DiagnosticsRecorder {
     }
 }
 
-impl RuleProjectionDiagnosticsSink for DiagnosticsRecorder {
+impl ProjectionDiagnosticsSink for DiagnosticsRecorder {
     fn emit_rule_projection(
         &mut self,
         phase: RunPhase,
@@ -1145,6 +1344,15 @@ impl RuleProjectionDiagnosticsSink for DiagnosticsRecorder {
         spec: RuleProjectionDiagnosticSpec,
     ) -> Result<(), FractalError> {
         self.emit_rule_projection_inner(phase, context, projection, spec)
+    }
+
+    fn emit_output_projection(
+        &mut self,
+        phase: RunPhase,
+        context: OutputProjectionDiagnosticContext,
+        spec: OutputProjectionDiagnosticSpec,
+    ) -> Result<(), FractalError> {
+        self.emit_output_projection_inner(phase, context, spec)
     }
 }
 
@@ -1221,6 +1429,33 @@ fn format_diagnostic_event(event: &DiagnosticEvent) -> String {
                 spec.identity.rule_name, spec.identity.projection_name
             ));
             parts.push(format!("projection={}", projection.as_str()));
+            parts.push(format!("input_shape={:?}", spec.input_layout.shape));
+            parts.push(format!("output_shape={:?}", spec.output_layout.shape));
+            if let Some(linear_layout) = &spec.linear_layout {
+                parts.push(format!(
+                    "weight_shape={:?}",
+                    linear_layout.stored_weight.shape
+                ));
+                parts.push(format!(
+                    "backward_rhs_shape={:?}",
+                    linear_layout.backward_input_grad_rhs.shape
+                ));
+                parts.push(format!(
+                    "backward_rhs_transform={:?}",
+                    linear_layout.backward_input_grad_rhs.transform
+                ));
+            }
+        }
+        DiagnosticEventKind::OutputProjection {
+            position,
+            sequence_length,
+            spec,
+        } => {
+            parts.push(format!("position={position}/{sequence_length}"));
+            parts.push(format!(
+                "projection_path={}.{}",
+                spec.identity.model_name, spec.identity.projection_name
+            ));
             parts.push(format!("input_shape={:?}", spec.input_layout.shape));
             parts.push(format!("output_shape={:?}", spec.output_layout.shape));
             if let Some(linear_layout) = &spec.linear_layout {

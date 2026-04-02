@@ -8,7 +8,8 @@ use crate::{
     data_generator::TokenBatch,
     diagnostics::{
         DiagnosticEventKind, DiagnosticsRecorder, ForwardGraphBurden,
-        RuleProjectionDiagnosticContext, RuleProjectionDiagnosticsSink, TrainStepDiagnosticContext,
+        OutputProjectionDiagnosticContext, OutputProjectionDiagnosticSpec,
+        ProjectionDiagnosticsSink, RuleProjectionDiagnosticContext, TrainStepDiagnosticContext,
     },
     error::FractalError,
     lifecycle::RunPhase,
@@ -101,7 +102,7 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
                     use_router,
                     diagnostics: diagnostics
                         .as_deref_mut()
-                        .map(|sink| sink as &mut dyn RuleProjectionDiagnosticsSink),
+                        .map(|sink| sink as &mut dyn ProjectionDiagnosticsSink),
                     step_context,
                     position,
                     sequence_length: seq_len,
@@ -119,10 +120,27 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
                     readout.dims().into_iter().collect(),
                 )?;
             }
-            let token_logits =
-                self.output
-                    .forward(readout)
-                    .reshape([batch_size, 1, self.vocab_size]);
+            let output_input_shape = readout.dims().into_iter().collect::<Vec<_>>();
+            let output_projection = self.output.forward(readout);
+            if let (Some(context), Some(recorder)) = (step_context, diagnostics.as_deref_mut()) {
+                recorder.emit_output_projection(
+                    RunPhase::Train,
+                    OutputProjectionDiagnosticContext {
+                        step: context.step,
+                        tokens_seen: context.tokens_seen,
+                        position,
+                        sequence_length: seq_len,
+                    },
+                    OutputProjectionDiagnosticSpec::linear(
+                        "fractal_model",
+                        "output",
+                        output_input_shape,
+                        output_projection.dims().into_iter().collect(),
+                        self.output.weight.shape().dims::<2>().to_vec(),
+                    ),
+                )?;
+            }
+            let token_logits = output_projection.reshape([batch_size, 1, self.vocab_size]);
             logits.push(token_logits);
         }
 
@@ -234,7 +252,7 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
                     },
                     diagnostics
                         .as_deref_mut()
-                        .map(|sink| sink as &mut dyn RuleProjectionDiagnosticsSink),
+                        .map(|sink| sink as &mut dyn ProjectionDiagnosticsSink),
                     step_context.map(|context| RuleProjectionDiagnosticContext {
                         step: context.step,
                         tokens_seen: context.tokens_seen,
@@ -267,7 +285,7 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
                 },
                 diagnostics
                     .as_deref_mut()
-                    .map(|sink| sink as &mut dyn RuleProjectionDiagnosticsSink),
+                    .map(|sink| sink as &mut dyn ProjectionDiagnosticsSink),
                 step_context.map(|context| RuleProjectionDiagnosticContext {
                     step: context.step,
                     tokens_seen: context.tokens_seen,
@@ -316,7 +334,7 @@ fn count_true<B: Backend>(mask: Tensor<B, 1, Bool>) -> Result<usize, FractalErro
 struct RecurseTokenFrame<'a> {
     force_depth: Option<usize>,
     use_router: bool,
-    diagnostics: Option<&'a mut dyn RuleProjectionDiagnosticsSink>,
+    diagnostics: Option<&'a mut dyn ProjectionDiagnosticsSink>,
     step_context: Option<TrainStepDiagnosticContext>,
     position: usize,
     sequence_length: usize,

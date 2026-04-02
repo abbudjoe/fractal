@@ -30,11 +30,13 @@ use crate::{
         take_last_diagnostics_runtime_artifact, CudaMemorySnapshot, DiagnosticEvent,
         DiagnosticEventKind, DiagnosticProbeKind, DiagnosticProbeRequest, DiagnosticsPolicy,
         DiagnosticsRecorder, DiagnosticsRuntimeArtifact, DiagnosticsRuntimeFailureKind,
-        ForwardGraphBurden, ProbeCadence, RuleProjectionDiagnosticContext,
+        ForwardGraphBurden, OutputProjectionDiagnosticContext,
+        OutputProjectionDiagnosticEventSummary, OutputProjectionDiagnosticSpec,
+        OutputProjectionIdentity, ProbeCadence, ProjectionDiagnosticsSink,
+        RuleProjectionDiagnosticContext,
         RuleProjectionDiagnosticEventSummary, RuleProjectionDiagnosticSpec,
-        RuleProjectionDiagnosticsSink, RuleProjectionIdentity, RuleProjectionKind,
-        TensorLayoutMetadata, TensorLayoutOrigin, TensorLayoutTransform,
-        TrainStepDiagnosticContext,
+        RuleProjectionIdentity, RuleProjectionKind, TensorLayoutMetadata,
+        TensorLayoutOrigin, TensorLayoutTransform, TrainStepDiagnosticContext,
     },
     error::FractalError,
     fitness::SpeciesRawMetrics,
@@ -1965,6 +1967,11 @@ fn diagnostics_artifact_derives_boundary_memory_deltas_and_rule_projection_summa
                     position_interval: Some(1),
                 },
                 DiagnosticProbeRequest {
+                    kind: DiagnosticProbeKind::OutputProjection,
+                    cadence: ProbeCadence::EveryStep,
+                    position_interval: Some(1),
+                },
+                DiagnosticProbeRequest {
                     kind: DiagnosticProbeKind::CudaMemorySnapshot,
                     cadence: ProbeCadence::EveryStep,
                     position_interval: None,
@@ -2028,6 +2035,24 @@ fn diagnostics_artifact_derives_boundary_memory_deltas_and_rule_projection_summa
         )
         .unwrap();
     recorder
+        .emit_output_projection(
+            crate::RunPhase::Train,
+            OutputProjectionDiagnosticContext {
+                step: 0,
+                tokens_seen: 0,
+                position: 3,
+                sequence_length: 4,
+            },
+            OutputProjectionDiagnosticSpec::linear(
+                "fractal_model",
+                "output",
+                vec![1, 8],
+                vec![1, 32],
+                vec![8, 32],
+            ),
+        )
+        .unwrap();
+    recorder
         .emit_event(
             crate::RunPhase::Train,
             Some(context.step),
@@ -2082,6 +2107,25 @@ fn diagnostics_artifact_derives_boundary_memory_deltas_and_rule_projection_summa
             .as_ref()
             .and_then(|event| event.linear_layout.as_ref())
             .expect("linear layout metadata should exist")
+            .backward_input_grad_rhs
+            .transform,
+        TensorLayoutTransform::TransposedView
+    );
+    assert_eq!(
+        artifact
+            .last_output_projection_event
+            .as_ref()
+            .expect("last output projection summary should exist")
+            .identity
+            .projection_name,
+        "output"
+    );
+    assert_eq!(
+        artifact
+            .last_output_projection_event
+            .as_ref()
+            .and_then(|event| event.linear_layout.as_ref())
+            .expect("output linear layout metadata should exist")
             .backward_input_grad_rhs
             .transform,
         TensorLayoutTransform::TransposedView
@@ -2158,6 +2202,43 @@ fn failure_snapshot_runtime_state_records_last_rule_projection_summary() {
                 .expect("linear layout contract should exist"),
             ),
         }),
+        last_output_projection_event: Some(OutputProjectionDiagnosticEventSummary {
+            correlation_id: 8,
+            phase: RunPhase::Train,
+            step: Some(0),
+            tokens_seen: Some(0),
+            position: 3,
+            sequence_length: 4,
+            identity: OutputProjectionIdentity {
+                model_name: "fractal_model".to_owned(),
+                projection_name: "output".to_owned(),
+            },
+            input_layout: TensorLayoutMetadata {
+                origin: TensorLayoutOrigin::RuntimeObserved,
+                transform: TensorLayoutTransform::Identity,
+                shape: vec![1, 8],
+                strides: None,
+                is_contiguous: None,
+            },
+            output_layout: TensorLayoutMetadata {
+                origin: TensorLayoutOrigin::RuntimeObserved,
+                transform: TensorLayoutTransform::Identity,
+                shape: vec![1, 32],
+                strides: None,
+                is_contiguous: None,
+            },
+            linear_layout: Some(
+                OutputProjectionDiagnosticSpec::linear(
+                    "fractal_model",
+                    "output",
+                    vec![1, 8],
+                    vec![1, 32],
+                    vec![8, 32],
+                )
+                .linear_layout
+                .expect("linear layout contract should exist"),
+            ),
+        }),
     };
 
     state.record_diagnostic_summaries(&diagnostics);
@@ -2178,6 +2259,15 @@ fn failure_snapshot_runtime_state_records_last_rule_projection_summary() {
             .identity
             .projection_name,
         "g_proj"
+    );
+    assert_eq!(
+        state
+            .last_output_projection_event
+            .as_ref()
+            .expect("last output projection event should be recorded")
+            .identity
+            .projection_name,
+        "output"
     );
     assert!(state.validate().is_ok());
 }
@@ -2335,6 +2425,7 @@ fn training_runtime_emits_typed_diagnostics_for_first_step() {
     assert!(event_names.contains(&"train_step_start"));
     assert!(event_names.contains(&"forward_start"));
     assert!(event_names.contains(&"forward_position"));
+    assert!(event_names.contains(&"output_projection"));
     assert!(event_names.contains(&"forward_complete"));
     assert!(event_names.contains(&"loss_start"));
     assert!(event_names.contains(&"loss_complete"));
@@ -2393,10 +2484,10 @@ fn failed_forward_records_last_successful_diagnostic_boundary() {
         .diagnostics
         .last_event
         .expect("last diagnostic event should be captured");
-    assert_eq!(last_event.event.name(), "forward_position");
+    assert_eq!(last_event.event.name(), "output_projection");
     assert!(matches!(
         last_event.event,
-        DiagnosticEventKind::ForwardPosition { .. }
+        DiagnosticEventKind::OutputProjection { .. }
     ));
 }
 
@@ -2898,6 +2989,11 @@ fn test_training_diagnostics_policy() -> DiagnosticsPolicy {
             },
             DiagnosticProbeRequest {
                 kind: DiagnosticProbeKind::RuleProjection,
+                cadence: ProbeCadence::FirstNSteps { steps: 1 },
+                position_interval: Some(1),
+            },
+            DiagnosticProbeRequest {
+                kind: DiagnosticProbeKind::OutputProjection,
                 cadence: ProbeCadence::FirstNSteps { steps: 1 },
                 position_interval: Some(1),
             },

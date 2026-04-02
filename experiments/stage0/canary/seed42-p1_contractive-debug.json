@@ -170,6 +170,14 @@
               "position_interval": 64
             },
             {
+              "kind": "output_projection",
+              "cadence": {
+                "kind": "first_n_steps",
+                "steps": 1
+              },
+              "position_interval": 64
+            },
+            {
               "kind": "loss_boundary",
               "cadence": {
                 "kind": "step_interval",

@@ -532,6 +532,10 @@ fn failure_snapshot_runtime_state_json(spec: &crate::FailureSnapshotRuntimeState
             .last_rule_projection_event
             .as_ref()
             .map(rule_projection_diagnostic_event_summary_json),
+        "last_output_projection_event": spec
+            .last_output_projection_event
+            .as_ref()
+            .map(output_projection_diagnostic_event_summary_json),
     })
 }
 
@@ -752,6 +756,10 @@ fn diagnostics_runtime_json(spec: &crate::DiagnosticsRuntimeArtifact) -> Value {
             .last_rule_projection_event
             .as_ref()
             .map(rule_projection_diagnostic_event_summary_json),
+        "last_output_projection_event": spec
+            .last_output_projection_event
+            .as_ref()
+            .map(output_projection_diagnostic_event_summary_json),
     })
 }
 
@@ -826,6 +834,19 @@ fn diagnostic_event_kind_json(spec: &crate::DiagnosticEventKind) -> Value {
             "max_recursion_depth": max_recursion_depth,
             "projection": projection.as_str(),
             "identity": rule_projection_identity_json(&spec.identity),
+            "input_layout": tensor_layout_metadata_json(&spec.input_layout),
+            "output_layout": tensor_layout_metadata_json(&spec.output_layout),
+            "linear_layout": linear_projection_layout_metadata_json(spec.linear_layout.as_ref()),
+        }),
+        crate::DiagnosticEventKind::OutputProjection {
+            position,
+            sequence_length,
+            spec,
+        } => json!({
+            "kind": "output_projection",
+            "position": position,
+            "sequence_length": sequence_length,
+            "identity": output_projection_identity_json(&spec.identity),
             "input_layout": tensor_layout_metadata_json(&spec.input_layout),
             "output_layout": tensor_layout_metadata_json(&spec.output_layout),
             "linear_layout": linear_projection_layout_metadata_json(spec.linear_layout.as_ref()),
@@ -916,6 +937,30 @@ fn rule_projection_diagnostic_event_summary_json(
 fn rule_projection_identity_json(spec: &crate::RuleProjectionIdentity) -> Value {
     json!({
         "rule_name": spec.rule_name,
+        "projection_name": spec.projection_name,
+    })
+}
+
+fn output_projection_diagnostic_event_summary_json(
+    spec: &crate::OutputProjectionDiagnosticEventSummary,
+) -> Value {
+    json!({
+        "correlation_id": spec.correlation_id,
+        "phase": phase_name(spec.phase),
+        "step": spec.step,
+        "tokens_seen": spec.tokens_seen,
+        "position": spec.position,
+        "sequence_length": spec.sequence_length,
+        "identity": output_projection_identity_json(&spec.identity),
+        "input_layout": tensor_layout_metadata_json(&spec.input_layout),
+        "output_layout": tensor_layout_metadata_json(&spec.output_layout),
+        "linear_layout": linear_projection_layout_metadata_json(spec.linear_layout.as_ref()),
+    })
+}
+
+fn output_projection_identity_json(spec: &crate::OutputProjectionIdentity) -> Value {
+    json!({
+        "model_name": spec.model_name,
         "projection_name": spec.projection_name,
     })
 }
@@ -1335,6 +1380,7 @@ mod tests {
                     },
                 }),
                 last_rule_projection_event: None,
+                last_output_projection_event: None,
             },
             ..TrainingRuntimeArtifact::default()
         };
