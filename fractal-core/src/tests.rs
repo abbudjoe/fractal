@@ -27,24 +27,25 @@ use crate::{
     lifecycle::{
         ArtifactPolicy, BridgePackagingSpec, BridgeSplitPolicy, BridgeSubstrateMode, BudgetSpec,
         ComparisonContract, DecisionIntent, ExecutionBackend, ExecutionTarget, ExecutionTargetKind,
-        ExperimentId, ExperimentQuestion, ExperimentSpecTemplate, FailureSnapshotPolicy,
-        LaneIntent, LaunchPolicySpec, LearningRateScheduleSpec, ModelContractSpec,
-        NumericPrecisionKind, OptimizerKind, OptimizerSpec, QuantizationPolicy,
-        QuantizedPrecisionKind, RunExecutionOutcome, RunOutcomeClass, RunQualityOutcome,
-        RuntimeSurfaceSpec, TextCorpusFormat, TextCorpusSourceSpec, TextCorpusSplitSpec,
-        TokenizerArtifactSpec, Tournament, TournamentConfig, TournamentPreset,
-        TournamentProgressEvent, TournamentSequence, TrainingInputSpec, WeightExportFormat,
-        WeightExportPhase, WeightExportPolicy, WeightExportRuntimeState,
+        ExperimentId, ExperimentQuestion, ExperimentSpecTemplate, FailureSnapshotArtifactFormat,
+        FailureSnapshotCaptureTiming, FailureSnapshotPolicy, LaneIntent, LaunchPolicySpec,
+        LearningRateScheduleSpec, ModelContractSpec, NumericPrecisionKind, OptimizerKind,
+        OptimizerSpec, QuantizationPolicy, QuantizedPrecisionKind, RunExecutionOutcome,
+        RunOutcomeClass, RunQualityOutcome, RuntimeSurfaceSpec, TextCorpusFormat,
+        TextCorpusSourceSpec, TextCorpusSplitSpec, TokenizerArtifactSpec, Tournament,
+        TournamentConfig, TournamentPreset, TournamentProgressEvent, TournamentSequence,
+        TrainingInputSpec, WeightExportFormat, WeightExportPhase, WeightExportPolicy,
+        WeightExportRuntimeState,
     },
     model::FractalModel,
     primitives::complex_square,
     registry::{
-        build_failure_artifact, clip_gradients_global_norm, export_weight_phase, gradient_l2_norm,
-        is_valid_primitive_variant_name, load_weight_export_metadata, read_weight_export_metadata,
-        resolve_precision_profile, resolve_weight_export_paths, run_species_with_batches,
-        should_log_training_checkpoint, training_progress_interval, ComputeBackend,
-        CpuTrainBackend, ExecutionMode, PrimitiveVariantName, SpeciesDefinition, SpeciesId,
-        SpeciesRunContext, TrainingBatchSet,
+        build_failure_artifact, clip_gradients_global_norm, cpu_device, export_weight_phase,
+        gradient_l2_norm, is_valid_primitive_variant_name, load_weight_export_metadata,
+        read_weight_export_metadata, resolve_precision_profile, resolve_weight_export_paths,
+        run_species_with_batches, run_species_with_factory_candle, should_log_training_checkpoint,
+        training_progress_interval, ComputeBackend, CpuTrainBackend, ExecutionMode,
+        PrimitiveVariantName, SpeciesDefinition, SpeciesId, SpeciesRunContext, TrainingBatchSet,
     },
     router::EarlyExitRouter,
     rule_trait::{ApplyContext, FractalRule},
@@ -778,6 +779,14 @@ fn failure_snapshot_artifact_writes_required_metadata_and_runtime_state() {
     assert!(snapshot.attempted);
     assert!(snapshot.missing_required_artifacts.is_empty());
     assert_eq!(snapshot.completeness.as_str(), "complete");
+    assert_eq!(
+        snapshot
+            .contract
+            .as_ref()
+            .expect("failure snapshot contract should exist")
+            .capture_timing,
+        FailureSnapshotCaptureTiming::NoPanic
+    );
 
     let artifact_paths = snapshot
         .captured_artifacts()
@@ -868,6 +877,109 @@ fn run_species_failure_snapshot_preserves_diagnostics_tail() {
     assert!(events
         .iter()
         .any(|event| event["boundary"] == serde_json::Value::String("train-step-started".into())));
+
+    std::env::remove_var("FRACTAL_RUN_FAILURE_SNAPSHOT_DIR");
+    let _ = std::fs::remove_dir_all(&temp_root);
+}
+
+#[test]
+fn tournament_parallel_panic_preserves_live_failure_snapshot_state() {
+    let _env_lock = EXPORT_ENV_MUTEX.lock().unwrap();
+    let temp_root = std::env::temp_dir().join(format!(
+        "fractal-failure-snapshot-panic-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_root);
+    std::env::set_var("FRACTAL_RUN_FAILURE_SNAPSHOT_DIR", &temp_root);
+
+    let mut config = TournamentPreset::FastTest
+        .config()
+        .with_execution_mode(ExecutionMode::Parallel)
+        .with_parallelism(1);
+    config.train_steps_per_species = 1;
+    config.launch_policy.failure_snapshot = FailureSnapshotPolicy {
+        enabled: true,
+        required: true,
+        capture_model_weights: true,
+        capture_runtime_state: true,
+        capture_diagnostics_tail: true,
+    };
+    let mut template = test_experiment_template(config.clone());
+    template.runtime.launch_policy = config.launch_policy.clone();
+    config.experiment = Some(template);
+
+    let tournament = Tournament::new(config).expect("panic snapshot tournament should build");
+    let artifact = tournament
+        .run_generation_artifacts(
+            &[panic_training_species_definition(SpeciesId::P1Contractive)],
+            None,
+        )
+        .expect("panic failures should still produce tournament artifacts");
+
+    let record = &artifact.species[0];
+    assert_eq!(record.execution_outcome, RunExecutionOutcome::InfraFailure);
+    assert!(record
+        .error
+        .as_ref()
+        .expect("panic artifact should record an error")
+        .contains("intentional test panic"));
+
+    let snapshot = &record.training_runtime.failure_snapshot;
+    assert!(snapshot.attempted);
+    assert!(snapshot.missing_required_artifacts.is_empty());
+    assert_eq!(snapshot.completeness.as_str(), "complete");
+    let contract = snapshot
+        .contract
+        .as_ref()
+        .expect("panic snapshot contract should exist");
+    assert_eq!(contract.error_class.as_str(), "panic");
+    assert_eq!(
+        contract.capture_timing,
+        FailureSnapshotCaptureTiming::BeforePanicPropagation
+    );
+    assert_eq!(
+        contract.last_successful_boundary,
+        Some(crate::FailureDiagnosticBoundary::TrainStepStarted)
+    );
+
+    let runtime_state_path = snapshot
+        .captured_artifacts()
+        .find(|artifact| artifact.kind.as_str() == "runtime-state")
+        .expect("runtime-state artifact should be captured")
+        .path
+        .clone();
+    let runtime_state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&runtime_state_path).unwrap()).unwrap();
+    assert_eq!(runtime_state["planned_steps"], serde_json::Value::from(1));
+    assert_eq!(runtime_state["completed_steps"], serde_json::Value::from(0));
+
+    let diagnostics_path = snapshot
+        .captured_artifacts()
+        .find(|artifact| artifact.kind.as_str() == "diagnostics-tail")
+        .expect("diagnostics-tail artifact should be captured")
+        .path
+        .clone();
+    let diagnostics: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&diagnostics_path).unwrap()).unwrap();
+    let events = diagnostics
+        .as_array()
+        .expect("diagnostics tail should serialize as an array");
+    assert!(events
+        .iter()
+        .any(|event| event["boundary"] == serde_json::Value::String("train-phase-started".into())));
+    assert!(events
+        .iter()
+        .any(|event| event["boundary"] == serde_json::Value::String("train-step-started".into())));
+
+    let model_weights = snapshot
+        .captured_artifacts()
+        .find(|artifact| artifact.kind.as_str() == "model-weights")
+        .expect("model-weights artifact should be captured");
+    assert_eq!(model_weights.format, FailureSnapshotArtifactFormat::BurnBin);
+    assert!(std::path::Path::new(&model_weights.path)
+        .parent()
+        .expect("model-weight stem should have a parent directory")
+        .exists());
 
     std::env::remove_var("FRACTAL_RUN_FAILURE_SNAPSHOT_DIR");
     let _ = std::fs::remove_dir_all(&temp_root);
@@ -1586,6 +1698,48 @@ impl<B: Backend> FractalRule<B> for FailingRule<B> {
     }
 }
 
+#[derive(Module, Debug)]
+struct PanickingRule<B: Backend> {
+    hidden_dim: usize,
+    _marker: core::marker::PhantomData<B>,
+}
+
+impl<B: Backend> PanickingRule<B> {
+    fn new(hidden_dim: usize) -> Self {
+        Self {
+            hidden_dim,
+            _marker: core::marker::PhantomData,
+        }
+    }
+}
+
+impl<B: Backend> FractalRule<B> for PanickingRule<B> {
+    fn apply(
+        &self,
+        _state: &FractalState<B>,
+        _x: &Tensor<B, 2>,
+        _context: ApplyContext,
+    ) -> Result<FractalState<B>, FractalError> {
+        panic!("intentional test panic")
+    }
+
+    fn name(&self) -> &'static str {
+        "panicking_rule"
+    }
+
+    fn hidden_dim(&self) -> usize {
+        self.hidden_dim
+    }
+
+    fn state_layout(&self) -> StateLayout {
+        StateLayout::Flat
+    }
+
+    fn clone_box(&self) -> Box<dyn FractalRule<B>> {
+        Box::new(Self::new(self.hidden_dim))
+    }
+}
+
 impl<B: Backend> CountingRule<B> {
     fn new(hidden_dim: usize) -> Self {
         Self {
@@ -1869,6 +2023,55 @@ fn numeric_failure_species_definition(id: SpeciesId) -> SpeciesDefinition {
             variant_name,
             numeric_failure_species_runner,
             stub_species_runner_metal,
+        )
+    }
+}
+
+fn panic_training_species_runner(
+    context: SpeciesRunContext,
+) -> Result<SpeciesRawMetrics, FractalError> {
+    run_species_with_factory_candle(
+        SpeciesId::P1Contractive,
+        context,
+        cpu_device(),
+        |config, _device| PanickingRule::<CpuTrainBackend>::new(config.dim),
+    )
+}
+
+fn panic_training_species_runner_metal(
+    context: SpeciesRunContext,
+    _device: WgpuDevice,
+) -> Result<SpeciesRawMetrics, FractalError> {
+    panic_training_species_runner(context)
+}
+
+#[cfg(feature = "cuda")]
+fn panic_training_species_runner_cuda(
+    context: SpeciesRunContext,
+    _device: CandleDevice,
+) -> Result<SpeciesRawMetrics, FractalError> {
+    panic_training_species_runner(context)
+}
+
+fn panic_training_species_definition(id: SpeciesId) -> SpeciesDefinition {
+    let variant_name = test_variant_name(id);
+    #[cfg(feature = "cuda")]
+    {
+        SpeciesDefinition::new(
+            id,
+            variant_name,
+            panic_training_species_runner,
+            panic_training_species_runner_metal,
+            panic_training_species_runner_cuda,
+        )
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        SpeciesDefinition::new(
+            id,
+            variant_name,
+            panic_training_species_runner,
+            panic_training_species_runner_metal,
         )
     }
 }

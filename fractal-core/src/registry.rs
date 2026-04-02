@@ -1,7 +1,9 @@
 use std::{
+    any::Any,
     collections::{HashSet, VecDeque},
     fmt::{Display, Formatter},
     fs,
+    panic::AssertUnwindSafe,
     path::{Path, PathBuf},
     process::Command,
     str::FromStr,
@@ -33,13 +35,13 @@ use crate::{
     fitness::SpeciesRawMetrics,
     lifecycle::{
         CheckpointArtifact, CheckpointArtifactKind, ExperimentSpec, FailureDiagnosticBoundary,
-        FailureDiagnosticEvent, FailureSnapshotArtifact, FailureSnapshotArtifactKind,
-        FailureSnapshotCaptureTiming, FailureSnapshotContract, FailureSnapshotErrorClass,
-        FailureSnapshotPolicy, FailureSnapshotRuntimeState, InterimEvalSnapshot, OptimizerKind,
-        OptimizerSpec, PhaseTiming, RunExecutionOutcome, RunManifest, RunPhase, RunQualityOutcome,
-        SpeciesRunArtifact, SpeciesRunStage, TournamentConfig, TrainingRuntimeArtifact,
-        WeightExportArtifact, WeightExportContract, WeightExportFormat, WeightExportPhase,
-        WeightExportPolicy, WeightExportRuntimeState,
+        FailureDiagnosticEvent, FailureSnapshotArtifact, FailureSnapshotArtifactFormat,
+        FailureSnapshotArtifactKind, FailureSnapshotCaptureTiming, FailureSnapshotContract,
+        FailureSnapshotErrorClass, FailureSnapshotPolicy, FailureSnapshotRuntimeState,
+        InterimEvalSnapshot, OptimizerKind, OptimizerSpec, PhaseTiming, RunExecutionOutcome,
+        RunManifest, RunPhase, RunQualityOutcome, SpeciesRunArtifact, SpeciesRunStage,
+        TournamentConfig, TrainingRuntimeArtifact, WeightExportArtifact, WeightExportContract,
+        WeightExportFormat, WeightExportPhase, WeightExportPolicy, WeightExportRuntimeState,
     },
     model::{ForwardDebugProbe, FractalModel},
     rule_trait::FractalRule,
@@ -1011,12 +1013,62 @@ pub(crate) fn build_success_artifact(
     }
 }
 
+pub(crate) fn panic_payload_to_error(payload: &(dyn Any + Send)) -> FractalError {
+    let panic_message = if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_owned()
+    } else {
+        "non-string panic payload".to_owned()
+    };
+    FractalError::InvalidState(format!("species worker panicked: {panic_message}"))
+}
+
 pub(crate) fn build_failure_artifact(
     stage: SpeciesRunStage,
     manifest: RunManifest,
     phase_timings: Vec<PhaseTiming>,
     execution_outcome: RunExecutionOutcome,
     error: FractalError,
+) -> SpeciesRunArtifact {
+    let error_class = classify_failure_snapshot_error(execution_outcome, &error);
+    build_failure_artifact_with_snapshot_context(
+        stage,
+        manifest,
+        phase_timings,
+        execution_outcome,
+        error,
+        FailureSnapshotCaptureTiming::NoPanic,
+        error_class,
+    )
+}
+
+pub(crate) fn build_post_panic_failure_artifact(
+    stage: SpeciesRunStage,
+    manifest: RunManifest,
+    phase_timings: Vec<PhaseTiming>,
+    execution_outcome: RunExecutionOutcome,
+    error: FractalError,
+) -> SpeciesRunArtifact {
+    build_failure_artifact_with_snapshot_context(
+        stage,
+        manifest,
+        phase_timings,
+        execution_outcome,
+        error,
+        FailureSnapshotCaptureTiming::AfterPanicPropagation,
+        FailureSnapshotErrorClass::Panic,
+    )
+}
+
+fn build_failure_artifact_with_snapshot_context(
+    stage: SpeciesRunStage,
+    manifest: RunManifest,
+    phase_timings: Vec<PhaseTiming>,
+    execution_outcome: RunExecutionOutcome,
+    error: FractalError,
+    capture_timing: FailureSnapshotCaptureTiming,
+    error_class: FailureSnapshotErrorClass,
 ) -> SpeciesRunArtifact {
     let mut training_runtime = TrainingRuntimeArtifact::empty(&manifest.config.launch_policy);
     let diagnostics =
@@ -1026,9 +1078,9 @@ pub(crate) fn build_failure_artifact(
         &manifest,
         &training_runtime,
         &diagnostics,
-        execution_outcome,
+        error_class,
         &error,
-        FailureSnapshotCaptureTiming::AfterPanicPropagation,
+        capture_timing,
     );
     attach_failure_snapshot(&mut training_runtime, snapshot);
     SpeciesRunArtifact {
@@ -1082,13 +1134,74 @@ where
     B: Backend,
     R: FractalRule<B> + Module<B> + ModuleDisplay + Clone + std::fmt::Debug,
 {
+    build_failure_species_artifact_with_error_class(
+        stage,
+        manifest,
+        phase_timings,
+        training_runtime,
+        diagnostics,
+        execution_outcome,
+        error,
+        classify_failure_snapshot_error(execution_outcome, error),
+        capture_timing,
+        model,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_panic_species_artifact<B, R>(
+    stage: SpeciesRunStage,
+    manifest: &RunManifest,
+    phase_timings: Vec<PhaseTiming>,
+    training_runtime: &TrainingRuntimeArtifact,
+    diagnostics: &FailureDiagnosticsRecorder,
+    execution_outcome: RunExecutionOutcome,
+    error: &FractalError,
+    capture_timing: FailureSnapshotCaptureTiming,
+    model: Option<&FractalModel<B, R>>,
+) -> SpeciesRunArtifact
+where
+    B: Backend,
+    R: FractalRule<B> + Module<B> + ModuleDisplay + Clone + std::fmt::Debug,
+{
+    build_failure_species_artifact_with_error_class(
+        stage,
+        manifest,
+        phase_timings,
+        training_runtime,
+        diagnostics,
+        execution_outcome,
+        error,
+        FailureSnapshotErrorClass::Panic,
+        capture_timing,
+        model,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_failure_species_artifact_with_error_class<B, R>(
+    stage: SpeciesRunStage,
+    manifest: &RunManifest,
+    phase_timings: Vec<PhaseTiming>,
+    training_runtime: &TrainingRuntimeArtifact,
+    diagnostics: &FailureDiagnosticsRecorder,
+    execution_outcome: RunExecutionOutcome,
+    error: &FractalError,
+    error_class: FailureSnapshotErrorClass,
+    capture_timing: FailureSnapshotCaptureTiming,
+    model: Option<&FractalModel<B, R>>,
+) -> SpeciesRunArtifact
+where
+    B: Backend,
+    R: FractalRule<B> + Module<B> + ModuleDisplay + Clone + std::fmt::Debug,
+{
     let mut runtime = training_runtime.clone();
     let snapshot = capture_failure_snapshot(
         stage.clone(),
         manifest,
         training_runtime,
         diagnostics,
-        execution_outcome,
+        error_class,
         error,
         capture_timing,
         model,
@@ -1155,9 +1268,11 @@ where
         .with_pad_tokens(Some(vec![PAD_TOKEN]))
         .init(&device);
     let optimizer = ConfiguredOptimizer::<FractalModel<B, R>, B>::from_spec(&config.optimizer);
-    let execution_plan = match build_training_execution_plan(&batches, &config) {
-        Ok(plan) => plan,
-        Err(error) => {
+    let execution_plan = match std::panic::catch_unwind(AssertUnwindSafe(|| {
+        build_training_execution_plan(&batches, &config)
+    })) {
+        Ok(Ok(plan)) => plan,
+        Ok(Err(error)) => {
             let runtime = TrainingRuntimeArtifact::empty(&config.launch_policy);
             let artifact = build_failure_species_artifact(
                 stage,
@@ -1173,20 +1288,40 @@ where
             record_species_run_artifact(artifact);
             return Err(error);
         }
+        Err(payload) => {
+            let runtime = TrainingRuntimeArtifact::empty(&config.launch_policy);
+            let error = panic_payload_to_error(payload.as_ref());
+            let artifact = build_panic_species_artifact(
+                stage,
+                &manifest,
+                Vec::new(),
+                &runtime,
+                &diagnostics,
+                RunExecutionOutcome::InfraFailure,
+                &error,
+                FailureSnapshotCaptureTiming::BeforePanicPropagation,
+                Some(&model),
+            );
+            record_species_run_artifact(artifact);
+            std::panic::resume_unwind(payload);
+        }
     };
     let checkpoint_contract = CheckpointContractSnapshot::from_manifest(stage.clone(), &manifest);
     let weight_export_paths = resolve_weight_export_paths(&stage, &manifest);
-    let (mut model, mut optimizer, mut launch_runtime, checkpoint_paths) =
-        match maybe_restore_checkpoint(
-            stage.clone(),
-            &manifest,
-            &execution_plan,
-            model,
-            optimizer,
-            &device,
-        ) {
-            Ok(restored) => restored,
-            Err(error) => {
+    let panic_restore_model = model.clone();
+    let (model, mut optimizer, mut launch_runtime, checkpoint_paths) =
+        match std::panic::catch_unwind(AssertUnwindSafe(|| {
+            maybe_restore_checkpoint(
+                stage.clone(),
+                &manifest,
+                &execution_plan,
+                model,
+                optimizer,
+                &device,
+            )
+        })) {
+            Ok(Ok(restored)) => restored,
+            Ok(Err(error)) => {
                 let runtime = TrainingRuntimeArtifact::empty(&config.launch_policy);
                 let artifact = build_failure_species_artifact(
                     stage,
@@ -1197,324 +1332,822 @@ where
                     RunExecutionOutcome::InfraFailure,
                     &error,
                     FailureSnapshotCaptureTiming::NoPanic,
-                    None::<&FractalModel<B, R>>,
+                    Some(&panic_restore_model),
                 );
                 record_species_run_artifact(artifact);
                 return Err(error);
             }
+            Err(payload) => {
+                let runtime = TrainingRuntimeArtifact::empty(&config.launch_policy);
+                let error = panic_payload_to_error(payload.as_ref());
+                let artifact = build_panic_species_artifact(
+                    stage,
+                    &manifest,
+                    Vec::new(),
+                    &runtime,
+                    &diagnostics,
+                    RunExecutionOutcome::InfraFailure,
+                    &error,
+                    FailureSnapshotCaptureTiming::BeforePanicPropagation,
+                    Some(&panic_restore_model),
+                );
+                record_species_run_artifact(artifact);
+                std::panic::resume_unwind(payload);
+            }
         };
+    let mut model = Some(model);
     let mut phase_timings = Vec::with_capacity(4);
-    diagnostics.record(
-        FailureDiagnosticBoundary::ExecutionPlanBuilt,
-        RunPhase::Train,
-        &launch_runtime.artifact(&config.launch_policy),
-        None,
-    );
-    diagnostics.record(
-        FailureDiagnosticBoundary::CheckpointRestoreComplete,
-        RunPhase::Train,
-        &launch_runtime.artifact(&config.launch_policy),
-        None,
-    );
-    diagnostics.record(
-        FailureDiagnosticBoundary::TrainPhaseStarted,
-        RunPhase::Train,
-        &launch_runtime.artifact(&config.launch_policy),
-        None,
-    );
+    let run_result = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<_, FractalError> {
+        diagnostics.record(
+            FailureDiagnosticBoundary::ExecutionPlanBuilt,
+            RunPhase::Train,
+            &launch_runtime.artifact(&config.launch_policy),
+            None,
+        );
+        diagnostics.record(
+            FailureDiagnosticBoundary::CheckpointRestoreComplete,
+            RunPhase::Train,
+            &launch_runtime.artifact(&config.launch_policy),
+            None,
+        );
+        diagnostics.record(
+            FailureDiagnosticBoundary::TrainPhaseStarted,
+            RunPhase::Train,
+            &launch_runtime.artifact(&config.launch_policy),
+            None,
+        );
 
-    log_species_phase_start(
-        species,
-        "train",
-        &[
-            format!("steps={}", launch_runtime.planned_steps),
-            format!("target_tokens={}", launch_runtime.target_train_tokens),
-            format!("train_batch={}", config.train_batch_size),
-        ],
-    );
-    let train_started = Instant::now();
-    for step in launch_runtime.completed_steps..launch_runtime.planned_steps {
+        log_species_phase_start(
+            species,
+            "train",
+            &[
+                format!("steps={}", launch_runtime.planned_steps),
+                format!("target_tokens={}", launch_runtime.target_train_tokens),
+                format!("train_batch={}", config.train_batch_size),
+            ],
+        );
+        let train_started = Instant::now();
+        for step in launch_runtime.completed_steps..launch_runtime.planned_steps {
+            if let Some(deadline) = deadline {
+                if Instant::now() >= deadline {
+                    let elapsed = train_started.elapsed();
+                    phase_timings.push(phase_timing(
+                        RunPhase::Train,
+                        elapsed,
+                        launch_runtime.completed_steps,
+                        launch_runtime.planned_steps,
+                    ));
+                    let error =
+                        FractalError::InvalidState("run timeout exceeded during training".into());
+                    let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                    let artifact = build_failure_species_artifact(
+                        stage.clone(),
+                        &manifest,
+                        phase_timings.clone(),
+                        &training_runtime,
+                        &diagnostics,
+                        timeout_outcome_for_phase(RunPhase::Train),
+                        &error,
+                        FailureSnapshotCaptureTiming::NoPanic,
+                        Some(
+                            model
+                                .as_ref()
+                                .expect("model should be available during active run"),
+                        ),
+                    );
+                    record_species_run_artifact(artifact);
+                    return Err(error);
+                }
+            }
+            let train_batches = batches.train_batches_for_step(step);
+            if train_batches.is_empty() {
+                phase_timings.push(phase_timing(
+                    RunPhase::Train,
+                    train_started.elapsed(),
+                    launch_runtime.completed_steps,
+                    launch_runtime.planned_steps,
+                ));
+                let error = FractalError::InvalidState("training batch cache was empty".into());
+                let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                let artifact = build_failure_species_artifact(
+                    stage.clone(),
+                    &manifest,
+                    phase_timings.clone(),
+                    &training_runtime,
+                    &diagnostics,
+                    RunExecutionOutcome::InfraFailure,
+                    &error,
+                    FailureSnapshotCaptureTiming::NoPanic,
+                    Some(
+                        model
+                            .as_ref()
+                            .expect("model should be available during active run"),
+                    ),
+                );
+                record_species_run_artifact(artifact);
+                return Err(error);
+            }
+            diagnostics.record(
+                FailureDiagnosticBoundary::TrainStepStarted,
+                RunPhase::Train,
+                &launch_runtime.artifact(&config.launch_policy),
+                Some(step),
+            );
+            let batch = &train_batches[step % train_batches.len()];
+            if should_fire_debug_probe(
+                step,
+                config.launch_policy.debug.train_step_log_interval_steps,
+            ) {
+                let mut details = vec![
+                    format!("train_step={step}"),
+                    format!("planned_steps={}", launch_runtime.planned_steps),
+                    format!("tokens_seen={}", launch_runtime.train_tokens_seen),
+                    format!("batch_token_count={}", batch.token_count),
+                    format!("input_shape={:?}", batch.input_ids.dims()),
+                    format!("target_shape={:?}", batch.target_ids.dims()),
+                ];
+                if should_fire_debug_probe(
+                    step,
+                    config.launch_policy.debug.cuda_memory_log_interval_steps,
+                ) {
+                    if let Some(snapshot) = cuda_memory_snapshot() {
+                        details.push(snapshot);
+                    }
+                }
+                log_species_debug_probe(species, &details);
+            }
+            let debug_probe = if config
+                .launch_policy
+                .debug
+                .forward_trace_train_steps
+                .is_some_and(|limit| step < limit)
+            {
+                Some(ForwardDebugProbe {
+                    train_step: Some(step),
+                    position_log_interval: config.launch_policy.debug.forward_position_log_interval,
+                })
+            } else {
+                None
+            };
+            let loss = match model
+                .as_ref()
+                .expect("model should be available during active run")
+                .loss(batch, &criterion, None, true, debug_probe)
+            {
+                Ok(loss) => loss,
+                Err(error) => {
+                    phase_timings.push(phase_timing(
+                        RunPhase::Train,
+                        train_started.elapsed(),
+                        launch_runtime.completed_steps,
+                        launch_runtime.planned_steps,
+                    ));
+                    let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                    let artifact = build_failure_species_artifact(
+                        stage.clone(),
+                        &manifest,
+                        phase_timings.clone(),
+                        &training_runtime,
+                        &diagnostics,
+                        RunExecutionOutcome::InfraFailure,
+                        &error,
+                        FailureSnapshotCaptureTiming::NoPanic,
+                        Some(
+                            model
+                                .as_ref()
+                                .expect("model should be available during active run"),
+                        ),
+                    );
+                    record_species_run_artifact(artifact);
+                    return Err(error);
+                }
+            };
+            let grads = GradientsParams::from_grads(
+                loss.backward(),
+                model
+                    .as_ref()
+                    .expect("model should be available during active run"),
+            );
+            let scheduled_learning_rate = config.optimizer.learning_rate_at_tokens(
+                launch_runtime.train_tokens_seen,
+                launch_runtime.target_train_tokens,
+            );
+            let mut grads = grads;
+            if let Some(max_norm) = config.optimizer.gradient_clip_norm {
+                clip_gradients_global_norm(
+                    model
+                        .as_ref()
+                        .expect("model should be available during active run"),
+                    &mut grads,
+                    max_norm,
+                );
+            }
+            model = Some(
+                optimizer.step(
+                    scheduled_learning_rate,
+                    model
+                        .take()
+                        .expect("model should be available before optimizer step"),
+                    grads,
+                ),
+            );
+            launch_runtime.train_tokens_seen += batch.token_count;
+            launch_runtime.completed_steps = step + 1;
+            let completed_step = launch_runtime.completed_steps;
+            if should_fire_debug_probe(
+                step,
+                config.launch_policy.debug.train_step_log_interval_steps,
+            ) {
+                let mut details = vec![
+                    format!("train_step_done={completed_step}"),
+                    format!("tokens_seen={}", launch_runtime.train_tokens_seen),
+                    format!("scheduled_lr={scheduled_learning_rate:.8}"),
+                ];
+                if should_fire_debug_probe(
+                    step,
+                    config.launch_policy.debug.cuda_memory_log_interval_steps,
+                ) {
+                    if let Some(snapshot) = cuda_memory_snapshot() {
+                        details.push(snapshot);
+                    }
+                }
+                log_species_debug_probe(species, &details);
+            }
+            diagnostics.record(
+                FailureDiagnosticBoundary::TrainStepCompleted,
+                RunPhase::Train,
+                &launch_runtime.artifact(&config.launch_policy),
+                Some(completed_step),
+            );
+
+            let latest_snapshot = match maybe_capture_interim_eval(
+                species,
+                model
+                    .as_ref()
+                    .expect("model should be available during active run"),
+                &criterion,
+                &batches,
+                &config,
+                &mut launch_runtime,
+            ) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    phase_timings.push(phase_timing(
+                        RunPhase::Train,
+                        train_started.elapsed(),
+                        launch_runtime.completed_steps,
+                        launch_runtime.planned_steps,
+                    ));
+                    let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                    let artifact = build_failure_species_artifact(
+                        stage.clone(),
+                        &manifest,
+                        phase_timings.clone(),
+                        &training_runtime,
+                        &diagnostics,
+                        RunExecutionOutcome::InfraFailure,
+                        &error,
+                        FailureSnapshotCaptureTiming::NoPanic,
+                        Some(
+                            model
+                                .as_ref()
+                                .expect("model should be available during active run"),
+                        ),
+                    );
+                    record_species_run_artifact(artifact);
+                    return Err(error);
+                }
+            };
+            if latest_snapshot.is_some() {
+                diagnostics.record(
+                    FailureDiagnosticBoundary::InterimEvaluationComplete,
+                    RunPhase::Train,
+                    &launch_runtime.artifact(&config.launch_policy),
+                    Some(completed_step),
+                );
+            }
+            let latest_perplexity = latest_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.long_context_perplexity);
+            let best_improved = latest_perplexity
+                .map(|perplexity| match launch_runtime.best_perplexity {
+                    Some(best) => perplexity < best,
+                    None => true,
+                })
+                .unwrap_or(false);
+            if let Some(perplexity) = latest_perplexity {
+                if best_improved {
+                    launch_runtime.best_perplexity = Some(perplexity);
+                }
+            }
+            let checkpoint_due = advance_token_milestone(
+                &mut launch_runtime.next_checkpoint_token,
+                config.launch_policy.checkpoint.interval_tokens,
+                launch_runtime.train_tokens_seen,
+            );
+            if checkpoint_due {
+                if let Err(error) = maybe_persist_latest_checkpoint(
+                    &checkpoint_paths,
+                    &mut launch_runtime,
+                    &checkpoint_contract,
+                    &config.launch_policy,
+                    model
+                        .as_ref()
+                        .expect("model should be available during active run"),
+                    &optimizer,
+                    latest_perplexity,
+                ) {
+                    phase_timings.push(phase_timing(
+                        RunPhase::Train,
+                        train_started.elapsed(),
+                        launch_runtime.completed_steps,
+                        launch_runtime.planned_steps,
+                    ));
+                    let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                    let artifact = build_failure_species_artifact(
+                        stage.clone(),
+                        &manifest,
+                        phase_timings.clone(),
+                        &training_runtime,
+                        &diagnostics,
+                        RunExecutionOutcome::InfraFailure,
+                        &error,
+                        FailureSnapshotCaptureTiming::NoPanic,
+                        Some(
+                            model
+                                .as_ref()
+                                .expect("model should be available during active run"),
+                        ),
+                    );
+                    record_species_run_artifact(artifact);
+                    return Err(error);
+                }
+                diagnostics.record(
+                    FailureDiagnosticBoundary::LatestCheckpointPersisted,
+                    RunPhase::Train,
+                    &launch_runtime.artifact(&config.launch_policy),
+                    Some(completed_step),
+                );
+            }
+            if best_improved {
+                if let Err(error) = maybe_persist_best_checkpoint(
+                    &checkpoint_paths,
+                    &mut launch_runtime,
+                    &checkpoint_contract,
+                    &config.launch_policy,
+                    model
+                        .as_ref()
+                        .expect("model should be available during active run"),
+                    &optimizer,
+                    latest_perplexity,
+                ) {
+                    phase_timings.push(phase_timing(
+                        RunPhase::Train,
+                        train_started.elapsed(),
+                        launch_runtime.completed_steps,
+                        launch_runtime.planned_steps,
+                    ));
+                    let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                    let artifact = build_failure_species_artifact(
+                        stage.clone(),
+                        &manifest,
+                        phase_timings.clone(),
+                        &training_runtime,
+                        &diagnostics,
+                        RunExecutionOutcome::InfraFailure,
+                        &error,
+                        FailureSnapshotCaptureTiming::NoPanic,
+                        Some(
+                            model
+                                .as_ref()
+                                .expect("model should be available during active run"),
+                        ),
+                    );
+                    record_species_run_artifact(artifact);
+                    return Err(error);
+                }
+                diagnostics.record(
+                    FailureDiagnosticBoundary::BestCheckpointPersisted,
+                    RunPhase::Train,
+                    &launch_runtime.artifact(&config.launch_policy),
+                    Some(completed_step),
+                );
+                if config
+                    .launch_policy
+                    .weight_export
+                    .phases
+                    .contains(&WeightExportPhase::Best)
+                {
+                    if let Err(error) = apply_weight_export_attempt(
+                        &mut launch_runtime.weight_export,
+                        WeightExportPhase::Best,
+                        export_weight_phase(
+                            stage.clone(),
+                            &manifest,
+                            &config.launch_policy.weight_export,
+                            WeightExportPhase::Best,
+                            model
+                                .as_ref()
+                                .expect("model should be available during active run"),
+                            &weight_export_paths,
+                            config.launch_policy.weight_export.required,
+                        ),
+                    ) {
+                        phase_timings.push(phase_timing(
+                            RunPhase::Train,
+                            train_started.elapsed(),
+                            launch_runtime.completed_steps,
+                            launch_runtime.planned_steps,
+                        ));
+                        let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                        let artifact = build_failure_species_artifact(
+                            stage.clone(),
+                            &manifest,
+                            phase_timings.clone(),
+                            &training_runtime,
+                            &diagnostics,
+                            RunExecutionOutcome::InfraFailure,
+                            &error,
+                            FailureSnapshotCaptureTiming::NoPanic,
+                            Some(
+                                model
+                                    .as_ref()
+                                    .expect("model should be available during active run"),
+                            ),
+                        );
+                        record_species_run_artifact(artifact);
+                        return Err(error);
+                    }
+                    diagnostics.record(
+                        FailureDiagnosticBoundary::BestWeightExportComplete,
+                        RunPhase::Train,
+                        &launch_runtime.artifact(&config.launch_policy),
+                        Some(completed_step),
+                    );
+                }
+            }
+
+            if should_log_training_checkpoint(completed_step, launch_runtime.planned_steps) {
+                log_species_phase_progress(
+                    species,
+                    "train",
+                    completed_step,
+                    launch_runtime.planned_steps,
+                    train_started.elapsed(),
+                );
+            }
+        }
+        let train_elapsed = train_started.elapsed();
+        phase_timings.push(phase_timing(
+            RunPhase::Train,
+            train_elapsed,
+            launch_runtime.completed_steps,
+            launch_runtime.planned_steps,
+        ));
+        log_species_phase_done(species, "train", train_elapsed);
+        diagnostics.record(
+            FailureDiagnosticBoundary::StabilityPhaseStarted,
+            RunPhase::Stability,
+            &launch_runtime.artifact(&config.launch_policy),
+            None,
+        );
+
+        log_species_phase_start(
+            species,
+            "stability",
+            &[format!("depth={}", config.stability_depth)],
+        );
+        let stability_started = Instant::now();
         if let Some(deadline) = deadline {
             if Instant::now() >= deadline {
-                let elapsed = train_started.elapsed();
-                phase_timings.push(phase_timing(
-                    RunPhase::Train,
-                    elapsed,
-                    launch_runtime.completed_steps,
-                    launch_runtime.planned_steps,
-                ));
+                let elapsed = stability_started.elapsed();
+                phase_timings.push(phase_timing(RunPhase::Stability, elapsed, 0, 1));
                 let error =
-                    FractalError::InvalidState("run timeout exceeded during training".into());
+                    FractalError::InvalidState("run timeout exceeded during stability".into());
                 let training_runtime = launch_runtime.artifact(&config.launch_policy);
                 let artifact = build_failure_species_artifact(
-                    stage,
+                    stage.clone(),
                     &manifest,
-                    phase_timings,
+                    phase_timings.clone(),
                     &training_runtime,
                     &diagnostics,
-                    timeout_outcome_for_phase(RunPhase::Train),
+                    timeout_outcome_for_phase(RunPhase::Stability),
                     &error,
                     FailureSnapshotCaptureTiming::NoPanic,
-                    Some(&model),
+                    Some(
+                        model
+                            .as_ref()
+                            .expect("model should be available during active run"),
+                    ),
                 );
                 record_species_run_artifact(artifact);
                 return Err(error);
             }
         }
-        let train_batches = batches.train_batches_for_step(step);
-        if train_batches.is_empty() {
-            phase_timings.push(phase_timing(
-                RunPhase::Train,
-                train_started.elapsed(),
-                launch_runtime.completed_steps,
-                launch_runtime.planned_steps,
-            ));
-            let error = FractalError::InvalidState("training batch cache was empty".into());
-            let training_runtime = launch_runtime.artifact(&config.launch_policy);
-            let artifact = build_failure_species_artifact(
-                stage,
-                &manifest,
-                phase_timings,
-                &training_runtime,
-                &diagnostics,
-                RunExecutionOutcome::InfraFailure,
-                &error,
-                FailureSnapshotCaptureTiming::NoPanic,
-                Some(&model),
-            );
-            record_species_run_artifact(artifact);
-            return Err(error);
-        }
-        diagnostics.record(
-            FailureDiagnosticBoundary::TrainStepStarted,
-            RunPhase::Train,
-            &launch_runtime.artifact(&config.launch_policy),
-            Some(step),
-        );
-        let batch = &train_batches[step % train_batches.len()];
-        if should_fire_debug_probe(
-            step,
-            config.launch_policy.debug.train_step_log_interval_steps,
-        ) {
-            let mut details = vec![
-                format!("train_step={step}"),
-                format!("planned_steps={}", launch_runtime.planned_steps),
-                format!("tokens_seen={}", launch_runtime.train_tokens_seen),
-                format!("batch_token_count={}", batch.token_count),
-                format!("input_shape={:?}", batch.input_ids.dims()),
-                format!("target_shape={:?}", batch.target_ids.dims()),
-            ];
-            if should_fire_debug_probe(
-                step,
-                config.launch_policy.debug.cuda_memory_log_interval_steps,
-            ) {
-                if let Some(snapshot) = cuda_memory_snapshot() {
-                    details.push(snapshot);
-                }
-            }
-            log_species_debug_probe(species, &details);
-        }
-        let debug_probe = if config
-            .launch_policy
-            .debug
-            .forward_trace_train_steps
-            .is_some_and(|limit| step < limit)
-        {
-            Some(ForwardDebugProbe {
-                train_step: Some(step),
-                position_log_interval: config.launch_policy.debug.forward_position_log_interval,
-            })
-        } else {
-            None
-        };
-        let loss = match model.loss(batch, &criterion, None, true, debug_probe) {
-            Ok(loss) => loss,
-            Err(error) => {
+        let stability_batch = match batches.eval_sentence.first() {
+            Some(batch) => batch,
+            None => {
                 phase_timings.push(phase_timing(
-                    RunPhase::Train,
-                    train_started.elapsed(),
-                    launch_runtime.completed_steps,
-                    launch_runtime.planned_steps,
+                    RunPhase::Stability,
+                    stability_started.elapsed(),
+                    0,
+                    1,
                 ));
+                let error = FractalError::InvalidState("stability batch cache was empty".into());
                 let training_runtime = launch_runtime.artifact(&config.launch_policy);
                 let artifact = build_failure_species_artifact(
-                    stage,
+                    stage.clone(),
                     &manifest,
-                    phase_timings,
+                    phase_timings.clone(),
                     &training_runtime,
                     &diagnostics,
                     RunExecutionOutcome::InfraFailure,
                     &error,
                     FailureSnapshotCaptureTiming::NoPanic,
-                    Some(&model),
+                    Some(
+                        model
+                            .as_ref()
+                            .expect("model should be available during active run"),
+                    ),
                 );
                 record_species_run_artifact(artifact);
                 return Err(error);
             }
         };
-        let grads = GradientsParams::from_grads(loss.backward(), &model);
-        let scheduled_learning_rate = config.optimizer.learning_rate_at_tokens(
-            launch_runtime.train_tokens_seen,
-            launch_runtime.target_train_tokens,
-        );
-        let mut grads = grads;
-        if let Some(max_norm) = config.optimizer.gradient_clip_norm {
-            clip_gradients_global_norm(&model, &mut grads, max_norm);
-        }
-        model = optimizer.step(scheduled_learning_rate, model, grads);
-        launch_runtime.train_tokens_seen += batch.token_count;
-        launch_runtime.completed_steps = step + 1;
-        let completed_step = launch_runtime.completed_steps;
-        if should_fire_debug_probe(
-            step,
-            config.launch_policy.debug.train_step_log_interval_steps,
+        let grad_norm_depth_20 = match evaluate_stability_score(
+            model
+                .as_ref()
+                .expect("model should be available during active run"),
+            &criterion,
+            stability_batch,
+            config.stability_depth,
         ) {
-            let mut details = vec![
-                format!("train_step_done={completed_step}"),
-                format!("tokens_seen={}", launch_runtime.train_tokens_seen),
-                format!("scheduled_lr={scheduled_learning_rate:.8}"),
-            ];
-            if should_fire_debug_probe(
-                step,
-                config.launch_policy.debug.cuda_memory_log_interval_steps,
-            ) {
-                if let Some(snapshot) = cuda_memory_snapshot() {
-                    details.push(snapshot);
-                }
+            Ok(score) => score,
+            Err(error) => {
+                phase_timings.push(phase_timing(
+                    RunPhase::Stability,
+                    stability_started.elapsed(),
+                    0,
+                    1,
+                ));
+                let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                let artifact = build_failure_species_artifact(
+                    stage.clone(),
+                    &manifest,
+                    phase_timings.clone(),
+                    &training_runtime,
+                    &diagnostics,
+                    RunExecutionOutcome::InfraFailure,
+                    &error,
+                    FailureSnapshotCaptureTiming::NoPanic,
+                    Some(
+                        model
+                            .as_ref()
+                            .expect("model should be available during active run"),
+                    ),
+                );
+                record_species_run_artifact(artifact);
+                return Err(error);
             }
-            log_species_debug_probe(species, &details);
-        }
+        };
+        let stability_elapsed = stability_started.elapsed();
+        phase_timings.push(phase_timing(RunPhase::Stability, stability_elapsed, 1, 1));
+        log_species_phase_done(species, "stability", stability_elapsed);
         diagnostics.record(
-            FailureDiagnosticBoundary::TrainStepCompleted,
-            RunPhase::Train,
+            FailureDiagnosticBoundary::StabilityPhaseComplete,
+            RunPhase::Stability,
             &launch_runtime.artifact(&config.launch_policy),
-            Some(completed_step),
+            None,
+        );
+        diagnostics.record(
+            FailureDiagnosticBoundary::PerplexityPhaseStarted,
+            RunPhase::Perplexity,
+            &launch_runtime.artifact(&config.launch_policy),
+            None,
         );
 
-        let latest_snapshot = match maybe_capture_interim_eval(
+        log_species_phase_start(
             species,
-            &model,
+            "perplexity",
+            &[format!(
+                "batches={}",
+                config.effective_perplexity_eval_batches()
+            )],
+        );
+        let perplexity_started = Instant::now();
+        if let Some(deadline) = deadline {
+            if Instant::now() >= deadline {
+                let elapsed = perplexity_started.elapsed();
+                phase_timings.push(phase_timing(
+                    RunPhase::Perplexity,
+                    elapsed,
+                    0,
+                    batches.eval_sentence.len(),
+                ));
+                let error =
+                    FractalError::InvalidState("run timeout exceeded during perplexity".into());
+                let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                let artifact = build_failure_species_artifact(
+                    stage.clone(),
+                    &manifest,
+                    phase_timings.clone(),
+                    &training_runtime,
+                    &diagnostics,
+                    timeout_outcome_for_phase(RunPhase::Perplexity),
+                    &error,
+                    FailureSnapshotCaptureTiming::NoPanic,
+                    Some(
+                        model
+                            .as_ref()
+                            .expect("model should be available during active run"),
+                    ),
+                );
+                record_species_run_artifact(artifact);
+                return Err(error);
+            }
+        }
+        let long_context_perplexity = match evaluate_perplexity(
+            model
+                .as_ref()
+                .expect("model should be available during active run"),
             &criterion,
-            &batches,
-            &config,
-            &mut launch_runtime,
+            &batches.eval_sentence,
         ) {
-            Ok(snapshot) => snapshot,
+            Ok(perplexity) => perplexity,
             Err(error) => {
                 phase_timings.push(phase_timing(
-                    RunPhase::Train,
-                    train_started.elapsed(),
-                    launch_runtime.completed_steps,
-                    launch_runtime.planned_steps,
+                    RunPhase::Perplexity,
+                    perplexity_started.elapsed(),
+                    0,
+                    batches.eval_sentence.len(),
                 ));
                 let training_runtime = launch_runtime.artifact(&config.launch_policy);
                 let artifact = build_failure_species_artifact(
-                    stage,
+                    stage.clone(),
                     &manifest,
-                    phase_timings,
+                    phase_timings.clone(),
                     &training_runtime,
                     &diagnostics,
                     RunExecutionOutcome::InfraFailure,
                     &error,
                     FailureSnapshotCaptureTiming::NoPanic,
-                    Some(&model),
+                    Some(
+                        model
+                            .as_ref()
+                            .expect("model should be available during active run"),
+                    ),
                 );
                 record_species_run_artifact(artifact);
                 return Err(error);
             }
         };
-        if latest_snapshot.is_some() {
-            diagnostics.record(
-                FailureDiagnosticBoundary::InterimEvaluationComplete,
-                RunPhase::Train,
-                &launch_runtime.artifact(&config.launch_policy),
-                Some(completed_step),
-            );
-        }
-        let latest_perplexity = latest_snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.long_context_perplexity);
-        let best_improved = latest_perplexity
-            .map(|perplexity| match launch_runtime.best_perplexity {
-                Some(best) => perplexity < best,
-                None => true,
-            })
-            .unwrap_or(false);
-        if let Some(perplexity) = latest_perplexity {
-            if best_improved {
-                launch_runtime.best_perplexity = Some(perplexity);
+        let perplexity_elapsed = perplexity_started.elapsed();
+        phase_timings.push(phase_timing(
+            RunPhase::Perplexity,
+            perplexity_elapsed,
+            batches.eval_sentence.len(),
+            batches.eval_sentence.len(),
+        ));
+        log_species_phase_done(species, "perplexity", perplexity_elapsed);
+        diagnostics.record(
+            FailureDiagnosticBoundary::PerplexityPhaseComplete,
+            RunPhase::Perplexity,
+            &launch_runtime.artifact(&config.launch_policy),
+            None,
+        );
+        diagnostics.record(
+            FailureDiagnosticBoundary::ArcSpeedPhaseStarted,
+            RunPhase::ArcSpeed,
+            &launch_runtime.artifact(&config.launch_policy),
+            None,
+        );
+
+        log_species_phase_start(
+            species,
+            "arc_speed",
+            &[format!("batches={}", config.effective_arc_eval_batches())],
+        );
+        let accuracy_started = Instant::now();
+        if let Some(deadline) = deadline {
+            if Instant::now() >= deadline {
+                let elapsed = accuracy_started.elapsed();
+                phase_timings.push(phase_timing(
+                    RunPhase::ArcSpeed,
+                    elapsed,
+                    0,
+                    batches.eval_arc.len(),
+                ));
+                let error = FractalError::InvalidState(
+                    "run timeout exceeded during ARC/speed evaluation".into(),
+                );
+                let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                let artifact = build_failure_species_artifact(
+                    stage.clone(),
+                    &manifest,
+                    phase_timings.clone(),
+                    &training_runtime,
+                    &diagnostics,
+                    timeout_outcome_for_phase(RunPhase::ArcSpeed),
+                    &error,
+                    FailureSnapshotCaptureTiming::NoPanic,
+                    Some(
+                        model
+                            .as_ref()
+                            .expect("model should be available during active run"),
+                    ),
+                );
+                record_species_run_artifact(artifact);
+                return Err(error);
             }
         }
-        let checkpoint_due = advance_token_milestone(
-            &mut launch_runtime.next_checkpoint_token,
-            config.launch_policy.checkpoint.interval_tokens,
-            launch_runtime.train_tokens_seen,
-        );
-        if checkpoint_due {
-            if let Err(error) = maybe_persist_latest_checkpoint(
-                &checkpoint_paths,
-                &mut launch_runtime,
-                &checkpoint_contract,
-                &config.launch_policy,
-                &model,
-                &optimizer,
-                latest_perplexity,
-            ) {
+        let (arc_accuracy, tokens_per_sec) = match evaluate_accuracy_and_speed(
+            model
+                .as_ref()
+                .expect("model should be available during active run"),
+            &batches.eval_arc,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
                 phase_timings.push(phase_timing(
-                    RunPhase::Train,
-                    train_started.elapsed(),
-                    launch_runtime.completed_steps,
-                    launch_runtime.planned_steps,
+                    RunPhase::ArcSpeed,
+                    accuracy_started.elapsed(),
+                    0,
+                    batches.eval_arc.len(),
                 ));
                 let training_runtime = launch_runtime.artifact(&config.launch_policy);
                 let artifact = build_failure_species_artifact(
-                    stage,
+                    stage.clone(),
                     &manifest,
-                    phase_timings,
+                    phase_timings.clone(),
                     &training_runtime,
                     &diagnostics,
                     RunExecutionOutcome::InfraFailure,
                     &error,
                     FailureSnapshotCaptureTiming::NoPanic,
-                    Some(&model),
+                    Some(
+                        model
+                            .as_ref()
+                            .expect("model should be available during active run"),
+                    ),
                 );
                 record_species_run_artifact(artifact);
                 return Err(error);
             }
-            diagnostics.record(
-                FailureDiagnosticBoundary::LatestCheckpointPersisted,
-                RunPhase::Train,
-                &launch_runtime.artifact(&config.launch_policy),
-                Some(completed_step),
-            );
-        }
-        if best_improved {
+        };
+        let accuracy_elapsed = accuracy_started.elapsed();
+        phase_timings.push(phase_timing(
+            RunPhase::ArcSpeed,
+            accuracy_elapsed,
+            batches.eval_arc.len(),
+            batches.eval_arc.len(),
+        ));
+        log_species_phase_done(species, "arc_speed", accuracy_elapsed);
+        diagnostics.record(
+            FailureDiagnosticBoundary::ArcSpeedPhaseComplete,
+            RunPhase::ArcSpeed,
+            &launch_runtime.artifact(&config.launch_policy),
+            None,
+        );
+
+        let metrics = SpeciesRawMetrics {
+            species,
+            grad_norm_depth_20,
+            long_context_perplexity,
+            arc_accuracy,
+            tokens_per_sec,
+        };
+        let final_best_improved = match launch_runtime.best_perplexity {
+            Some(best) => long_context_perplexity < best,
+            None => true,
+        };
+        if final_best_improved {
+            launch_runtime.best_perplexity = Some(long_context_perplexity);
             if let Err(error) = maybe_persist_best_checkpoint(
                 &checkpoint_paths,
                 &mut launch_runtime,
                 &checkpoint_contract,
                 &config.launch_policy,
-                &model,
+                model
+                    .as_ref()
+                    .expect("model should be available during active run"),
                 &optimizer,
-                latest_perplexity,
+                Some(long_context_perplexity),
             ) {
-                phase_timings.push(phase_timing(
-                    RunPhase::Train,
-                    train_started.elapsed(),
-                    launch_runtime.completed_steps,
-                    launch_runtime.planned_steps,
-                ));
                 let training_runtime = launch_runtime.artifact(&config.launch_policy);
                 let artifact = build_failure_species_artifact(
-                    stage,
+                    stage.clone(),
                     &manifest,
-                    phase_timings,
+                    phase_timings.clone(),
                     &training_runtime,
                     &diagnostics,
                     RunExecutionOutcome::InfraFailure,
                     &error,
                     FailureSnapshotCaptureTiming::NoPanic,
-                    Some(&model),
+                    Some(
+                        model
+                            .as_ref()
+                            .expect("model should be available during active run"),
+                    ),
                 );
                 record_species_run_artifact(artifact);
                 return Err(error);
@@ -1523,7 +2156,7 @@ where
                 FailureDiagnosticBoundary::BestCheckpointPersisted,
                 RunPhase::Train,
                 &launch_runtime.artifact(&config.launch_policy),
-                Some(completed_step),
+                Some(launch_runtime.completed_steps),
             );
             if config
                 .launch_policy
@@ -1539,28 +2172,28 @@ where
                         &manifest,
                         &config.launch_policy.weight_export,
                         WeightExportPhase::Best,
-                        &model,
+                        model
+                            .as_ref()
+                            .expect("model should be available during active run"),
                         &weight_export_paths,
                         config.launch_policy.weight_export.required,
                     ),
                 ) {
-                    phase_timings.push(phase_timing(
-                        RunPhase::Train,
-                        train_started.elapsed(),
-                        launch_runtime.completed_steps,
-                        launch_runtime.planned_steps,
-                    ));
                     let training_runtime = launch_runtime.artifact(&config.launch_policy);
                     let artifact = build_failure_species_artifact(
-                        stage,
+                        stage.clone(),
                         &manifest,
-                        phase_timings,
+                        phase_timings.clone(),
                         &training_runtime,
                         &diagnostics,
                         RunExecutionOutcome::InfraFailure,
                         &error,
                         FailureSnapshotCaptureTiming::NoPanic,
-                        Some(&model),
+                        Some(
+                            model
+                                .as_ref()
+                                .expect("model should be available during active run"),
+                        ),
                     );
                     record_species_run_artifact(artifact);
                     return Err(error);
@@ -1569,328 +2202,42 @@ where
                     FailureDiagnosticBoundary::BestWeightExportComplete,
                     RunPhase::Train,
                     &launch_runtime.artifact(&config.launch_policy),
-                    Some(completed_step),
+                    Some(launch_runtime.completed_steps),
                 );
             }
         }
-
-        if should_log_training_checkpoint(completed_step, launch_runtime.planned_steps) {
-            log_species_phase_progress(
-                species,
-                "train",
-                completed_step,
-                launch_runtime.planned_steps,
-                train_started.elapsed(),
-            );
-        }
-    }
-    let train_elapsed = train_started.elapsed();
-    phase_timings.push(phase_timing(
-        RunPhase::Train,
-        train_elapsed,
-        launch_runtime.completed_steps,
-        launch_runtime.planned_steps,
-    ));
-    log_species_phase_done(species, "train", train_elapsed);
-    diagnostics.record(
-        FailureDiagnosticBoundary::StabilityPhaseStarted,
-        RunPhase::Stability,
-        &launch_runtime.artifact(&config.launch_policy),
-        None,
-    );
-
-    log_species_phase_start(
-        species,
-        "stability",
-        &[format!("depth={}", config.stability_depth)],
-    );
-    let stability_started = Instant::now();
-    if let Some(deadline) = deadline {
-        if Instant::now() >= deadline {
-            let elapsed = stability_started.elapsed();
-            phase_timings.push(phase_timing(RunPhase::Stability, elapsed, 0, 1));
-            let error = FractalError::InvalidState("run timeout exceeded during stability".into());
-            let training_runtime = launch_runtime.artifact(&config.launch_policy);
-            let artifact = build_failure_species_artifact(
-                stage,
-                &manifest,
-                phase_timings,
-                &training_runtime,
-                &diagnostics,
-                timeout_outcome_for_phase(RunPhase::Stability),
-                &error,
-                FailureSnapshotCaptureTiming::NoPanic,
-                Some(&model),
-            );
-            record_species_run_artifact(artifact);
-            return Err(error);
-        }
-    }
-    let stability_batch = match batches.eval_sentence.first() {
-        Some(batch) => batch,
-        None => {
-            phase_timings.push(phase_timing(
-                RunPhase::Stability,
-                stability_started.elapsed(),
-                0,
-                1,
-            ));
-            let error = FractalError::InvalidState("stability batch cache was empty".into());
-            let training_runtime = launch_runtime.artifact(&config.launch_policy);
-            let artifact = build_failure_species_artifact(
-                stage,
-                &manifest,
-                phase_timings,
-                &training_runtime,
-                &diagnostics,
-                RunExecutionOutcome::InfraFailure,
-                &error,
-                FailureSnapshotCaptureTiming::NoPanic,
-                Some(&model),
-            );
-            record_species_run_artifact(artifact);
-            return Err(error);
-        }
-    };
-    let grad_norm_depth_20 =
-        match evaluate_stability_score(&model, &criterion, stability_batch, config.stability_depth)
-        {
-            Ok(score) => score,
-            Err(error) => {
-                phase_timings.push(phase_timing(
-                    RunPhase::Stability,
-                    stability_started.elapsed(),
-                    0,
-                    1,
-                ));
-                let training_runtime = launch_runtime.artifact(&config.launch_policy);
-                let artifact = build_failure_species_artifact(
-                    stage,
-                    &manifest,
-                    phase_timings,
-                    &training_runtime,
-                    &diagnostics,
-                    RunExecutionOutcome::InfraFailure,
-                    &error,
-                    FailureSnapshotCaptureTiming::NoPanic,
-                    Some(&model),
-                );
-                record_species_run_artifact(artifact);
-                return Err(error);
-            }
-        };
-    let stability_elapsed = stability_started.elapsed();
-    phase_timings.push(phase_timing(RunPhase::Stability, stability_elapsed, 1, 1));
-    log_species_phase_done(species, "stability", stability_elapsed);
-    diagnostics.record(
-        FailureDiagnosticBoundary::StabilityPhaseComplete,
-        RunPhase::Stability,
-        &launch_runtime.artifact(&config.launch_policy),
-        None,
-    );
-    diagnostics.record(
-        FailureDiagnosticBoundary::PerplexityPhaseStarted,
-        RunPhase::Perplexity,
-        &launch_runtime.artifact(&config.launch_policy),
-        None,
-    );
-
-    log_species_phase_start(
-        species,
-        "perplexity",
-        &[format!(
-            "batches={}",
-            config.effective_perplexity_eval_batches()
-        )],
-    );
-    let perplexity_started = Instant::now();
-    if let Some(deadline) = deadline {
-        if Instant::now() >= deadline {
-            let elapsed = perplexity_started.elapsed();
-            phase_timings.push(phase_timing(
-                RunPhase::Perplexity,
-                elapsed,
-                0,
-                batches.eval_sentence.len(),
-            ));
-            let error = FractalError::InvalidState("run timeout exceeded during perplexity".into());
-            let training_runtime = launch_runtime.artifact(&config.launch_policy);
-            let artifact = build_failure_species_artifact(
-                stage,
-                &manifest,
-                phase_timings,
-                &training_runtime,
-                &diagnostics,
-                timeout_outcome_for_phase(RunPhase::Perplexity),
-                &error,
-                FailureSnapshotCaptureTiming::NoPanic,
-                Some(&model),
-            );
-            record_species_run_artifact(artifact);
-            return Err(error);
-        }
-    }
-    let long_context_perplexity =
-        match evaluate_perplexity(&model, &criterion, &batches.eval_sentence) {
-            Ok(perplexity) => perplexity,
-            Err(error) => {
-                phase_timings.push(phase_timing(
-                    RunPhase::Perplexity,
-                    perplexity_started.elapsed(),
-                    0,
-                    batches.eval_sentence.len(),
-                ));
-                let training_runtime = launch_runtime.artifact(&config.launch_policy);
-                let artifact = build_failure_species_artifact(
-                    stage,
-                    &manifest,
-                    phase_timings,
-                    &training_runtime,
-                    &diagnostics,
-                    RunExecutionOutcome::InfraFailure,
-                    &error,
-                    FailureSnapshotCaptureTiming::NoPanic,
-                    Some(&model),
-                );
-                record_species_run_artifact(artifact);
-                return Err(error);
-            }
-        };
-    let perplexity_elapsed = perplexity_started.elapsed();
-    phase_timings.push(phase_timing(
-        RunPhase::Perplexity,
-        perplexity_elapsed,
-        batches.eval_sentence.len(),
-        batches.eval_sentence.len(),
-    ));
-    log_species_phase_done(species, "perplexity", perplexity_elapsed);
-    diagnostics.record(
-        FailureDiagnosticBoundary::PerplexityPhaseComplete,
-        RunPhase::Perplexity,
-        &launch_runtime.artifact(&config.launch_policy),
-        None,
-    );
-    diagnostics.record(
-        FailureDiagnosticBoundary::ArcSpeedPhaseStarted,
-        RunPhase::ArcSpeed,
-        &launch_runtime.artifact(&config.launch_policy),
-        None,
-    );
-
-    log_species_phase_start(
-        species,
-        "arc_speed",
-        &[format!("batches={}", config.effective_arc_eval_batches())],
-    );
-    let accuracy_started = Instant::now();
-    if let Some(deadline) = deadline {
-        if Instant::now() >= deadline {
-            let elapsed = accuracy_started.elapsed();
-            phase_timings.push(phase_timing(
-                RunPhase::ArcSpeed,
-                elapsed,
-                0,
-                batches.eval_arc.len(),
-            ));
-            let error = FractalError::InvalidState(
-                "run timeout exceeded during ARC/speed evaluation".into(),
-            );
-            let training_runtime = launch_runtime.artifact(&config.launch_policy);
-            let artifact = build_failure_species_artifact(
-                stage,
-                &manifest,
-                phase_timings,
-                &training_runtime,
-                &diagnostics,
-                timeout_outcome_for_phase(RunPhase::ArcSpeed),
-                &error,
-                FailureSnapshotCaptureTiming::NoPanic,
-                Some(&model),
-            );
-            record_species_run_artifact(artifact);
-            return Err(error);
-        }
-    }
-    let (arc_accuracy, tokens_per_sec) =
-        match evaluate_accuracy_and_speed(&model, &batches.eval_arc) {
-            Ok(result) => result,
-            Err(error) => {
-                phase_timings.push(phase_timing(
-                    RunPhase::ArcSpeed,
-                    accuracy_started.elapsed(),
-                    0,
-                    batches.eval_arc.len(),
-                ));
-                let training_runtime = launch_runtime.artifact(&config.launch_policy);
-                let artifact = build_failure_species_artifact(
-                    stage,
-                    &manifest,
-                    phase_timings,
-                    &training_runtime,
-                    &diagnostics,
-                    RunExecutionOutcome::InfraFailure,
-                    &error,
-                    FailureSnapshotCaptureTiming::NoPanic,
-                    Some(&model),
-                );
-                record_species_run_artifact(artifact);
-                return Err(error);
-            }
-        };
-    let accuracy_elapsed = accuracy_started.elapsed();
-    phase_timings.push(phase_timing(
-        RunPhase::ArcSpeed,
-        accuracy_elapsed,
-        batches.eval_arc.len(),
-        batches.eval_arc.len(),
-    ));
-    log_species_phase_done(species, "arc_speed", accuracy_elapsed);
-    diagnostics.record(
-        FailureDiagnosticBoundary::ArcSpeedPhaseComplete,
-        RunPhase::ArcSpeed,
-        &launch_runtime.artifact(&config.launch_policy),
-        None,
-    );
-
-    let metrics = SpeciesRawMetrics {
-        species,
-        grad_norm_depth_20,
-        long_context_perplexity,
-        arc_accuracy,
-        tokens_per_sec,
-    };
-    let final_best_improved = match launch_runtime.best_perplexity {
-        Some(best) => long_context_perplexity < best,
-        None => true,
-    };
-    if final_best_improved {
-        launch_runtime.best_perplexity = Some(long_context_perplexity);
-        if let Err(error) = maybe_persist_best_checkpoint(
+        if let Err(error) = maybe_persist_final_checkpoint(
             &checkpoint_paths,
             &mut launch_runtime,
             &checkpoint_contract,
             &config.launch_policy,
-            &model,
+            model
+                .as_ref()
+                .expect("model should be available during active run"),
             &optimizer,
             Some(long_context_perplexity),
         ) {
             let training_runtime = launch_runtime.artifact(&config.launch_policy);
             let artifact = build_failure_species_artifact(
-                stage,
+                stage.clone(),
                 &manifest,
-                phase_timings,
+                phase_timings.clone(),
                 &training_runtime,
                 &diagnostics,
                 RunExecutionOutcome::InfraFailure,
                 &error,
                 FailureSnapshotCaptureTiming::NoPanic,
-                Some(&model),
+                Some(
+                    model
+                        .as_ref()
+                        .expect("model should be available during active run"),
+                ),
             );
             record_species_run_artifact(artifact);
             return Err(error);
         }
         diagnostics.record(
-            FailureDiagnosticBoundary::BestCheckpointPersisted,
+            FailureDiagnosticBoundary::FinalCheckpointPersisted,
             RunPhase::Train,
             &launch_runtime.artifact(&config.launch_policy),
             Some(launch_runtime.completed_steps),
@@ -1899,95 +2246,76 @@ where
             .launch_policy
             .weight_export
             .phases
-            .contains(&WeightExportPhase::Best)
+            .contains(&WeightExportPhase::Final)
         {
             if let Err(error) = apply_weight_export_attempt(
                 &mut launch_runtime.weight_export,
-                WeightExportPhase::Best,
+                WeightExportPhase::Final,
                 export_weight_phase(
                     stage.clone(),
                     &manifest,
                     &config.launch_policy.weight_export,
-                    WeightExportPhase::Best,
-                    &model,
+                    WeightExportPhase::Final,
+                    model
+                        .as_ref()
+                        .expect("model should be available during active run"),
                     &weight_export_paths,
                     config.launch_policy.weight_export.required,
                 ),
             ) {
                 let training_runtime = launch_runtime.artifact(&config.launch_policy);
                 let artifact = build_failure_species_artifact(
-                    stage,
+                    stage.clone(),
                     &manifest,
-                    phase_timings,
+                    phase_timings.clone(),
                     &training_runtime,
                     &diagnostics,
                     RunExecutionOutcome::InfraFailure,
                     &error,
                     FailureSnapshotCaptureTiming::NoPanic,
-                    Some(&model),
+                    Some(
+                        model
+                            .as_ref()
+                            .expect("model should be available during active run"),
+                    ),
                 );
                 record_species_run_artifact(artifact);
                 return Err(error);
             }
             diagnostics.record(
-                FailureDiagnosticBoundary::BestWeightExportComplete,
+                FailureDiagnosticBoundary::FinalWeightExportComplete,
                 RunPhase::Train,
                 &launch_runtime.artifact(&config.launch_policy),
                 Some(launch_runtime.completed_steps),
             );
         }
-    }
-    if let Err(error) = maybe_persist_final_checkpoint(
-        &checkpoint_paths,
-        &mut launch_runtime,
-        &checkpoint_contract,
-        &config.launch_policy,
-        &model,
-        &optimizer,
-        Some(long_context_perplexity),
-    ) {
-        let training_runtime = launch_runtime.artifact(&config.launch_policy);
-        let artifact = build_failure_species_artifact(
-            stage,
-            &manifest,
-            phase_timings,
-            &training_runtime,
-            &diagnostics,
-            RunExecutionOutcome::InfraFailure,
-            &error,
-            FailureSnapshotCaptureTiming::NoPanic,
-            Some(&model),
+        let quality_outcome = classify_quality_outcome(&metrics);
+        diagnostics.record(
+            FailureDiagnosticBoundary::RunComplete,
+            RunPhase::ArcSpeed,
+            &launch_runtime.artifact(&config.launch_policy),
+            None,
         );
+        let artifact = SpeciesRunArtifact {
+            stage: stage.clone(),
+            manifest: manifest.clone(),
+            phase_timings: phase_timings.clone(),
+            training_runtime: launch_runtime.artifact(&config.launch_policy),
+            execution_outcome: RunExecutionOutcome::Success,
+            quality_outcome,
+            error: None,
+            metrics: Some(metrics.clone()),
+        };
         record_species_run_artifact(artifact);
-        return Err(error);
-    }
-    diagnostics.record(
-        FailureDiagnosticBoundary::FinalCheckpointPersisted,
-        RunPhase::Train,
-        &launch_runtime.artifact(&config.launch_policy),
-        Some(launch_runtime.completed_steps),
-    );
-    if config
-        .launch_policy
-        .weight_export
-        .phases
-        .contains(&WeightExportPhase::Final)
-    {
-        if let Err(error) = apply_weight_export_attempt(
-            &mut launch_runtime.weight_export,
-            WeightExportPhase::Final,
-            export_weight_phase(
-                stage.clone(),
-                &manifest,
-                &config.launch_policy.weight_export,
-                WeightExportPhase::Final,
-                &model,
-                &weight_export_paths,
-                config.launch_policy.weight_export.required,
-            ),
-        ) {
+
+        Ok(metrics)
+    }));
+    match run_result {
+        Ok(result) => result,
+        Err(payload) => {
+            let error = panic_payload_to_error(payload.as_ref());
             let training_runtime = launch_runtime.artifact(&config.launch_policy);
-            let artifact = build_failure_species_artifact(
+            let artifact = build_panic_species_artifact(
                 stage,
                 &manifest,
                 phase_timings,
@@ -1995,39 +2323,17 @@ where
                 &diagnostics,
                 RunExecutionOutcome::InfraFailure,
                 &error,
-                FailureSnapshotCaptureTiming::NoPanic,
-                Some(&model),
+                FailureSnapshotCaptureTiming::BeforePanicPropagation,
+                Some(
+                    model
+                        .as_ref()
+                        .expect("model should be available during active run"),
+                ),
             );
             record_species_run_artifact(artifact);
-            return Err(error);
+            std::panic::resume_unwind(payload);
         }
-        diagnostics.record(
-            FailureDiagnosticBoundary::FinalWeightExportComplete,
-            RunPhase::Train,
-            &launch_runtime.artifact(&config.launch_policy),
-            Some(launch_runtime.completed_steps),
-        );
     }
-    let quality_outcome = classify_quality_outcome(&metrics);
-    diagnostics.record(
-        FailureDiagnosticBoundary::RunComplete,
-        RunPhase::ArcSpeed,
-        &launch_runtime.artifact(&config.launch_policy),
-        None,
-    );
-    let artifact = SpeciesRunArtifact {
-        stage,
-        manifest,
-        phase_timings,
-        training_runtime: launch_runtime.artifact(&config.launch_policy),
-        execution_outcome: RunExecutionOutcome::Success,
-        quality_outcome,
-        error: None,
-        metrics: Some(metrics.clone()),
-    };
-    record_species_run_artifact(artifact);
-
-    Ok(metrics)
 }
 
 fn prepare_batches_for_run<B: AutodiffBackend>(
@@ -2960,6 +3266,7 @@ fn persist_failure_snapshot_payload<T: Serialize>(
 ) {
     let result = write_pretty_json(path, value).map(|_| FailureSnapshotArtifact {
         kind,
+        format: FailureSnapshotArtifactFormat::Json,
         path: path.display().to_string(),
     });
     match result {
@@ -2974,6 +3281,7 @@ fn finalize_failure_snapshot_metadata(
 ) {
     state.record_success(FailureSnapshotArtifact {
         kind: FailureSnapshotArtifactKind::Metadata,
+        format: FailureSnapshotArtifactFormat::Json,
         path: metadata_path.display().to_string(),
     });
     if let Err(error) = write_pretty_json(metadata_path, state) {
@@ -2987,8 +3295,8 @@ fn capture_failure_snapshot<B, R>(
     manifest: &RunManifest,
     training_runtime: &TrainingRuntimeArtifact,
     diagnostics: &FailureDiagnosticsRecorder,
-    execution_outcome: RunExecutionOutcome,
-    error: &FractalError,
+    error_class: FailureSnapshotErrorClass,
+    _error: &FractalError,
     capture_timing: FailureSnapshotCaptureTiming,
     model: Option<&FractalModel<B, R>>,
 ) -> FailureSnapshotRuntimeState
@@ -3002,7 +3310,6 @@ where
         return state;
     }
 
-    let error_class = classify_failure_snapshot_error(execution_outcome, error);
     let contract = match build_failure_snapshot_contract(
         stage.clone(),
         manifest,
@@ -3074,6 +3381,7 @@ where
                         {
                             Ok(_) => state.record_success(FailureSnapshotArtifact {
                                 kind: FailureSnapshotArtifactKind::ModelWeights,
+                                format: FailureSnapshotArtifactFormat::BurnBin,
                                 path: model_weights_path.display().to_string(),
                             }),
                             Err(error) => state.record_failure(
@@ -3100,8 +3408,8 @@ fn capture_failure_snapshot_without_model(
     manifest: &RunManifest,
     training_runtime: &TrainingRuntimeArtifact,
     diagnostics: &FailureDiagnosticsRecorder,
-    execution_outcome: RunExecutionOutcome,
-    error: &FractalError,
+    error_class: FailureSnapshotErrorClass,
+    _error: &FractalError,
     capture_timing: FailureSnapshotCaptureTiming,
 ) -> FailureSnapshotRuntimeState {
     let policy = manifest.config.launch_policy.failure_snapshot.clone();
@@ -3110,7 +3418,6 @@ fn capture_failure_snapshot_without_model(
         return state;
     }
 
-    let error_class = classify_failure_snapshot_error(execution_outcome, error);
     let contract = match build_failure_snapshot_contract(
         stage.clone(),
         manifest,

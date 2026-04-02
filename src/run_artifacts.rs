@@ -563,8 +563,27 @@ fn failure_snapshot_contract_json(spec: &crate::FailureSnapshotContract) -> Valu
 fn failure_snapshot_artifact_json(spec: &crate::FailureSnapshotArtifact) -> Value {
     json!({
         "kind": spec.kind.as_str(),
+        "format": failure_snapshot_artifact_format_json(&spec.format),
         "path": spec.path,
     })
+}
+
+fn failure_snapshot_artifact_format_json(spec: &crate::FailureSnapshotArtifactFormat) -> Value {
+    match spec {
+        crate::FailureSnapshotArtifactFormat::Json => json!({
+            "kind": "json",
+        }),
+        crate::FailureSnapshotArtifactFormat::BurnBin => json!({
+            "kind": "burn-bin",
+        }),
+        crate::FailureSnapshotArtifactFormat::SafeTensors => json!({
+            "kind": "safe-tensors",
+        }),
+        crate::FailureSnapshotArtifactFormat::Quantized { precision } => json!({
+            "kind": "quantized",
+            "precision": precision.as_str(),
+        }),
+    }
 }
 
 fn failure_snapshot_attempt_json(spec: &crate::FailureSnapshotAttempt) -> Value {
