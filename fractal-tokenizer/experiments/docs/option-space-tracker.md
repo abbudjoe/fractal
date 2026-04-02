@@ -8,6 +8,32 @@ floor. The hard gates are good, typed lexical fallback fixed byte collapse, and
 the frontier/emission line has been exhausted. What remains is a missing
 architectural layer for reusable held-out structure.
 
+## Current Checkpoint
+
+Latest completed checkpoint on `codex/shared-overlay-dictionary-impl`:
+
+- offline overlay benchmark is now the primary scorecard
+  - real hybrid held-out result: `verdict=strong`
+  - `overall_batch_transport_ratio = 1.43`
+  - `overall_batch_definition_overhead_rate = 0.07`
+  - exactness remains perfect
+- first runtime-facing seam now exists
+  - typed stateless `OverlayServerRequest`
+  - exact server-side rematerialization through `OverlayEnvelopeServer`
+  - local Ollama embedding and generation smokes both pass
+- key architectural lesson from the runtime pass:
+  - naive JSON payload sizing was too heavy
+  - compact typed payload sizing fixed the obvious dead-weight issue
+
+Read:
+
+- the overlay line now has both:
+  - a credible offline benchmark for its actual niche
+  - a working runtime boundary seam that preserves exactness
+- the next question is no longer whether the overlay works at all
+- the next question is how much real boundary-level efficiency we can retain
+  once this seam is exercised more systematically
+
 ## Active Pivot
 
 The active post-postmortem pivot is now:
