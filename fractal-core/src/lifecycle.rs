@@ -1278,8 +1278,712 @@ impl WeightExportArtifact {
 
     pub fn validate_against_config(&self, config: &TournamentConfig) -> Result<(), FractalError> {
         self.validate()?;
+        self.phase.validate_supported()?;
         self.format.validate_supported()?;
         self.contract.validate_against_config(config)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArtifactCompleteness {
+    Disabled,
+    Complete,
+    Partial,
+}
+
+impl ArtifactCompleteness {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum WeightExportAttemptOutcome {
+    Succeeded { artifact: Box<WeightExportArtifact> },
+    Failed { error: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeightExportAttempt {
+    pub phase: WeightExportPhase,
+    pub outcome: WeightExportAttemptOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeightExportRuntimeState {
+    pub policy: WeightExportPolicy,
+    pub completeness: ArtifactCompleteness,
+    pub attempts: Vec<WeightExportAttempt>,
+    pub missing_required_phases: Vec<WeightExportPhase>,
+}
+
+impl Default for WeightExportRuntimeState {
+    fn default() -> Self {
+        Self::from_policy(WeightExportPolicy::disabled())
+    }
+}
+
+impl WeightExportRuntimeState {
+    pub fn from_policy(policy: WeightExportPolicy) -> Self {
+        let mut state = Self {
+            policy,
+            completeness: ArtifactCompleteness::Disabled,
+            attempts: Vec::new(),
+            missing_required_phases: Vec::new(),
+        };
+        state.refresh();
+        state
+    }
+
+    pub fn completed_artifacts(&self) -> impl Iterator<Item = &WeightExportArtifact> {
+        self.attempts
+            .iter()
+            .filter_map(|attempt| match &attempt.outcome {
+                WeightExportAttemptOutcome::Succeeded { artifact } => Some(artifact.as_ref()),
+                WeightExportAttemptOutcome::Failed { .. } => None,
+            })
+    }
+
+    pub fn record_success(&mut self, artifact: WeightExportArtifact) {
+        let phase = artifact.phase;
+        let attempt = WeightExportAttempt {
+            phase,
+            outcome: WeightExportAttemptOutcome::Succeeded {
+                artifact: Box::new(artifact),
+            },
+        };
+        self.upsert_attempt(attempt);
+        self.refresh();
+    }
+
+    pub fn record_failure(&mut self, phase: WeightExportPhase, error: impl Into<String>) {
+        let attempt = WeightExportAttempt {
+            phase,
+            outcome: WeightExportAttemptOutcome::Failed {
+                error: error.into(),
+            },
+        };
+        self.upsert_attempt(attempt);
+        self.refresh();
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        self.policy.validate()?;
+        let mut seen = HashSet::new();
+        for attempt in &self.attempts {
+            if !self.policy.phases.contains(&attempt.phase) {
+                return Err(FractalError::InvalidConfig(format!(
+                    "weight export attempt {} was not requested by policy",
+                    attempt.phase.as_str()
+                )));
+            }
+            if !seen.insert(attempt.phase) {
+                return Err(FractalError::InvalidConfig(format!(
+                    "weight export attempt {} is duplicated",
+                    attempt.phase.as_str()
+                )));
+            }
+            match &attempt.outcome {
+                WeightExportAttemptOutcome::Succeeded { artifact } => {
+                    if artifact.phase != attempt.phase {
+                        return Err(FractalError::InvalidConfig(
+                            "weight export attempt phase must match the captured artifact".into(),
+                        ));
+                    }
+                    if artifact.required != self.policy.required {
+                        return Err(FractalError::InvalidConfig(
+                            "weight export artifact required flag must match the policy".into(),
+                        ));
+                    }
+                    artifact.validate()?;
+                }
+                WeightExportAttemptOutcome::Failed { error } => {
+                    if error.trim().is_empty() {
+                        return Err(FractalError::InvalidConfig(
+                            "weight export failure must record a non-empty error".into(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        let mut expected = self.clone();
+        expected.refresh();
+        if self.completeness != expected.completeness {
+            return Err(FractalError::InvalidConfig(
+                "weight export completeness must match the recorded attempts".into(),
+            ));
+        }
+        if self.missing_required_phases != expected.missing_required_phases {
+            return Err(FractalError::InvalidConfig(
+                "weight export missing_required_phases must match the recorded attempts".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn upsert_attempt(&mut self, attempt: WeightExportAttempt) {
+        if let Some(slot) = self
+            .attempts
+            .iter_mut()
+            .find(|existing| existing.phase == attempt.phase)
+        {
+            *slot = attempt;
+        } else {
+            self.attempts.push(attempt);
+        }
+    }
+
+    fn refresh(&mut self) {
+        self.completeness = if !self.policy.is_enabled() {
+            ArtifactCompleteness::Disabled
+        } else if self
+            .policy
+            .phases
+            .iter()
+            .all(|phase| self.attempt_succeeded(*phase))
+        {
+            ArtifactCompleteness::Complete
+        } else {
+            ArtifactCompleteness::Partial
+        };
+
+        self.missing_required_phases = if !self.policy.required {
+            Vec::new()
+        } else {
+            self.policy
+                .phases
+                .iter()
+                .copied()
+                .filter(|phase| !self.attempt_succeeded(*phase))
+                .collect()
+        };
+    }
+
+    fn attempt_succeeded(&self, phase: WeightExportPhase) -> bool {
+        self.attempts.iter().any(|attempt| {
+            attempt.phase == phase
+                && matches!(
+                    attempt.outcome,
+                    WeightExportAttemptOutcome::Succeeded { .. }
+                )
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FailureSnapshotArtifactKind {
+    Metadata,
+    RuntimeState,
+    DiagnosticsTail,
+    ModelWeights,
+}
+
+impl FailureSnapshotArtifactKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Metadata => "metadata",
+            Self::RuntimeState => "runtime-state",
+            Self::DiagnosticsTail => "diagnostics-tail",
+            Self::ModelWeights => "model-weights",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SnapshotCompleteness {
+    Disabled,
+    NotCaptured,
+    Complete,
+    Partial,
+}
+
+impl SnapshotCompleteness {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::NotCaptured => "not-captured",
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FailureSnapshotErrorClass {
+    InvalidConfig,
+    InvalidState,
+    Shape,
+    TrainTimeout,
+    EvalConstrained,
+    Panic,
+}
+
+impl FailureSnapshotErrorClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidConfig => "invalid-config",
+            Self::InvalidState => "invalid-state",
+            Self::Shape => "shape",
+            Self::TrainTimeout => "train-timeout",
+            Self::EvalConstrained => "eval-constrained",
+            Self::Panic => "panic",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FailureSnapshotCaptureTiming {
+    NoPanic,
+    BeforePanicPropagation,
+    AfterPanicPropagation,
+}
+
+impl FailureSnapshotCaptureTiming {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoPanic => "no-panic",
+            Self::BeforePanicPropagation => "before-panic-propagation",
+            Self::AfterPanicPropagation => "after-panic-propagation",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FailureDiagnosticBoundary {
+    ExecutionPlanBuilt,
+    CheckpointRestoreComplete,
+    TrainPhaseStarted,
+    TrainStepStarted,
+    TrainStepCompleted,
+    InterimEvaluationComplete,
+    LatestCheckpointPersisted,
+    BestCheckpointPersisted,
+    FinalCheckpointPersisted,
+    BestWeightExportComplete,
+    FinalWeightExportComplete,
+    StabilityPhaseStarted,
+    StabilityPhaseComplete,
+    PerplexityPhaseStarted,
+    PerplexityPhaseComplete,
+    ArcSpeedPhaseStarted,
+    ArcSpeedPhaseComplete,
+    RunComplete,
+}
+
+impl FailureDiagnosticBoundary {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExecutionPlanBuilt => "execution-plan-built",
+            Self::CheckpointRestoreComplete => "checkpoint-restore-complete",
+            Self::TrainPhaseStarted => "train-phase-started",
+            Self::TrainStepStarted => "train-step-started",
+            Self::TrainStepCompleted => "train-step-completed",
+            Self::InterimEvaluationComplete => "interim-evaluation-complete",
+            Self::LatestCheckpointPersisted => "latest-checkpoint-persisted",
+            Self::BestCheckpointPersisted => "best-checkpoint-persisted",
+            Self::FinalCheckpointPersisted => "final-checkpoint-persisted",
+            Self::BestWeightExportComplete => "best-weight-export-complete",
+            Self::FinalWeightExportComplete => "final-weight-export-complete",
+            Self::StabilityPhaseStarted => "stability-phase-started",
+            Self::StabilityPhaseComplete => "stability-phase-complete",
+            Self::PerplexityPhaseStarted => "perplexity-phase-started",
+            Self::PerplexityPhaseComplete => "perplexity-phase-complete",
+            Self::ArcSpeedPhaseStarted => "arc-speed-phase-started",
+            Self::ArcSpeedPhaseComplete => "arc-speed-phase-complete",
+            Self::RunComplete => "run-complete",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailureDiagnosticEvent {
+    pub boundary: FailureDiagnosticBoundary,
+    pub phase: RunPhase,
+    pub completed_steps: usize,
+    pub planned_steps: usize,
+    pub train_tokens_seen: usize,
+    pub step: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailureSnapshotPolicy {
+    pub enabled: bool,
+    pub required: bool,
+    pub capture_model_weights: bool,
+    pub capture_runtime_state: bool,
+    pub capture_diagnostics_tail: bool,
+}
+
+impl Default for FailureSnapshotPolicy {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
+impl FailureSnapshotPolicy {
+    pub const fn disabled() -> Self {
+        Self {
+            enabled: false,
+            required: false,
+            capture_model_weights: false,
+            capture_runtime_state: false,
+            capture_diagnostics_tail: false,
+        }
+    }
+
+    pub fn label(&self) -> String {
+        if !self.enabled {
+            return "disabled".to_owned();
+        }
+
+        format!(
+            "required={} runtime_state={} diagnostics_tail={} model_weights={}",
+            self.required,
+            self.capture_runtime_state,
+            self.capture_diagnostics_tail,
+            self.capture_model_weights
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        if !self.enabled {
+            if self.required
+                || self.capture_model_weights
+                || self.capture_runtime_state
+                || self.capture_diagnostics_tail
+            {
+                return Err(FractalError::InvalidConfig(
+                    "disabled failure snapshot policy cannot request capture semantics".into(),
+                ));
+            }
+            return Ok(());
+        }
+        if !self.capture_runtime_state {
+            return Err(FractalError::InvalidConfig(
+                "failure snapshots must capture runtime state when enabled".into(),
+            ));
+        }
+        if !self.capture_diagnostics_tail {
+            return Err(FractalError::InvalidConfig(
+                "failure snapshots must capture diagnostics tail when enabled".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn requested_artifact_kinds(&self) -> Vec<FailureSnapshotArtifactKind> {
+        if !self.enabled {
+            return Vec::new();
+        }
+        let mut kinds = vec![FailureSnapshotArtifactKind::Metadata];
+        if self.capture_runtime_state {
+            kinds.push(FailureSnapshotArtifactKind::RuntimeState);
+        }
+        if self.capture_diagnostics_tail {
+            kinds.push(FailureSnapshotArtifactKind::DiagnosticsTail);
+        }
+        if self.capture_model_weights {
+            kinds.push(FailureSnapshotArtifactKind::ModelWeights);
+        }
+        kinds
+    }
+
+    pub fn required_artifact_kinds(&self) -> Vec<FailureSnapshotArtifactKind> {
+        if !self.enabled || !self.required {
+            return Vec::new();
+        }
+        let mut kinds = vec![FailureSnapshotArtifactKind::Metadata];
+        if self.capture_runtime_state {
+            kinds.push(FailureSnapshotArtifactKind::RuntimeState);
+        }
+        if self.capture_diagnostics_tail {
+            kinds.push(FailureSnapshotArtifactKind::DiagnosticsTail);
+        }
+        kinds
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailureSnapshotContract {
+    pub experiment_logical_name: String,
+    pub experiment_run_id: String,
+    pub experiment_branch: Option<String>,
+    pub experiment_commit_sha: String,
+    pub species: String,
+    pub variant_name: String,
+    pub model: ModelContractSpec,
+    pub vocab_size: usize,
+    pub precision: PrecisionPolicy,
+    pub error_class: FailureSnapshotErrorClass,
+    pub capture_timing: FailureSnapshotCaptureTiming,
+    pub last_successful_boundary: Option<FailureDiagnosticBoundary>,
+}
+
+impl FailureSnapshotContract {
+    pub fn validate(&self) -> Result<(), FractalError> {
+        for (name, value) in [
+            (
+                "experiment_logical_name",
+                self.experiment_logical_name.as_str(),
+            ),
+            ("experiment_run_id", self.experiment_run_id.as_str()),
+            ("experiment_commit_sha", self.experiment_commit_sha.as_str()),
+            ("species", self.species.as_str()),
+            ("variant_name", self.variant_name.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(FractalError::InvalidConfig(format!(
+                    "failure snapshot contract {name} must be non-empty"
+                )));
+            }
+        }
+        if self.vocab_size == 0 {
+            return Err(FractalError::InvalidConfig(
+                "failure snapshot vocab_size must be greater than zero".into(),
+            ));
+        }
+        self.model.validate()?;
+        self.precision.validate()?;
+        Ok(())
+    }
+
+    pub fn validate_against_config(&self, config: &TournamentConfig) -> Result<(), FractalError> {
+        self.validate()?;
+        self.model.validate_against_config(config)?;
+        if self.vocab_size != config.vocab_size {
+            return Err(FractalError::InvalidConfig(format!(
+                "failure snapshot vocab_size {} must match config vocab_size {}",
+                self.vocab_size, config.vocab_size
+            )));
+        }
+        if self.precision != config.launch_policy.precision {
+            return Err(FractalError::InvalidConfig(
+                "failure snapshot precision must match the resolved launch policy precision".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailureSnapshotArtifact {
+    pub kind: FailureSnapshotArtifactKind,
+    pub path: String,
+}
+
+impl FailureSnapshotArtifact {
+    pub fn validate(&self) -> Result<(), FractalError> {
+        if self.path.trim().is_empty() {
+            return Err(FractalError::InvalidConfig(format!(
+                "failure snapshot artifact {} path must be non-empty",
+                self.kind.as_str()
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum FailureSnapshotAttemptOutcome {
+    Captured { artifact: FailureSnapshotArtifact },
+    Failed { error: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailureSnapshotAttempt {
+    pub kind: FailureSnapshotArtifactKind,
+    pub outcome: FailureSnapshotAttemptOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailureSnapshotRuntimeState {
+    pub policy: FailureSnapshotPolicy,
+    pub attempted: bool,
+    pub completeness: SnapshotCompleteness,
+    pub contract: Option<FailureSnapshotContract>,
+    pub attempts: Vec<FailureSnapshotAttempt>,
+    pub missing_required_artifacts: Vec<FailureSnapshotArtifactKind>,
+}
+
+impl Default for FailureSnapshotRuntimeState {
+    fn default() -> Self {
+        Self::from_policy(FailureSnapshotPolicy::disabled())
+    }
+}
+
+impl FailureSnapshotRuntimeState {
+    pub fn from_policy(policy: FailureSnapshotPolicy) -> Self {
+        let mut state = Self {
+            policy,
+            attempted: false,
+            completeness: SnapshotCompleteness::Disabled,
+            contract: None,
+            attempts: Vec::new(),
+            missing_required_artifacts: Vec::new(),
+        };
+        state.refresh();
+        state
+    }
+
+    pub fn mark_attempted(&mut self) {
+        self.attempted = true;
+        self.refresh();
+    }
+
+    pub fn begin_capture(&mut self, contract: FailureSnapshotContract) {
+        self.attempted = true;
+        self.contract = Some(contract);
+        self.refresh();
+    }
+
+    pub fn captured_artifacts(&self) -> impl Iterator<Item = &FailureSnapshotArtifact> {
+        self.attempts
+            .iter()
+            .filter_map(|attempt| match &attempt.outcome {
+                FailureSnapshotAttemptOutcome::Captured { artifact } => Some(artifact),
+                FailureSnapshotAttemptOutcome::Failed { .. } => None,
+            })
+    }
+
+    pub fn record_success(&mut self, artifact: FailureSnapshotArtifact) {
+        let kind = artifact.kind;
+        let attempt = FailureSnapshotAttempt {
+            kind,
+            outcome: FailureSnapshotAttemptOutcome::Captured { artifact },
+        };
+        self.upsert_attempt(attempt);
+        self.refresh();
+    }
+
+    pub fn record_failure(&mut self, kind: FailureSnapshotArtifactKind, error: impl Into<String>) {
+        let attempt = FailureSnapshotAttempt {
+            kind,
+            outcome: FailureSnapshotAttemptOutcome::Failed {
+                error: error.into(),
+            },
+        };
+        self.upsert_attempt(attempt);
+        self.refresh();
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        self.policy.validate()?;
+        if !self.attempted && self.contract.is_some() {
+            return Err(FractalError::InvalidConfig(
+                "failure snapshot contract requires an attempted capture".into(),
+            ));
+        }
+        if let Some(contract) = &self.contract {
+            contract.validate()?;
+        }
+
+        let mut seen = HashSet::new();
+        let requested = self.policy.requested_artifact_kinds();
+        for attempt in &self.attempts {
+            if !requested.contains(&attempt.kind) {
+                return Err(FractalError::InvalidConfig(format!(
+                    "failure snapshot attempt {} was not requested by policy",
+                    attempt.kind.as_str()
+                )));
+            }
+            if !seen.insert(attempt.kind) {
+                return Err(FractalError::InvalidConfig(format!(
+                    "failure snapshot attempt {} is duplicated",
+                    attempt.kind.as_str()
+                )));
+            }
+            match &attempt.outcome {
+                FailureSnapshotAttemptOutcome::Captured { artifact } => {
+                    if artifact.kind != attempt.kind {
+                        return Err(FractalError::InvalidConfig(
+                            "failure snapshot attempt kind must match the captured artifact".into(),
+                        ));
+                    }
+                    artifact.validate()?;
+                }
+                FailureSnapshotAttemptOutcome::Failed { error } => {
+                    if error.trim().is_empty() {
+                        return Err(FractalError::InvalidConfig(
+                            "failure snapshot failure must record a non-empty error".into(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        let mut expected = self.clone();
+        expected.refresh();
+        if self.completeness != expected.completeness {
+            return Err(FractalError::InvalidConfig(
+                "failure snapshot completeness must match the recorded attempts".into(),
+            ));
+        }
+        if self.missing_required_artifacts != expected.missing_required_artifacts {
+            return Err(FractalError::InvalidConfig(
+                "failure snapshot missing_required_artifacts must match the recorded attempts"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn upsert_attempt(&mut self, attempt: FailureSnapshotAttempt) {
+        if let Some(slot) = self
+            .attempts
+            .iter_mut()
+            .find(|existing| existing.kind == attempt.kind)
+        {
+            *slot = attempt;
+        } else {
+            self.attempts.push(attempt);
+        }
+    }
+
+    fn refresh(&mut self) {
+        self.completeness = if !self.policy.enabled {
+            SnapshotCompleteness::Disabled
+        } else if !self.attempted {
+            SnapshotCompleteness::NotCaptured
+        } else if self
+            .policy
+            .requested_artifact_kinds()
+            .iter()
+            .all(|kind| self.capture_succeeded(*kind))
+        {
+            SnapshotCompleteness::Complete
+        } else {
+            SnapshotCompleteness::Partial
+        };
+
+        self.missing_required_artifacts = self
+            .policy
+            .required_artifact_kinds()
+            .into_iter()
+            .filter(|kind| !self.capture_succeeded(*kind))
+            .collect();
+    }
+
+    fn capture_succeeded(&self, kind: FailureSnapshotArtifactKind) -> bool {
+        self.attempts.iter().any(|attempt| {
+            attempt.kind == kind
+                && matches!(
+                    attempt.outcome,
+                    FailureSnapshotAttemptOutcome::Captured { .. }
+                )
+        })
     }
 }
 
@@ -1752,6 +2456,8 @@ pub struct LaunchPolicySpec {
     #[serde(default)]
     pub weight_export: WeightExportPolicy,
     #[serde(default)]
+    pub failure_snapshot: FailureSnapshotPolicy,
+    #[serde(default)]
     pub debug: DebugProbePolicy,
 }
 
@@ -1769,6 +2475,7 @@ impl LaunchPolicySpec {
             eval_cadence: EvalCadencePolicy::legacy_default(),
             resume: ResumePolicy::legacy_default(),
             weight_export: WeightExportPolicy::legacy_default(),
+            failure_snapshot: FailureSnapshotPolicy::disabled(),
             debug: DebugProbePolicy::disabled(),
         }
     }
@@ -1780,6 +2487,7 @@ impl LaunchPolicySpec {
             eval_cadence: EvalCadencePolicy::stage0_default(),
             resume: ResumePolicy::stage0_default(),
             weight_export: WeightExportPolicy::legacy_default(),
+            failure_snapshot: FailureSnapshotPolicy::disabled(),
             debug: DebugProbePolicy::disabled(),
         }
     }
@@ -1789,12 +2497,13 @@ impl LaunchPolicySpec {
             "legacy-default".to_owned()
         } else {
             format!(
-                "precision=[{}] checkpoint=[{}] eval=[{}] resume=[{}] weight_export=[{}] debug=[{}]",
+                "precision=[{}] checkpoint=[{}] eval=[{}] resume=[{}] weight_export=[{}] failure_snapshot=[{}] debug=[{}]",
                 self.precision.label(),
                 self.checkpoint.label(),
                 self.eval_cadence.label(),
                 self.resume.label(),
                 self.weight_export.label(),
+                self.failure_snapshot.label(),
                 self.debug.label()
             )
         }
@@ -1806,6 +2515,7 @@ impl LaunchPolicySpec {
         self.eval_cadence.validate()?;
         self.resume.validate()?;
         self.weight_export.validate()?;
+        self.failure_snapshot.validate()?;
         self.debug.validate()?;
         Ok(())
     }
@@ -2727,7 +3437,8 @@ pub struct SpeciesRunStage {
     pub total: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum RunPhase {
     Train,
     Stability,
@@ -2789,7 +3500,8 @@ pub struct PhaseTiming {
     pub total: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum CheckpointArtifactKind {
     Latest,
     Previous,
@@ -2808,7 +3520,7 @@ impl CheckpointArtifactKind {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CheckpointArtifact {
     pub kind: CheckpointArtifactKind,
     pub tokens_seen: usize,
@@ -2817,7 +3529,7 @@ pub struct CheckpointArtifact {
     pub long_context_perplexity: Option<f64>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InterimEvalSnapshot {
     pub tokens_seen: usize,
     pub completed_steps: usize,
@@ -2827,7 +3539,7 @@ pub struct InterimEvalSnapshot {
     pub tokens_per_sec: Option<f64>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TrainingRuntimeArtifact {
     pub completed_steps: usize,
     pub planned_steps: usize,
@@ -2835,8 +3547,35 @@ pub struct TrainingRuntimeArtifact {
     pub target_train_tokens: usize,
     pub resumed_from_checkpoint: bool,
     pub checkpoints: Vec<CheckpointArtifact>,
-    pub weight_exports: Vec<WeightExportArtifact>,
+    pub weight_export: WeightExportRuntimeState,
+    pub failure_snapshot: FailureSnapshotRuntimeState,
     pub interim_evaluations: Vec<InterimEvalSnapshot>,
+}
+
+impl Default for TrainingRuntimeArtifact {
+    fn default() -> Self {
+        Self::empty(&LaunchPolicySpec::legacy_default())
+    }
+}
+
+impl TrainingRuntimeArtifact {
+    pub fn empty(launch_policy: &LaunchPolicySpec) -> Self {
+        Self {
+            completed_steps: 0,
+            planned_steps: 0,
+            train_tokens_seen: 0,
+            target_train_tokens: 0,
+            resumed_from_checkpoint: false,
+            checkpoints: Vec::new(),
+            weight_export: WeightExportRuntimeState::from_policy(
+                launch_policy.weight_export.clone(),
+            ),
+            failure_snapshot: FailureSnapshotRuntimeState::from_policy(
+                launch_policy.failure_snapshot.clone(),
+            ),
+            interim_evaluations: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -3170,7 +3909,7 @@ impl Tournament {
                     manifest,
                     vec![phase_timing(RunPhase::Train, started.elapsed(), 0, 0)],
                     RunExecutionOutcome::InfraFailure,
-                    error.to_string(),
+                    error.clone(),
                 ),
             }
         });

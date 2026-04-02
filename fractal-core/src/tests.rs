@@ -27,22 +27,24 @@ use crate::{
     lifecycle::{
         ArtifactPolicy, BridgePackagingSpec, BridgeSplitPolicy, BridgeSubstrateMode, BudgetSpec,
         ComparisonContract, DecisionIntent, ExecutionBackend, ExecutionTarget, ExecutionTargetKind,
-        ExperimentId, ExperimentQuestion, ExperimentSpecTemplate, LaneIntent, LaunchPolicySpec,
-        LearningRateScheduleSpec, ModelContractSpec, NumericPrecisionKind, OptimizerKind,
-        OptimizerSpec, QuantizationPolicy, QuantizedPrecisionKind, RunExecutionOutcome,
-        RunOutcomeClass, RunQualityOutcome, RuntimeSurfaceSpec, TextCorpusFormat,
-        TextCorpusSourceSpec, TextCorpusSplitSpec, TokenizerArtifactSpec, Tournament,
-        TournamentConfig, TournamentPreset, TournamentProgressEvent, TournamentSequence,
-        TrainingInputSpec, WeightExportFormat, WeightExportPhase, WeightExportPolicy,
+        ExperimentId, ExperimentQuestion, ExperimentSpecTemplate, FailureSnapshotPolicy,
+        LaneIntent, LaunchPolicySpec, LearningRateScheduleSpec, ModelContractSpec,
+        NumericPrecisionKind, OptimizerKind, OptimizerSpec, QuantizationPolicy,
+        QuantizedPrecisionKind, RunExecutionOutcome, RunOutcomeClass, RunQualityOutcome,
+        RuntimeSurfaceSpec, TextCorpusFormat, TextCorpusSourceSpec, TextCorpusSplitSpec,
+        TokenizerArtifactSpec, Tournament, TournamentConfig, TournamentPreset,
+        TournamentProgressEvent, TournamentSequence, TrainingInputSpec, WeightExportFormat,
+        WeightExportPhase, WeightExportPolicy, WeightExportRuntimeState,
     },
     model::FractalModel,
     primitives::complex_square,
     registry::{
-        clip_gradients_global_norm, export_weight_phase, gradient_l2_norm,
+        build_failure_artifact, clip_gradients_global_norm, export_weight_phase, gradient_l2_norm,
         is_valid_primitive_variant_name, load_weight_export_metadata, read_weight_export_metadata,
-        resolve_precision_profile, resolve_weight_export_paths, should_log_training_checkpoint,
-        training_progress_interval, ComputeBackend, CpuTrainBackend, ExecutionMode,
-        PrimitiveVariantName, SpeciesDefinition, SpeciesId, SpeciesRunContext,
+        resolve_precision_profile, resolve_weight_export_paths, run_species_with_batches,
+        should_log_training_checkpoint, training_progress_interval, ComputeBackend,
+        CpuTrainBackend, ExecutionMode, PrimitiveVariantName, SpeciesDefinition, SpeciesId,
+        SpeciesRunContext, TrainingBatchSet,
     },
     router::EarlyExitRouter,
     rule_trait::{ApplyContext, FractalRule},
@@ -289,6 +291,10 @@ fn stage0_launch_policy_contract_matches_stage0_training_plan() {
         launch_policy.weight_export,
         WeightExportPolicy::legacy_default()
     );
+    assert_eq!(
+        launch_policy.failure_snapshot,
+        FailureSnapshotPolicy::disabled()
+    );
 }
 
 #[test]
@@ -323,6 +329,36 @@ fn weight_export_policy_rejects_unsupported_format_and_phase() {
     assert!(unsupported_phase_policy
         .validate_against_backend(&ComputeBackend::CpuCandle)
         .is_err());
+}
+
+#[test]
+fn failure_snapshot_policy_rejects_disabled_or_incomplete_capture_contracts() {
+    let disabled_but_required = FailureSnapshotPolicy {
+        enabled: false,
+        required: true,
+        capture_model_weights: false,
+        capture_runtime_state: false,
+        capture_diagnostics_tail: false,
+    };
+    assert!(disabled_but_required.validate().is_err());
+
+    let missing_runtime_state = FailureSnapshotPolicy {
+        enabled: true,
+        required: true,
+        capture_model_weights: false,
+        capture_runtime_state: false,
+        capture_diagnostics_tail: true,
+    };
+    assert!(missing_runtime_state.validate().is_err());
+
+    let missing_diagnostics_tail = FailureSnapshotPolicy {
+        enabled: true,
+        required: false,
+        capture_model_weights: true,
+        capture_runtime_state: true,
+        capture_diagnostics_tail: false,
+    };
+    assert!(missing_diagnostics_tail.validate().is_err());
 }
 
 #[test]
@@ -373,6 +409,47 @@ fn weight_export_artifact_validate_against_config_rejects_unsupported_format() {
     };
 
     assert!(artifact.validate_against_config(&config).is_err());
+}
+
+#[test]
+fn weight_export_artifact_validate_against_config_rejects_unsupported_phase() {
+    let config = TournamentPreset::FastTest.config();
+    let artifact = crate::lifecycle::WeightExportArtifact {
+        format: WeightExportFormat::BurnBin,
+        phase: WeightExportPhase::Latest,
+        path: "/tmp/weights".to_owned(),
+        metadata_path: "/tmp/metadata.json".to_owned(),
+        required: true,
+        contract: crate::lifecycle::WeightExportContract {
+            experiment_logical_name: "stage1-export".to_owned(),
+            experiment_run_id: "run-123".to_owned(),
+            experiment_branch: Some("codex/stage0-launch".to_owned()),
+            experiment_commit_sha: "abc123".to_owned(),
+            species: SpeciesId::P1Contractive.as_str().to_owned(),
+            variant_name: "p1_contractive_v1".to_owned(),
+            model: ModelContractSpec::recursive_kernel_v1(config.dim, config.max_recursion_depth),
+            vocab_size: config.vocab_size,
+            precision: config.launch_policy.precision.clone(),
+            format: WeightExportFormat::BurnBin,
+        },
+    };
+
+    assert!(artifact.validate_against_config(&config).is_err());
+}
+
+#[test]
+fn weight_export_runtime_state_marks_best_effort_failures_without_required_gaps() {
+    let policy = WeightExportPolicy {
+        format: WeightExportFormat::BurnBin,
+        phases: vec![WeightExportPhase::Best],
+        required: false,
+    };
+    let mut state = WeightExportRuntimeState::from_policy(policy);
+    state.record_failure(WeightExportPhase::Best, "disk full");
+
+    assert!(state.validate().is_ok());
+    assert!(state.missing_required_phases.is_empty());
+    assert_eq!(state.completeness.as_str(), "partial");
 }
 
 #[test]
@@ -646,6 +723,153 @@ fn external_weight_export_roots_include_run_identity() {
     assert!(artifact_b.path.contains("run-456"));
 
     std::env::remove_var("FRACTAL_RUN_EXPORT_DIR");
+    let _ = std::fs::remove_dir_all(&temp_root);
+}
+
+#[test]
+fn failure_snapshot_artifact_writes_required_metadata_and_runtime_state() {
+    let _env_lock = EXPORT_ENV_MUTEX.lock().unwrap();
+    let temp_root = std::env::temp_dir().join(format!(
+        "fractal-failure-snapshot-artifact-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_root);
+    std::env::set_var("FRACTAL_RUN_FAILURE_SNAPSHOT_DIR", &temp_root);
+
+    let mut config = TournamentPreset::FastTest.config();
+    config.launch_policy.failure_snapshot = FailureSnapshotPolicy {
+        enabled: true,
+        required: true,
+        capture_model_weights: false,
+        capture_runtime_state: true,
+        capture_diagnostics_tail: true,
+    };
+    let mut template = test_experiment_template(config.clone());
+    template.runtime.launch_policy = config.launch_policy.clone();
+    let experiment = template.resolve_variant(
+        SpeciesId::P1Contractive,
+        PrimitiveVariantName::new_unchecked("p1_contractive_v1"),
+    );
+    let manifest = crate::RunManifest {
+        variant_name: PrimitiveVariantName::new_unchecked("p1_contractive_v1"),
+        timeout_budget: None,
+        config,
+        experiment: Some(experiment),
+    };
+
+    let artifact = build_failure_artifact(
+        crate::SpeciesRunStage {
+            species: SpeciesId::P1Contractive,
+            ordinal: 1,
+            total: 1,
+        },
+        manifest,
+        vec![crate::PhaseTiming {
+            phase: crate::RunPhase::Train,
+            elapsed: Duration::from_secs(1),
+            completed: 0,
+            total: 1,
+        }],
+        RunExecutionOutcome::InfraFailure,
+        FractalError::InvalidState("synthetic failure".into()),
+    );
+
+    let snapshot = artifact.training_runtime.failure_snapshot;
+    assert!(snapshot.attempted);
+    assert!(snapshot.missing_required_artifacts.is_empty());
+    assert_eq!(snapshot.completeness.as_str(), "complete");
+
+    let artifact_paths = snapshot
+        .captured_artifacts()
+        .map(|artifact| (artifact.kind.as_str().to_owned(), artifact.path.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert!(std::path::Path::new(artifact_paths["metadata"].as_str()).exists());
+    assert!(std::path::Path::new(artifact_paths["runtime-state"].as_str()).exists());
+    assert!(std::path::Path::new(artifact_paths["diagnostics-tail"].as_str()).exists());
+
+    std::env::remove_var("FRACTAL_RUN_FAILURE_SNAPSHOT_DIR");
+    let _ = std::fs::remove_dir_all(&temp_root);
+}
+
+#[test]
+fn run_species_failure_snapshot_preserves_diagnostics_tail() {
+    let _env_lock = EXPORT_ENV_MUTEX.lock().unwrap();
+    let temp_root = std::env::temp_dir().join(format!(
+        "fractal-failure-snapshot-tail-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_root);
+    std::env::set_var("FRACTAL_RUN_FAILURE_SNAPSHOT_DIR", &temp_root);
+
+    let mut config = TournamentPreset::FastTest.config();
+    config.train_steps_per_species = 1;
+    config.launch_policy.failure_snapshot = FailureSnapshotPolicy {
+        enabled: true,
+        required: true,
+        capture_model_weights: false,
+        capture_runtime_state: true,
+        capture_diagnostics_tail: true,
+    };
+    let mut template = test_experiment_template(config.clone());
+    template.runtime.launch_policy = config.launch_policy.clone();
+    config.experiment = Some(template.clone());
+
+    let device = Default::default();
+    let batch = crate::TokenBatch {
+        input_ids: Tensor::<CpuTrainBackend, 2, Int>::from_data(
+            TensorData::new(vec![1i64, 2, 3, 4], [1, 4]),
+            &device,
+        ),
+        target_ids: Tensor::<CpuTrainBackend, 2, Int>::from_data(
+            TensorData::new(vec![2i64, 3, 4, 5], [1, 4]),
+            &device,
+        ),
+        token_count: 4,
+        family: TaskFamily::RecursiveSentence,
+    };
+    let batches = TrainingBatchSet {
+        train_sentence: vec![batch.clone()],
+        train_arc: None,
+        eval_sentence: vec![batch.clone()],
+        eval_arc: vec![batch],
+    };
+
+    let result = run_species_with_batches(
+        SpeciesId::P1Contractive,
+        PrimitiveVariantName::new_unchecked("p1_contractive_v1"),
+        config,
+        None,
+        device,
+        FailingRule::<CpuTrainBackend>::new(16),
+        batches,
+    );
+    assert!(result.is_err());
+
+    let artifact = crate::registry::take_last_species_run_artifact()
+        .expect("failing run should persist a species artifact");
+    let snapshot = artifact.training_runtime.failure_snapshot;
+    assert!(snapshot.attempted);
+    assert!(snapshot.missing_required_artifacts.is_empty());
+
+    let diagnostics_path = snapshot
+        .captured_artifacts()
+        .find(|artifact| artifact.kind.as_str() == "diagnostics-tail")
+        .expect("diagnostics-tail artifact should be captured")
+        .path
+        .clone();
+    let diagnostics: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&diagnostics_path).unwrap()).unwrap();
+    let events = diagnostics
+        .as_array()
+        .expect("diagnostics tail should serialize as an array");
+    assert!(events
+        .iter()
+        .any(|event| event["boundary"] == serde_json::Value::String("train-phase-started".into())));
+    assert!(events
+        .iter()
+        .any(|event| event["boundary"] == serde_json::Value::String("train-step-started".into())));
+
+    std::env::remove_var("FRACTAL_RUN_FAILURE_SNAPSHOT_DIR");
     let _ = std::fs::remove_dir_all(&temp_root);
 }
 
@@ -1303,6 +1527,50 @@ impl<B: Backend> FractalRule<B> for AddInputRule<B> {
 
     fn name(&self) -> &'static str {
         "add_input_rule"
+    }
+
+    fn hidden_dim(&self) -> usize {
+        self.hidden_dim
+    }
+
+    fn state_layout(&self) -> StateLayout {
+        StateLayout::Flat
+    }
+
+    fn clone_box(&self) -> Box<dyn FractalRule<B>> {
+        Box::new(Self::new(self.hidden_dim))
+    }
+}
+
+#[derive(Module, Debug)]
+struct FailingRule<B: Backend> {
+    hidden_dim: usize,
+    _marker: core::marker::PhantomData<B>,
+}
+
+impl<B: Backend> FailingRule<B> {
+    fn new(hidden_dim: usize) -> Self {
+        Self {
+            hidden_dim,
+            _marker: core::marker::PhantomData,
+        }
+    }
+}
+
+impl<B: Backend> FractalRule<B> for FailingRule<B> {
+    fn apply(
+        &self,
+        _state: &FractalState<B>,
+        _x: &Tensor<B, 2>,
+        _context: ApplyContext,
+    ) -> Result<FractalState<B>, FractalError> {
+        Err(FractalError::InvalidState(
+            "intentional test rule failure".into(),
+        ))
+    }
+
+    fn name(&self) -> &'static str {
+        "failing_rule"
     }
 
     fn hidden_dim(&self) -> usize {

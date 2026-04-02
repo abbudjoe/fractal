@@ -150,14 +150,7 @@ fn build_artifact_json(report: &TournamentRunReport) -> Value {
                         "total": timing.total,
                     })
                 }).collect::<Vec<_>>(),
-                "training_runtime": training_runtime_json(
-                    &record.training_runtime,
-                    record
-                        .manifest
-                        .experiment
-                        .as_ref()
-                        .map(|experiment| &experiment.runtime.launch_policy),
-                ),
+                "training_runtime": training_runtime_json(&record.training_runtime),
                 "metrics": record.metrics.as_ref().map(|metrics| {
                     json!({
                         "grad_norm_depth_20": metrics.grad_norm_depth_20,
@@ -361,13 +354,7 @@ fn training_input_json(spec: &crate::TrainingInputSpec) -> Value {
     })
 }
 
-fn training_runtime_json(
-    spec: &fractal_core::lifecycle::TrainingRuntimeArtifact,
-    launch_policy: Option<&crate::LaunchPolicySpec>,
-) -> Value {
-    let missing_required_weight_exports =
-        missing_required_weight_export_phases(launch_policy, &spec.weight_exports);
-
+fn training_runtime_json(spec: &fractal_core::lifecycle::TrainingRuntimeArtifact) -> Value {
     json!({
         "completed_steps": spec.completed_steps,
         "planned_steps": spec.planned_steps,
@@ -383,15 +370,8 @@ fn training_runtime_json(
                 "long_context_perplexity": checkpoint.long_context_perplexity,
             })
         }).collect::<Vec<_>>(),
-        "weight_exports": spec
-            .weight_exports
-            .iter()
-            .map(weight_export_artifact_json)
-            .collect::<Vec<_>>(),
-        "missing_required_weight_export_phases": missing_required_weight_exports
-            .iter()
-            .map(|phase| phase_name_from_weight_export(*phase))
-            .collect::<Vec<_>>(),
+        "weight_export": weight_export_runtime_state_json(&spec.weight_export),
+        "failure_snapshot": failure_snapshot_runtime_state_json(&spec.failure_snapshot),
         "interim_evaluations": spec.interim_evaluations.iter().map(|snapshot| {
             json!({
                 "tokens_seen": snapshot.tokens_seen,
@@ -405,24 +385,50 @@ fn training_runtime_json(
     })
 }
 
-fn missing_required_weight_export_phases(
-    launch_policy: Option<&crate::LaunchPolicySpec>,
-    exports: &[crate::WeightExportArtifact],
-) -> Vec<crate::WeightExportPhase> {
-    let Some(launch_policy) = launch_policy else {
-        return Vec::new();
-    };
-    let policy = &launch_policy.weight_export;
-    if !policy.required || policy.phases.is_empty() {
-        return Vec::new();
-    }
+fn weight_export_runtime_state_json(spec: &crate::WeightExportRuntimeState) -> Value {
+    json!({
+        "policy": {
+            "format": weight_export_format_json(&spec.policy.format),
+            "phases": spec
+                .policy
+                .phases
+                .iter()
+                .map(|phase| phase_name_from_weight_export(*phase))
+                .collect::<Vec<_>>(),
+            "required": spec.policy.required,
+            "label": spec.policy.label(),
+        },
+        "completeness": spec.completeness.as_str(),
+        "completed_artifacts": spec
+            .completed_artifacts()
+            .map(weight_export_artifact_json)
+            .collect::<Vec<_>>(),
+        "attempts": spec
+            .attempts
+            .iter()
+            .map(weight_export_attempt_json)
+            .collect::<Vec<_>>(),
+        "missing_required_phases": spec
+            .missing_required_phases
+            .iter()
+            .map(|phase| phase_name_from_weight_export(*phase))
+            .collect::<Vec<_>>(),
+    })
+}
 
-    policy
-        .phases
-        .iter()
-        .copied()
-        .filter(|phase| !exports.iter().any(|artifact| artifact.phase == *phase))
-        .collect::<Vec<_>>()
+fn weight_export_attempt_json(spec: &crate::WeightExportAttempt) -> Value {
+    match &spec.outcome {
+        crate::WeightExportAttemptOutcome::Succeeded { artifact } => json!({
+            "phase": phase_name_from_weight_export(spec.phase),
+            "status": "succeeded",
+            "artifact": weight_export_artifact_json(artifact),
+        }),
+        crate::WeightExportAttemptOutcome::Failed { error } => json!({
+            "phase": phase_name_from_weight_export(spec.phase),
+            "status": "failed",
+            "error": error,
+        }),
+    }
 }
 
 fn weight_export_artifact_json(spec: &crate::WeightExportArtifact) -> Value {
@@ -490,6 +496,92 @@ fn phase_name_from_weight_export(phase: crate::WeightExportPhase) -> &'static st
     }
 }
 
+fn failure_snapshot_runtime_state_json(spec: &crate::FailureSnapshotRuntimeState) -> Value {
+    json!({
+        "policy": {
+            "enabled": spec.policy.enabled,
+            "required": spec.policy.required,
+            "capture_model_weights": spec.policy.capture_model_weights,
+            "capture_runtime_state": spec.policy.capture_runtime_state,
+            "capture_diagnostics_tail": spec.policy.capture_diagnostics_tail,
+            "label": spec.policy.label(),
+        },
+        "attempted": spec.attempted,
+        "completeness": spec.completeness.as_str(),
+        "contract": spec.contract.as_ref().map(failure_snapshot_contract_json),
+        "artifacts": spec
+            .captured_artifacts()
+            .map(failure_snapshot_artifact_json)
+            .collect::<Vec<_>>(),
+        "attempts": spec
+            .attempts
+            .iter()
+            .map(failure_snapshot_attempt_json)
+            .collect::<Vec<_>>(),
+        "missing_required_artifacts": spec
+            .missing_required_artifacts
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn failure_snapshot_contract_json(spec: &crate::FailureSnapshotContract) -> Value {
+    json!({
+        "experiment_logical_name": spec.experiment_logical_name,
+        "experiment_run_id": spec.experiment_run_id,
+        "experiment_branch": spec.experiment_branch,
+        "experiment_commit_sha": spec.experiment_commit_sha,
+        "species": spec.species,
+        "variant_name": spec.variant_name,
+        "model": {
+            "architecture": spec.model.architecture.as_str(),
+            "hidden_dim": spec.model.hidden_dim,
+            "max_recursion_depth": spec.model.max_recursion_depth,
+            "router_enabled": spec.model.router_enabled,
+            "label": spec.model.label(),
+        },
+        "vocab_size": spec.vocab_size,
+        "precision": {
+            "compute": spec.precision.compute.as_str(),
+            "optimizer_state": spec.precision.optimizer_state.as_str(),
+            "reduction": spec.precision.reduction.as_str(),
+            "tf32_enabled": spec.precision.tf32_enabled,
+            "quantization": {
+                "weights": spec.precision.quantization.weights.map(|kind| kind.as_str()),
+                "activations": spec.precision.quantization.activations.map(|kind| kind.as_str()),
+            },
+        },
+        "error_class": spec.error_class.as_str(),
+        "capture_timing": spec.capture_timing.as_str(),
+        "last_successful_boundary": spec
+            .last_successful_boundary
+            .map(|boundary| boundary.as_str()),
+    })
+}
+
+fn failure_snapshot_artifact_json(spec: &crate::FailureSnapshotArtifact) -> Value {
+    json!({
+        "kind": spec.kind.as_str(),
+        "path": spec.path,
+    })
+}
+
+fn failure_snapshot_attempt_json(spec: &crate::FailureSnapshotAttempt) -> Value {
+    match &spec.outcome {
+        crate::FailureSnapshotAttemptOutcome::Captured { artifact } => json!({
+            "kind": spec.kind.as_str(),
+            "status": "captured",
+            "artifact": failure_snapshot_artifact_json(artifact),
+        }),
+        crate::FailureSnapshotAttemptOutcome::Failed { error } => json!({
+            "kind": spec.kind.as_str(),
+            "status": "failed",
+            "error": error,
+        }),
+    }
+}
+
 fn text_corpus_split_json(spec: &crate::TextCorpusSplitSpec) -> Value {
     json!({
         "path": spec.path,
@@ -548,6 +640,14 @@ fn launch_policy_json(spec: &crate::LaunchPolicySpec) -> Value {
                 .collect::<Vec<_>>(),
             "required": spec.weight_export.required,
             "label": spec.weight_export.label(),
+        },
+        "failure_snapshot": {
+            "enabled": spec.failure_snapshot.enabled,
+            "required": spec.failure_snapshot.required,
+            "capture_model_weights": spec.failure_snapshot.capture_model_weights,
+            "capture_runtime_state": spec.failure_snapshot.capture_runtime_state,
+            "capture_diagnostics_tail": spec.failure_snapshot.capture_diagnostics_tail,
+            "label": spec.failure_snapshot.label(),
         },
         "debug": {
             "train_step_log_interval_steps": spec.debug.train_step_log_interval_steps,
@@ -710,7 +810,8 @@ mod tests {
     use fractal_core::{
         ArtifactPolicy, BudgetSpec, DecisionIntent, ExecutionBackend, ExecutionTarget,
         ExecutionTargetKind, ExperimentId, ExperimentQuestion, ExperimentSpec, LaneIntent,
-        OptimizerSpec, RuntimeSurfaceSpec, TrainingInputSpec, VariantSpec,
+        OptimizerSpec, RuntimeSurfaceSpec, TrainingInputSpec, VariantSpec, WeightExportArtifact,
+        WeightExportContract, WeightExportFormat, WeightExportPhase, WeightExportPolicy,
     };
 
     use super::{persist_run_artifacts, ARTIFACT_FILENAME, MANIFEST_FILENAME};
@@ -826,6 +927,142 @@ mod tests {
             artifact_json["results"][0]["experiment"]["runtime"]["launch_policy"]["resume"]
                 ["resume_on_interrupt"],
             serde_json::Value::Bool(false)
+        );
+
+        env::remove_var("FRACTAL_RUN_ARTIFACT_DIR");
+        env::remove_var("FRACTAL_RUN_MANIFEST_DIR");
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn persisted_artifacts_keep_export_and_failure_snapshot_completeness_separate() {
+        let temp_root = env::temp_dir().join(format!(
+            "fractal-run-artifacts-separation-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp_root);
+        let artifact_dir = temp_root.join("artifacts");
+        let manifest_dir = temp_root.join("manifests");
+        env::set_var("FRACTAL_RUN_ARTIFACT_DIR", &artifact_dir);
+        env::set_var("FRACTAL_RUN_MANIFEST_DIR", &manifest_dir);
+
+        let mut config = TournamentPreset::FastTest.config();
+        config.launch_policy.weight_export = WeightExportPolicy::stage1_default();
+        config.launch_policy.failure_snapshot = fractal_core::FailureSnapshotPolicy {
+            enabled: true,
+            required: true,
+            capture_model_weights: false,
+            capture_runtime_state: true,
+            capture_diagnostics_tail: true,
+        };
+
+        let experiment = test_experiment_spec();
+        let mut training_runtime = TrainingRuntimeArtifact::empty(&config.launch_policy);
+        training_runtime
+            .checkpoints
+            .push(fractal_core::lifecycle::CheckpointArtifact {
+                kind: fractal_core::lifecycle::CheckpointArtifactKind::Latest,
+                tokens_seen: 128,
+                completed_steps: 2,
+                directory: "/tmp/checkpoints/latest".to_owned(),
+                long_context_perplexity: Some(1.25),
+            });
+        training_runtime
+            .weight_export
+            .record_success(WeightExportArtifact {
+                format: WeightExportFormat::BurnBin,
+                phase: WeightExportPhase::Best,
+                path: "/tmp/exports/best/weights".to_owned(),
+                metadata_path: "/tmp/exports/best/metadata.json".to_owned(),
+                required: true,
+                contract: WeightExportContract {
+                    experiment_logical_name: experiment.experiment_id.logical_name.clone(),
+                    experiment_run_id: experiment.experiment_id.run_id.clone(),
+                    experiment_branch: experiment.experiment_id.branch.clone(),
+                    experiment_commit_sha: experiment.experiment_id.commit_sha.clone().unwrap(),
+                    species: SpeciesId::P1Contractive.as_str().to_owned(),
+                    variant_name: "p1_contractive_v1".to_owned(),
+                    model: experiment.model.clone(),
+                    vocab_size: config.vocab_size,
+                    precision: config.launch_policy.precision.clone(),
+                    format: WeightExportFormat::BurnBin,
+                },
+            });
+
+        let species = species_registry_for_species(SpeciesId::P1Contractive);
+        let report = TournamentRunReport::new(TournamentRunReportParts {
+            preset: TournamentPreset::FastTest,
+            lane: TournamentLane::Leader,
+            comparison: ComparisonContract::authoritative_same_preset(),
+            config: config.clone(),
+            species,
+            results: vec![RankedSpeciesResult {
+                rank: 1,
+                species: SpeciesId::P1Contractive,
+                stability_score: 0.53,
+                long_context_perplexity: 1.54,
+                arc_accuracy: 0.68,
+                tokens_per_sec: 100.0,
+                fitness: 0.58,
+            }],
+            artifact: fractal_core::TournamentRunArtifact {
+                config: config.clone(),
+                species: vec![fractal_core::SpeciesRunArtifact {
+                    stage: fractal_core::SpeciesRunStage {
+                        species: SpeciesId::P1Contractive,
+                        ordinal: 1,
+                        total: 1,
+                    },
+                    manifest: fractal_core::RunManifest {
+                        variant_name: fractal_core::PrimitiveVariantName::new_unchecked(
+                            "p1_contractive_v1",
+                        ),
+                        timeout_budget: None,
+                        config,
+                        experiment: Some(experiment),
+                    },
+                    phase_timings: vec![fractal_core::PhaseTiming {
+                        phase: fractal_core::RunPhase::Train,
+                        elapsed: std::time::Duration::from_secs(1),
+                        completed: 1,
+                        total: 1,
+                    }],
+                    training_runtime,
+                    execution_outcome: fractal_core::RunExecutionOutcome::Success,
+                    quality_outcome: fractal_core::RunQualityOutcome::Clean,
+                    error: None,
+                    metrics: Some(fractal_core::SpeciesRawMetrics {
+                        species: SpeciesId::P1Contractive,
+                        grad_norm_depth_20: 0.53,
+                        long_context_perplexity: 1.54,
+                        arc_accuracy: 0.68,
+                        tokens_per_sec: 100.0,
+                    }),
+                }],
+            },
+            bridge_stats: BTreeMap::new(),
+        });
+
+        let paths = persist_run_artifacts(&report).unwrap();
+        let artifact_json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&paths.artifact_path).unwrap()).unwrap();
+        let runtime = &artifact_json["results"][0]["training_runtime"];
+
+        assert_eq!(
+            runtime["weight_export"]["missing_required_phases"],
+            serde_json::json!(["final"])
+        );
+        assert_eq!(
+            runtime["weight_export"]["completeness"],
+            serde_json::Value::String("partial".to_owned())
+        );
+        assert_eq!(
+            runtime["failure_snapshot"]["attempted"],
+            serde_json::Value::Bool(false)
+        );
+        assert_eq!(
+            runtime["failure_snapshot"]["completeness"],
+            serde_json::Value::String("not-captured".to_owned())
         );
 
         env::remove_var("FRACTAL_RUN_ARTIFACT_DIR");

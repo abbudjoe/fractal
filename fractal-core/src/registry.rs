@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     fmt::{Display, Formatter},
     fs,
     path::{Path, PathBuf},
@@ -32,11 +32,14 @@ use crate::{
     error::FractalError,
     fitness::SpeciesRawMetrics,
     lifecycle::{
-        CheckpointArtifact, CheckpointArtifactKind, ExperimentSpec, InterimEvalSnapshot,
-        OptimizerKind, OptimizerSpec, PhaseTiming, RunExecutionOutcome, RunManifest, RunPhase,
-        RunQualityOutcome, SpeciesRunArtifact, SpeciesRunStage, TournamentConfig,
-        TrainingRuntimeArtifact, WeightExportArtifact, WeightExportContract, WeightExportFormat,
-        WeightExportPhase, WeightExportPolicy,
+        CheckpointArtifact, CheckpointArtifactKind, ExperimentSpec, FailureDiagnosticBoundary,
+        FailureDiagnosticEvent, FailureSnapshotArtifact, FailureSnapshotArtifactKind,
+        FailureSnapshotCaptureTiming, FailureSnapshotContract, FailureSnapshotErrorClass,
+        FailureSnapshotPolicy, FailureSnapshotRuntimeState, InterimEvalSnapshot, OptimizerKind,
+        OptimizerSpec, PhaseTiming, RunExecutionOutcome, RunManifest, RunPhase, RunQualityOutcome,
+        SpeciesRunArtifact, SpeciesRunStage, TournamentConfig, TrainingRuntimeArtifact,
+        WeightExportArtifact, WeightExportContract, WeightExportFormat, WeightExportPhase,
+        WeightExportPolicy, WeightExportRuntimeState,
     },
     model::{ForwardDebugProbe, FractalModel},
     rule_trait::FractalRule,
@@ -260,8 +263,30 @@ struct RuntimeCheckpointState {
     next_arc_token: Option<usize>,
     next_systems_speed_token: Option<usize>,
     checkpoints: Vec<CheckpointArtifactState>,
-    weight_exports: Vec<WeightExportArtifact>,
+    weight_exports: PersistedWeightExportState,
     interim_evaluations: Vec<InterimEvalSnapshotState>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum PersistedWeightExportState {
+    Legacy(Vec<WeightExportArtifact>),
+    Current(WeightExportRuntimeState),
+}
+
+impl PersistedWeightExportState {
+    fn into_runtime_state(self, policy: &WeightExportPolicy) -> WeightExportRuntimeState {
+        match self {
+            Self::Legacy(artifacts) => {
+                let mut state = WeightExportRuntimeState::from_policy(policy.clone());
+                for artifact in artifacts {
+                    state.record_success(artifact);
+                }
+                state
+            }
+            Self::Current(state) => state,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -360,6 +385,11 @@ pub(crate) struct WeightExportRuntimePaths {
 }
 
 #[derive(Clone, Debug)]
+struct FailureSnapshotRuntimePaths {
+    root: PathBuf,
+}
+
+#[derive(Clone, Debug)]
 struct LaunchRuntimeState {
     completed_steps: usize,
     planned_steps: usize,
@@ -373,7 +403,7 @@ struct LaunchRuntimeState {
     next_arc_token: Option<usize>,
     next_systems_speed_token: Option<usize>,
     checkpoints: Vec<CheckpointArtifact>,
-    weight_exports: Vec<WeightExportArtifact>,
+    weight_export: WeightExportRuntimeState,
     interim_evaluations: Vec<InterimEvalSnapshot>,
 }
 
@@ -392,12 +422,17 @@ impl LaunchRuntimeState {
             next_arc_token: launch_policy.eval_cadence.arc_interval_tokens,
             next_systems_speed_token: launch_policy.eval_cadence.systems_speed_interval_tokens,
             checkpoints: Vec::new(),
-            weight_exports: Vec::new(),
+            weight_export: WeightExportRuntimeState::from_policy(
+                launch_policy.weight_export.clone(),
+            ),
             interim_evaluations: Vec::new(),
         }
     }
 
-    fn from_checkpoint(state: RuntimeCheckpointState) -> Self {
+    fn from_checkpoint(
+        state: RuntimeCheckpointState,
+        launch_policy: &crate::LaunchPolicySpec,
+    ) -> Self {
         Self {
             completed_steps: state.completed_steps,
             planned_steps: state.planned_steps,
@@ -415,7 +450,9 @@ impl LaunchRuntimeState {
                 .into_iter()
                 .map(CheckpointArtifactState::into_runtime_artifact)
                 .collect(),
-            weight_exports: state.weight_exports,
+            weight_export: state
+                .weight_exports
+                .into_runtime_state(&launch_policy.weight_export),
             interim_evaluations: state
                 .interim_evaluations
                 .into_iter()
@@ -442,7 +479,7 @@ impl LaunchRuntimeState {
                 .iter()
                 .map(CheckpointArtifactState::from)
                 .collect(),
-            weight_exports: self.weight_exports.clone(),
+            weight_exports: PersistedWeightExportState::Current(self.weight_export.clone()),
             interim_evaluations: self
                 .interim_evaluations
                 .iter()
@@ -451,7 +488,7 @@ impl LaunchRuntimeState {
         }
     }
 
-    fn artifact(&self) -> TrainingRuntimeArtifact {
+    fn artifact(&self, launch_policy: &crate::LaunchPolicySpec) -> TrainingRuntimeArtifact {
         TrainingRuntimeArtifact {
             completed_steps: self.completed_steps,
             planned_steps: self.planned_steps,
@@ -459,9 +496,60 @@ impl LaunchRuntimeState {
             target_train_tokens: self.target_train_tokens,
             resumed_from_checkpoint: self.resumed_from_checkpoint,
             checkpoints: self.checkpoints.clone(),
-            weight_exports: self.weight_exports.clone(),
+            weight_export: self.weight_export.clone(),
+            failure_snapshot: FailureSnapshotRuntimeState::from_policy(
+                launch_policy.failure_snapshot.clone(),
+            ),
             interim_evaluations: self.interim_evaluations.clone(),
         }
+    }
+}
+
+const FAILURE_DIAGNOSTIC_TAIL_LIMIT: usize = 32;
+
+#[derive(Clone, Debug)]
+struct FailureDiagnosticsRecorder {
+    enabled: bool,
+    events: VecDeque<FailureDiagnosticEvent>,
+}
+
+impl FailureDiagnosticsRecorder {
+    fn from_policy(policy: &FailureSnapshotPolicy) -> Self {
+        Self {
+            enabled: policy.enabled && policy.capture_diagnostics_tail,
+            events: VecDeque::new(),
+        }
+    }
+
+    fn record(
+        &mut self,
+        boundary: FailureDiagnosticBoundary,
+        phase: RunPhase,
+        runtime: &TrainingRuntimeArtifact,
+        step: Option<usize>,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        if self.events.len() == FAILURE_DIAGNOSTIC_TAIL_LIMIT {
+            self.events.pop_front();
+        }
+        self.events.push_back(FailureDiagnosticEvent {
+            boundary,
+            phase,
+            completed_steps: runtime.completed_steps,
+            planned_steps: runtime.planned_steps,
+            train_tokens_seen: runtime.train_tokens_seen,
+            step,
+        });
+    }
+
+    fn snapshot(&self) -> Vec<FailureDiagnosticEvent> {
+        self.events.iter().cloned().collect()
+    }
+
+    fn last_boundary(&self) -> Option<FailureDiagnosticBoundary> {
+        self.events.back().map(|event| event.boundary)
     }
 }
 
@@ -910,11 +998,12 @@ pub(crate) fn build_success_artifact(
     metrics: SpeciesRawMetrics,
 ) -> SpeciesRunArtifact {
     let quality_outcome = classify_quality_outcome(&metrics);
+    let training_runtime = TrainingRuntimeArtifact::empty(&manifest.config.launch_policy);
     SpeciesRunArtifact {
         stage,
         manifest,
         phase_timings,
-        training_runtime: TrainingRuntimeArtifact::default(),
+        training_runtime,
         execution_outcome: RunExecutionOutcome::Success,
         quality_outcome,
         error: None,
@@ -927,16 +1016,29 @@ pub(crate) fn build_failure_artifact(
     manifest: RunManifest,
     phase_timings: Vec<PhaseTiming>,
     execution_outcome: RunExecutionOutcome,
-    error: impl Into<String>,
+    error: FractalError,
 ) -> SpeciesRunArtifact {
+    let mut training_runtime = TrainingRuntimeArtifact::empty(&manifest.config.launch_policy);
+    let diagnostics =
+        FailureDiagnosticsRecorder::from_policy(&manifest.config.launch_policy.failure_snapshot);
+    let snapshot = capture_failure_snapshot_without_model(
+        stage.clone(),
+        &manifest,
+        &training_runtime,
+        &diagnostics,
+        execution_outcome,
+        &error,
+        FailureSnapshotCaptureTiming::AfterPanicPropagation,
+    );
+    attach_failure_snapshot(&mut training_runtime, snapshot);
     SpeciesRunArtifact {
         stage,
         manifest,
         phase_timings,
-        training_runtime: TrainingRuntimeArtifact::default(),
+        training_runtime,
         execution_outcome,
         quality_outcome: RunQualityOutcome::Clean,
-        error: Some(error.into()),
+        error: Some(error.to_string()),
         metrics: None,
     }
 }
@@ -961,6 +1063,46 @@ fn timeout_outcome_for_phase(phase: RunPhase) -> RunExecutionOutcome {
         RunPhase::Stability | RunPhase::Perplexity | RunPhase::ArcSpeed => {
             RunExecutionOutcome::EvalConstrained
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_failure_species_artifact<B, R>(
+    stage: SpeciesRunStage,
+    manifest: &RunManifest,
+    phase_timings: Vec<PhaseTiming>,
+    training_runtime: &TrainingRuntimeArtifact,
+    diagnostics: &FailureDiagnosticsRecorder,
+    execution_outcome: RunExecutionOutcome,
+    error: &FractalError,
+    capture_timing: FailureSnapshotCaptureTiming,
+    model: Option<&FractalModel<B, R>>,
+) -> SpeciesRunArtifact
+where
+    B: Backend,
+    R: FractalRule<B> + Module<B> + ModuleDisplay + Clone + std::fmt::Debug,
+{
+    let mut runtime = training_runtime.clone();
+    let snapshot = capture_failure_snapshot(
+        stage.clone(),
+        manifest,
+        training_runtime,
+        diagnostics,
+        execution_outcome,
+        error,
+        capture_timing,
+        model,
+    );
+    attach_failure_snapshot(&mut runtime, snapshot);
+    SpeciesRunArtifact {
+        stage,
+        manifest: manifest.clone(),
+        phase_timings,
+        training_runtime: runtime,
+        execution_outcome,
+        quality_outcome: RunQualityOutcome::Clean,
+        error: Some(error.to_string()),
+        metrics: None,
     }
 }
 
@@ -991,6 +1133,8 @@ where
         variant_name,
         experiment,
     );
+    let mut diagnostics =
+        FailureDiagnosticsRecorder::from_policy(&config.launch_policy.failure_snapshot);
     let run_started = Instant::now();
     let deadline = config.run_timeout.map(|timeout| run_started + timeout);
     let stage = SpeciesRunStage {
@@ -1014,16 +1158,18 @@ where
     let execution_plan = match build_training_execution_plan(&batches, &config) {
         Ok(plan) => plan,
         Err(error) => {
-            let artifact = SpeciesRunArtifact {
+            let runtime = TrainingRuntimeArtifact::empty(&config.launch_policy);
+            let artifact = build_failure_species_artifact(
                 stage,
-                manifest: manifest.clone(),
-                phase_timings: Vec::new(),
-                training_runtime: TrainingRuntimeArtifact::default(),
-                execution_outcome: RunExecutionOutcome::InfraFailure,
-                quality_outcome: RunQualityOutcome::Clean,
-                error: Some(error.to_string()),
-                metrics: None,
-            };
+                &manifest,
+                Vec::new(),
+                &runtime,
+                &diagnostics,
+                RunExecutionOutcome::InfraFailure,
+                &error,
+                FailureSnapshotCaptureTiming::NoPanic,
+                Some(&model),
+            );
             record_species_run_artifact(artifact);
             return Err(error);
         }
@@ -1041,21 +1187,41 @@ where
         ) {
             Ok(restored) => restored,
             Err(error) => {
-                let artifact = SpeciesRunArtifact {
+                let runtime = TrainingRuntimeArtifact::empty(&config.launch_policy);
+                let artifact = build_failure_species_artifact(
                     stage,
-                    manifest: manifest.clone(),
-                    phase_timings: Vec::new(),
-                    training_runtime: TrainingRuntimeArtifact::default(),
-                    execution_outcome: RunExecutionOutcome::InfraFailure,
-                    quality_outcome: RunQualityOutcome::Clean,
-                    error: Some(error.to_string()),
-                    metrics: None,
-                };
+                    &manifest,
+                    Vec::new(),
+                    &runtime,
+                    &diagnostics,
+                    RunExecutionOutcome::InfraFailure,
+                    &error,
+                    FailureSnapshotCaptureTiming::NoPanic,
+                    None::<&FractalModel<B, R>>,
+                );
                 record_species_run_artifact(artifact);
                 return Err(error);
             }
         };
     let mut phase_timings = Vec::with_capacity(4);
+    diagnostics.record(
+        FailureDiagnosticBoundary::ExecutionPlanBuilt,
+        RunPhase::Train,
+        &launch_runtime.artifact(&config.launch_policy),
+        None,
+    );
+    diagnostics.record(
+        FailureDiagnosticBoundary::CheckpointRestoreComplete,
+        RunPhase::Train,
+        &launch_runtime.artifact(&config.launch_policy),
+        None,
+    );
+    diagnostics.record(
+        FailureDiagnosticBoundary::TrainPhaseStarted,
+        RunPhase::Train,
+        &launch_runtime.artifact(&config.launch_policy),
+        None,
+    );
 
     log_species_phase_start(
         species,
@@ -1077,20 +1243,22 @@ where
                     launch_runtime.completed_steps,
                     launch_runtime.planned_steps,
                 ));
-                let artifact = SpeciesRunArtifact {
+                let error =
+                    FractalError::InvalidState("run timeout exceeded during training".into());
+                let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                let artifact = build_failure_species_artifact(
                     stage,
-                    manifest: manifest.clone(),
+                    &manifest,
                     phase_timings,
-                    training_runtime: launch_runtime.artifact(),
-                    execution_outcome: timeout_outcome_for_phase(RunPhase::Train),
-                    quality_outcome: RunQualityOutcome::Clean,
-                    error: Some("run timeout exceeded during training".into()),
-                    metrics: None,
-                };
+                    &training_runtime,
+                    &diagnostics,
+                    timeout_outcome_for_phase(RunPhase::Train),
+                    &error,
+                    FailureSnapshotCaptureTiming::NoPanic,
+                    Some(&model),
+                );
                 record_species_run_artifact(artifact);
-                return Err(FractalError::InvalidState(
-                    "run timeout exceeded during training".into(),
-                ));
+                return Err(error);
             }
         }
         let train_batches = batches.train_batches_for_step(step);
@@ -1101,21 +1269,28 @@ where
                 launch_runtime.completed_steps,
                 launch_runtime.planned_steps,
             ));
-            let artifact = SpeciesRunArtifact {
+            let error = FractalError::InvalidState("training batch cache was empty".into());
+            let training_runtime = launch_runtime.artifact(&config.launch_policy);
+            let artifact = build_failure_species_artifact(
                 stage,
-                manifest: manifest.clone(),
+                &manifest,
                 phase_timings,
-                training_runtime: launch_runtime.artifact(),
-                execution_outcome: RunExecutionOutcome::InfraFailure,
-                quality_outcome: RunQualityOutcome::Clean,
-                error: Some("training batch cache was empty".into()),
-                metrics: None,
-            };
+                &training_runtime,
+                &diagnostics,
+                RunExecutionOutcome::InfraFailure,
+                &error,
+                FailureSnapshotCaptureTiming::NoPanic,
+                Some(&model),
+            );
             record_species_run_artifact(artifact);
-            return Err(FractalError::InvalidState(
-                "training batch cache was empty".into(),
-            ));
+            return Err(error);
         }
+        diagnostics.record(
+            FailureDiagnosticBoundary::TrainStepStarted,
+            RunPhase::Train,
+            &launch_runtime.artifact(&config.launch_policy),
+            Some(step),
+        );
         let batch = &train_batches[step % train_batches.len()];
         if should_fire_debug_probe(
             step,
@@ -1161,16 +1336,18 @@ where
                     launch_runtime.completed_steps,
                     launch_runtime.planned_steps,
                 ));
-                let artifact = SpeciesRunArtifact {
+                let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                let artifact = build_failure_species_artifact(
                     stage,
-                    manifest: manifest.clone(),
+                    &manifest,
                     phase_timings,
-                    training_runtime: launch_runtime.artifact(),
-                    execution_outcome: RunExecutionOutcome::InfraFailure,
-                    quality_outcome: RunQualityOutcome::Clean,
-                    error: Some(error.to_string()),
-                    metrics: None,
-                };
+                    &training_runtime,
+                    &diagnostics,
+                    RunExecutionOutcome::InfraFailure,
+                    &error,
+                    FailureSnapshotCaptureTiming::NoPanic,
+                    Some(&model),
+                );
                 record_species_run_artifact(artifact);
                 return Err(error);
             }
@@ -1207,6 +1384,12 @@ where
             }
             log_species_debug_probe(species, &details);
         }
+        diagnostics.record(
+            FailureDiagnosticBoundary::TrainStepCompleted,
+            RunPhase::Train,
+            &launch_runtime.artifact(&config.launch_policy),
+            Some(completed_step),
+        );
 
         let latest_snapshot = match maybe_capture_interim_eval(
             species,
@@ -1224,20 +1407,30 @@ where
                     launch_runtime.completed_steps,
                     launch_runtime.planned_steps,
                 ));
-                let artifact = SpeciesRunArtifact {
+                let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                let artifact = build_failure_species_artifact(
                     stage,
-                    manifest: manifest.clone(),
+                    &manifest,
                     phase_timings,
-                    training_runtime: launch_runtime.artifact(),
-                    execution_outcome: RunExecutionOutcome::InfraFailure,
-                    quality_outcome: RunQualityOutcome::Clean,
-                    error: Some(error.to_string()),
-                    metrics: None,
-                };
+                    &training_runtime,
+                    &diagnostics,
+                    RunExecutionOutcome::InfraFailure,
+                    &error,
+                    FailureSnapshotCaptureTiming::NoPanic,
+                    Some(&model),
+                );
                 record_species_run_artifact(artifact);
                 return Err(error);
             }
         };
+        if latest_snapshot.is_some() {
+            diagnostics.record(
+                FailureDiagnosticBoundary::InterimEvaluationComplete,
+                RunPhase::Train,
+                &launch_runtime.artifact(&config.launch_policy),
+                Some(completed_step),
+            );
+        }
         let latest_perplexity = latest_snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.long_context_perplexity);
@@ -1273,19 +1466,27 @@ where
                     launch_runtime.completed_steps,
                     launch_runtime.planned_steps,
                 ));
-                let artifact = SpeciesRunArtifact {
+                let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                let artifact = build_failure_species_artifact(
                     stage,
-                    manifest: manifest.clone(),
+                    &manifest,
                     phase_timings,
-                    training_runtime: launch_runtime.artifact(),
-                    execution_outcome: RunExecutionOutcome::InfraFailure,
-                    quality_outcome: RunQualityOutcome::Clean,
-                    error: Some(error.to_string()),
-                    metrics: None,
-                };
+                    &training_runtime,
+                    &diagnostics,
+                    RunExecutionOutcome::InfraFailure,
+                    &error,
+                    FailureSnapshotCaptureTiming::NoPanic,
+                    Some(&model),
+                );
                 record_species_run_artifact(artifact);
                 return Err(error);
             }
+            diagnostics.record(
+                FailureDiagnosticBoundary::LatestCheckpointPersisted,
+                RunPhase::Train,
+                &launch_runtime.artifact(&config.launch_policy),
+                Some(completed_step),
+            );
         }
         if best_improved {
             if let Err(error) = maybe_persist_best_checkpoint(
@@ -1303,58 +1504,73 @@ where
                     launch_runtime.completed_steps,
                     launch_runtime.planned_steps,
                 ));
-                let artifact = SpeciesRunArtifact {
+                let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                let artifact = build_failure_species_artifact(
                     stage,
-                    manifest: manifest.clone(),
+                    &manifest,
                     phase_timings,
-                    training_runtime: launch_runtime.artifact(),
-                    execution_outcome: RunExecutionOutcome::InfraFailure,
-                    quality_outcome: RunQualityOutcome::Clean,
-                    error: Some(error.to_string()),
-                    metrics: None,
-                };
+                    &training_runtime,
+                    &diagnostics,
+                    RunExecutionOutcome::InfraFailure,
+                    &error,
+                    FailureSnapshotCaptureTiming::NoPanic,
+                    Some(&model),
+                );
                 record_species_run_artifact(artifact);
                 return Err(error);
             }
+            diagnostics.record(
+                FailureDiagnosticBoundary::BestCheckpointPersisted,
+                RunPhase::Train,
+                &launch_runtime.artifact(&config.launch_policy),
+                Some(completed_step),
+            );
             if config
                 .launch_policy
                 .weight_export
                 .phases
                 .contains(&WeightExportPhase::Best)
             {
-                match export_weight_phase(
-                    stage.clone(),
-                    &manifest,
-                    &config.launch_policy.weight_export,
+                if let Err(error) = apply_weight_export_attempt(
+                    &mut launch_runtime.weight_export,
                     WeightExportPhase::Best,
-                    &model,
-                    &weight_export_paths,
-                    config.launch_policy.weight_export.required,
+                    export_weight_phase(
+                        stage.clone(),
+                        &manifest,
+                        &config.launch_policy.weight_export,
+                        WeightExportPhase::Best,
+                        &model,
+                        &weight_export_paths,
+                        config.launch_policy.weight_export.required,
+                    ),
                 ) {
-                    Ok(artifact) => {
-                        upsert_weight_export_artifact(&mut launch_runtime.weight_exports, artifact)
-                    }
-                    Err(error) => {
-                        phase_timings.push(phase_timing(
-                            RunPhase::Train,
-                            train_started.elapsed(),
-                            launch_runtime.completed_steps,
-                            launch_runtime.planned_steps,
-                        ));
-                        let artifact = SpeciesRunArtifact {
-                            stage,
-                            manifest: manifest.clone(),
-                            phase_timings,
-                            training_runtime: launch_runtime.artifact(),
-                            execution_outcome: RunExecutionOutcome::InfraFailure,
-                            quality_outcome: RunQualityOutcome::Clean,
-                            error: Some(error.to_string()),
-                            metrics: None,
-                        };
-                        record_species_run_artifact(artifact);
-                        return Err(error);
-                    }
+                    phase_timings.push(phase_timing(
+                        RunPhase::Train,
+                        train_started.elapsed(),
+                        launch_runtime.completed_steps,
+                        launch_runtime.planned_steps,
+                    ));
+                    let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                    let artifact = build_failure_species_artifact(
+                        stage,
+                        &manifest,
+                        phase_timings,
+                        &training_runtime,
+                        &diagnostics,
+                        RunExecutionOutcome::InfraFailure,
+                        &error,
+                        FailureSnapshotCaptureTiming::NoPanic,
+                        Some(&model),
+                    );
+                    record_species_run_artifact(artifact);
+                    return Err(error);
                 }
+                diagnostics.record(
+                    FailureDiagnosticBoundary::BestWeightExportComplete,
+                    RunPhase::Train,
+                    &launch_runtime.artifact(&config.launch_policy),
+                    Some(completed_step),
+                );
             }
         }
 
@@ -1376,6 +1592,12 @@ where
         launch_runtime.planned_steps,
     ));
     log_species_phase_done(species, "train", train_elapsed);
+    diagnostics.record(
+        FailureDiagnosticBoundary::StabilityPhaseStarted,
+        RunPhase::Stability,
+        &launch_runtime.artifact(&config.launch_policy),
+        None,
+    );
 
     log_species_phase_start(
         species,
@@ -1387,20 +1609,21 @@ where
         if Instant::now() >= deadline {
             let elapsed = stability_started.elapsed();
             phase_timings.push(phase_timing(RunPhase::Stability, elapsed, 0, 1));
-            let artifact = SpeciesRunArtifact {
+            let error = FractalError::InvalidState("run timeout exceeded during stability".into());
+            let training_runtime = launch_runtime.artifact(&config.launch_policy);
+            let artifact = build_failure_species_artifact(
                 stage,
-                manifest: manifest.clone(),
+                &manifest,
                 phase_timings,
-                training_runtime: launch_runtime.artifact(),
-                execution_outcome: timeout_outcome_for_phase(RunPhase::Stability),
-                quality_outcome: RunQualityOutcome::Clean,
-                error: Some("run timeout exceeded during stability".into()),
-                metrics: None,
-            };
+                &training_runtime,
+                &diagnostics,
+                timeout_outcome_for_phase(RunPhase::Stability),
+                &error,
+                FailureSnapshotCaptureTiming::NoPanic,
+                Some(&model),
+            );
             record_species_run_artifact(artifact);
-            return Err(FractalError::InvalidState(
-                "run timeout exceeded during stability".into(),
-            ));
+            return Err(error);
         }
     }
     let stability_batch = match batches.eval_sentence.first() {
@@ -1412,20 +1635,21 @@ where
                 0,
                 1,
             ));
-            let artifact = SpeciesRunArtifact {
+            let error = FractalError::InvalidState("stability batch cache was empty".into());
+            let training_runtime = launch_runtime.artifact(&config.launch_policy);
+            let artifact = build_failure_species_artifact(
                 stage,
-                manifest: manifest.clone(),
+                &manifest,
                 phase_timings,
-                training_runtime: launch_runtime.artifact(),
-                execution_outcome: RunExecutionOutcome::InfraFailure,
-                quality_outcome: RunQualityOutcome::Clean,
-                error: Some("stability batch cache was empty".into()),
-                metrics: None,
-            };
+                &training_runtime,
+                &diagnostics,
+                RunExecutionOutcome::InfraFailure,
+                &error,
+                FailureSnapshotCaptureTiming::NoPanic,
+                Some(&model),
+            );
             record_species_run_artifact(artifact);
-            return Err(FractalError::InvalidState(
-                "stability batch cache was empty".into(),
-            ));
+            return Err(error);
         }
     };
     let grad_norm_depth_20 =
@@ -1439,16 +1663,18 @@ where
                     0,
                     1,
                 ));
-                let artifact = SpeciesRunArtifact {
+                let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                let artifact = build_failure_species_artifact(
                     stage,
-                    manifest: manifest.clone(),
+                    &manifest,
                     phase_timings,
-                    training_runtime: launch_runtime.artifact(),
-                    execution_outcome: RunExecutionOutcome::InfraFailure,
-                    quality_outcome: RunQualityOutcome::Clean,
-                    error: Some(error.to_string()),
-                    metrics: None,
-                };
+                    &training_runtime,
+                    &diagnostics,
+                    RunExecutionOutcome::InfraFailure,
+                    &error,
+                    FailureSnapshotCaptureTiming::NoPanic,
+                    Some(&model),
+                );
                 record_species_run_artifact(artifact);
                 return Err(error);
             }
@@ -1456,6 +1682,18 @@ where
     let stability_elapsed = stability_started.elapsed();
     phase_timings.push(phase_timing(RunPhase::Stability, stability_elapsed, 1, 1));
     log_species_phase_done(species, "stability", stability_elapsed);
+    diagnostics.record(
+        FailureDiagnosticBoundary::StabilityPhaseComplete,
+        RunPhase::Stability,
+        &launch_runtime.artifact(&config.launch_policy),
+        None,
+    );
+    diagnostics.record(
+        FailureDiagnosticBoundary::PerplexityPhaseStarted,
+        RunPhase::Perplexity,
+        &launch_runtime.artifact(&config.launch_policy),
+        None,
+    );
 
     log_species_phase_start(
         species,
@@ -1475,20 +1713,21 @@ where
                 0,
                 batches.eval_sentence.len(),
             ));
-            let artifact = SpeciesRunArtifact {
+            let error = FractalError::InvalidState("run timeout exceeded during perplexity".into());
+            let training_runtime = launch_runtime.artifact(&config.launch_policy);
+            let artifact = build_failure_species_artifact(
                 stage,
-                manifest: manifest.clone(),
+                &manifest,
                 phase_timings,
-                training_runtime: launch_runtime.artifact(),
-                execution_outcome: timeout_outcome_for_phase(RunPhase::Perplexity),
-                quality_outcome: RunQualityOutcome::Clean,
-                error: Some("run timeout exceeded during perplexity".into()),
-                metrics: None,
-            };
+                &training_runtime,
+                &diagnostics,
+                timeout_outcome_for_phase(RunPhase::Perplexity),
+                &error,
+                FailureSnapshotCaptureTiming::NoPanic,
+                Some(&model),
+            );
             record_species_run_artifact(artifact);
-            return Err(FractalError::InvalidState(
-                "run timeout exceeded during perplexity".into(),
-            ));
+            return Err(error);
         }
     }
     let long_context_perplexity =
@@ -1501,16 +1740,18 @@ where
                     0,
                     batches.eval_sentence.len(),
                 ));
-                let artifact = SpeciesRunArtifact {
+                let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                let artifact = build_failure_species_artifact(
                     stage,
-                    manifest: manifest.clone(),
+                    &manifest,
                     phase_timings,
-                    training_runtime: launch_runtime.artifact(),
-                    execution_outcome: RunExecutionOutcome::InfraFailure,
-                    quality_outcome: RunQualityOutcome::Clean,
-                    error: Some(error.to_string()),
-                    metrics: None,
-                };
+                    &training_runtime,
+                    &diagnostics,
+                    RunExecutionOutcome::InfraFailure,
+                    &error,
+                    FailureSnapshotCaptureTiming::NoPanic,
+                    Some(&model),
+                );
                 record_species_run_artifact(artifact);
                 return Err(error);
             }
@@ -1523,6 +1764,18 @@ where
         batches.eval_sentence.len(),
     ));
     log_species_phase_done(species, "perplexity", perplexity_elapsed);
+    diagnostics.record(
+        FailureDiagnosticBoundary::PerplexityPhaseComplete,
+        RunPhase::Perplexity,
+        &launch_runtime.artifact(&config.launch_policy),
+        None,
+    );
+    diagnostics.record(
+        FailureDiagnosticBoundary::ArcSpeedPhaseStarted,
+        RunPhase::ArcSpeed,
+        &launch_runtime.artifact(&config.launch_policy),
+        None,
+    );
 
     log_species_phase_start(
         species,
@@ -1539,20 +1792,23 @@ where
                 0,
                 batches.eval_arc.len(),
             ));
-            let artifact = SpeciesRunArtifact {
-                stage,
-                manifest: manifest.clone(),
-                phase_timings,
-                training_runtime: launch_runtime.artifact(),
-                execution_outcome: timeout_outcome_for_phase(RunPhase::ArcSpeed),
-                quality_outcome: RunQualityOutcome::Clean,
-                error: Some("run timeout exceeded during ARC/speed evaluation".into()),
-                metrics: None,
-            };
-            record_species_run_artifact(artifact);
-            return Err(FractalError::InvalidState(
+            let error = FractalError::InvalidState(
                 "run timeout exceeded during ARC/speed evaluation".into(),
-            ));
+            );
+            let training_runtime = launch_runtime.artifact(&config.launch_policy);
+            let artifact = build_failure_species_artifact(
+                stage,
+                &manifest,
+                phase_timings,
+                &training_runtime,
+                &diagnostics,
+                timeout_outcome_for_phase(RunPhase::ArcSpeed),
+                &error,
+                FailureSnapshotCaptureTiming::NoPanic,
+                Some(&model),
+            );
+            record_species_run_artifact(artifact);
+            return Err(error);
         }
     }
     let (arc_accuracy, tokens_per_sec) =
@@ -1565,16 +1821,18 @@ where
                     0,
                     batches.eval_arc.len(),
                 ));
-                let artifact = SpeciesRunArtifact {
+                let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                let artifact = build_failure_species_artifact(
                     stage,
-                    manifest: manifest.clone(),
+                    &manifest,
                     phase_timings,
-                    training_runtime: launch_runtime.artifact(),
-                    execution_outcome: RunExecutionOutcome::InfraFailure,
-                    quality_outcome: RunQualityOutcome::Clean,
-                    error: Some(error.to_string()),
-                    metrics: None,
-                };
+                    &training_runtime,
+                    &diagnostics,
+                    RunExecutionOutcome::InfraFailure,
+                    &error,
+                    FailureSnapshotCaptureTiming::NoPanic,
+                    Some(&model),
+                );
                 record_species_run_artifact(artifact);
                 return Err(error);
             }
@@ -1587,6 +1845,12 @@ where
         batches.eval_arc.len(),
     ));
     log_species_phase_done(species, "arc_speed", accuracy_elapsed);
+    diagnostics.record(
+        FailureDiagnosticBoundary::ArcSpeedPhaseComplete,
+        RunPhase::ArcSpeed,
+        &launch_runtime.artifact(&config.launch_policy),
+        None,
+    );
 
     let metrics = SpeciesRawMetrics {
         species,
@@ -1610,52 +1874,67 @@ where
             &optimizer,
             Some(long_context_perplexity),
         ) {
-            let artifact = SpeciesRunArtifact {
+            let training_runtime = launch_runtime.artifact(&config.launch_policy);
+            let artifact = build_failure_species_artifact(
                 stage,
-                manifest: manifest.clone(),
+                &manifest,
                 phase_timings,
-                training_runtime: launch_runtime.artifact(),
-                execution_outcome: RunExecutionOutcome::InfraFailure,
-                quality_outcome: RunQualityOutcome::Clean,
-                error: Some(error.to_string()),
-                metrics: None,
-            };
+                &training_runtime,
+                &diagnostics,
+                RunExecutionOutcome::InfraFailure,
+                &error,
+                FailureSnapshotCaptureTiming::NoPanic,
+                Some(&model),
+            );
             record_species_run_artifact(artifact);
             return Err(error);
         }
+        diagnostics.record(
+            FailureDiagnosticBoundary::BestCheckpointPersisted,
+            RunPhase::Train,
+            &launch_runtime.artifact(&config.launch_policy),
+            Some(launch_runtime.completed_steps),
+        );
         if config
             .launch_policy
             .weight_export
             .phases
             .contains(&WeightExportPhase::Best)
         {
-            match export_weight_phase(
-                stage.clone(),
-                &manifest,
-                &config.launch_policy.weight_export,
+            if let Err(error) = apply_weight_export_attempt(
+                &mut launch_runtime.weight_export,
                 WeightExportPhase::Best,
-                &model,
-                &weight_export_paths,
-                config.launch_policy.weight_export.required,
+                export_weight_phase(
+                    stage.clone(),
+                    &manifest,
+                    &config.launch_policy.weight_export,
+                    WeightExportPhase::Best,
+                    &model,
+                    &weight_export_paths,
+                    config.launch_policy.weight_export.required,
+                ),
             ) {
-                Ok(artifact) => {
-                    upsert_weight_export_artifact(&mut launch_runtime.weight_exports, artifact)
-                }
-                Err(error) => {
-                    let artifact = SpeciesRunArtifact {
-                        stage,
-                        manifest: manifest.clone(),
-                        phase_timings,
-                        training_runtime: launch_runtime.artifact(),
-                        execution_outcome: RunExecutionOutcome::InfraFailure,
-                        quality_outcome: RunQualityOutcome::Clean,
-                        error: Some(error.to_string()),
-                        metrics: None,
-                    };
-                    record_species_run_artifact(artifact);
-                    return Err(error);
-                }
+                let training_runtime = launch_runtime.artifact(&config.launch_policy);
+                let artifact = build_failure_species_artifact(
+                    stage,
+                    &manifest,
+                    phase_timings,
+                    &training_runtime,
+                    &diagnostics,
+                    RunExecutionOutcome::InfraFailure,
+                    &error,
+                    FailureSnapshotCaptureTiming::NoPanic,
+                    Some(&model),
+                );
+                record_species_run_artifact(artifact);
+                return Err(error);
             }
+            diagnostics.record(
+                FailureDiagnosticBoundary::BestWeightExportComplete,
+                RunPhase::Train,
+                &launch_runtime.artifact(&config.launch_policy),
+                Some(launch_runtime.completed_steps),
+            );
         }
     }
     if let Err(error) = maybe_persist_final_checkpoint(
@@ -1667,59 +1946,80 @@ where
         &optimizer,
         Some(long_context_perplexity),
     ) {
-        let artifact = SpeciesRunArtifact {
+        let training_runtime = launch_runtime.artifact(&config.launch_policy);
+        let artifact = build_failure_species_artifact(
             stage,
-            manifest: manifest.clone(),
+            &manifest,
             phase_timings,
-            training_runtime: launch_runtime.artifact(),
-            execution_outcome: RunExecutionOutcome::InfraFailure,
-            quality_outcome: RunQualityOutcome::Clean,
-            error: Some(error.to_string()),
-            metrics: None,
-        };
+            &training_runtime,
+            &diagnostics,
+            RunExecutionOutcome::InfraFailure,
+            &error,
+            FailureSnapshotCaptureTiming::NoPanic,
+            Some(&model),
+        );
         record_species_run_artifact(artifact);
         return Err(error);
     }
+    diagnostics.record(
+        FailureDiagnosticBoundary::FinalCheckpointPersisted,
+        RunPhase::Train,
+        &launch_runtime.artifact(&config.launch_policy),
+        Some(launch_runtime.completed_steps),
+    );
     if config
         .launch_policy
         .weight_export
         .phases
         .contains(&WeightExportPhase::Final)
     {
-        match export_weight_phase(
-            stage.clone(),
-            &manifest,
-            &config.launch_policy.weight_export,
+        if let Err(error) = apply_weight_export_attempt(
+            &mut launch_runtime.weight_export,
             WeightExportPhase::Final,
-            &model,
-            &weight_export_paths,
-            config.launch_policy.weight_export.required,
+            export_weight_phase(
+                stage.clone(),
+                &manifest,
+                &config.launch_policy.weight_export,
+                WeightExportPhase::Final,
+                &model,
+                &weight_export_paths,
+                config.launch_policy.weight_export.required,
+            ),
         ) {
-            Ok(artifact) => {
-                upsert_weight_export_artifact(&mut launch_runtime.weight_exports, artifact)
-            }
-            Err(error) => {
-                let artifact = SpeciesRunArtifact {
-                    stage,
-                    manifest: manifest.clone(),
-                    phase_timings,
-                    training_runtime: launch_runtime.artifact(),
-                    execution_outcome: RunExecutionOutcome::InfraFailure,
-                    quality_outcome: RunQualityOutcome::Clean,
-                    error: Some(error.to_string()),
-                    metrics: None,
-                };
-                record_species_run_artifact(artifact);
-                return Err(error);
-            }
+            let training_runtime = launch_runtime.artifact(&config.launch_policy);
+            let artifact = build_failure_species_artifact(
+                stage,
+                &manifest,
+                phase_timings,
+                &training_runtime,
+                &diagnostics,
+                RunExecutionOutcome::InfraFailure,
+                &error,
+                FailureSnapshotCaptureTiming::NoPanic,
+                Some(&model),
+            );
+            record_species_run_artifact(artifact);
+            return Err(error);
         }
+        diagnostics.record(
+            FailureDiagnosticBoundary::FinalWeightExportComplete,
+            RunPhase::Train,
+            &launch_runtime.artifact(&config.launch_policy),
+            Some(launch_runtime.completed_steps),
+        );
     }
     let quality_outcome = classify_quality_outcome(&metrics);
+    diagnostics.record(
+        FailureDiagnosticBoundary::RunComplete,
+        RunPhase::ArcSpeed,
+        &launch_runtime.artifact(&config.launch_policy),
+        None,
+    );
     let artifact = SpeciesRunArtifact {
         stage,
         manifest,
         phase_timings,
-        training_runtime: launch_runtime.artifact(),
+        training_runtime: launch_runtime.artifact(&config.launch_policy),
         execution_outcome: RunExecutionOutcome::Success,
         quality_outcome,
         error: None,
@@ -2216,6 +2516,30 @@ pub(crate) fn resolve_weight_export_paths(
     WeightExportRuntimePaths { root }
 }
 
+fn resolve_failure_snapshot_paths(
+    stage: &SpeciesRunStage,
+    manifest: &RunManifest,
+) -> FailureSnapshotRuntimePaths {
+    let snapshot_prefix = resolve_weight_identity_prefix(manifest, stage);
+    let root = if let Some(root) = std::env::var_os("FRACTAL_RUN_FAILURE_SNAPSHOT_DIR") {
+        PathBuf::from(root)
+            .join(snapshot_prefix)
+            .join(stage.species.as_str())
+    } else if let Some(root) = std::env::var_os("FRACTAL_RUN_ARTIFACT_DIR") {
+        PathBuf::from(root)
+            .join("failure-snapshots")
+            .join(snapshot_prefix)
+            .join(stage.species.as_str())
+    } else {
+        PathBuf::from(".fractal-run-results")
+            .join(snapshot_prefix)
+            .join("failure-snapshots")
+            .join(stage.species.as_str())
+    };
+
+    FailureSnapshotRuntimePaths { root }
+}
+
 fn weight_export_slot_dir(
     paths: &WeightExportRuntimePaths,
     format: &WeightExportFormat,
@@ -2230,6 +2554,22 @@ fn weight_export_weights_stem(slot_dir: &Path) -> PathBuf {
 
 fn weight_export_metadata_path(slot_dir: &Path) -> PathBuf {
     slot_dir.join("metadata.json")
+}
+
+fn failure_snapshot_metadata_path(paths: &FailureSnapshotRuntimePaths) -> PathBuf {
+    paths.root.join("metadata.json")
+}
+
+fn failure_snapshot_runtime_state_path(paths: &FailureSnapshotRuntimePaths) -> PathBuf {
+    paths.root.join("runtime-state.json")
+}
+
+fn failure_snapshot_diagnostics_tail_path(paths: &FailureSnapshotRuntimePaths) -> PathBuf {
+    paths.root.join("diagnostics-tail.json")
+}
+
+fn failure_snapshot_model_weights_stem(paths: &FailureSnapshotRuntimePaths) -> PathBuf {
+    paths.root.join("model-weights").join("weights")
 }
 
 fn clear_checkpoint_root(root: &Path) -> Result<(), FractalError> {
@@ -2253,6 +2593,20 @@ fn write_checkpoint_state(path: &Path, state: &RuntimeCheckpointState) -> Result
     .map_err(|error| {
         FractalError::InvalidState(format!(
             "failed to write checkpoint state {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn write_pretty_json<T: Serialize>(path: &Path, value: &T) -> Result<(), FractalError> {
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(value)
+            .map_err(|error| FractalError::InvalidState(error.to_string()))?,
+    )
+    .map_err(|error| {
+        FractalError::InvalidState(format!(
+            "failed to write json artifact {}: {error}",
             path.display()
         ))
     })
@@ -2456,7 +2810,7 @@ where
     Ok((
         model,
         optimizer,
-        LaunchRuntimeState::from_checkpoint(checkpoint_state),
+        LaunchRuntimeState::from_checkpoint(checkpoint_state, &manifest.config.launch_policy),
         paths,
     ))
 }
@@ -2490,20 +2844,6 @@ where
     Ok(())
 }
 
-fn upsert_weight_export_artifact(
-    exports: &mut Vec<WeightExportArtifact>,
-    artifact: WeightExportArtifact,
-) {
-    if let Some(slot) = exports
-        .iter_mut()
-        .find(|existing| existing.phase == artifact.phase)
-    {
-        *slot = artifact;
-    } else {
-        exports.push(artifact);
-    }
-}
-
 fn build_weight_export_contract(
     stage: SpeciesRunStage,
     manifest: &RunManifest,
@@ -2533,6 +2873,307 @@ fn build_weight_export_contract(
     };
     contract.validate_against_config(&manifest.config)?;
     Ok(contract)
+}
+
+fn build_failure_snapshot_contract(
+    stage: SpeciesRunStage,
+    manifest: &RunManifest,
+    error_class: FailureSnapshotErrorClass,
+    capture_timing: FailureSnapshotCaptureTiming,
+    last_successful_boundary: Option<FailureDiagnosticBoundary>,
+) -> Result<FailureSnapshotContract, FractalError> {
+    let experiment = manifest.experiment.as_ref().ok_or_else(|| {
+        FractalError::InvalidConfig(
+            "failure snapshot requires a resolved experiment spec in the run manifest".into(),
+        )
+    })?;
+    let commit_sha = experiment.experiment_id.commit_sha.clone().ok_or_else(|| {
+        FractalError::InvalidConfig(
+            "failure snapshot requires the producing experiment commit_sha".into(),
+        )
+    })?;
+    let contract = FailureSnapshotContract {
+        experiment_logical_name: experiment.experiment_id.logical_name.clone(),
+        experiment_run_id: experiment.experiment_id.run_id.clone(),
+        experiment_branch: experiment.experiment_id.branch.clone(),
+        experiment_commit_sha: commit_sha,
+        species: stage.species.as_str().to_owned(),
+        variant_name: manifest.variant_name.as_str().to_owned(),
+        model: experiment.model.clone(),
+        vocab_size: manifest.config.vocab_size,
+        precision: manifest.config.launch_policy.precision.clone(),
+        error_class,
+        capture_timing,
+        last_successful_boundary,
+    };
+    contract.validate_against_config(&manifest.config)?;
+    Ok(contract)
+}
+
+fn apply_weight_export_attempt(
+    runtime: &mut WeightExportRuntimeState,
+    phase: WeightExportPhase,
+    result: Result<WeightExportArtifact, FractalError>,
+) -> Result<(), FractalError> {
+    match result {
+        Ok(artifact) => {
+            runtime.record_success(artifact);
+            Ok(())
+        }
+        Err(error) => {
+            runtime.record_failure(phase, error.to_string());
+            if runtime.policy.required {
+                Err(error)
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+fn classify_failure_snapshot_error(
+    execution_outcome: RunExecutionOutcome,
+    error: &FractalError,
+) -> FailureSnapshotErrorClass {
+    match execution_outcome {
+        RunExecutionOutcome::TrainTimeout => FailureSnapshotErrorClass::TrainTimeout,
+        RunExecutionOutcome::EvalConstrained => FailureSnapshotErrorClass::EvalConstrained,
+        RunExecutionOutcome::InfraFailure | RunExecutionOutcome::Success => match error {
+            FractalError::InvalidConfig(_) => FailureSnapshotErrorClass::InvalidConfig,
+            FractalError::InvalidState(_) => FailureSnapshotErrorClass::InvalidState,
+            FractalError::Shape(_) => FailureSnapshotErrorClass::Shape,
+        },
+    }
+}
+
+fn mark_failure_snapshot_root_error(state: &mut FailureSnapshotRuntimeState, error: &FractalError) {
+    for kind in state.policy.requested_artifact_kinds() {
+        state.record_failure(kind, error.to_string());
+    }
+}
+
+fn persist_failure_snapshot_payload<T: Serialize>(
+    state: &mut FailureSnapshotRuntimeState,
+    kind: FailureSnapshotArtifactKind,
+    path: &Path,
+    value: &T,
+) {
+    let result = write_pretty_json(path, value).map(|_| FailureSnapshotArtifact {
+        kind,
+        path: path.display().to_string(),
+    });
+    match result {
+        Ok(artifact) => state.record_success(artifact),
+        Err(error) => state.record_failure(kind, error.to_string()),
+    }
+}
+
+fn finalize_failure_snapshot_metadata(
+    state: &mut FailureSnapshotRuntimeState,
+    metadata_path: &Path,
+) {
+    state.record_success(FailureSnapshotArtifact {
+        kind: FailureSnapshotArtifactKind::Metadata,
+        path: metadata_path.display().to_string(),
+    });
+    if let Err(error) = write_pretty_json(metadata_path, state) {
+        state.record_failure(FailureSnapshotArtifactKind::Metadata, error.to_string());
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_failure_snapshot<B, R>(
+    stage: SpeciesRunStage,
+    manifest: &RunManifest,
+    training_runtime: &TrainingRuntimeArtifact,
+    diagnostics: &FailureDiagnosticsRecorder,
+    execution_outcome: RunExecutionOutcome,
+    error: &FractalError,
+    capture_timing: FailureSnapshotCaptureTiming,
+    model: Option<&FractalModel<B, R>>,
+) -> FailureSnapshotRuntimeState
+where
+    B: Backend,
+    R: FractalRule<B> + Module<B> + ModuleDisplay + Clone + std::fmt::Debug,
+{
+    let policy = manifest.config.launch_policy.failure_snapshot.clone();
+    let mut state = FailureSnapshotRuntimeState::from_policy(policy.clone());
+    if !policy.enabled {
+        return state;
+    }
+
+    let error_class = classify_failure_snapshot_error(execution_outcome, error);
+    let contract = match build_failure_snapshot_contract(
+        stage.clone(),
+        manifest,
+        error_class,
+        capture_timing,
+        diagnostics.last_boundary(),
+    ) {
+        Ok(contract) => contract,
+        Err(contract_error) => {
+            state.mark_attempted();
+            state.record_failure(
+                FailureSnapshotArtifactKind::Metadata,
+                contract_error.to_string(),
+            );
+            return state;
+        }
+    };
+    state.begin_capture(contract);
+
+    let paths = resolve_failure_snapshot_paths(&stage, manifest);
+    if let Err(error) = fs::create_dir_all(&paths.root).map_err(|io_error| {
+        FractalError::InvalidState(format!(
+            "failed to create failure snapshot root {}: {io_error}",
+            paths.root.display()
+        ))
+    }) {
+        mark_failure_snapshot_root_error(&mut state, &error);
+        return state;
+    }
+
+    if policy.capture_runtime_state {
+        persist_failure_snapshot_payload(
+            &mut state,
+            FailureSnapshotArtifactKind::RuntimeState,
+            &failure_snapshot_runtime_state_path(&paths),
+            training_runtime,
+        );
+    }
+    if policy.capture_diagnostics_tail {
+        let diagnostics_tail = diagnostics.snapshot();
+        persist_failure_snapshot_payload(
+            &mut state,
+            FailureSnapshotArtifactKind::DiagnosticsTail,
+            &failure_snapshot_diagnostics_tail_path(&paths),
+            &diagnostics_tail,
+        );
+    }
+    if policy.capture_model_weights {
+        match model {
+            Some(model) => {
+                let model_weights_path = failure_snapshot_model_weights_stem(&paths);
+                if let Some(parent) = model_weights_path.parent() {
+                    if let Err(error) = fs::create_dir_all(parent).map_err(|io_error| {
+                        FractalError::InvalidState(format!(
+                            "failed to create failure snapshot model-weight root {}: {io_error}",
+                            parent.display()
+                        ))
+                    }) {
+                        state.record_failure(
+                            FailureSnapshotArtifactKind::ModelWeights,
+                            error.to_string(),
+                        );
+                    } else {
+                        let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
+                        match model
+                            .clone()
+                            .save_file(model_weights_path.clone(), &recorder)
+                            .map_err(recorder_error)
+                        {
+                            Ok(_) => state.record_success(FailureSnapshotArtifact {
+                                kind: FailureSnapshotArtifactKind::ModelWeights,
+                                path: model_weights_path.display().to_string(),
+                            }),
+                            Err(error) => state.record_failure(
+                                FailureSnapshotArtifactKind::ModelWeights,
+                                error.to_string(),
+                            ),
+                        }
+                    }
+                }
+            }
+            None => state.record_failure(
+                FailureSnapshotArtifactKind::ModelWeights,
+                "model weights were unavailable for failure snapshot capture".to_owned(),
+            ),
+        }
+    }
+
+    finalize_failure_snapshot_metadata(&mut state, &failure_snapshot_metadata_path(&paths));
+    state
+}
+
+fn capture_failure_snapshot_without_model(
+    stage: SpeciesRunStage,
+    manifest: &RunManifest,
+    training_runtime: &TrainingRuntimeArtifact,
+    diagnostics: &FailureDiagnosticsRecorder,
+    execution_outcome: RunExecutionOutcome,
+    error: &FractalError,
+    capture_timing: FailureSnapshotCaptureTiming,
+) -> FailureSnapshotRuntimeState {
+    let policy = manifest.config.launch_policy.failure_snapshot.clone();
+    let mut state = FailureSnapshotRuntimeState::from_policy(policy.clone());
+    if !policy.enabled {
+        return state;
+    }
+
+    let error_class = classify_failure_snapshot_error(execution_outcome, error);
+    let contract = match build_failure_snapshot_contract(
+        stage.clone(),
+        manifest,
+        error_class,
+        capture_timing,
+        diagnostics.last_boundary(),
+    ) {
+        Ok(contract) => contract,
+        Err(contract_error) => {
+            state.mark_attempted();
+            state.record_failure(
+                FailureSnapshotArtifactKind::Metadata,
+                contract_error.to_string(),
+            );
+            return state;
+        }
+    };
+    state.begin_capture(contract);
+
+    let paths = resolve_failure_snapshot_paths(&stage, manifest);
+    if let Err(error) = fs::create_dir_all(&paths.root).map_err(|io_error| {
+        FractalError::InvalidState(format!(
+            "failed to create failure snapshot root {}: {io_error}",
+            paths.root.display()
+        ))
+    }) {
+        mark_failure_snapshot_root_error(&mut state, &error);
+        return state;
+    }
+
+    if policy.capture_runtime_state {
+        persist_failure_snapshot_payload(
+            &mut state,
+            FailureSnapshotArtifactKind::RuntimeState,
+            &failure_snapshot_runtime_state_path(&paths),
+            training_runtime,
+        );
+    }
+    if policy.capture_diagnostics_tail {
+        let diagnostics_tail = diagnostics.snapshot();
+        persist_failure_snapshot_payload(
+            &mut state,
+            FailureSnapshotArtifactKind::DiagnosticsTail,
+            &failure_snapshot_diagnostics_tail_path(&paths),
+            &diagnostics_tail,
+        );
+    }
+    if policy.capture_model_weights {
+        state.record_failure(
+            FailureSnapshotArtifactKind::ModelWeights,
+            "model weights were unavailable for failure snapshot capture".to_owned(),
+        );
+    }
+
+    finalize_failure_snapshot_metadata(&mut state, &failure_snapshot_metadata_path(&paths));
+    state
+}
+
+fn attach_failure_snapshot(
+    training_runtime: &mut TrainingRuntimeArtifact,
+    snapshot: FailureSnapshotRuntimeState,
+) {
+    training_runtime.failure_snapshot = snapshot;
 }
 
 pub(crate) fn export_weight_phase<B, R>(
