@@ -402,6 +402,7 @@ fn training_runtime_json(
                 "tokens_per_sec": snapshot.tokens_per_sec,
             })
         }).collect::<Vec<_>>(),
+        "diagnostics": diagnostics_runtime_json(&spec.diagnostics),
     })
 }
 
@@ -549,13 +550,177 @@ fn launch_policy_json(spec: &crate::LaunchPolicySpec) -> Value {
             "required": spec.weight_export.required,
             "label": spec.weight_export.label(),
         },
-        "debug": {
-            "train_step_log_interval_steps": spec.debug.train_step_log_interval_steps,
-            "cuda_memory_log_interval_steps": spec.debug.cuda_memory_log_interval_steps,
-            "forward_trace_train_steps": spec.debug.forward_trace_train_steps,
-            "forward_position_log_interval": spec.debug.forward_position_log_interval,
-        },
+        "diagnostics": diagnostics_policy_json(&spec.diagnostics),
     })
+}
+
+fn diagnostics_policy_json(spec: &crate::DiagnosticsPolicy) -> Value {
+    json!({
+        "required": spec.required,
+        "structured_output": spec.structured_output.as_str(),
+        "probes": spec.probes.iter().map(diagnostic_probe_json).collect::<Vec<_>>(),
+        "label": spec.label(),
+    })
+}
+
+fn diagnostic_probe_json(spec: &crate::DiagnosticProbeRequest) -> Value {
+    json!({
+        "kind": spec.kind.as_str(),
+        "cadence": probe_cadence_json(&spec.cadence),
+        "position_interval": spec.position_interval,
+    })
+}
+
+fn probe_cadence_json(spec: &crate::ProbeCadence) -> Value {
+    match spec {
+        crate::ProbeCadence::EveryStep => json!({
+            "kind": "every_step",
+        }),
+        crate::ProbeCadence::StepInterval { steps } => json!({
+            "kind": "step_interval",
+            "steps": steps,
+        }),
+        crate::ProbeCadence::FirstNSteps { steps } => json!({
+            "kind": "first_n_steps",
+            "steps": steps,
+        }),
+    }
+}
+
+fn diagnostics_runtime_json(spec: &crate::DiagnosticsRuntimeArtifact) -> Value {
+    json!({
+        "policy": diagnostics_policy_json(&spec.policy),
+        "structured_output": {
+            "format": spec.policy.structured_output.as_str(),
+            "event_file": spec.event_file,
+        },
+        "event_count": spec.events.len(),
+        "emitted_probe_kinds": spec
+            .emitted_probe_kinds
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>(),
+        "missing_required_probe_kinds": spec
+            .missing_required_probe_kinds
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>(),
+        "missing_required_boundary_completions": spec
+            .missing_required_boundary_completions
+            .iter()
+            .map(|boundary| boundary.as_str())
+            .collect::<Vec<_>>(),
+        "runtime_failure": spec
+            .runtime_failure
+            .as_ref()
+            .map(diagnostics_runtime_failure_json),
+        "diagnostics_incomplete": spec.diagnostics_incomplete,
+        "last_event": spec.last_event.as_ref().map(diagnostic_event_json),
+    })
+}
+
+fn diagnostics_runtime_failure_json(spec: &crate::DiagnosticsRuntimeFailure) -> Value {
+    json!({
+        "kind": match spec.kind {
+            crate::DiagnosticsRuntimeFailureKind::Initialization => "initialization",
+            crate::DiagnosticsRuntimeFailureKind::EventPersistence => "event_persistence",
+        },
+        "probe_kind": spec.probe_kind.map(|kind| kind.as_str()),
+        "boundary": spec.boundary.map(|boundary| boundary.as_str()),
+        "message": spec.message.clone(),
+    })
+}
+
+fn diagnostic_event_json(spec: &crate::DiagnosticEvent) -> Value {
+    json!({
+        "experiment_run_id": spec.experiment_run_id.clone(),
+        "experiment_logical_name": spec.experiment_logical_name.clone(),
+        "species": spec.species.clone(),
+        "variant_name": spec.variant_name.clone(),
+        "phase": phase_name(spec.phase),
+        "step": spec.step,
+        "tokens_seen": spec.tokens_seen,
+        "event": diagnostic_event_kind_json(&spec.event),
+    })
+}
+
+fn diagnostic_event_kind_json(spec: &crate::DiagnosticEventKind) -> Value {
+    match spec {
+        crate::DiagnosticEventKind::TrainStepStart {
+            planned_steps,
+            batch_token_count,
+            input_shape,
+            target_shape,
+        } => json!({
+            "kind": "train_step_start",
+            "planned_steps": planned_steps,
+            "batch_token_count": batch_token_count,
+            "input_shape": input_shape,
+            "target_shape": target_shape,
+        }),
+        crate::DiagnosticEventKind::ForwardStart { input_shape } => json!({
+            "kind": "forward_start",
+            "input_shape": input_shape,
+        }),
+        crate::DiagnosticEventKind::ForwardPosition {
+            position,
+            sequence_length,
+            input_shape,
+            readout_shape,
+        } => json!({
+            "kind": "forward_position",
+            "position": position,
+            "sequence_length": sequence_length,
+            "input_shape": input_shape,
+            "readout_shape": readout_shape,
+        }),
+        crate::DiagnosticEventKind::ForwardComplete { logits_shape } => json!({
+            "kind": "forward_complete",
+            "logits_shape": logits_shape,
+        }),
+        crate::DiagnosticEventKind::LossStart { target_shape } => json!({
+            "kind": "loss_start",
+            "target_shape": target_shape,
+        }),
+        crate::DiagnosticEventKind::LossComplete { loss_shape } => json!({
+            "kind": "loss_complete",
+            "loss_shape": loss_shape,
+        }),
+        crate::DiagnosticEventKind::BackwardStart => json!({
+            "kind": "backward_start",
+        }),
+        crate::DiagnosticEventKind::BackwardComplete => json!({
+            "kind": "backward_complete",
+        }),
+        crate::DiagnosticEventKind::OptimizerStepStart {
+            scheduled_learning_rate,
+        } => json!({
+            "kind": "optimizer_step_start",
+            "scheduled_learning_rate": scheduled_learning_rate,
+        }),
+        crate::DiagnosticEventKind::OptimizerStepComplete {
+            scheduled_learning_rate,
+            completed_steps,
+            train_tokens_seen,
+        } => json!({
+            "kind": "optimizer_step_complete",
+            "scheduled_learning_rate": scheduled_learning_rate,
+            "completed_steps": completed_steps,
+            "train_tokens_seen": train_tokens_seen,
+        }),
+        crate::DiagnosticEventKind::CudaMemorySnapshot {
+            boundary,
+            used_mib,
+            free_mib,
+            total_mib,
+        } => json!({
+            "kind": "cuda_memory_snapshot",
+            "boundary": boundary.as_str(),
+            "used_mib": used_mib,
+            "free_mib": free_mib,
+            "total_mib": total_mib,
+        }),
+    }
 }
 
 fn tokenizer_bridge_json(stats: &crate::TokenizerBridgeStats) -> Value {
@@ -700,23 +865,29 @@ fn io_error(error: std::io::Error) -> FractalError {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
     use std::{env, fs};
 
     use crate::{
-        species_registry_for_species, ComparisonContract, RankedSpeciesResult, SpeciesId,
-        TournamentLane, TournamentPreset, TournamentRunReport, TournamentRunReportParts,
+        species_registry_for_species, ComparisonContract, DiagnosticEvent, DiagnosticEventKind,
+        DiagnosticProbeKind, DiagnosticProbeRequest, DiagnosticsPolicy, RankedSpeciesResult,
+        SpeciesId, TournamentLane, TournamentPreset, TournamentRunReport, TournamentRunReportParts,
     };
     use fractal_core::lifecycle::TrainingRuntimeArtifact;
     use fractal_core::{
         ArtifactPolicy, BudgetSpec, DecisionIntent, ExecutionBackend, ExecutionTarget,
         ExecutionTargetKind, ExperimentId, ExperimentQuestion, ExperimentSpec, LaneIntent,
-        OptimizerSpec, RuntimeSurfaceSpec, TrainingInputSpec, VariantSpec,
+        OptimizerSpec, ProbeCadence, RunPhase, RuntimeSurfaceSpec, TrainingInputSpec, VariantSpec,
     };
 
     use super::{persist_run_artifacts, ARTIFACT_FILENAME, MANIFEST_FILENAME};
 
+    static ARTIFACT_ENV_MUTEX: Mutex<()> = Mutex::new(());
+
     #[test]
     fn persist_run_artifacts_writes_manifest_and_artifact_json() {
+        let _env_lock = ARTIFACT_ENV_MUTEX.lock().unwrap();
         let temp_root =
             env::temp_dir().join(format!("fractal-run-artifacts-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp_root);
@@ -826,6 +997,140 @@ mod tests {
             artifact_json["results"][0]["experiment"]["runtime"]["launch_policy"]["resume"]
                 ["resume_on_interrupt"],
             serde_json::Value::Bool(false)
+        );
+
+        env::remove_var("FRACTAL_RUN_ARTIFACT_DIR");
+        env::remove_var("FRACTAL_RUN_MANIFEST_DIR");
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn persist_run_artifacts_references_runtime_owned_diagnostic_event_stream_and_summary() {
+        let _env_lock = ARTIFACT_ENV_MUTEX.lock().unwrap();
+        let temp_root =
+            env::temp_dir().join(format!("fractal-run-diagnostics-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_root);
+        let artifact_dir = temp_root.join("artifacts");
+        let manifest_dir = temp_root.join("manifests");
+        let diagnostic_event_path = artifact_dir.join("diagnostics/run-123/p1_contractive.jsonl");
+        fs::create_dir_all(diagnostic_event_path.parent().unwrap()).unwrap();
+        fs::write(
+            &diagnostic_event_path,
+            "{\"event\":{\"kind\":\"train_step_start\"}}\n",
+        )
+        .unwrap();
+        env::set_var("FRACTAL_RUN_ARTIFACT_DIR", &artifact_dir);
+        env::set_var("FRACTAL_RUN_MANIFEST_DIR", &manifest_dir);
+
+        let species = species_registry_for_species(SpeciesId::P1Contractive);
+        let training_runtime = TrainingRuntimeArtifact {
+            diagnostics: fractal_core::DiagnosticsRuntimeArtifact {
+                policy: DiagnosticsPolicy {
+                    required: true,
+                    probes: vec![DiagnosticProbeRequest {
+                        kind: DiagnosticProbeKind::TrainStep,
+                        cadence: ProbeCadence::EveryStep,
+                        position_interval: None,
+                    }],
+                    structured_output: fractal_core::StructuredDiagnosticsOutput::Jsonl,
+                },
+                event_file: Some(diagnostic_event_path.display().to_string()),
+                events: vec![DiagnosticEvent {
+                    experiment_run_id: "run-123".to_owned(),
+                    experiment_logical_name: Some("fast-test-run".to_owned()),
+                    species: SpeciesId::P1Contractive.as_str().to_owned(),
+                    variant_name: "p1_contractive_v1".to_owned(),
+                    phase: RunPhase::Train,
+                    step: Some(0),
+                    tokens_seen: Some(0),
+                    event: DiagnosticEventKind::TrainStepStart {
+                        planned_steps: 1,
+                        batch_token_count: 16,
+                        input_shape: vec![1, 16],
+                        target_shape: vec![1, 16],
+                    },
+                }],
+                emitted_probe_kinds: vec![DiagnosticProbeKind::TrainStep],
+                missing_required_probe_kinds: Vec::new(),
+                missing_required_boundary_completions: Vec::new(),
+                runtime_failure: None,
+                diagnostics_incomplete: false,
+                last_event: Some(DiagnosticEvent {
+                    experiment_run_id: "run-123".to_owned(),
+                    experiment_logical_name: Some("fast-test-run".to_owned()),
+                    species: SpeciesId::P1Contractive.as_str().to_owned(),
+                    variant_name: "p1_contractive_v1".to_owned(),
+                    phase: RunPhase::Train,
+                    step: Some(0),
+                    tokens_seen: Some(0),
+                    event: DiagnosticEventKind::TrainStepStart {
+                        planned_steps: 1,
+                        batch_token_count: 16,
+                        input_shape: vec![1, 16],
+                        target_shape: vec![1, 16],
+                    },
+                }),
+            },
+            ..TrainingRuntimeArtifact::default()
+        };
+        let artifact = fractal_core::TournamentRunArtifact {
+            config: TournamentPreset::FastTest.config(),
+            species: vec![fractal_core::SpeciesRunArtifact {
+                stage: fractal_core::SpeciesRunStage {
+                    species: SpeciesId::P1Contractive,
+                    ordinal: 1,
+                    total: 1,
+                },
+                manifest: fractal_core::RunManifest {
+                    variant_name: fractal_core::PrimitiveVariantName::new_unchecked(
+                        "p1_contractive_v1",
+                    ),
+                    timeout_budget: None,
+                    config: TournamentPreset::FastTest.config(),
+                    experiment: Some(test_experiment_spec()),
+                },
+                phase_timings: vec![fractal_core::PhaseTiming {
+                    phase: fractal_core::RunPhase::Train,
+                    elapsed: std::time::Duration::from_secs(1),
+                    completed: 1,
+                    total: 1,
+                }],
+                training_runtime,
+                execution_outcome: fractal_core::RunExecutionOutcome::InfraFailure,
+                quality_outcome: fractal_core::RunQualityOutcome::Clean,
+                error: Some("synthetic training failure".to_owned()),
+                metrics: None,
+            }],
+        };
+        let report = TournamentRunReport::new(TournamentRunReportParts {
+            preset: TournamentPreset::FastTest,
+            lane: TournamentLane::Leader,
+            comparison: ComparisonContract::authoritative_same_preset(),
+            config: TournamentPreset::FastTest.config(),
+            species,
+            results: Vec::new(),
+            artifact,
+            bridge_stats: BTreeMap::new(),
+        });
+
+        let paths = persist_run_artifacts(&report).unwrap();
+        let artifact_json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&paths.artifact_path).unwrap()).unwrap();
+        let diagnostics = &artifact_json["results"][0]["training_runtime"]["diagnostics"];
+        let event_file = diagnostics["structured_output"]["event_file"]
+            .as_str()
+            .expect("diagnostics event file should be recorded");
+        let event_path = PathBuf::from(event_file);
+        assert!(event_path.exists());
+        let lines = fs::read_to_string(&event_path).unwrap();
+        assert!(lines.contains("\"kind\":\"train_step_start\""));
+        assert_eq!(
+            diagnostics["policy"]["probes"][0]["kind"],
+            serde_json::Value::String("train_step".to_owned())
+        );
+        assert_eq!(
+            diagnostics["last_event"]["event"]["kind"],
+            serde_json::Value::String("train_step_start".to_owned())
         );
 
         env::remove_var("FRACTAL_RUN_ARTIFACT_DIR");

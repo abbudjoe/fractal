@@ -13,6 +13,9 @@ use crate::{
         GeneratorConfig, GeneratorDepthConfig, SimpleHierarchicalGenerator, MIN_SEQUENCE_LEN,
         MIN_VOCAB_SIZE, PAD_TOKEN,
     },
+    diagnostics::{
+        take_last_diagnostics_runtime_artifact, DiagnosticsPolicy, DiagnosticsRuntimeArtifact,
+    },
     error::FractalError,
     fitness::SpeciesRawMetrics,
     registry::{
@@ -1684,66 +1687,6 @@ impl ResumePolicy {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DebugProbePolicy {
-    pub train_step_log_interval_steps: Option<usize>,
-    pub cuda_memory_log_interval_steps: Option<usize>,
-    pub forward_trace_train_steps: Option<usize>,
-    pub forward_position_log_interval: Option<usize>,
-}
-
-impl Default for DebugProbePolicy {
-    fn default() -> Self {
-        Self::disabled()
-    }
-}
-
-impl DebugProbePolicy {
-    pub const fn disabled() -> Self {
-        Self {
-            train_step_log_interval_steps: None,
-            cuda_memory_log_interval_steps: None,
-            forward_trace_train_steps: None,
-            forward_position_log_interval: None,
-        }
-    }
-
-    pub fn label(&self) -> String {
-        format!(
-            "train_step_log_interval_steps={:?} cuda_memory_log_interval_steps={:?} forward_trace_train_steps={:?} forward_position_log_interval={:?}",
-            self.train_step_log_interval_steps,
-            self.cuda_memory_log_interval_steps,
-            self.forward_trace_train_steps,
-            self.forward_position_log_interval
-        )
-    }
-
-    pub fn validate(&self) -> Result<(), FractalError> {
-        for (name, interval) in [
-            (
-                "train_step_log_interval_steps",
-                self.train_step_log_interval_steps,
-            ),
-            (
-                "cuda_memory_log_interval_steps",
-                self.cuda_memory_log_interval_steps,
-            ),
-            ("forward_trace_train_steps", self.forward_trace_train_steps),
-            (
-                "forward_position_log_interval",
-                self.forward_position_log_interval,
-            ),
-        ] {
-            if interval == Some(0) {
-                return Err(FractalError::InvalidConfig(format!(
-                    "{name} must be greater than zero when configured"
-                )));
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchPolicySpec {
     pub precision: PrecisionPolicy,
     pub checkpoint: CheckpointPolicy,
@@ -1752,7 +1695,7 @@ pub struct LaunchPolicySpec {
     #[serde(default)]
     pub weight_export: WeightExportPolicy,
     #[serde(default)]
-    pub debug: DebugProbePolicy,
+    pub diagnostics: DiagnosticsPolicy,
 }
 
 impl Default for LaunchPolicySpec {
@@ -1769,7 +1712,7 @@ impl LaunchPolicySpec {
             eval_cadence: EvalCadencePolicy::legacy_default(),
             resume: ResumePolicy::legacy_default(),
             weight_export: WeightExportPolicy::legacy_default(),
-            debug: DebugProbePolicy::disabled(),
+            diagnostics: DiagnosticsPolicy::disabled(),
         }
     }
 
@@ -1780,7 +1723,7 @@ impl LaunchPolicySpec {
             eval_cadence: EvalCadencePolicy::stage0_default(),
             resume: ResumePolicy::stage0_default(),
             weight_export: WeightExportPolicy::legacy_default(),
-            debug: DebugProbePolicy::disabled(),
+            diagnostics: DiagnosticsPolicy::disabled(),
         }
     }
 
@@ -1795,7 +1738,7 @@ impl LaunchPolicySpec {
                 self.eval_cadence.label(),
                 self.resume.label(),
                 self.weight_export.label(),
-                self.debug.label()
+                self.diagnostics.label()
             )
         }
     }
@@ -1806,7 +1749,7 @@ impl LaunchPolicySpec {
         self.eval_cadence.validate()?;
         self.resume.validate()?;
         self.weight_export.validate()?;
-        self.debug.validate()?;
+        self.diagnostics.validate()?;
         Ok(())
     }
 
@@ -1815,7 +1758,8 @@ impl LaunchPolicySpec {
         backend: &crate::registry::ComputeBackend,
     ) -> Result<(), FractalError> {
         self.validate()?;
-        self.weight_export.validate_against_backend(backend)
+        self.weight_export.validate_against_backend(backend)?;
+        self.diagnostics.validate_against_backend(backend)
     }
 }
 
@@ -2727,7 +2671,8 @@ pub struct SpeciesRunStage {
     pub total: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RunPhase {
     Train,
     Stability,
@@ -2837,6 +2782,7 @@ pub struct TrainingRuntimeArtifact {
     pub checkpoints: Vec<CheckpointArtifact>,
     pub weight_exports: Vec<WeightExportArtifact>,
     pub interim_evaluations: Vec<InterimEvalSnapshot>,
+    pub diagnostics: DiagnosticsRuntimeArtifact,
 }
 
 #[derive(Clone, Debug)]
@@ -3151,6 +3097,7 @@ impl Tournament {
         started: Instant,
         result: &Result<SpeciesRawMetrics, FractalError>,
     ) -> SpeciesRunArtifact {
+        let recovered_diagnostics = take_last_diagnostics_runtime_artifact();
         let mut artifact = take_last_species_run_artifact().unwrap_or_else(|| {
             let manifest = RunManifest {
                 variant_name: context.variant_name,
@@ -3174,6 +3121,12 @@ impl Tournament {
                 ),
             }
         });
+
+        if let Some(recovered_diagnostics) = recovered_diagnostics {
+            if artifact.training_runtime.diagnostics.events.is_empty() {
+                artifact.training_runtime.diagnostics = recovered_diagnostics;
+            }
+        }
 
         artifact.stage = stage;
         if artifact.phase_timings.is_empty() {

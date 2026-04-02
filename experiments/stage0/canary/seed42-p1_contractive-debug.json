@@ -135,11 +135,61 @@
           "restart_on_corruption": true,
           "restart_on_contract_ambiguity": true
         },
-        "debug": {
-          "train_step_log_interval_steps": 50,
-          "cuda_memory_log_interval_steps": 50,
-          "forward_trace_train_steps": 1,
-          "forward_position_log_interval": 64
+        "diagnostics": {
+          "required": true,
+          "structured_output": "jsonl",
+          "probes": [
+            {
+              "kind": "train_step",
+              "cadence": {
+                "kind": "step_interval",
+                "steps": 50
+              }
+            },
+            {
+              "kind": "forward_boundary",
+              "cadence": {
+                "kind": "step_interval",
+                "steps": 50
+              }
+            },
+            {
+              "kind": "forward_position",
+              "cadence": {
+                "kind": "first_n_steps",
+                "steps": 1
+              },
+              "position_interval": 64
+            },
+            {
+              "kind": "loss_boundary",
+              "cadence": {
+                "kind": "step_interval",
+                "steps": 50
+              }
+            },
+            {
+              "kind": "backward_boundary",
+              "cadence": {
+                "kind": "step_interval",
+                "steps": 50
+              }
+            },
+            {
+              "kind": "optimizer_boundary",
+              "cadence": {
+                "kind": "step_interval",
+                "steps": 50
+              }
+            },
+            {
+              "kind": "cuda_memory_snapshot",
+              "cadence": {
+                "kind": "step_interval",
+                "steps": 50
+              }
+            }
+          ]
         }
       }
     },
