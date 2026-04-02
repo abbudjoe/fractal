@@ -1,4 +1,5 @@
 pub mod data_generator;
+pub mod diagnostics;
 pub mod error;
 pub mod fitness;
 pub mod lifecycle;
@@ -11,6 +12,12 @@ pub mod state;
 
 pub use data_generator::{
     GeneratorDepthConfig, SimpleHierarchicalGenerator, TaskFamily, TokenBatch, PAD_TOKEN,
+};
+pub use diagnostics::{
+    CudaMemorySnapshot, DiagnosticBoundary, DiagnosticEvent, DiagnosticEventKind,
+    DiagnosticIdentity, DiagnosticProbeKind, DiagnosticProbeRequest, DiagnosticsPolicy,
+    DiagnosticsRecorder, DiagnosticsRuntimeArtifact, ProbeCadence, StructuredDiagnosticsOutput,
+    TrainStepDiagnosticContext,
 };
 pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
 pub use lifecycle::{

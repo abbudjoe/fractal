@@ -6,24 +6,13 @@ use burn::{
 
 use crate::{
     data_generator::TokenBatch,
+    diagnostics::{DiagnosticsRecorder, TrainStepDiagnosticContext},
     error::FractalError,
+    lifecycle::RunPhase,
     router::EarlyExitRouter,
     rule_trait::{ApplyContext, FractalRule},
     state::FractalState,
 };
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ForwardDebugProbe {
-    pub train_step: Option<usize>,
-    pub position_log_interval: Option<usize>,
-}
-
-impl ForwardDebugProbe {
-    fn should_log_position(self, position: usize) -> bool {
-        self.position_log_interval
-            .is_some_and(|interval| position.is_multiple_of(interval))
-    }
-}
 
 #[derive(Module, Debug)]
 pub struct FractalModel<B: Backend, R: Module<B>> {
@@ -65,7 +54,7 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
         &self,
         input_ids: Tensor<B, 2, Int>,
     ) -> Result<Tensor<B, 3>, FractalError> {
-        self.forward_tokens_with_controls(input_ids, None, true, None)
+        self.forward_tokens_with_controls(input_ids, None, true, None, None)
     }
 
     pub fn forward_tokens_with_controls(
@@ -73,7 +62,8 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
         input_ids: Tensor<B, 2, Int>,
         force_depth: Option<usize>,
         use_router: bool,
-        debug_probe: Option<ForwardDebugProbe>,
+        diagnostics: Option<&mut DiagnosticsRecorder>,
+        step_context: Option<TrainStepDiagnosticContext>,
     ) -> Result<Tensor<B, 3>, FractalError> {
         let [batch_size, seq_len] = input_ids.dims();
         let device = input_ids.device();
@@ -85,31 +75,27 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
             &device,
         )?;
         let mut logits = Vec::with_capacity(seq_len);
+        let mut diagnostics = diagnostics;
 
         for position in 0..seq_len {
             let x_t = embeddings
                 .clone()
                 .narrow(1, position, 1)
                 .reshape([batch_size, self.hidden_dim]);
-            if debug_probe.is_some_and(|probe| probe.should_log_position(position)) {
-                println!(
-                    "[phase:debug] forward train_step={:?} position={}/{} x_shape={:?}",
-                    debug_probe.and_then(|probe| probe.train_step),
-                    position,
-                    seq_len,
-                    x_t.dims()
-                );
-            }
+            let input_shape = x_t.dims().into_iter().collect::<Vec<_>>();
             state = self.recurse_token(state, x_t, force_depth, use_router)?;
             let readout = state.readout();
-            if debug_probe.is_some_and(|probe| probe.should_log_position(position)) {
-                println!(
-                    "[phase:debug] forward train_step={:?} position={}/{} readout_shape={:?}",
-                    debug_probe.and_then(|probe| probe.train_step),
-                    position,
-                    seq_len,
-                    readout.dims()
-                );
+            if let (Some(context), Some(recorder)) = (step_context, diagnostics.as_deref_mut()) {
+                if recorder.should_emit_forward_position(context.step, position) {
+                    recorder.emit_forward_position(
+                        RunPhase::Train,
+                        context,
+                        position,
+                        seq_len,
+                        input_shape,
+                        readout.dims().into_iter().collect(),
+                    );
+                }
             }
             let token_logits =
                 self.output
@@ -127,13 +113,13 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
         criterion: &CrossEntropyLoss<B>,
         force_depth: Option<usize>,
         use_router: bool,
-        debug_probe: Option<ForwardDebugProbe>,
     ) -> Result<Tensor<B, 1>, FractalError> {
         let logits = self.forward_tokens_with_controls(
             batch.input_ids.clone(),
             force_depth,
             use_router,
-            debug_probe,
+            None,
+            None,
         )?;
         let [batch_size, seq_len, vocab_size] = logits.dims();
         let targets = batch.target_ids.clone().reshape([batch_size * seq_len]);

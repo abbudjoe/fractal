@@ -29,6 +29,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     data_generator::{SimpleHierarchicalGenerator, TaskFamily, TokenBatch, PAD_TOKEN},
+    diagnostics::{
+        CudaMemorySnapshot, DiagnosticEventKind, DiagnosticIdentity, DiagnosticsRecorder,
+        DiagnosticsRuntimeArtifact, TrainStepDiagnosticContext,
+    },
     error::FractalError,
     fitness::SpeciesRawMetrics,
     lifecycle::{
@@ -38,7 +42,7 @@ use crate::{
         TrainingRuntimeArtifact, WeightExportArtifact, WeightExportContract, WeightExportFormat,
         WeightExportPhase, WeightExportPolicy,
     },
-    model::{ForwardDebugProbe, FractalModel},
+    model::FractalModel,
     rule_trait::FractalRule,
 };
 
@@ -451,7 +455,7 @@ impl LaunchRuntimeState {
         }
     }
 
-    fn artifact(&self) -> TrainingRuntimeArtifact {
+    fn artifact(&self, diagnostics: DiagnosticsRuntimeArtifact) -> TrainingRuntimeArtifact {
         TrainingRuntimeArtifact {
             completed_steps: self.completed_steps,
             planned_steps: self.planned_steps,
@@ -461,6 +465,7 @@ impl LaunchRuntimeState {
             checkpoints: self.checkpoints.clone(),
             weight_exports: self.weight_exports.clone(),
             interim_evaluations: self.interim_evaluations.clone(),
+            diagnostics,
         }
     }
 }
@@ -1055,6 +1060,10 @@ where
                 return Err(error);
             }
         };
+    let mut diagnostics = DiagnosticsRecorder::new(
+        config.launch_policy.diagnostics.clone(),
+        build_diagnostic_identity(species, &manifest),
+    );
     let mut phase_timings = Vec::with_capacity(4);
 
     log_species_phase_start(
@@ -1081,7 +1090,7 @@ where
                     stage,
                     manifest: manifest.clone(),
                     phase_timings,
-                    training_runtime: launch_runtime.artifact(),
+                    training_runtime: launch_runtime.artifact(diagnostics.artifact()),
                     execution_outcome: timeout_outcome_for_phase(RunPhase::Train),
                     quality_outcome: RunQualityOutcome::Clean,
                     error: Some("run timeout exceeded during training".into()),
@@ -1105,7 +1114,7 @@ where
                 stage,
                 manifest: manifest.clone(),
                 phase_timings,
-                training_runtime: launch_runtime.artifact(),
+                training_runtime: launch_runtime.artifact(diagnostics.artifact()),
                 execution_outcome: RunExecutionOutcome::InfraFailure,
                 quality_outcome: RunQualityOutcome::Clean,
                 error: Some("training batch cache was empty".into()),
@@ -1117,43 +1126,44 @@ where
             ));
         }
         let batch = &train_batches[step % train_batches.len()];
-        if should_fire_debug_probe(
+        let step_context = TrainStepDiagnosticContext {
             step,
-            config.launch_policy.debug.train_step_log_interval_steps,
-        ) {
-            let mut details = vec![
-                format!("train_step={step}"),
-                format!("planned_steps={}", launch_runtime.planned_steps),
-                format!("tokens_seen={}", launch_runtime.train_tokens_seen),
-                format!("batch_token_count={}", batch.token_count),
-                format!("input_shape={:?}", batch.input_ids.dims()),
-                format!("target_shape={:?}", batch.target_ids.dims()),
-            ];
-            if should_fire_debug_probe(
-                step,
-                config.launch_policy.debug.cuda_memory_log_interval_steps,
-            ) {
-                if let Some(snapshot) = cuda_memory_snapshot() {
-                    details.push(snapshot);
-                }
-            }
-            log_species_debug_probe(species, &details);
-        }
-        let debug_probe = if config
-            .launch_policy
-            .debug
-            .forward_trace_train_steps
-            .is_some_and(|limit| step < limit)
-        {
-            Some(ForwardDebugProbe {
-                train_step: Some(step),
-                position_log_interval: config.launch_policy.debug.forward_position_log_interval,
-            })
-        } else {
-            None
+            tokens_seen: launch_runtime.train_tokens_seen,
         };
-        let loss = match model.loss(batch, &criterion, None, true, debug_probe) {
-            Ok(loss) => loss,
+        emit_training_diagnostic(
+            &mut diagnostics,
+            step_context,
+            DiagnosticEventKind::TrainStepStart {
+                planned_steps: launch_runtime.planned_steps,
+                batch_token_count: batch.token_count,
+                input_shape: batch.input_ids.dims().into_iter().collect(),
+                target_shape: batch.target_ids.dims().into_iter().collect(),
+            },
+        );
+        emit_training_diagnostic(
+            &mut diagnostics,
+            step_context,
+            DiagnosticEventKind::ForwardStart {
+                input_shape: batch.input_ids.dims().into_iter().collect(),
+            },
+        );
+        let logits = match model.forward_tokens_with_controls(
+            batch.input_ids.clone(),
+            None,
+            true,
+            Some(&mut diagnostics),
+            Some(step_context),
+        ) {
+            Ok(logits) => {
+                emit_training_diagnostic(
+                    &mut diagnostics,
+                    step_context,
+                    DiagnosticEventKind::ForwardComplete {
+                        logits_shape: logits.dims().into_iter().collect(),
+                    },
+                );
+                logits
+            }
             Err(error) => {
                 phase_timings.push(phase_timing(
                     RunPhase::Train,
@@ -1165,7 +1175,7 @@ where
                     stage,
                     manifest: manifest.clone(),
                     phase_timings,
-                    training_runtime: launch_runtime.artifact(),
+                    training_runtime: launch_runtime.artifact(diagnostics.artifact()),
                     execution_outcome: RunExecutionOutcome::InfraFailure,
                     quality_outcome: RunQualityOutcome::Clean,
                     error: Some(error.to_string()),
@@ -1175,7 +1185,34 @@ where
                 return Err(error);
             }
         };
+        emit_training_diagnostic(
+            &mut diagnostics,
+            step_context,
+            DiagnosticEventKind::LossStart {
+                target_shape: batch.target_ids.dims().into_iter().collect(),
+            },
+        );
+        let [batch_size, seq_len, vocab_size] = logits.dims();
+        let targets = batch.target_ids.clone().reshape([batch_size * seq_len]);
+        let loss = criterion.forward(logits.reshape([batch_size * seq_len, vocab_size]), targets);
+        emit_training_diagnostic(
+            &mut diagnostics,
+            step_context,
+            DiagnosticEventKind::LossComplete {
+                loss_shape: loss.dims().into_iter().collect(),
+            },
+        );
+        emit_training_diagnostic(
+            &mut diagnostics,
+            step_context,
+            DiagnosticEventKind::BackwardStart,
+        );
         let grads = GradientsParams::from_grads(loss.backward(), &model);
+        emit_training_diagnostic(
+            &mut diagnostics,
+            step_context,
+            DiagnosticEventKind::BackwardComplete,
+        );
         let scheduled_learning_rate = config.optimizer.learning_rate_at_tokens(
             launch_runtime.train_tokens_seen,
             launch_runtime.target_train_tokens,
@@ -1184,29 +1221,26 @@ where
         if let Some(max_norm) = config.optimizer.gradient_clip_norm {
             clip_gradients_global_norm(&model, &mut grads, max_norm);
         }
+        emit_training_diagnostic(
+            &mut diagnostics,
+            step_context,
+            DiagnosticEventKind::OptimizerStepStart {
+                scheduled_learning_rate,
+            },
+        );
         model = optimizer.step(scheduled_learning_rate, model, grads);
         launch_runtime.train_tokens_seen += batch.token_count;
         launch_runtime.completed_steps = step + 1;
         let completed_step = launch_runtime.completed_steps;
-        if should_fire_debug_probe(
-            step,
-            config.launch_policy.debug.train_step_log_interval_steps,
-        ) {
-            let mut details = vec![
-                format!("train_step_done={completed_step}"),
-                format!("tokens_seen={}", launch_runtime.train_tokens_seen),
-                format!("scheduled_lr={scheduled_learning_rate:.8}"),
-            ];
-            if should_fire_debug_probe(
-                step,
-                config.launch_policy.debug.cuda_memory_log_interval_steps,
-            ) {
-                if let Some(snapshot) = cuda_memory_snapshot() {
-                    details.push(snapshot);
-                }
-            }
-            log_species_debug_probe(species, &details);
-        }
+        emit_training_diagnostic(
+            &mut diagnostics,
+            step_context,
+            DiagnosticEventKind::OptimizerStepComplete {
+                scheduled_learning_rate,
+                completed_steps: completed_step,
+                train_tokens_seen: launch_runtime.train_tokens_seen,
+            },
+        );
 
         let latest_snapshot = match maybe_capture_interim_eval(
             species,
@@ -1228,7 +1262,7 @@ where
                     stage,
                     manifest: manifest.clone(),
                     phase_timings,
-                    training_runtime: launch_runtime.artifact(),
+                    training_runtime: launch_runtime.artifact(diagnostics.artifact()),
                     execution_outcome: RunExecutionOutcome::InfraFailure,
                     quality_outcome: RunQualityOutcome::Clean,
                     error: Some(error.to_string()),
@@ -1277,7 +1311,7 @@ where
                     stage,
                     manifest: manifest.clone(),
                     phase_timings,
-                    training_runtime: launch_runtime.artifact(),
+                    training_runtime: launch_runtime.artifact(diagnostics.artifact()),
                     execution_outcome: RunExecutionOutcome::InfraFailure,
                     quality_outcome: RunQualityOutcome::Clean,
                     error: Some(error.to_string()),
@@ -1307,7 +1341,7 @@ where
                     stage,
                     manifest: manifest.clone(),
                     phase_timings,
-                    training_runtime: launch_runtime.artifact(),
+                    training_runtime: launch_runtime.artifact(diagnostics.artifact()),
                     execution_outcome: RunExecutionOutcome::InfraFailure,
                     quality_outcome: RunQualityOutcome::Clean,
                     error: Some(error.to_string()),
@@ -1345,7 +1379,7 @@ where
                             stage,
                             manifest: manifest.clone(),
                             phase_timings,
-                            training_runtime: launch_runtime.artifact(),
+                            training_runtime: launch_runtime.artifact(diagnostics.artifact()),
                             execution_outcome: RunExecutionOutcome::InfraFailure,
                             quality_outcome: RunQualityOutcome::Clean,
                             error: Some(error.to_string()),
@@ -1391,7 +1425,7 @@ where
                 stage,
                 manifest: manifest.clone(),
                 phase_timings,
-                training_runtime: launch_runtime.artifact(),
+                training_runtime: launch_runtime.artifact(diagnostics.artifact()),
                 execution_outcome: timeout_outcome_for_phase(RunPhase::Stability),
                 quality_outcome: RunQualityOutcome::Clean,
                 error: Some("run timeout exceeded during stability".into()),
@@ -1416,7 +1450,7 @@ where
                 stage,
                 manifest: manifest.clone(),
                 phase_timings,
-                training_runtime: launch_runtime.artifact(),
+                training_runtime: launch_runtime.artifact(diagnostics.artifact()),
                 execution_outcome: RunExecutionOutcome::InfraFailure,
                 quality_outcome: RunQualityOutcome::Clean,
                 error: Some("stability batch cache was empty".into()),
@@ -1443,7 +1477,7 @@ where
                     stage,
                     manifest: manifest.clone(),
                     phase_timings,
-                    training_runtime: launch_runtime.artifact(),
+                    training_runtime: launch_runtime.artifact(diagnostics.artifact()),
                     execution_outcome: RunExecutionOutcome::InfraFailure,
                     quality_outcome: RunQualityOutcome::Clean,
                     error: Some(error.to_string()),
@@ -1479,7 +1513,7 @@ where
                 stage,
                 manifest: manifest.clone(),
                 phase_timings,
-                training_runtime: launch_runtime.artifact(),
+                training_runtime: launch_runtime.artifact(diagnostics.artifact()),
                 execution_outcome: timeout_outcome_for_phase(RunPhase::Perplexity),
                 quality_outcome: RunQualityOutcome::Clean,
                 error: Some("run timeout exceeded during perplexity".into()),
@@ -1505,7 +1539,7 @@ where
                     stage,
                     manifest: manifest.clone(),
                     phase_timings,
-                    training_runtime: launch_runtime.artifact(),
+                    training_runtime: launch_runtime.artifact(diagnostics.artifact()),
                     execution_outcome: RunExecutionOutcome::InfraFailure,
                     quality_outcome: RunQualityOutcome::Clean,
                     error: Some(error.to_string()),
@@ -1543,7 +1577,7 @@ where
                 stage,
                 manifest: manifest.clone(),
                 phase_timings,
-                training_runtime: launch_runtime.artifact(),
+                training_runtime: launch_runtime.artifact(diagnostics.artifact()),
                 execution_outcome: timeout_outcome_for_phase(RunPhase::ArcSpeed),
                 quality_outcome: RunQualityOutcome::Clean,
                 error: Some("run timeout exceeded during ARC/speed evaluation".into()),
@@ -1569,7 +1603,7 @@ where
                     stage,
                     manifest: manifest.clone(),
                     phase_timings,
-                    training_runtime: launch_runtime.artifact(),
+                    training_runtime: launch_runtime.artifact(diagnostics.artifact()),
                     execution_outcome: RunExecutionOutcome::InfraFailure,
                     quality_outcome: RunQualityOutcome::Clean,
                     error: Some(error.to_string()),
@@ -1614,7 +1648,7 @@ where
                 stage,
                 manifest: manifest.clone(),
                 phase_timings,
-                training_runtime: launch_runtime.artifact(),
+                training_runtime: launch_runtime.artifact(diagnostics.artifact()),
                 execution_outcome: RunExecutionOutcome::InfraFailure,
                 quality_outcome: RunQualityOutcome::Clean,
                 error: Some(error.to_string()),
@@ -1646,7 +1680,7 @@ where
                         stage,
                         manifest: manifest.clone(),
                         phase_timings,
-                        training_runtime: launch_runtime.artifact(),
+                        training_runtime: launch_runtime.artifact(diagnostics.artifact()),
                         execution_outcome: RunExecutionOutcome::InfraFailure,
                         quality_outcome: RunQualityOutcome::Clean,
                         error: Some(error.to_string()),
@@ -1671,7 +1705,7 @@ where
             stage,
             manifest: manifest.clone(),
             phase_timings,
-            training_runtime: launch_runtime.artifact(),
+            training_runtime: launch_runtime.artifact(diagnostics.artifact()),
             execution_outcome: RunExecutionOutcome::InfraFailure,
             quality_outcome: RunQualityOutcome::Clean,
             error: Some(error.to_string()),
@@ -1703,7 +1737,7 @@ where
                     stage,
                     manifest: manifest.clone(),
                     phase_timings,
-                    training_runtime: launch_runtime.artifact(),
+                    training_runtime: launch_runtime.artifact(diagnostics.artifact()),
                     execution_outcome: RunExecutionOutcome::InfraFailure,
                     quality_outcome: RunQualityOutcome::Clean,
                     error: Some(error.to_string()),
@@ -1719,7 +1753,7 @@ where
         stage,
         manifest,
         phase_timings,
-        training_runtime: launch_runtime.artifact(),
+        training_runtime: launch_runtime.artifact(diagnostics.artifact()),
         execution_outcome: RunExecutionOutcome::Success,
         quality_outcome,
         error: None,
@@ -1813,7 +1847,7 @@ where
 {
     let mut total_loss = 0.0f64;
     for batch in batches {
-        let loss = model.loss(batch, criterion, None, true, None)?;
+        let loss = model.loss(batch, criterion, None, true)?;
         total_loss += loss.into_scalar().elem::<f64>();
     }
     let mean_loss = total_loss / batches.len() as f64;
@@ -1877,11 +1911,41 @@ pub(crate) fn training_progress_interval(total_steps: usize) -> usize {
     total_steps.max(1).div_ceil(TRAIN_PROGRESS_TARGET_EVENTS)
 }
 
-fn should_fire_debug_probe(step: usize, interval: Option<usize>) -> bool {
-    interval.is_some_and(|interval| step.is_multiple_of(interval))
+fn build_diagnostic_identity(species: SpeciesId, manifest: &RunManifest) -> DiagnosticIdentity {
+    let experiment = manifest.experiment.as_ref();
+    DiagnosticIdentity {
+        experiment_run_id: experiment
+            .map(|spec| spec.experiment_id.run_id.clone())
+            .unwrap_or_else(|| format!("local-{}", manifest.variant_name.as_str())),
+        experiment_logical_name: experiment.map(|spec| spec.experiment_id.logical_name.clone()),
+        species: species.as_str().to_owned(),
+        variant_name: manifest.variant_name.as_str().to_owned(),
+    }
 }
 
-fn cuda_memory_snapshot() -> Option<String> {
+fn emit_training_diagnostic(
+    diagnostics: &mut DiagnosticsRecorder,
+    context: TrainStepDiagnosticContext,
+    event: DiagnosticEventKind,
+) {
+    let boundary = event.boundary();
+    diagnostics.emit_event(
+        RunPhase::Train,
+        Some(context.step),
+        Some(context.tokens_seen),
+        event,
+    );
+    if let Some(boundary) = boundary {
+        diagnostics.record_cuda_memory_snapshot(
+            RunPhase::Train,
+            context,
+            boundary,
+            read_cuda_memory_snapshot(),
+        );
+    }
+}
+
+fn read_cuda_memory_snapshot() -> Option<CudaMemorySnapshot> {
     let output = Command::new("nvidia-smi")
         .args([
             "--query-gpu=memory.used,memory.free,memory.total",
@@ -1892,18 +1956,23 @@ fn cuda_memory_snapshot() -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let line = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .next()?
-        .trim()
-        .to_owned();
-    let mut values = line.split(',').map(|value| value.trim());
-    let used_mib = values.next()?;
-    let free_mib = values.next()?;
-    let total_mib = values.next()?;
-    Some(format!(
-        "cuda_mem_mib(used={used_mib},free={free_mib},total={total_mib})"
-    ))
+    parse_cuda_memory_snapshot(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()?
+            .trim(),
+    )
+}
+
+fn parse_cuda_memory_snapshot(line: &str) -> Option<CudaMemorySnapshot> {
+    let mut values = line
+        .split(',')
+        .map(|value| value.trim().parse::<usize>().ok());
+    Some(CudaMemorySnapshot {
+        used_mib: values.next()??,
+        free_mib: values.next()??,
+        total_mib: values.next()??,
+    })
 }
 
 fn log_species_phase_start(species: SpeciesId, phase: &str, details: &[String]) {
@@ -1933,15 +2002,6 @@ fn log_species_phase_done(species: SpeciesId, phase: &str, elapsed: Duration) {
         "[phase:done] {species} {phase} elapsed={:.1}s",
         elapsed.as_secs_f64()
     );
-}
-
-fn log_species_debug_probe(species: SpeciesId, details: &[String]) {
-    let suffix = if details.is_empty() {
-        String::new()
-    } else {
-        format!(" {}", details.join(" "))
-    };
-    println!("[phase:debug] {species}{suffix}");
 }
 
 pub(crate) fn gradient_l2_norm<M, B>(module: &M, grads: &GradientsParams) -> f64
@@ -2103,7 +2163,7 @@ where
     R: FractalRule<B> + Module<B> + AutodiffModule<B> + ModuleDisplay + Clone + std::fmt::Debug,
     <R as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend> + ModuleDisplay,
 {
-    let stability_loss = model.loss(batch, criterion, Some(stability_depth), false, None)?;
+    let stability_loss = model.loss(batch, criterion, Some(stability_depth), false)?;
     let stability_grads = GradientsParams::from_grads(stability_loss.backward(), model);
     Ok(gradient_l2_norm(model, &stability_grads))
 }
