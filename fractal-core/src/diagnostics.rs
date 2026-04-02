@@ -407,7 +407,7 @@ pub struct DiagnosticEvent {
     pub event: DiagnosticEventKind,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct DiagnosticsRuntimeArtifact {
     pub policy: DiagnosticsPolicy,
     pub event_file: Option<String>,
@@ -421,6 +421,20 @@ pub struct DiagnosticsRuntimeArtifact {
 }
 
 impl DiagnosticsRuntimeArtifact {
+    pub(crate) fn from_policy(policy: DiagnosticsPolicy) -> Self {
+        Self {
+            policy,
+            event_file: None,
+            events: Vec::new(),
+            emitted_probe_kinds: Vec::new(),
+            missing_required_probe_kinds: Vec::new(),
+            missing_required_boundary_completions: Vec::new(),
+            runtime_failure: None,
+            diagnostics_incomplete: false,
+            last_event: None,
+        }
+    }
+
     pub(crate) fn initialization_failure(
         policy: DiagnosticsPolicy,
         runtime_paths: Option<&DiagnosticsRuntimePaths>,
