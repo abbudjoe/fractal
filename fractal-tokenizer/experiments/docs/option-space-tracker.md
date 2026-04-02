@@ -16,6 +16,7 @@ The active post-postmortem pivot is now:
 - [shared-overlay-dictionary-spec.md](./shared-overlay-dictionary-spec.md)
 - [overlay-model-facing-transport-spec.md](./overlay-model-facing-transport-spec.md)
 - [overlay-offline-benchmark-spec.md](./overlay-offline-benchmark-spec.md)
+- [server-side-overlay-envelope-spec.md](./server-side-overlay-envelope-spec.md)
 
 This is intentionally **not** another attempt to rescue recursion as the
 primary tokenizer substrate.
@@ -243,6 +244,10 @@ Read:
 - the next uncertainty is no longer whether the overlay works offline; it is
   whether the runtime path can preserve these wins without adding enough
   client/server complexity to erase them
+- the next smallest-complete runtime step is now specified in
+  [server-side-overlay-envelope-spec.md](./server-side-overlay-envelope-spec.md):
+  a stateless typed envelope that crosses a real boundary and rematerializes
+  exact canonical prompt text on the server side
 
 ## Tried By Layer
 
