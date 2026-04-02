@@ -6,11 +6,7 @@ use burn::{
     },
     nn::Initializer,
     record::{PrecisionSettings, Record},
-    tensor::{
-        backend::{AutodiffBackend, Backend},
-        module::linear,
-        Tensor,
-    },
+    tensor::{backend::{AutodiffBackend, Backend}, Tensor},
 };
 use serde::{Deserialize, Serialize};
 
@@ -187,15 +183,20 @@ impl StructuredProjectionConfig {
 
 impl<B: Backend> StructuredProjection<B> {
     pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
-        if D == 1 {
-            return Self::forward::<2>(self, input.unsqueeze()).flatten(0, 1);
-        }
-
-        let weight = match self.layout_policy {
-            ProjectionLayoutPolicy::InputByOutput => self.weight.val(),
-            ProjectionLayoutPolicy::OutputByInput => self.weight.val().transpose(),
-        };
-        linear(input, weight, self.bias.as_ref().map(|bias| bias.val()))
+        let dims = input.dims();
+        let [d_input, d_output] = self.logical_dims();
+        assert_eq!(
+            dims[D - 1],
+            d_input,
+            "structured projection input width mismatch: expected last dimension {d_input}, got {}",
+            dims[D - 1]
+        );
+        let leading = dims[..D - 1].iter().copied().product::<usize>().max(1);
+        let input_2d = input.reshape([leading, d_input]);
+        let output_2d = self.forward_rank2(input_2d);
+        let mut output_shape = dims;
+        output_shape[D - 1] = d_output;
+        output_2d.reshape(output_shape)
     }
 
     pub fn layout_policy(&self) -> ProjectionLayoutPolicy {
@@ -222,6 +223,18 @@ impl<B: Backend> StructuredProjection<B> {
             output_shape,
             self.layout_policy.linear_layout_metadata(d_input, d_output),
         )
+    }
+
+    fn forward_rank2(&self, input: Tensor<B, 2>) -> Tensor<B, 2> {
+        let weight = match self.layout_policy {
+            ProjectionLayoutPolicy::InputByOutput => self.weight.val(),
+            ProjectionLayoutPolicy::OutputByInput => self.weight.val().transpose(),
+        };
+        let output = input.matmul(weight);
+        match &self.bias {
+            Some(bias) => output.add(bias.val().reshape([1, self.logical_dims()[1]])),
+            None => output,
+        }
     }
 
     fn load_weight_record(
