@@ -31,7 +31,8 @@ pub use lifecycle::{
 };
 pub use model::FractalModel;
 pub use registry::{
-    is_valid_primitive_variant_name, resolve_precision_profile, run_species_with_batches,
+    is_valid_primitive_variant_name, load_weight_export_artifact, load_weight_export_metadata,
+    read_weight_export_metadata, resolve_precision_profile, run_species_with_batches,
     CandleBf16Backend, CandleBf16TrainBackend, CandleF32Backend, CandleF32TrainBackend,
     ComputeBackend, CpuBackend, CpuTrainBackend, ExecutionMode, MetalBackend, MetalBf16Backend,
     MetalBf16TrainBackend, MetalF32Backend, MetalF32TrainBackend, MetalTrainBackend,

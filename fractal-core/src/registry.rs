@@ -1321,10 +1321,6 @@ where
                 .weight_export
                 .phases
                 .contains(&WeightExportPhase::Best)
-                && !launch_runtime
-                    .weight_exports
-                    .iter()
-                    .any(|artifact| artifact.phase == WeightExportPhase::Best)
             {
                 match export_weight_phase(
                     stage.clone(),
@@ -1627,6 +1623,40 @@ where
             record_species_run_artifact(artifact);
             return Err(error);
         }
+        if config
+            .launch_policy
+            .weight_export
+            .phases
+            .contains(&WeightExportPhase::Best)
+        {
+            match export_weight_phase(
+                stage.clone(),
+                &manifest,
+                &config.launch_policy.weight_export,
+                WeightExportPhase::Best,
+                &model,
+                &weight_export_paths,
+                config.launch_policy.weight_export.required,
+            ) {
+                Ok(artifact) => {
+                    upsert_weight_export_artifact(&mut launch_runtime.weight_exports, artifact)
+                }
+                Err(error) => {
+                    let artifact = SpeciesRunArtifact {
+                        stage,
+                        manifest: manifest.clone(),
+                        phase_timings,
+                        training_runtime: launch_runtime.artifact(),
+                        execution_outcome: RunExecutionOutcome::InfraFailure,
+                        quality_outcome: RunQualityOutcome::Clean,
+                        error: Some(error.to_string()),
+                        metrics: None,
+                    };
+                    record_species_run_artifact(artifact);
+                    return Err(error);
+                }
+            }
+        }
     }
     if let Err(error) = maybe_persist_final_checkpoint(
         &checkpoint_paths,
@@ -1655,10 +1685,6 @@ where
         .weight_export
         .phases
         .contains(&WeightExportPhase::Final)
-        && !launch_runtime
-            .weight_exports
-            .iter()
-            .any(|artifact| artifact.phase == WeightExportPhase::Final)
     {
         match export_weight_phase(
             stage.clone(),
@@ -2139,25 +2165,50 @@ fn checkpoint_optimizer_stem(slot_dir: &Path) -> PathBuf {
     slot_dir.join("optimizer")
 }
 
+fn sanitize_path_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => ch,
+            _ => '_',
+        })
+        .collect()
+}
+
+fn resolve_weight_identity_prefix(manifest: &RunManifest, stage: &SpeciesRunStage) -> PathBuf {
+    let Some(experiment) = manifest.experiment.as_ref() else {
+        return PathBuf::from(sanitize_path_component(
+            &std::env::var("FRACTAL_RUN_ID")
+                .unwrap_or_else(|_| format!("run-{}", stage.species.as_str())),
+        ));
+    };
+
+    let logical_name = experiment.experiment_id.logical_name.trim();
+    let run_id = experiment.experiment_id.run_id.trim();
+    if logical_name.is_empty() || run_id.is_empty() {
+        return PathBuf::from(format!("run-{}", stage.species.as_str()));
+    }
+
+    PathBuf::from(sanitize_path_component(logical_name)).join(sanitize_path_component(run_id))
+}
+
 pub(crate) fn resolve_weight_export_paths(
     stage: &SpeciesRunStage,
     manifest: &RunManifest,
 ) -> WeightExportRuntimePaths {
+    let export_prefix = resolve_weight_identity_prefix(manifest, stage);
     let root = if let Some(root) = std::env::var_os("FRACTAL_RUN_EXPORT_DIR") {
-        PathBuf::from(root).join(stage.species.as_str())
+        PathBuf::from(root)
+            .join(export_prefix)
+            .join(stage.species.as_str())
     } else if let Some(root) = std::env::var_os("FRACTAL_RUN_ARTIFACT_DIR") {
         PathBuf::from(root)
             .join("exports")
+            .join(export_prefix)
             .join(stage.species.as_str())
     } else {
-        let run_id = manifest
-            .experiment
-            .as_ref()
-            .map(|experiment| experiment.experiment_id.run_id.clone())
-            .or_else(|| std::env::var("FRACTAL_RUN_ID").ok())
-            .unwrap_or_else(|| format!("run-{}", stage.species.as_str()));
         PathBuf::from(".fractal-run-results")
-            .join(run_id)
+            .join(export_prefix)
             .join("exports")
             .join(stage.species.as_str())
     };
@@ -2553,10 +2604,7 @@ where
     Ok(artifact)
 }
 
-#[cfg(test)]
-pub(crate) fn read_weight_export_metadata(
-    path: &Path,
-) -> Result<WeightExportArtifact, FractalError> {
+pub fn read_weight_export_metadata(path: &Path) -> Result<WeightExportArtifact, FractalError> {
     let bytes = fs::read(path).map_err(|error| {
         FractalError::InvalidState(format!(
             "failed to read weight export metadata {}: {error}",
@@ -2571,6 +2619,48 @@ pub(crate) fn read_weight_export_metadata(
     })?;
     artifact.validate()?;
     Ok(artifact)
+}
+
+pub fn load_weight_export_artifact<B, R>(
+    artifact: &WeightExportArtifact,
+    model: FractalModel<B, R>,
+    config: &TournamentConfig,
+    device: &B::Device,
+) -> Result<FractalModel<B, R>, FractalError>
+where
+    B: Backend,
+    R: FractalRule<B> + Module<B> + ModuleDisplay + Clone + std::fmt::Debug,
+{
+    artifact.validate_against_config(config)?;
+    match &artifact.format {
+        WeightExportFormat::BurnBin => {
+            let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
+            model
+                .load_file(PathBuf::from(&artifact.path), &recorder, device)
+                .map_err(recorder_error)
+        }
+        WeightExportFormat::SafeTensors => Err(FractalError::InvalidConfig(
+            "safe-tensors weight export loading is not yet executable in the runtime".into(),
+        )),
+        WeightExportFormat::Quantized { precision } => Err(FractalError::InvalidConfig(format!(
+            "quantized weight export loading for {} is not yet executable in the runtime",
+            precision.as_str()
+        ))),
+    }
+}
+
+pub fn load_weight_export_metadata<B, R>(
+    metadata_path: &Path,
+    model: FractalModel<B, R>,
+    config: &TournamentConfig,
+    device: &B::Device,
+) -> Result<FractalModel<B, R>, FractalError>
+where
+    B: Backend,
+    R: FractalRule<B> + Module<B> + ModuleDisplay + Clone + std::fmt::Debug,
+{
+    let artifact = read_weight_export_metadata(metadata_path)?;
+    load_weight_export_artifact(&artifact, model, config, device)
 }
 
 fn maybe_persist_latest_checkpoint<B, R>(

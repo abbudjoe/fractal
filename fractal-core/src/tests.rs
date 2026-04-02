@@ -14,7 +14,6 @@ use burn::{
     module::{Module, Param},
     nn,
     optim::GradientsParams,
-    record::{BinFileRecorder, FullPrecisionSettings},
     tensor::{backend::Backend, Int, Tensor, TensorData},
 };
 
@@ -40,10 +39,10 @@ use crate::{
     primitives::complex_square,
     registry::{
         clip_gradients_global_norm, export_weight_phase, gradient_l2_norm,
-        is_valid_primitive_variant_name, read_weight_export_metadata, resolve_precision_profile,
-        resolve_weight_export_paths, should_log_training_checkpoint, training_progress_interval,
-        ComputeBackend, CpuTrainBackend, ExecutionMode, PrimitiveVariantName, SpeciesDefinition,
-        SpeciesId, SpeciesRunContext,
+        is_valid_primitive_variant_name, load_weight_export_metadata, read_weight_export_metadata,
+        resolve_precision_profile, resolve_weight_export_paths, should_log_training_checkpoint,
+        training_progress_interval, ComputeBackend, CpuTrainBackend, ExecutionMode,
+        PrimitiveVariantName, SpeciesDefinition, SpeciesId, SpeciesRunContext,
     },
     router::EarlyExitRouter,
     rule_trait::{ApplyContext, FractalRule},
@@ -54,6 +53,7 @@ type TestBackend = Candle<f32, i64>;
 static APPLY_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static CONCURRENT_SPECIES: AtomicUsize = AtomicUsize::new(0);
 static MAX_CONCURRENT_SPECIES: AtomicUsize = AtomicUsize::new(0);
+static EXPORT_ENV_MUTEX: Mutex<()> = Mutex::new(());
 
 #[test]
 fn complex_square_matches_hand_computed_values() {
@@ -377,16 +377,24 @@ fn weight_export_artifact_validate_against_config_rejects_unsupported_format() {
 
 #[test]
 fn burn_bin_weight_export_writes_metadata_and_loads_back() {
+    let _env_lock = EXPORT_ENV_MUTEX.lock().unwrap();
     let config = TournamentPreset::FastTest.config();
     let device = Default::default();
     let rule = AddInputRule::<TestBackend>::new(config.dim);
-    let model = FractalModel::new(
+    let mut model = FractalModel::new(
         config.vocab_size,
         config.dim,
         config.max_recursion_depth,
         config.router_threshold,
         PAD_TOKEN,
         rule,
+        &device,
+    );
+    model.output.weight = Param::from_data(
+        TensorData::new(
+            vec![0.5f32; config.vocab_size * config.dim],
+            [config.dim, config.vocab_size],
+        ),
         &device,
     );
     let mut template = test_experiment_template(config.clone());
@@ -428,20 +436,214 @@ fn burn_bin_weight_export_writes_metadata_and_loads_back() {
     assert_eq!(metadata, artifact);
     assert!(metadata.validate_against_config(&config).is_ok());
 
-    let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
-    let restored_model = FractalModel::new(
+    let probe_input = Tensor::<TestBackend, 2, Int>::from_data(
+        TensorData::new(vec![1i64, 2i64], [1, 2]),
+        &device,
+    );
+    let expected_logits = model
+        .clone()
+        .forward_tokens(probe_input.clone())
+        .expect("expected logits");
+
+    let restored_model = load_weight_export_metadata(
+        std::path::Path::new(&artifact.metadata_path),
+        FractalModel::new(
+            config.vocab_size,
+            config.dim,
+            config.max_recursion_depth,
+            config.router_threshold,
+            PAD_TOKEN,
+            AddInputRule::<TestBackend>::new(config.dim),
+            &device,
+        ),
+        &config,
+        &device,
+    )
+    .expect("exported weights load back");
+
+    let actual_logits = restored_model
+        .forward_tokens(probe_input)
+        .expect("loaded logits");
+    assert_eq!(
+        actual_logits.into_data().to_vec::<f32>().unwrap(),
+        expected_logits.into_data().to_vec::<f32>().unwrap()
+    );
+
+    std::env::remove_var("FRACTAL_RUN_EXPORT_DIR");
+    let _ = std::fs::remove_dir_all(&temp_root);
+}
+
+#[test]
+fn best_weight_export_refreshes_when_improved_again() {
+    let _env_lock = EXPORT_ENV_MUTEX.lock().unwrap();
+    let config = TournamentPreset::FastTest.config();
+    let device = Default::default();
+    let rule = AddInputRule::<TestBackend>::new(config.dim);
+    let mut model = FractalModel::new(
         config.vocab_size,
         config.dim,
         config.max_recursion_depth,
         config.router_threshold,
         PAD_TOKEN,
-        AddInputRule::<TestBackend>::new(config.dim),
+        rule,
         &device,
-    )
-    .load_file(std::path::PathBuf::from(&artifact.path), &recorder, &device)
-    .expect("exported weights load back");
+    );
+    model.output.weight = Param::from_data(
+        TensorData::new(
+            vec![0.25f32; config.vocab_size * config.dim],
+            [config.vocab_size, config.dim],
+        ),
+        &device,
+    );
+    let mut template = test_experiment_template(config.clone());
+    template.runtime.launch_policy.weight_export = WeightExportPolicy::stage1_default();
+    let experiment = template.resolve_variant(
+        SpeciesId::P1Contractive,
+        PrimitiveVariantName::new_unchecked("p1_contractive_v1"),
+    );
+    let manifest = crate::RunManifest {
+        variant_name: PrimitiveVariantName::new_unchecked("p1_contractive_v1"),
+        timeout_budget: None,
+        config: config.clone(),
+        experiment: Some(experiment),
+    };
+    let stage = crate::SpeciesRunStage {
+        species: SpeciesId::P1Contractive,
+        ordinal: 1,
+        total: 1,
+    };
+    let temp_root = std::env::temp_dir().join(format!(
+        "fractal-weight-export-refresh-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_root);
+    std::env::set_var("FRACTAL_RUN_EXPORT_DIR", &temp_root);
+    let paths = resolve_weight_export_paths(&stage, &manifest);
 
-    assert_eq!(restored_model.pad_token(), model.pad_token());
+    let first_artifact = export_weight_phase(
+        stage.clone(),
+        &manifest,
+        &template.runtime.launch_policy.weight_export,
+        WeightExportPhase::Best,
+        &model,
+        &paths,
+        template.runtime.launch_policy.weight_export.required,
+    )
+    .expect("first best export succeeds");
+    let first_metadata = std::fs::metadata(&first_artifact.metadata_path)
+        .expect("first best export metadata exists")
+        .modified()
+        .expect("first best export metadata timestamp");
+
+    model.output.weight = Param::from_data(
+        TensorData::new(
+            vec![0.75f32; config.vocab_size * config.dim],
+            [config.dim, config.vocab_size],
+        ),
+        &device,
+    );
+    std::thread::sleep(Duration::from_millis(10));
+    let second_artifact = export_weight_phase(
+        stage,
+        &manifest,
+        &template.runtime.launch_policy.weight_export,
+        WeightExportPhase::Best,
+        &model,
+        &paths,
+        template.runtime.launch_policy.weight_export.required,
+    )
+    .expect("refreshed best export succeeds");
+    let second_metadata = std::fs::metadata(&second_artifact.metadata_path)
+        .expect("refreshed best export metadata exists")
+        .modified()
+        .expect("refreshed best export metadata timestamp");
+
+    assert_eq!(first_artifact.path, second_artifact.path);
+    assert!(second_metadata > first_metadata);
+
+    std::env::remove_var("FRACTAL_RUN_EXPORT_DIR");
+    let _ = std::fs::remove_dir_all(&temp_root);
+}
+
+#[test]
+fn external_weight_export_roots_include_run_identity() {
+    let _env_lock = EXPORT_ENV_MUTEX.lock().unwrap();
+    let config = TournamentPreset::FastTest.config();
+    let device = Default::default();
+    let rule = AddInputRule::<TestBackend>::new(config.dim);
+    let model = FractalModel::new(
+        config.vocab_size,
+        config.dim,
+        config.max_recursion_depth,
+        config.router_threshold,
+        PAD_TOKEN,
+        rule,
+        &device,
+    );
+    let mut template = test_experiment_template(config.clone());
+    template.runtime.launch_policy.weight_export = WeightExportPolicy::stage1_default();
+    let experiment_a = template.resolve_variant(
+        SpeciesId::P1Contractive,
+        PrimitiveVariantName::new_unchecked("p1_contractive_v1"),
+    );
+    let mut template_b = test_experiment_template(config.clone());
+    template_b.experiment_id.logical_name = "fast-test-control-b".to_owned();
+    template_b.experiment_id.run_id = "run-456".to_owned();
+    template_b.runtime.launch_policy.weight_export = WeightExportPolicy::stage1_default();
+    let experiment_b = template_b.resolve_variant(
+        SpeciesId::P1Contractive,
+        PrimitiveVariantName::new_unchecked("p1_contractive_v1"),
+    );
+    let manifest_a = crate::RunManifest {
+        variant_name: PrimitiveVariantName::new_unchecked("p1_contractive_v1"),
+        timeout_budget: None,
+        config: config.clone(),
+        experiment: Some(experiment_a),
+    };
+    let manifest_b = crate::RunManifest {
+        variant_name: PrimitiveVariantName::new_unchecked("p1_contractive_v1"),
+        timeout_budget: None,
+        config: config.clone(),
+        experiment: Some(experiment_b),
+    };
+    let stage = crate::SpeciesRunStage {
+        species: SpeciesId::P1Contractive,
+        ordinal: 1,
+        total: 1,
+    };
+    let temp_root = std::env::temp_dir().join(format!(
+        "fractal-weight-export-collision-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_root);
+    std::env::set_var("FRACTAL_RUN_EXPORT_DIR", &temp_root);
+
+    let artifact_a = export_weight_phase(
+        stage.clone(),
+        &manifest_a,
+        &template.runtime.launch_policy.weight_export,
+        WeightExportPhase::Best,
+        &model,
+        &resolve_weight_export_paths(&stage, &manifest_a),
+        template.runtime.launch_policy.weight_export.required,
+    )
+    .expect("first export succeeds");
+    let artifact_b = export_weight_phase(
+        stage.clone(),
+        &manifest_b,
+        &template_b.runtime.launch_policy.weight_export,
+        WeightExportPhase::Best,
+        &model,
+        &resolve_weight_export_paths(&stage, &manifest_b),
+        template_b.runtime.launch_policy.weight_export.required,
+    )
+    .expect("second export succeeds");
+
+    assert_ne!(artifact_a.path, artifact_b.path);
+    assert!(artifact_a.path.contains("fast-test-control"));
+    assert!(artifact_a.path.contains("run-123"));
+    assert!(artifact_b.path.contains("fast-test-control-b"));
+    assert!(artifact_b.path.contains("run-456"));
 
     std::env::remove_var("FRACTAL_RUN_EXPORT_DIR");
     let _ = std::fs::remove_dir_all(&temp_root);
