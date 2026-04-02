@@ -22,7 +22,10 @@ pub use native::{
     NativeTokenizedBatch, NativeTokenizedChunk, NativeTokenizedDocument, NativeTokenizer,
     NativeTruncationPolicy, SlowSentencePieceTokenizer, SlowSentencePieceTokenizerError,
 };
-pub use ollama::{OllamaEmbeddingClient, OllamaEndpointConfig};
+pub use ollama::{
+    OllamaClientBenchmarkConfig, OllamaEmbeddingClient, OllamaEmbeddingRequestMetrics,
+    OllamaEndpointConfig, OverlayBenchmarkRequest, OverlayClientBenchmarkResult,
+};
 pub use overlay::{
     OverlayModelFacingBatch, OverlayModelFacingDocument, OverlayTransportAdapter,
     OverlayTransportBatch, OverlayTransportConfig,

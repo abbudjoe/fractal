@@ -26,13 +26,13 @@ use crate::{
     FaceoffFallbackMode, FaceoffIdentityMode, FaceoffLexemeKind, FaceoffLocalCacheMode,
     FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer, LocalMacroKind,
     ModelFacingBatch, ModelFacingDocument, NativeCollationSpec, NativeCompatibilityAdapter,
-    NativeTokenizer, OllamaEmbeddingClient, OllamaEndpointConfig, OverlayBatchPackingStrategy,
-    OverlayDictionaryScope, OverlayDocumentMode, OverlayModelFacingBatch,
-    OverlayModelFacingDocument, OverlayPack, OverlaySharingPolicy, OverlayTransportAdapter,
-    OverlayTransportConfig, P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary,
-    PrototypeGranularityMode, RecursiveOverlayConfig, RecursiveOverlayDocument,
-    RecursiveOverlayMode, RecursiveTokenizer, StateSignature, TokenRecord, TokenizerConfig,
-    TokenizerSubstrateMode, FACEOFF_VOCAB_FORMAT_VERSION,
+    NativeTokenizer, OllamaClientBenchmarkConfig, OllamaEmbeddingClient, OllamaEndpointConfig,
+    OverlayBatchPackingStrategy, OverlayBenchmarkRequest, OverlayDictionaryScope,
+    OverlayDocumentMode, OverlayModelFacingBatch, OverlayModelFacingDocument, OverlayPack,
+    OverlaySharingPolicy, OverlayTransportAdapter, OverlayTransportConfig, P1FractalHybrid,
+    P2Mandelbrot, PrimitiveRunSummary, PrototypeGranularityMode, RecursiveOverlayConfig,
+    RecursiveOverlayDocument, RecursiveOverlayMode, RecursiveTokenizer, StateSignature,
+    TokenRecord, TokenizerConfig, TokenizerSubstrateMode, FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -1276,6 +1276,34 @@ fn overlay_transport_adapter_respects_packing_config() {
 }
 
 #[test]
+fn ollama_overlay_benchmark_rejects_zero_measure_rounds() {
+    let client = OllamaEmbeddingClient::new(OllamaEndpointConfig::default()).unwrap();
+    let tokenizer = build_hf_native_tokenizer(&["ts=1 level=info route=/ready status=200\n"]);
+    let error = client
+        .benchmark_overlay_roundtrip_with_config(
+            OverlayBenchmarkRequest {
+                tokenizer: &tokenizer,
+                texts: &["ts=1 level=info route=/ready status=200\n".to_string()],
+                overlay_mode: RecursiveOverlayMode::LocalRecordMacro,
+                overlay_config: &RecursiveOverlayConfig::default(),
+                transport_config: OverlayTransportConfig::default(),
+            },
+            &OllamaClientBenchmarkConfig {
+                warmup_rounds: 0,
+                measure_rounds: 0,
+            },
+        )
+        .expect_err("zero measure rounds should be rejected before any live request");
+
+    assert!(
+        error
+            .to_string()
+            .contains("measure_rounds must be greater than zero"),
+        "unexpected benchmark config error: {error}"
+    );
+}
+
+#[test]
 fn overlay_model_facing_ollama_embedding_smoke_uses_materialized_transport_text() {
     let Some(tokenizer_path) = local_qwen25_tokenizer_json_path() else {
         println!("OLLAMA_OVERLAY_SKIP=no local qwen25 tokenizer.json configured/found");
@@ -1297,41 +1325,95 @@ fn overlay_model_facing_ollama_embedding_smoke_uses_materialized_transport_text(
 {\"ts\":\"2026-04-01T12:01:02Z\",\"level\":\"info\",\"service\":\"auth\",\"route\":\"/ready\",\"status\":500,\"request_id\":\"def-2\"}\n\
 ";
     let tokenizer = HuggingFaceNativeTokenizer::from_file(&tokenizer_path).unwrap();
-    let overlays = [text_a, text_b]
-        .into_iter()
-        .map(|text| {
-            let canonical = tokenizer.tokenize_with_byte_offsets(text).unwrap();
-            let overlay = build_recursive_overlay(
-                text,
-                canonical,
-                RecursiveOverlayMode::LocalRecordMacro,
-                &RecursiveOverlayConfig::default(),
-            );
-            OverlayModelFacingDocument::new(overlay).unwrap()
+    let benchmark = client
+        .benchmark_overlay_roundtrip(OverlayBenchmarkRequest {
+            tokenizer: &tokenizer,
+            texts: &[text_a.to_string(), text_b.to_string()],
+            overlay_mode: RecursiveOverlayMode::LocalRecordMacro,
+            overlay_config: &RecursiveOverlayConfig::default(),
+            transport_config: OverlayTransportConfig::default(),
         })
-        .collect::<Vec<_>>();
-    let batch = OverlayModelFacingBatch::new(overlays);
-    let adapter = OverlayTransportAdapter::new(OverlayTransportConfig::default());
-    let prepared = adapter.prepare_batch(&batch).unwrap();
-    let materialized = prepared
-        .expanded_token_ids_by_document()
-        .unwrap()
-        .into_iter()
-        .map(|token_ids| tokenizer.decode_token_ids(&token_ids).unwrap())
-        .collect::<Vec<_>>();
-
-    assert_eq!(materialized, vec![text_a.to_string(), text_b.to_string()]);
-
-    let embeddings = client.embed_texts(&materialized).unwrap();
-    assert_eq!(embeddings.len(), 2);
-    assert_eq!(embeddings[0].len(), embeddings[1].len());
-    assert!(!embeddings[0].is_empty());
+        .unwrap();
 
     println!("OLLAMA_OVERLAY_MODEL={}", client.config().embedding_model);
     println!("OLLAMA_OVERLAY_BASE_URL={}", client.config().base_url);
-    println!("OLLAMA_OVERLAY_DOCUMENTS={}", materialized.len());
-    println!("OLLAMA_OVERLAY_EMBED_DIM={}", embeddings[0].len());
+    println!("OLLAMA_OVERLAY_DOCUMENTS={}", benchmark.document_count);
+    println!("OLLAMA_OVERLAY_INPUT_BYTES={}", benchmark.input_bytes);
+    println!(
+        "OLLAMA_OVERLAY_CANONICAL_TOKENS={}",
+        benchmark.canonical_token_count
+    );
+    println!(
+        "OLLAMA_OVERLAY_TRANSPORT_SYMBOLS={:.2}",
+        benchmark.transport_symbols
+    );
+    println!(
+        "OLLAMA_OVERLAY_TRANSPORT_RATIO={:.2}",
+        benchmark.transport_ratio
+    );
+    println!(
+        "OLLAMA_OVERLAY_DEFINITION_OVERHEAD_RATE={:.2}",
+        benchmark.definition_overhead_rate
+    );
+    println!(
+        "OLLAMA_OVERLAY_BASE_PREP_MS={:.2}",
+        benchmark.base_prepare_ms
+    );
+    println!(
+        "OLLAMA_OVERLAY_BASE_REQUEST_MS={:.2}",
+        benchmark.base.request_ms
+    );
+    println!(
+        "OLLAMA_OVERLAY_BASE_REQUEST_MIN_MS={:.2}",
+        benchmark.base.request_min_ms
+    );
+    println!(
+        "OLLAMA_OVERLAY_BASE_REQUEST_MAX_MS={:.2}",
+        benchmark.base.request_max_ms
+    );
+    println!(
+        "OLLAMA_OVERLAY_BASE_TOTAL_MS={:.2}",
+        benchmark.base_total_ms()
+    );
+    println!(
+        "OLLAMA_OVERLAY_DISCOVERY_MS={:.2}",
+        benchmark.overlay_discovery_ms
+    );
+    println!("OLLAMA_OVERLAY_PACK_MS={:.2}", benchmark.overlay_pack_ms);
+    println!(
+        "OLLAMA_OVERLAY_MATERIALIZE_MS={:.2}",
+        benchmark.overlay_materialize_ms
+    );
+    println!(
+        "OLLAMA_OVERLAY_CLIENT_OVERHEAD_MS={:.2}",
+        benchmark.overlay_client_overhead_ms()
+    );
+    println!(
+        "OLLAMA_OVERLAY_EXTRA_CLIENT_OVERHEAD_MS={:.2}",
+        benchmark.overlay_extra_client_overhead_ms()
+    );
+    println!(
+        "OLLAMA_OVERLAY_REQUEST_MS={:.2}",
+        benchmark.overlay_request_ms
+    );
+    println!(
+        "OLLAMA_OVERLAY_REQUEST_DELTA_MS={:.2}",
+        benchmark.request_delta_ms()
+    );
+    println!(
+        "OLLAMA_OVERLAY_TOTAL_MS={:.2}",
+        benchmark.overlay_total_ms()
+    );
+    println!("OLLAMA_OVERLAY_EMBED_DIM={}", benchmark.embedding_dim);
     println!("OLLAMA_OVERLAY_ROUNDTRIP=OK");
+
+    assert_eq!(benchmark.document_count, 2);
+    assert_eq!(benchmark.base.document_count, 2);
+    assert!(benchmark.embedding_dim > 0);
+    assert!(benchmark.transport_ratio > 1.0);
+    assert!(benchmark.overlay_client_overhead_ms() >= 0.0);
+    assert!(benchmark.base_total_ms() >= benchmark.base.request_ms);
+    assert!(benchmark.overlay_total_ms() >= benchmark.overlay_request_ms);
 }
 
 fn unique_temp_path(prefix: &str, suffix: &str) -> PathBuf {

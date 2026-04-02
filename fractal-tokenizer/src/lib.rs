@@ -21,10 +21,12 @@ pub use model_face::{
     ModelFacingDocument, NativeCollatedBatch, NativeCollatedChunk, NativeCollatedDocument,
     NativeCollationError, NativeCollationSpec, NativeCompatibilityAdapter,
     NativeCompatibilityBatch, NativeCompatibilityError, NativeTokenizedBatch, NativeTokenizedChunk,
-    NativeTokenizedDocument, NativeTokenizer, NativeTruncationPolicy, OllamaEmbeddingClient,
-    OllamaEndpointConfig, OverlayModelFacingBatch, OverlayModelFacingDocument,
-    OverlayTransportAdapter, OverlayTransportBatch, OverlayTransportConfig,
-    SlowSentencePieceTokenizer, SlowSentencePieceTokenizerError, TypedEmbeddingBridge,
+    NativeTokenizedDocument, NativeTokenizer, NativeTruncationPolicy, OllamaClientBenchmarkConfig,
+    OllamaEmbeddingClient, OllamaEmbeddingRequestMetrics, OllamaEndpointConfig,
+    OverlayBenchmarkRequest, OverlayClientBenchmarkResult, OverlayModelFacingBatch,
+    OverlayModelFacingDocument, OverlayTransportAdapter, OverlayTransportBatch,
+    OverlayTransportConfig, SlowSentencePieceTokenizer, SlowSentencePieceTokenizerError,
+    TypedEmbeddingBridge,
 };
 pub use overlay::{
     build_recursive_overlay, pack_overlay_documents_in_batches, LocalMacro, LocalMacroKind,
