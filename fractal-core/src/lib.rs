@@ -2,6 +2,7 @@ pub mod data_generator;
 pub mod diagnostics;
 pub mod error;
 pub mod fitness;
+pub mod language_model_head;
 pub mod lifecycle;
 pub mod model;
 pub mod projection;
@@ -28,6 +29,7 @@ pub use diagnostics::{
     TensorLayoutTransform, TrainStepDiagnosticContext,
 };
 pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
+pub use language_model_head::{LanguageModelHead, LanguageModelHeadConfig};
 pub use lifecycle::{
     ArcSourceMode, ArcSourceSpec, ArtifactCompleteness, ArtifactPolicy, BatchingPolicy,
     BridgePackagingSpec, BridgeSplitPolicy, BridgeSubstrateMode, BudgetSpec, BufferReusePolicy,

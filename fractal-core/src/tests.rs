@@ -487,13 +487,16 @@ fn burn_bin_weight_export_writes_metadata_and_loads_back() {
         rule,
         &device,
     );
-    model.output.weight = Param::from_data(
+    let mut output_record = model.output.clone().into_record();
+    output_record.weight = Param::from_data(
         TensorData::new(
             vec![0.5f32; config.vocab_size * config.dim],
             [config.dim, config.vocab_size],
         ),
         &device,
     );
+    output_record.layout_policy = crate::projection::ProjectionLayoutPolicy::InputByOutput;
+    model.output = model.output.clone().load_record(output_record);
     let mut template = test_experiment_template(config.clone());
     template.runtime.launch_policy.weight_export = WeightExportPolicy::stage1_default();
     let experiment = template.resolve_variant(
@@ -585,13 +588,15 @@ fn best_weight_export_refreshes_when_improved_again() {
         rule,
         &device,
     );
-    model.output.weight = Param::from_data(
+    let mut output_record = model.output.clone().into_record();
+    output_record.weight = Param::from_data(
         TensorData::new(
             vec![0.25f32; config.vocab_size * config.dim],
             [config.vocab_size, config.dim],
         ),
         &device,
     );
+    model.output = model.output.clone().load_record(output_record);
     let mut template = test_experiment_template(config.clone());
     template.runtime.launch_policy.weight_export = WeightExportPolicy::stage1_default();
     let experiment = template.resolve_variant(
@@ -632,13 +637,16 @@ fn best_weight_export_refreshes_when_improved_again() {
         .modified()
         .expect("first best export metadata timestamp");
 
-    model.output.weight = Param::from_data(
+    let mut output_record = model.output.clone().into_record();
+    output_record.weight = Param::from_data(
         TensorData::new(
             vec![0.75f32; config.vocab_size * config.dim],
             [config.dim, config.vocab_size],
         ),
         &device,
     );
+    output_record.layout_policy = crate::projection::ProjectionLayoutPolicy::InputByOutput;
+    model.output = model.output.clone().load_record(output_record);
     std::thread::sleep(Duration::from_millis(10));
     let second_artifact = export_weight_phase(
         stage,
@@ -1874,11 +1882,15 @@ fn recurrent_model_routes_recursion_per_sample() {
         Param::from_data(TensorData::new(vec![0.0f32, 1.0, 0.3], [3, 1]), &device);
     model.router.projection.weight = Param::from_data(TensorData::from([[1.0f32]]), &device);
     model.router.projection.bias = Some(Param::from_data(TensorData::from([0.0f32]), &device));
-    model.output.weight = Param::from_data(TensorData::from([[1.0f32, 1.0, 1.0]]), &device);
-    model.output.bias = Some(Param::from_data(
+    let mut output_record = model.output.clone().into_record();
+    output_record.weight =
+        Param::from_data(TensorData::from([[1.0f32, 1.0, 1.0]]), &device);
+    output_record.bias = Some(Param::from_data(
         TensorData::from([0.0f32, 0.0, 0.0]),
         &device,
     ));
+    output_record.layout_policy = crate::projection::ProjectionLayoutPolicy::InputByOutput;
+    model.output = model.output.clone().load_record(output_record);
 
     let input_ids =
         Tensor::<TestBackend, 2, Int>::from_data(TensorData::new(vec![1i64, 2], [2, 1]), &device);

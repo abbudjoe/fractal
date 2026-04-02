@@ -1,6 +1,6 @@
 use burn::{
     module::Module,
-    nn::{loss::CrossEntropyLoss, Embedding, EmbeddingConfig, Linear, LinearConfig},
+    nn::{loss::CrossEntropyLoss, Embedding, EmbeddingConfig},
     tensor::{backend::Backend, Bool, ElementConversion, Int, Tensor, TensorData},
 };
 
@@ -8,10 +8,11 @@ use crate::{
     data_generator::TokenBatch,
     diagnostics::{
         DiagnosticEventKind, DiagnosticsRecorder, ForwardGraphBurden,
-        OutputProjectionDiagnosticContext, OutputProjectionDiagnosticSpec,
-        ProjectionDiagnosticsSink, RuleProjectionDiagnosticContext, TrainStepDiagnosticContext,
+        OutputProjectionDiagnosticContext, ProjectionDiagnosticsSink,
+        RuleProjectionDiagnosticContext, TrainStepDiagnosticContext,
     },
     error::FractalError,
+    language_model_head::{LanguageModelHead, LanguageModelHeadConfig},
     lifecycle::RunPhase,
     router::EarlyExitRouter,
     rule_trait::{ApplyContext, FractalRule},
@@ -23,7 +24,7 @@ pub struct FractalModel<B: Backend, R: Module<B>> {
     pub embedding: Embedding<B>,
     pub rule: R,
     pub router: EarlyExitRouter<B>,
-    pub output: Linear<B>,
+    pub output: LanguageModelHead<B>,
     hidden_dim: usize,
     vocab_size: usize,
     max_recursion_depth: usize,
@@ -45,7 +46,7 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
         Self {
             embedding: EmbeddingConfig::new(vocab_size, hidden_dim).init(device),
             router: EarlyExitRouter::new(readout_width, router_threshold, device),
-            output: LinearConfig::new(readout_width, vocab_size).init(device),
+            output: LanguageModelHeadConfig::new(readout_width, vocab_size).init(device),
             rule,
             hidden_dim,
             vocab_size,
@@ -131,12 +132,11 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
                         position,
                         sequence_length: seq_len,
                     },
-                    OutputProjectionDiagnosticSpec::linear(
+                    self.output.diagnostic_spec(
                         "fractal_model",
                         "output",
                         output_input_shape,
                         output_projection.dims().into_iter().collect(),
-                        self.output.weight.shape().dims::<2>().to_vec(),
                     ),
                 )?;
             }
