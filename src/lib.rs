@@ -22,6 +22,15 @@ pub use tokenizer_training::{
     STAGE0_CANONICAL_TOKENIZER_REPO_ID, STAGE0_CANONICAL_TOKENIZER_USE_FAST,
 };
 
+#[cfg(test)]
+pub(crate) fn artifact_env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    match LOCK.get_or_init(|| std::sync::Mutex::new(())).lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 #[derive(Clone)]
 pub struct TournamentRunReport {
     pub preset: TournamentPreset,

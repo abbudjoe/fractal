@@ -19,9 +19,10 @@ use crate::{
     error::FractalError,
     fitness::SpeciesRawMetrics,
     registry::{
-        build_failure_artifact, build_success_artifact, classify_quality_outcome, phase_timing,
-        resolve_precision_profile, take_last_species_run_artifact, ComputeBackend, ExecutionMode,
-        PrimitiveVariantName, SpeciesDefinition, SpeciesId, SpeciesRunContext,
+        build_failure_artifact, build_post_panic_failure_artifact, build_success_artifact,
+        classify_quality_outcome, phase_timing, resolve_precision_profile,
+        take_last_species_run_artifact, ComputeBackend, ExecutionMode, PrimitiveVariantName,
+        SpeciesDefinition, SpeciesId, SpeciesRunContext,
     },
 };
 
@@ -1502,6 +1503,30 @@ impl FailureSnapshotArtifactKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum FailureSnapshotArtifactFormat {
+    Json,
+    BurnBin,
+    SafeTensors,
+    Quantized { precision: QuantizedPrecisionKind },
+}
+
+impl FailureSnapshotArtifactFormat {
+    pub const fn json() -> Self {
+        Self::Json
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::BurnBin => "burn-bin",
+            Self::SafeTensors => "safe-tensors",
+            Self::Quantized { .. } => "quantized",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SnapshotCompleteness {
     Disabled,
     NotCaptured,
@@ -1783,6 +1808,8 @@ impl FailureSnapshotContract {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailureSnapshotArtifact {
     pub kind: FailureSnapshotArtifactKind,
+    #[serde(default = "FailureSnapshotArtifactFormat::json")]
+    pub format: FailureSnapshotArtifactFormat,
     pub path: String,
 }
 
@@ -1793,6 +1820,32 @@ impl FailureSnapshotArtifact {
                 "failure snapshot artifact {} path must be non-empty",
                 self.kind.as_str()
             )));
+        }
+        match (self.kind, self.format) {
+            (
+                FailureSnapshotArtifactKind::Metadata
+                | FailureSnapshotArtifactKind::RuntimeState
+                | FailureSnapshotArtifactKind::DiagnosticsTail,
+                FailureSnapshotArtifactFormat::Json,
+            ) => {}
+            (
+                FailureSnapshotArtifactKind::Metadata
+                | FailureSnapshotArtifactKind::RuntimeState
+                | FailureSnapshotArtifactKind::DiagnosticsTail,
+                _,
+            ) => {
+                return Err(FractalError::InvalidConfig(format!(
+                    "failure snapshot artifact {} must use json format",
+                    self.kind.as_str()
+                )));
+            }
+            (FailureSnapshotArtifactKind::ModelWeights, FailureSnapshotArtifactFormat::Json) => {
+                return Err(FractalError::InvalidConfig(
+                    "failure snapshot model-weights artifact must record an explicit weight format"
+                        .into(),
+                ));
+            }
+            (FailureSnapshotArtifactKind::ModelWeights, _) => {}
         }
         Ok(())
     }
@@ -3589,10 +3642,17 @@ pub enum TournamentProgressEvent {
 }
 
 #[derive(Debug)]
+enum SpeciesExecutionResult {
+    Success(SpeciesRawMetrics),
+    Failure(FractalError),
+    Panic { error: FractalError },
+}
+
+#[derive(Debug)]
 struct SpeciesWorkerMessage {
     index: usize,
     elapsed: Duration,
-    result: Result<SpeciesRawMetrics, FractalError>,
+    result: SpeciesExecutionResult,
     artifact: SpeciesRunArtifact,
 }
 
@@ -3734,7 +3794,8 @@ impl Tournament {
             );
             let started = Instant::now();
             let context = self.run_context(index, definition);
-            let result = definition.run(context.clone(), &self.config.execution_backend);
+            let result =
+                Self::execute_species(definition, context.clone(), &self.config.execution_backend);
             let artifact = Self::capture_species_artifact(
                 definition,
                 stage.clone(),
@@ -3742,7 +3803,7 @@ impl Tournament {
                 started,
                 &result,
             );
-            if let Ok(metrics) = &result {
+            if let SpeciesExecutionResult::Success(metrics) = &result {
                 Self::emit_event(
                     reporter.as_ref(),
                     TournamentProgressEvent::SpeciesCompleted(SpeciesCompletion {
@@ -3753,7 +3814,7 @@ impl Tournament {
                 );
             }
             artifacts.push(artifact);
-            if result.is_err() {
+            if !matches!(result, SpeciesExecutionResult::Success(_)) {
                 break;
             }
         }
@@ -3785,7 +3846,7 @@ impl Tournament {
             })?;
             let stage = Self::run_stage(species[message.index].id, message.index, total);
             match message.result {
-                Ok(result) => {
+                SpeciesExecutionResult::Success(result) => {
                     Self::emit_event(
                         reporter.as_ref(),
                         TournamentProgressEvent::SpeciesCompleted(SpeciesCompletion {
@@ -3807,7 +3868,7 @@ impl Tournament {
                         launched += 1;
                     }
                 }
-                Err(_) => {
+                SpeciesExecutionResult::Failure(_) | SpeciesExecutionResult::Panic { .. } => {
                     failure_encountered = true;
                     artifacts[message.index] = Some(message.artifact);
                     completed += 1;
@@ -3834,7 +3895,7 @@ impl Tournament {
         stage: SpeciesRunStage,
         context: &SpeciesRunContext,
         started: Instant,
-        result: &Result<SpeciesRawMetrics, FractalError>,
+        result: &SpeciesExecutionResult,
     ) -> SpeciesRunArtifact {
         let recovered_diagnostics = take_last_diagnostics_runtime_artifact();
         let mut artifact = take_last_species_run_artifact().unwrap_or_else(|| {
@@ -3845,13 +3906,20 @@ impl Tournament {
                 experiment: context.experiment.clone(),
             };
             match result {
-                Ok(metrics) => build_success_artifact(
+                SpeciesExecutionResult::Success(metrics) => build_success_artifact(
                     stage.clone(),
                     manifest,
                     vec![phase_timing(RunPhase::Train, started.elapsed(), 0, 0)],
                     metrics.clone(),
                 ),
-                Err(error) => build_failure_artifact(
+                SpeciesExecutionResult::Failure(error) => build_failure_artifact(
+                    stage.clone(),
+                    manifest,
+                    vec![phase_timing(RunPhase::Train, started.elapsed(), 0, 0)],
+                    RunExecutionOutcome::InfraFailure,
+                    error.clone(),
+                ),
+                SpeciesExecutionResult::Panic { error } => build_post_panic_failure_artifact(
                     stage.clone(),
                     manifest,
                     vec![phase_timing(RunPhase::Train, started.elapsed(), 0, 0)],
@@ -3874,20 +3942,38 @@ impl Tournament {
                 .push(phase_timing(RunPhase::Train, started.elapsed(), 0, 0));
         }
         if artifact.metrics.is_none() {
-            if let Ok(metrics) = result {
+            if let SpeciesExecutionResult::Success(metrics) = result {
                 artifact.quality_outcome = classify_quality_outcome(metrics);
                 artifact.metrics = Some(metrics.clone());
                 artifact.execution_outcome = RunExecutionOutcome::Success;
             }
         }
         if artifact.error.is_none() {
-            if let Err(error) = result {
-                artifact.error = Some(error.to_string());
-                artifact.execution_outcome = RunExecutionOutcome::InfraFailure;
+            match result {
+                SpeciesExecutionResult::Failure(error)
+                | SpeciesExecutionResult::Panic { error } => {
+                    artifact.error = Some(error.to_string());
+                    artifact.execution_outcome = RunExecutionOutcome::InfraFailure;
+                }
+                SpeciesExecutionResult::Success(_) => {}
             }
         }
 
         artifact
+    }
+
+    fn execute_species(
+        definition: &SpeciesDefinition,
+        context: SpeciesRunContext,
+        backend: &crate::registry::ComputeBackend,
+    ) -> SpeciesExecutionResult {
+        match std::panic::catch_unwind(AssertUnwindSafe(|| definition.run(context, backend))) {
+            Ok(Ok(metrics)) => SpeciesExecutionResult::Success(metrics),
+            Ok(Err(error)) => SpeciesExecutionResult::Failure(error),
+            Err(payload) => SpeciesExecutionResult::Panic {
+                error: crate::registry::panic_payload_to_error(payload.as_ref()),
+            },
+        }
     }
 
     fn spawn_species_worker(
@@ -3906,11 +3992,7 @@ impl Tournament {
         let tx = tx.clone();
         thread::spawn(move || {
             let started = Instant::now();
-            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                definition.run(context.clone(), &backend)
-            }))
-            .map_err(|_| FractalError::InvalidState("species worker panicked".into()))
-            .and_then(|result| result);
+            let result = Self::execute_species(&definition, context.clone(), &backend);
             let stage = Self::run_stage(definition.id, index, total);
             let artifact =
                 Self::capture_species_artifact(&definition, stage, &context, started, &result);

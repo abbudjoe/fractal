@@ -564,8 +564,27 @@ fn failure_snapshot_contract_json(spec: &crate::FailureSnapshotContract) -> Valu
 fn failure_snapshot_artifact_json(spec: &crate::FailureSnapshotArtifact) -> Value {
     json!({
         "kind": spec.kind.as_str(),
+        "format": failure_snapshot_artifact_format_json(&spec.format),
         "path": spec.path,
     })
+}
+
+fn failure_snapshot_artifact_format_json(spec: &crate::FailureSnapshotArtifactFormat) -> Value {
+    match spec {
+        crate::FailureSnapshotArtifactFormat::Json => json!({
+            "kind": "json",
+        }),
+        crate::FailureSnapshotArtifactFormat::BurnBin => json!({
+            "kind": "burn-bin",
+        }),
+        crate::FailureSnapshotArtifactFormat::SafeTensors => json!({
+            "kind": "safe-tensors",
+        }),
+        crate::FailureSnapshotArtifactFormat::Quantized { precision } => json!({
+            "kind": "quantized",
+            "precision": precision.as_str(),
+        }),
+    }
 }
 
 fn failure_snapshot_attempt_json(spec: &crate::FailureSnapshotAttempt) -> Value {
@@ -966,13 +985,13 @@ fn io_error(error: std::io::Error) -> FractalError {
 mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
-    use std::sync::Mutex;
     use std::{env, fs};
 
     use crate::{
-        species_registry_for_species, ComparisonContract, DiagnosticEvent, DiagnosticEventKind,
-        DiagnosticProbeKind, DiagnosticProbeRequest, DiagnosticsPolicy, RankedSpeciesResult,
-        SpeciesId, TournamentLane, TournamentPreset, TournamentRunReport, TournamentRunReportParts,
+        artifact_env_test_lock, species_registry_for_species, ComparisonContract, DiagnosticEvent,
+        DiagnosticEventKind, DiagnosticProbeKind, DiagnosticProbeRequest, DiagnosticsPolicy,
+        RankedSpeciesResult, SpeciesId, TournamentLane, TournamentPreset, TournamentRunReport,
+        TournamentRunReportParts,
     };
     use fractal_core::lifecycle::TrainingRuntimeArtifact;
     use fractal_core::{
@@ -985,11 +1004,9 @@ mod tests {
 
     use super::{persist_run_artifacts, ARTIFACT_FILENAME, MANIFEST_FILENAME};
 
-    static ARTIFACT_ENV_MUTEX: Mutex<()> = Mutex::new(());
-
     #[test]
     fn persist_run_artifacts_writes_manifest_and_artifact_json() {
-        let _env_lock = ARTIFACT_ENV_MUTEX.lock().unwrap();
+        let _env_lock = artifact_env_test_lock();
         let temp_root =
             env::temp_dir().join(format!("fractal-run-artifacts-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp_root);
@@ -1108,7 +1125,7 @@ mod tests {
 
     #[test]
     fn persist_run_artifacts_references_runtime_owned_diagnostic_event_stream_and_summary() {
-        let _env_lock = ARTIFACT_ENV_MUTEX.lock().unwrap();
+        let _env_lock = artifact_env_test_lock();
         let temp_root =
             env::temp_dir().join(format!("fractal-run-diagnostics-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp_root);
@@ -1243,6 +1260,7 @@ mod tests {
 
     #[test]
     fn persisted_artifacts_keep_export_and_failure_snapshot_completeness_separate() {
+        let _env_lock = artifact_env_test_lock();
         let temp_root = env::temp_dir().join(format!(
             "fractal-run-artifacts-separation-{}",
             std::process::id()

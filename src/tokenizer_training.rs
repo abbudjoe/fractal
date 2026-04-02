@@ -1245,6 +1245,7 @@ mod tests {
 
     #[test]
     fn tokenizer_backed_stage0_smoke_path_captures_bridge_metadata() {
+        let _env_lock = crate::artifact_env_test_lock();
         let temp_root =
             env::temp_dir().join(format!("fractal-tokenizer-stage0-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp_root);
