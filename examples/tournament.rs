@@ -2907,7 +2907,11 @@ mod tests {
             serde_json::from_slice(&fs::read(&frozen_manifest_path).unwrap()).unwrap();
         assert_eq!(
             frozen_manifest["expected_commit_sha"].as_str(),
-            Some(current_git_commit_sha().expect("current git commit should resolve").as_str())
+            Some(
+                current_git_commit_sha()
+                    .expect("current git commit should resolve")
+                    .as_str()
+            )
         );
     }
 

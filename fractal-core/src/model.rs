@@ -21,7 +21,7 @@ pub struct ForwardDebugProbe {
 impl ForwardDebugProbe {
     fn should_log_position(self, position: usize) -> bool {
         self.position_log_interval
-            .is_some_and(|interval| position % interval == 0)
+            .is_some_and(|interval| position.is_multiple_of(interval))
     }
 }
 

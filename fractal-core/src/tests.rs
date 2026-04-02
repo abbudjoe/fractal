@@ -14,6 +14,7 @@ use burn::{
     module::{Module, Param},
     nn,
     optim::GradientsParams,
+    record::{BinFileRecorder, FullPrecisionSettings},
     tensor::{backend::Backend, Int, Tensor, TensorData},
 };
 
@@ -33,13 +34,14 @@ use crate::{
         RunOutcomeClass, RunQualityOutcome, RuntimeSurfaceSpec, TextCorpusFormat,
         TextCorpusSourceSpec, TextCorpusSplitSpec, TokenizerArtifactSpec, Tournament,
         TournamentConfig, TournamentPreset, TournamentProgressEvent, TournamentSequence,
-        TrainingInputSpec,
+        TrainingInputSpec, WeightExportFormat, WeightExportPhase, WeightExportPolicy,
     },
     model::FractalModel,
     primitives::complex_square,
     registry::{
-        clip_gradients_global_norm, gradient_l2_norm, is_valid_primitive_variant_name,
-        resolve_precision_profile, should_log_training_checkpoint, training_progress_interval,
+        clip_gradients_global_norm, export_weight_phase, gradient_l2_norm,
+        is_valid_primitive_variant_name, read_weight_export_metadata, resolve_precision_profile,
+        resolve_weight_export_paths, should_log_training_checkpoint, training_progress_interval,
         ComputeBackend, CpuTrainBackend, ExecutionMode, PrimitiveVariantName, SpeciesDefinition,
         SpeciesId, SpeciesRunContext,
     },
@@ -283,6 +285,166 @@ fn stage0_launch_policy_contract_matches_stage0_training_plan() {
         launch_policy.debug,
         crate::lifecycle::DebugProbePolicy::disabled()
     );
+    assert_eq!(
+        launch_policy.weight_export,
+        WeightExportPolicy::legacy_default()
+    );
+}
+
+#[test]
+fn stage1_weight_export_contract_is_burn_bin_best_and_final_required() {
+    let policy = WeightExportPolicy::stage1_default();
+
+    assert_eq!(policy.format, WeightExportFormat::BurnBin);
+    assert_eq!(
+        policy.phases,
+        vec![WeightExportPhase::Best, WeightExportPhase::Final]
+    );
+    assert!(policy.required);
+    assert!(policy.validate().is_ok());
+}
+
+#[test]
+fn weight_export_policy_rejects_unsupported_format_and_phase() {
+    let unsupported_format_policy = WeightExportPolicy {
+        format: WeightExportFormat::SafeTensors,
+        phases: vec![WeightExportPhase::Best],
+        required: true,
+    };
+    assert!(unsupported_format_policy
+        .validate_against_backend(&ComputeBackend::CpuCandle)
+        .is_err());
+
+    let unsupported_phase_policy = WeightExportPolicy {
+        format: WeightExportFormat::BurnBin,
+        phases: vec![WeightExportPhase::Latest],
+        required: true,
+    };
+    assert!(unsupported_phase_policy
+        .validate_against_backend(&ComputeBackend::CpuCandle)
+        .is_err());
+}
+
+#[test]
+fn weight_export_contract_validates_against_config_and_rejects_mismatch() {
+    let mut config = TournamentPreset::FastTest.config();
+    config.launch_policy.precision = LaunchPolicySpec::stage0_default().precision;
+    let contract = crate::lifecycle::WeightExportContract {
+        experiment_logical_name: "stage1-export".to_owned(),
+        experiment_run_id: "run-123".to_owned(),
+        experiment_branch: Some("codex/stage0-launch".to_owned()),
+        experiment_commit_sha: "abc123".to_owned(),
+        species: SpeciesId::P1Contractive.as_str().to_owned(),
+        variant_name: "p1_contractive_v1".to_owned(),
+        model: ModelContractSpec::recursive_kernel_v1(config.dim, config.max_recursion_depth),
+        vocab_size: config.vocab_size,
+        precision: config.launch_policy.precision.clone(),
+        format: WeightExportFormat::BurnBin,
+    };
+
+    assert!(contract.validate_against_config(&config).is_ok());
+
+    let mut mismatched = contract.clone();
+    mismatched.vocab_size += 1;
+    assert!(mismatched.validate_against_config(&config).is_err());
+}
+
+#[test]
+fn weight_export_artifact_validate_against_config_rejects_unsupported_format() {
+    let config = TournamentPreset::FastTest.config();
+    let artifact = crate::lifecycle::WeightExportArtifact {
+        format: WeightExportFormat::SafeTensors,
+        phase: WeightExportPhase::Best,
+        path: "/tmp/weights".to_owned(),
+        metadata_path: "/tmp/metadata.json".to_owned(),
+        required: true,
+        contract: crate::lifecycle::WeightExportContract {
+            experiment_logical_name: "stage1-export".to_owned(),
+            experiment_run_id: "run-123".to_owned(),
+            experiment_branch: Some("codex/stage0-launch".to_owned()),
+            experiment_commit_sha: "abc123".to_owned(),
+            species: SpeciesId::P1Contractive.as_str().to_owned(),
+            variant_name: "p1_contractive_v1".to_owned(),
+            model: ModelContractSpec::recursive_kernel_v1(config.dim, config.max_recursion_depth),
+            vocab_size: config.vocab_size,
+            precision: config.launch_policy.precision.clone(),
+            format: WeightExportFormat::SafeTensors,
+        },
+    };
+
+    assert!(artifact.validate_against_config(&config).is_err());
+}
+
+#[test]
+fn burn_bin_weight_export_writes_metadata_and_loads_back() {
+    let config = TournamentPreset::FastTest.config();
+    let device = Default::default();
+    let rule = AddInputRule::<TestBackend>::new(config.dim);
+    let model = FractalModel::new(
+        config.vocab_size,
+        config.dim,
+        config.max_recursion_depth,
+        config.router_threshold,
+        PAD_TOKEN,
+        rule,
+        &device,
+    );
+    let mut template = test_experiment_template(config.clone());
+    template.runtime.launch_policy.weight_export = WeightExportPolicy::stage1_default();
+    let experiment = template.resolve_variant(
+        SpeciesId::P1Contractive,
+        PrimitiveVariantName::new_unchecked("p1_contractive_v1"),
+    );
+    let manifest = crate::RunManifest {
+        variant_name: PrimitiveVariantName::new_unchecked("p1_contractive_v1"),
+        timeout_budget: None,
+        config: config.clone(),
+        experiment: Some(experiment),
+    };
+    let stage = crate::SpeciesRunStage {
+        species: SpeciesId::P1Contractive,
+        ordinal: 1,
+        total: 1,
+    };
+    let temp_root =
+        std::env::temp_dir().join(format!("fractal-weight-export-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_root);
+    std::env::set_var("FRACTAL_RUN_EXPORT_DIR", &temp_root);
+    let paths = resolve_weight_export_paths(&stage, &manifest);
+
+    let artifact = export_weight_phase(
+        stage,
+        &manifest,
+        &template.runtime.launch_policy.weight_export,
+        WeightExportPhase::Best,
+        &model,
+        &paths,
+        template.runtime.launch_policy.weight_export.required,
+    )
+    .expect("burn-bin export succeeds");
+    let metadata = read_weight_export_metadata(std::path::Path::new(&artifact.metadata_path))
+        .expect("export metadata loads");
+
+    assert_eq!(metadata, artifact);
+    assert!(metadata.validate_against_config(&config).is_ok());
+
+    let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
+    let restored_model = FractalModel::new(
+        config.vocab_size,
+        config.dim,
+        config.max_recursion_depth,
+        config.router_threshold,
+        PAD_TOKEN,
+        AddInputRule::<TestBackend>::new(config.dim),
+        &device,
+    )
+    .load_file(std::path::PathBuf::from(&artifact.path), &recorder, &device)
+    .expect("exported weights load back");
+
+    assert_eq!(restored_model.pad_token(), model.pad_token());
+
+    std::env::remove_var("FRACTAL_RUN_EXPORT_DIR");
+    let _ = std::fs::remove_dir_all(&temp_root);
 }
 
 #[test]

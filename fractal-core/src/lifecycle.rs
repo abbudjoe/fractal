@@ -1022,6 +1022,267 @@ impl BudgetSpec {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WeightExportPhase {
+    Best,
+    Final,
+    Latest,
+    FailureSnapshot,
+}
+
+impl WeightExportPhase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Best => "best",
+            Self::Final => "final",
+            Self::Latest => "latest",
+            Self::FailureSnapshot => "failure-snapshot",
+        }
+    }
+
+    pub(crate) fn validate_supported(&self) -> Result<(), FractalError> {
+        match self {
+            Self::Best | Self::Final => Ok(()),
+            Self::Latest => Err(FractalError::InvalidConfig(
+                "weight export phase latest is not yet supported by the runtime".into(),
+            )),
+            Self::FailureSnapshot => Err(FractalError::InvalidConfig(
+                "weight export phase failure-snapshot is not yet supported by the runtime".into(),
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "format", rename_all = "kebab-case")]
+pub enum WeightExportFormat {
+    BurnBin,
+    SafeTensors,
+    Quantized { precision: QuantizedPrecisionKind },
+}
+
+impl WeightExportFormat {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::BurnBin => "burn-bin",
+            Self::SafeTensors => "safe-tensors",
+            Self::Quantized { .. } => "quantized",
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Self::BurnBin => "burn-bin".to_owned(),
+            Self::SafeTensors => "safe-tensors".to_owned(),
+            Self::Quantized { precision } => format!("quantized-{}", precision.as_str()),
+        }
+    }
+
+    pub(crate) fn validate_supported(&self) -> Result<(), FractalError> {
+        match self {
+            Self::BurnBin => Ok(()),
+            Self::SafeTensors => Err(FractalError::InvalidConfig(
+                "safe-tensors weight export is not yet executable in the runtime".into(),
+            )),
+            Self::Quantized { precision } => Err(FractalError::InvalidConfig(format!(
+                "quantized weight export {} is not yet executable in the runtime",
+                precision.as_str()
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeightExportPolicy {
+    pub format: WeightExportFormat,
+    pub phases: Vec<WeightExportPhase>,
+    pub required: bool,
+}
+
+impl Default for WeightExportPolicy {
+    fn default() -> Self {
+        Self::legacy_default()
+    }
+}
+
+impl WeightExportPolicy {
+    pub fn disabled() -> Self {
+        Self {
+            format: WeightExportFormat::BurnBin,
+            phases: Vec::new(),
+            required: false,
+        }
+    }
+
+    pub fn stage1_default() -> Self {
+        Self {
+            format: WeightExportFormat::BurnBin,
+            phases: vec![WeightExportPhase::Best, WeightExportPhase::Final],
+            required: true,
+        }
+    }
+
+    pub fn legacy_default() -> Self {
+        Self::disabled()
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        !self.phases.is_empty()
+    }
+
+    pub fn label(&self) -> String {
+        if !self.is_enabled() {
+            return "disabled".to_owned();
+        }
+
+        let phases = self
+            .phases
+            .iter()
+            .map(|phase| phase.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "format={} phases=[{}] required={}",
+            self.format.label(),
+            phases,
+            self.required
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        self.format.validate_supported()?;
+        if self.phases.is_empty() {
+            if self.required {
+                return Err(FractalError::InvalidConfig(
+                    "required weight export policy must request at least one phase".into(),
+                ));
+            }
+            return Ok(());
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for phase in &self.phases {
+            if !seen.insert(*phase) {
+                return Err(FractalError::InvalidConfig(format!(
+                    "weight export phase {} is duplicated",
+                    phase.as_str()
+                )));
+            }
+            phase.validate_supported()?;
+        }
+
+        Ok(())
+    }
+
+    pub fn validate_against_backend(
+        &self,
+        backend: &crate::registry::ComputeBackend,
+    ) -> Result<(), FractalError> {
+        self.validate()?;
+        let _ = backend;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeightExportContract {
+    pub experiment_logical_name: String,
+    pub experiment_run_id: String,
+    pub experiment_branch: Option<String>,
+    pub experiment_commit_sha: String,
+    pub species: String,
+    pub variant_name: String,
+    pub model: ModelContractSpec,
+    pub vocab_size: usize,
+    pub precision: PrecisionPolicy,
+    pub format: WeightExportFormat,
+}
+
+impl WeightExportContract {
+    pub fn validate(&self) -> Result<(), FractalError> {
+        for (name, value) in [
+            (
+                "experiment_logical_name",
+                self.experiment_logical_name.as_str(),
+            ),
+            ("experiment_run_id", self.experiment_run_id.as_str()),
+            ("experiment_commit_sha", self.experiment_commit_sha.as_str()),
+            ("species", self.species.as_str()),
+            ("variant_name", self.variant_name.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(FractalError::InvalidConfig(format!(
+                    "weight export contract {name} must be non-empty"
+                )));
+            }
+        }
+        if self.vocab_size == 0 {
+            return Err(FractalError::InvalidConfig(
+                "weight export vocab_size must be greater than zero".into(),
+            ));
+        }
+        self.model.validate()?;
+        self.precision.validate()?;
+        Ok(())
+    }
+
+    pub fn validate_against_config(&self, config: &TournamentConfig) -> Result<(), FractalError> {
+        self.validate()?;
+        self.model.validate_against_config(config)?;
+        if self.vocab_size != config.vocab_size {
+            return Err(FractalError::InvalidConfig(format!(
+                "weight export vocab_size {} must match config vocab_size {}",
+                self.vocab_size, config.vocab_size
+            )));
+        }
+        if self.precision != config.launch_policy.precision {
+            return Err(FractalError::InvalidConfig(
+                "weight export precision must match the resolved launch policy precision".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeightExportArtifact {
+    pub format: WeightExportFormat,
+    pub phase: WeightExportPhase,
+    pub path: String,
+    pub metadata_path: String,
+    pub required: bool,
+    pub contract: WeightExportContract,
+}
+
+impl WeightExportArtifact {
+    pub fn validate(&self) -> Result<(), FractalError> {
+        if self.path.trim().is_empty() {
+            return Err(FractalError::InvalidConfig(
+                "weight export artifact path must be non-empty".into(),
+            ));
+        }
+        if self.metadata_path.trim().is_empty() {
+            return Err(FractalError::InvalidConfig(
+                "weight export artifact metadata_path must be non-empty".into(),
+            ));
+        }
+        if self.format != self.contract.format {
+            return Err(FractalError::InvalidConfig(
+                "weight export artifact format must match the embedded contract format".into(),
+            ));
+        }
+        self.contract.validate()?;
+        Ok(())
+    }
+
+    pub fn validate_against_config(&self, config: &TournamentConfig) -> Result<(), FractalError> {
+        self.validate()?;
+        self.format.validate_supported()?;
+        self.contract.validate_against_config(config)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EvalBackendPolicy {
@@ -1489,6 +1750,8 @@ pub struct LaunchPolicySpec {
     pub eval_cadence: EvalCadencePolicy,
     pub resume: ResumePolicy,
     #[serde(default)]
+    pub weight_export: WeightExportPolicy,
+    #[serde(default)]
     pub debug: DebugProbePolicy,
 }
 
@@ -1499,22 +1762,24 @@ impl Default for LaunchPolicySpec {
 }
 
 impl LaunchPolicySpec {
-    pub const fn legacy_default() -> Self {
+    pub fn legacy_default() -> Self {
         Self {
             precision: PrecisionPolicy::legacy_default(),
             checkpoint: CheckpointPolicy::legacy_default(),
             eval_cadence: EvalCadencePolicy::legacy_default(),
             resume: ResumePolicy::legacy_default(),
+            weight_export: WeightExportPolicy::legacy_default(),
             debug: DebugProbePolicy::disabled(),
         }
     }
 
-    pub const fn stage0_default() -> Self {
+    pub fn stage0_default() -> Self {
         Self {
             precision: PrecisionPolicy::stage0_default(),
             checkpoint: CheckpointPolicy::stage0_default(),
             eval_cadence: EvalCadencePolicy::stage0_default(),
             resume: ResumePolicy::stage0_default(),
+            weight_export: WeightExportPolicy::legacy_default(),
             debug: DebugProbePolicy::disabled(),
         }
     }
@@ -1524,11 +1789,12 @@ impl LaunchPolicySpec {
             "legacy-default".to_owned()
         } else {
             format!(
-                "precision=[{}] checkpoint=[{}] eval=[{}] resume=[{}] debug=[{}]",
+                "precision=[{}] checkpoint=[{}] eval=[{}] resume=[{}] weight_export=[{}] debug=[{}]",
                 self.precision.label(),
                 self.checkpoint.label(),
                 self.eval_cadence.label(),
                 self.resume.label(),
+                self.weight_export.label(),
                 self.debug.label()
             )
         }
@@ -1539,8 +1805,17 @@ impl LaunchPolicySpec {
         self.checkpoint.validate()?;
         self.eval_cadence.validate()?;
         self.resume.validate()?;
+        self.weight_export.validate()?;
         self.debug.validate()?;
         Ok(())
+    }
+
+    pub fn validate_against_backend(
+        &self,
+        backend: &crate::registry::ComputeBackend,
+    ) -> Result<(), FractalError> {
+        self.validate()?;
+        self.weight_export.validate_against_backend(backend)
     }
 }
 
@@ -1932,7 +2207,8 @@ impl TournamentConfig {
             ));
         }
         self.optimizer.validate()?;
-        self.launch_policy.validate()?;
+        self.launch_policy
+            .validate_against_backend(&self.execution_backend)?;
         resolve_precision_profile(&self.execution_backend, &self.launch_policy.precision)?;
         if let Some(run_timeout) = self.run_timeout {
             if run_timeout.is_zero() {
@@ -2559,6 +2835,7 @@ pub struct TrainingRuntimeArtifact {
     pub target_train_tokens: usize,
     pub resumed_from_checkpoint: bool,
     pub checkpoints: Vec<CheckpointArtifact>,
+    pub weight_exports: Vec<WeightExportArtifact>,
     pub interim_evaluations: Vec<InterimEvalSnapshot>,
 }
 

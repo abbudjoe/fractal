@@ -1190,8 +1190,12 @@ fn tensor_readout_to_f32<B: Backend>(
     tensor: &Tensor<B, 2>,
     label: &'static str,
 ) -> Result<Vec<f32>, FractalError> {
-    tensor_data_to_vec::<B::FloatElem>(tensor.clone().into_data(), label)
-        .map(|values| values.into_iter().map(|value| value.elem::<f32>()).collect())
+    tensor_data_to_vec::<B::FloatElem>(tensor.clone().into_data(), label).map(|values| {
+        values
+            .into_iter()
+            .map(|value| value.elem::<f32>())
+            .collect()
+    })
 }
 
 #[cfg(test)]

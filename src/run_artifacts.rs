@@ -150,7 +150,14 @@ fn build_artifact_json(report: &TournamentRunReport) -> Value {
                         "total": timing.total,
                     })
                 }).collect::<Vec<_>>(),
-                "training_runtime": training_runtime_json(&record.training_runtime),
+                "training_runtime": training_runtime_json(
+                    &record.training_runtime,
+                    record
+                        .manifest
+                        .experiment
+                        .as_ref()
+                        .map(|experiment| &experiment.runtime.launch_policy),
+                ),
                 "metrics": record.metrics.as_ref().map(|metrics| {
                     json!({
                         "grad_norm_depth_20": metrics.grad_norm_depth_20,
@@ -354,7 +361,13 @@ fn training_input_json(spec: &crate::TrainingInputSpec) -> Value {
     })
 }
 
-fn training_runtime_json(spec: &fractal_core::lifecycle::TrainingRuntimeArtifact) -> Value {
+fn training_runtime_json(
+    spec: &fractal_core::lifecycle::TrainingRuntimeArtifact,
+    launch_policy: Option<&crate::LaunchPolicySpec>,
+) -> Value {
+    let missing_required_weight_exports =
+        missing_required_weight_export_phases(launch_policy, &spec.weight_exports);
+
     json!({
         "completed_steps": spec.completed_steps,
         "planned_steps": spec.planned_steps,
@@ -370,6 +383,15 @@ fn training_runtime_json(spec: &fractal_core::lifecycle::TrainingRuntimeArtifact
                 "long_context_perplexity": checkpoint.long_context_perplexity,
             })
         }).collect::<Vec<_>>(),
+        "weight_exports": spec
+            .weight_exports
+            .iter()
+            .map(weight_export_artifact_json)
+            .collect::<Vec<_>>(),
+        "missing_required_weight_export_phases": missing_required_weight_exports
+            .iter()
+            .map(|phase| phase_name_from_weight_export(*phase))
+            .collect::<Vec<_>>(),
         "interim_evaluations": spec.interim_evaluations.iter().map(|snapshot| {
             json!({
                 "tokens_seen": snapshot.tokens_seen,
@@ -381,6 +403,91 @@ fn training_runtime_json(spec: &fractal_core::lifecycle::TrainingRuntimeArtifact
             })
         }).collect::<Vec<_>>(),
     })
+}
+
+fn missing_required_weight_export_phases(
+    launch_policy: Option<&crate::LaunchPolicySpec>,
+    exports: &[crate::WeightExportArtifact],
+) -> Vec<crate::WeightExportPhase> {
+    let Some(launch_policy) = launch_policy else {
+        return Vec::new();
+    };
+    let policy = &launch_policy.weight_export;
+    if !policy.required || policy.phases.is_empty() {
+        return Vec::new();
+    }
+
+    policy
+        .phases
+        .iter()
+        .copied()
+        .filter(|phase| !exports.iter().any(|artifact| artifact.phase == *phase))
+        .collect::<Vec<_>>()
+}
+
+fn weight_export_artifact_json(spec: &crate::WeightExportArtifact) -> Value {
+    json!({
+        "format": weight_export_format_json(&spec.format),
+        "phase": phase_name_from_weight_export(spec.phase),
+        "path": spec.path,
+        "metadata_path": spec.metadata_path,
+        "required": spec.required,
+        "contract": weight_export_contract_json(&spec.contract),
+    })
+}
+
+fn weight_export_contract_json(spec: &crate::WeightExportContract) -> Value {
+    json!({
+        "experiment_logical_name": spec.experiment_logical_name,
+        "experiment_run_id": spec.experiment_run_id,
+        "experiment_branch": spec.experiment_branch,
+        "experiment_commit_sha": spec.experiment_commit_sha,
+        "species": spec.species,
+        "variant_name": spec.variant_name,
+        "model": {
+            "architecture": spec.model.architecture.as_str(),
+            "hidden_dim": spec.model.hidden_dim,
+            "max_recursion_depth": spec.model.max_recursion_depth,
+            "router_enabled": spec.model.router_enabled,
+            "label": spec.model.label(),
+        },
+        "vocab_size": spec.vocab_size,
+        "precision": {
+            "compute": spec.precision.compute.as_str(),
+            "optimizer_state": spec.precision.optimizer_state.as_str(),
+            "reduction": spec.precision.reduction.as_str(),
+            "tf32_enabled": spec.precision.tf32_enabled,
+            "quantization": {
+                "weights": spec.precision.quantization.weights.map(|kind| kind.as_str()),
+                "activations": spec.precision.quantization.activations.map(|kind| kind.as_str()),
+            },
+        },
+        "format": weight_export_format_json(&spec.format),
+    })
+}
+
+fn weight_export_format_json(format: &crate::WeightExportFormat) -> Value {
+    match format {
+        crate::WeightExportFormat::BurnBin => json!({
+            "format": "burn-bin",
+        }),
+        crate::WeightExportFormat::SafeTensors => json!({
+            "format": "safe-tensors",
+        }),
+        crate::WeightExportFormat::Quantized { precision } => json!({
+            "format": "quantized",
+            "precision": precision.as_str(),
+        }),
+    }
+}
+
+fn phase_name_from_weight_export(phase: crate::WeightExportPhase) -> &'static str {
+    match phase {
+        crate::WeightExportPhase::Best => "best",
+        crate::WeightExportPhase::Final => "final",
+        crate::WeightExportPhase::Latest => "latest",
+        crate::WeightExportPhase::FailureSnapshot => "failure-snapshot",
+    }
 }
 
 fn text_corpus_split_json(spec: &crate::TextCorpusSplitSpec) -> Value {
@@ -430,6 +537,17 @@ fn launch_policy_json(spec: &crate::LaunchPolicySpec) -> Value {
             "resume_on_interrupt": spec.resume.resume_on_interrupt,
             "restart_on_corruption": spec.resume.restart_on_corruption,
             "restart_on_contract_ambiguity": spec.resume.restart_on_contract_ambiguity,
+        },
+        "weight_export": {
+            "format": weight_export_format_json(&spec.weight_export.format),
+            "phases": spec
+                .weight_export
+                .phases
+                .iter()
+                .map(|phase| phase_name_from_weight_export(*phase))
+                .collect::<Vec<_>>(),
+            "required": spec.weight_export.required,
+            "label": spec.weight_export.label(),
         },
         "debug": {
             "train_step_log_interval_steps": spec.debug.train_step_log_interval_steps,

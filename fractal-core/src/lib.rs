@@ -26,7 +26,8 @@ pub use lifecycle::{
     SpeciesCompletion, SpeciesRunArtifact, SpeciesRunStage, TextCorpusFormat, TextCorpusSourceSpec,
     TextCorpusSplitSpec, TokenizerArtifactSpec, TokenizerBridgeSpec, Tournament, TournamentConfig,
     TournamentPreset, TournamentProgressEvent, TournamentReporter, TournamentRunArtifact,
-    TournamentSequence, TrainingInputMode, TrainingInputSpec, VariantSpec,
+    TournamentSequence, TrainingInputMode, TrainingInputSpec, VariantSpec, WeightExportArtifact,
+    WeightExportContract, WeightExportFormat, WeightExportPhase, WeightExportPolicy,
 };
 pub use model::FractalModel;
 pub use registry::{
