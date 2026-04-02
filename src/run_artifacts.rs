@@ -431,6 +431,10 @@ fn launch_policy_json(spec: &crate::LaunchPolicySpec) -> Value {
             "restart_on_corruption": spec.resume.restart_on_corruption,
             "restart_on_contract_ambiguity": spec.resume.restart_on_contract_ambiguity,
         },
+        "debug": {
+            "train_step_log_interval_steps": spec.debug.train_step_log_interval_steps,
+            "cuda_memory_log_interval_steps": spec.debug.cuda_memory_log_interval_steps,
+        },
     })
 }
 

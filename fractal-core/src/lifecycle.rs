@@ -1423,11 +1423,61 @@ impl ResumePolicy {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugProbePolicy {
+    pub train_step_log_interval_steps: Option<usize>,
+    pub cuda_memory_log_interval_steps: Option<usize>,
+}
+
+impl Default for DebugProbePolicy {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
+impl DebugProbePolicy {
+    pub const fn disabled() -> Self {
+        Self {
+            train_step_log_interval_steps: None,
+            cuda_memory_log_interval_steps: None,
+        }
+    }
+
+    pub fn label(&self) -> String {
+        format!(
+            "train_step_log_interval_steps={:?} cuda_memory_log_interval_steps={:?}",
+            self.train_step_log_interval_steps, self.cuda_memory_log_interval_steps
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        for (name, interval) in [
+            (
+                "train_step_log_interval_steps",
+                self.train_step_log_interval_steps,
+            ),
+            (
+                "cuda_memory_log_interval_steps",
+                self.cuda_memory_log_interval_steps,
+            ),
+        ] {
+            if interval == Some(0) {
+                return Err(FractalError::InvalidConfig(format!(
+                    "{name} must be greater than zero when configured"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchPolicySpec {
     pub precision: PrecisionPolicy,
     pub checkpoint: CheckpointPolicy,
     pub eval_cadence: EvalCadencePolicy,
     pub resume: ResumePolicy,
+    #[serde(default)]
+    pub debug: DebugProbePolicy,
 }
 
 impl Default for LaunchPolicySpec {
@@ -1443,6 +1493,7 @@ impl LaunchPolicySpec {
             checkpoint: CheckpointPolicy::legacy_default(),
             eval_cadence: EvalCadencePolicy::legacy_default(),
             resume: ResumePolicy::legacy_default(),
+            debug: DebugProbePolicy::disabled(),
         }
     }
 
@@ -1452,6 +1503,7 @@ impl LaunchPolicySpec {
             checkpoint: CheckpointPolicy::stage0_default(),
             eval_cadence: EvalCadencePolicy::stage0_default(),
             resume: ResumePolicy::stage0_default(),
+            debug: DebugProbePolicy::disabled(),
         }
     }
 
@@ -1460,11 +1512,12 @@ impl LaunchPolicySpec {
             "legacy-default".to_owned()
         } else {
             format!(
-                "precision=[{}] checkpoint=[{}] eval=[{}] resume=[{}]",
+                "precision=[{}] checkpoint=[{}] eval=[{}] resume=[{}] debug=[{}]",
                 self.precision.label(),
                 self.checkpoint.label(),
                 self.eval_cadence.label(),
-                self.resume.label()
+                self.resume.label(),
+                self.debug.label()
             )
         }
     }
@@ -1474,6 +1527,7 @@ impl LaunchPolicySpec {
         self.checkpoint.validate()?;
         self.eval_cadence.validate()?;
         self.resume.validate()?;
+        self.debug.validate()?;
         Ok(())
     }
 }

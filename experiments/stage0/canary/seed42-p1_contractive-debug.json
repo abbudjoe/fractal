@@ -1,0 +1,158 @@
+{
+  "logical_name": "stage0-canary-debug-s42-p1-contractive",
+  "question_summary": "debug the Stage 0 H200 tokenizer-backed canary OOM for p1_contractive_v1 with typed runtime probes before retrying the standard canary",
+  "preset": "full-medium-stress",
+  "lane": null,
+  "species": "p1_contractive",
+  "expected_branch": "codex/stage0-launch",
+  "expected_commit_sha": null,
+  "experiment": {
+    "question": {
+      "lane_intent": "benchmark",
+      "decision_intent": "benchmark"
+    },
+    "config": {
+      "seed": 42,
+      "dim": 1024,
+      "levels": 6,
+      "vocab_size": 32000,
+      "max_seq_len": 2048,
+      "max_recursion_depth": 16,
+      "stability_depth": 20,
+      "router_threshold": 0.92,
+      "train_batch_size": 2,
+      "eval_batch_size": 2,
+      "train_steps_per_species": 5000,
+      "train_token_budget": 10000000,
+      "eval_batches_per_family": 2,
+      "perplexity_eval_batches": 2,
+      "arc_eval_batches": 2,
+      "execution_mode": "sequential",
+      "parallelism": 1,
+      "backend": "cuda",
+      "timeout_seconds": null
+    },
+    "model": {
+      "architecture": "recursive-kernel-v1",
+      "hidden_dim": 1024,
+      "max_recursion_depth": 16,
+      "router_enabled": true
+    },
+    "training_input": {
+      "mode": "tokenizer-backed-text",
+      "corpus_name": "fineweb-stage0-canary",
+      "corpus_source": {
+        "train": {
+          "path": "experiments/stage0/assets/fineweb/stage0-canary/train.jsonl",
+          "format": {
+            "format": "jsonl-text",
+            "text_field": "text"
+          },
+          "max_documents": null
+        },
+        "eval": {
+          "path": "experiments/stage0/assets/fineweb/stage0-canary/eval.jsonl",
+          "format": {
+            "format": "jsonl-text",
+            "text_field": "text"
+          },
+          "max_documents": null
+        }
+      },
+      "tokenizer": {
+        "artifact_id": "openlm-research/open_llama_3b_v2",
+        "artifact_path": "experiments/stage0/assets/open_llama_3b_v2/tokenizer.model",
+        "vocab_size": 32000,
+        "pad_token_id": 0
+      },
+      "bridge": {
+        "enabled": true,
+        "observational_only": true
+      },
+      "bridge_packaging": {
+        "vocab_artifact_path": "experiments/stage0/assets/open_llama_3b_v2/fineweb-stage0-canary-bridge-vocab.json",
+        "dim": 64,
+        "levels": 3,
+        "max_depth": 6,
+        "seed": 42,
+        "split_policy": "balanced",
+        "substrate_mode": "raw-bytes",
+        "chunk_max_tokens": 2048,
+        "chunk_max_bytes": 2048
+      },
+      "arc_source": {
+        "mode": "synthetic-canonical"
+      }
+    },
+    "optimizer": {
+      "kind": "adamw",
+      "peak_learning_rate": 0.0002,
+      "beta_1": 0.9,
+      "beta_2": 0.95,
+      "epsilon": 1e-8,
+      "weight_decay": 0.05,
+      "gradient_clip_norm": 1.0,
+      "schedule": {
+        "kind": "warmup-cosine",
+        "warmup_fraction": 0.02,
+        "decay_floor_fraction": 0.1
+      }
+    },
+    "runtime": {
+      "eval_backend_policy": "shared-backend",
+      "batching_policy": "padded",
+      "execution_policy": "simple-loop",
+      "buffer_reuse_policy": "disabled",
+      "benchmark_mode": "leaderboard",
+      "backend_policy": "active-execution-backend",
+      "launch_policy": {
+        "precision": {
+          "compute": "bf16",
+          "optimizer_state": "fp32",
+          "reduction": "fp32",
+          "tf32_enabled": true,
+          "quantization": {
+            "weights": null,
+            "activations": null
+          }
+        },
+        "checkpoint": {
+          "interval_tokens": 2000000,
+          "keep_latest": true,
+          "keep_best": true,
+          "keep_final": true,
+          "keep_previous": true
+        },
+        "eval_cadence": {
+          "perplexity_interval_tokens": 2000000,
+          "stability_interval_tokens": 2000000,
+          "arc_interval_tokens": 5000000,
+          "systems_speed_interval_tokens": 5000000,
+          "final_full_eval": true
+        },
+        "resume": {
+          "resume_on_interrupt": true,
+          "restart_on_corruption": true,
+          "restart_on_contract_ambiguity": true
+        },
+        "debug": {
+          "train_step_log_interval_steps": 50,
+          "cuda_memory_log_interval_steps": 50
+        }
+      }
+    },
+    "comparison": {
+      "authority": "advisory",
+      "requires_same_preset": false,
+      "requires_same_runtime_surfaces": true,
+      "requires_frozen_commit": false,
+      "requires_same_backend": true
+    },
+    "artifacts": {
+      "manifest_required": true,
+      "structured_artifact_required": true,
+      "final_log_required": true,
+      "tracker_ready_output_required": true
+    }
+  }
+}

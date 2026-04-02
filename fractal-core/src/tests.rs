@@ -279,6 +279,21 @@ fn stage0_launch_policy_contract_matches_stage0_training_plan() {
     assert!(launch_policy.resume.resume_on_interrupt);
     assert!(launch_policy.resume.restart_on_corruption);
     assert!(launch_policy.resume.restart_on_contract_ambiguity);
+    assert_eq!(
+        launch_policy.debug,
+        crate::lifecycle::DebugProbePolicy::disabled()
+    );
+}
+
+#[test]
+fn launch_policy_rejects_zero_debug_probe_intervals() {
+    let mut launch_policy = LaunchPolicySpec::stage0_default();
+    launch_policy.debug.train_step_log_interval_steps = Some(0);
+    assert!(launch_policy.validate().is_err());
+
+    launch_policy.debug.train_step_log_interval_steps = None;
+    launch_policy.debug.cuda_memory_log_interval_steps = Some(0);
+    assert!(launch_policy.validate().is_err());
 }
 
 #[test]

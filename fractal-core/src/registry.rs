@@ -3,6 +3,7 @@ use std::{
     fmt::{Display, Formatter},
     fs,
     path::{Path, PathBuf},
+    process::Command,
     str::FromStr,
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
@@ -1103,6 +1104,28 @@ where
             ));
         }
         let batch = &train_batches[step % train_batches.len()];
+        if should_fire_debug_probe(
+            step,
+            config.launch_policy.debug.train_step_log_interval_steps,
+        ) {
+            let mut details = vec![
+                format!("train_step={step}"),
+                format!("planned_steps={}", launch_runtime.planned_steps),
+                format!("tokens_seen={}", launch_runtime.train_tokens_seen),
+                format!("batch_token_count={}", batch.token_count),
+                format!("input_shape={:?}", batch.input_ids.dims()),
+                format!("target_shape={:?}", batch.target_ids.dims()),
+            ];
+            if should_fire_debug_probe(
+                step,
+                config.launch_policy.debug.cuda_memory_log_interval_steps,
+            ) {
+                if let Some(snapshot) = cuda_memory_snapshot() {
+                    details.push(snapshot);
+                }
+            }
+            log_species_debug_probe(species, &details);
+        }
         let loss = match model.loss(batch, &criterion, None, true) {
             Ok(loss) => loss,
             Err(error) => {
@@ -1139,6 +1162,25 @@ where
         launch_runtime.train_tokens_seen += batch.token_count;
         launch_runtime.completed_steps = step + 1;
         let completed_step = launch_runtime.completed_steps;
+        if should_fire_debug_probe(
+            step,
+            config.launch_policy.debug.train_step_log_interval_steps,
+        ) {
+            let mut details = vec![
+                format!("train_step_done={completed_step}"),
+                format!("tokens_seen={}", launch_runtime.train_tokens_seen),
+                format!("scheduled_lr={scheduled_learning_rate:.8}"),
+            ];
+            if should_fire_debug_probe(
+                step,
+                config.launch_policy.debug.cuda_memory_log_interval_steps,
+            ) {
+                if let Some(snapshot) = cuda_memory_snapshot() {
+                    details.push(snapshot);
+                }
+            }
+            log_species_debug_probe(species, &details);
+        }
 
         let latest_snapshot = match maybe_capture_interim_eval(
             species,
@@ -1701,6 +1743,35 @@ pub(crate) fn training_progress_interval(total_steps: usize) -> usize {
     total_steps.max(1).div_ceil(TRAIN_PROGRESS_TARGET_EVENTS)
 }
 
+fn should_fire_debug_probe(step: usize, interval: Option<usize>) -> bool {
+    interval.is_some_and(|interval| step % interval == 0)
+}
+
+fn cuda_memory_snapshot() -> Option<String> {
+    let output = Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=memory.used,memory.free,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .to_owned();
+    let mut values = line.split(',').map(|value| value.trim());
+    let used_mib = values.next()?;
+    let free_mib = values.next()?;
+    let total_mib = values.next()?;
+    Some(format!(
+        "cuda_mem_mib(used={used_mib},free={free_mib},total={total_mib})"
+    ))
+}
+
 fn log_species_phase_start(species: SpeciesId, phase: &str, details: &[String]) {
     let suffix = if details.is_empty() {
         String::new()
@@ -1728,6 +1799,15 @@ fn log_species_phase_done(species: SpeciesId, phase: &str, elapsed: Duration) {
         "[phase:done] {species} {phase} elapsed={:.1}s",
         elapsed.as_secs_f64()
     );
+}
+
+fn log_species_debug_probe(species: SpeciesId, details: &[String]) {
+    let suffix = if details.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", details.join(" "))
+    };
+    println!("[phase:debug] {species}{suffix}");
 }
 
 pub(crate) fn gradient_l2_norm<M, B>(module: &M, grads: &GradientsParams) -> f64

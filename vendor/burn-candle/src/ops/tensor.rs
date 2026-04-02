@@ -142,17 +142,39 @@ impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle
     }
 
     fn float_matmul(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
+        let lhs_shape = lhs.tensor.dims().to_vec();
+        let lhs_dtype = lhs.tensor.dtype();
+        let lhs_contiguous_before = lhs.tensor.is_contiguous();
+        let rhs_shape = rhs.tensor.dims().to_vec();
+        let rhs_dtype = rhs.tensor.dtype();
+        let rhs_contiguous_before = rhs.tensor.is_contiguous();
         let lhs_contiguous = if !lhs.tensor.is_contiguous() {
-            lhs.tensor.contiguous().unwrap()
+            lhs.tensor.contiguous().unwrap_or_else(|error| {
+                panic!(
+                    "candle matmul failed to make lhs contiguous: {error}; lhs_shape={lhs_shape:?} lhs_dtype={lhs_dtype:?} lhs_contiguous_before={lhs_contiguous_before} rhs_shape={rhs_shape:?} rhs_dtype={rhs_dtype:?} rhs_contiguous_before={rhs_contiguous_before}"
+                )
+            })
         } else {
             lhs.tensor
         };
         let rhs_contiguous = if !rhs.tensor.is_contiguous() {
-            rhs.tensor.contiguous().unwrap()
+            rhs.tensor.contiguous().unwrap_or_else(|error| {
+                panic!(
+                    "candle matmul failed to make rhs contiguous: {error}; lhs_shape={lhs_shape:?} lhs_dtype={lhs_dtype:?} lhs_contiguous_before={lhs_contiguous_before} rhs_shape={rhs_shape:?} rhs_dtype={rhs_dtype:?} rhs_contiguous_before={rhs_contiguous_before}"
+                )
+            })
         } else {
             rhs.tensor
         };
-        CandleTensor::new(lhs_contiguous.broadcast_matmul(&rhs_contiguous).unwrap())
+        let lhs_contiguous_shape = lhs_contiguous.dims().to_vec();
+        let rhs_contiguous_shape = rhs_contiguous.dims().to_vec();
+        CandleTensor::new(lhs_contiguous.broadcast_matmul(&rhs_contiguous).unwrap_or_else(
+            |error| {
+                panic!(
+                    "candle matmul failed: {error}; lhs_shape={lhs_shape:?} lhs_dtype={lhs_dtype:?} lhs_contiguous_before={lhs_contiguous_before} lhs_contiguous_shape={lhs_contiguous_shape:?} rhs_shape={rhs_shape:?} rhs_dtype={rhs_dtype:?} rhs_contiguous_before={rhs_contiguous_before} rhs_contiguous_shape={rhs_contiguous_shape:?}"
+                )
+            },
+        ))
     }
 
     fn float_cross(
