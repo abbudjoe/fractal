@@ -4,6 +4,7 @@ pub mod error;
 pub mod fitness;
 pub mod lifecycle;
 pub mod model;
+pub mod projection;
 pub mod primitives;
 pub mod registry;
 pub mod router;
@@ -48,6 +49,10 @@ pub use lifecycle::{
     WeightExportPolicy, WeightExportRuntimeState,
 };
 pub use model::FractalModel;
+pub use projection::{
+    ProjectionLayoutPolicy, StructuredProjection, StructuredProjectionConfig,
+    StructuredProjectionRecord,
+};
 pub use registry::{
     is_valid_primitive_variant_name, load_weight_export_artifact, load_weight_export_metadata,
     read_weight_export_metadata, resolve_precision_profile, run_species_with_batches,

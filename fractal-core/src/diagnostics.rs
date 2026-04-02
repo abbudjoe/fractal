@@ -342,6 +342,7 @@ pub enum TensorLayoutTransform {
     Identity,
     UnsqueezedView,
     TransposedView,
+    TransposedUnsqueezedView,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,14 +403,12 @@ impl RuleProjectionDiagnosticSpec {
             .clone()
             .try_into()
             .expect("linear weight shape should be rank 2");
-        Self {
-            identity: RuleProjectionIdentity {
-                rule_name: rule_name.into(),
-                projection_name: projection_name.into(),
-            },
-            input_layout: TensorLayoutMetadata::observed(input_shape),
-            output_layout: TensorLayoutMetadata::observed(output_shape),
-            linear_layout: Some(LinearProjectionLayoutMetadata {
+        Self::linear_with_layout(
+            rule_name,
+            projection_name,
+            input_shape,
+            output_shape,
+            LinearProjectionLayoutMetadata {
                 stored_weight: TensorLayoutMetadata::linear_contract(
                     vec![d_input, d_output],
                     TensorLayoutTransform::Identity,
@@ -422,7 +421,25 @@ impl RuleProjectionDiagnosticSpec {
                     vec![d_output, d_input],
                     TensorLayoutTransform::TransposedView,
                 ),
-            }),
+            },
+        )
+    }
+
+    pub fn linear_with_layout(
+        rule_name: impl Into<String>,
+        projection_name: impl Into<String>,
+        input_shape: Vec<usize>,
+        output_shape: Vec<usize>,
+        linear_layout: LinearProjectionLayoutMetadata,
+    ) -> Self {
+        Self {
+            identity: RuleProjectionIdentity {
+                rule_name: rule_name.into(),
+                projection_name: projection_name.into(),
+            },
+            input_layout: TensorLayoutMetadata::observed(input_shape),
+            output_layout: TensorLayoutMetadata::observed(output_shape),
+            linear_layout: Some(linear_layout),
         }
     }
 }

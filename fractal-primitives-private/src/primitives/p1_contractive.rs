@@ -1,16 +1,15 @@
 use burn::{
     module::Module,
-    nn::{Linear, LinearConfig},
     tensor::{backend::Backend, Tensor},
 };
 
 use fractal_core::{
     diagnostics::{
-        RuleProjectionDiagnosticContext, RuleProjectionDiagnosticSpec, RuleProjectionDiagnosticsSink,
-        RuleProjectionKind,
+        RuleProjectionDiagnosticContext, RuleProjectionDiagnosticsSink, RuleProjectionKind,
     },
     error::FractalError,
     primitives::{gated_sigmoid, one_minus},
+    projection::{ProjectionLayoutPolicy, StructuredProjection, StructuredProjectionConfig},
     rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
     RunPhase,
@@ -18,18 +17,20 @@ use fractal_core::{
 
 #[derive(Module, Debug)]
 pub struct P1Contractive<B: Backend> {
-    pub g_proj: Linear<B>,
-    pub w_h: Linear<B>,
-    pub u: Linear<B>,
+    pub g_proj: StructuredProjection<B>,
+    pub w_h: StructuredProjection<B>,
+    pub u: StructuredProjection<B>,
     hidden_dim: usize,
 }
 
 impl<B: Backend> P1Contractive<B> {
     pub fn new(hidden_dim: usize, device: &B::Device) -> Self {
+        let projection = StructuredProjectionConfig::new(hidden_dim, hidden_dim)
+            .with_layout_policy(ProjectionLayoutPolicy::OutputByInput);
         Self {
-            g_proj: LinearConfig::new(hidden_dim, hidden_dim).init(device),
-            w_h: LinearConfig::new(hidden_dim, hidden_dim).init(device),
-            u: LinearConfig::new(hidden_dim, hidden_dim).init(device),
+            g_proj: projection.init(device),
+            w_h: projection.init(device),
+            u: projection.init(device),
             hidden_dim,
         }
     }
@@ -66,12 +67,11 @@ impl<B: Backend> FractalRule<B> for P1Contractive<B> {
                 RunPhase::Train,
                 rule_context,
                 RuleProjectionKind::Gate,
-                RuleProjectionDiagnosticSpec::linear(
+                self.g_proj.diagnostic_spec(
                     self.name(),
                     "g_proj",
                     gate_input_shape,
                     gate_projection.dims().into_iter().collect(),
-                    self.g_proj.weight.shape().dims::<2>().to_vec(),
                 ),
             )?;
         }
@@ -85,12 +85,11 @@ impl<B: Backend> FractalRule<B> for P1Contractive<B> {
                 RunPhase::Train,
                 rule_context,
                 RuleProjectionKind::StateMix,
-                RuleProjectionDiagnosticSpec::linear(
+                self.w_h.diagnostic_spec(
                     self.name(),
                     "w_h",
                     state_input_shape,
                     state_projection.dims().into_iter().collect(),
-                    self.w_h.weight.shape().dims::<2>().to_vec(),
                 ),
             )?;
         }
@@ -103,12 +102,11 @@ impl<B: Backend> FractalRule<B> for P1Contractive<B> {
                 RunPhase::Train,
                 rule_context,
                 RuleProjectionKind::InputMix,
-                RuleProjectionDiagnosticSpec::linear(
+                self.u.diagnostic_spec(
                     self.name(),
                     "u",
                     input_mix_input_shape,
                     input_projection.dims().into_iter().collect(),
-                    self.u.weight.shape().dims::<2>().to_vec(),
                 ),
             )?;
         }

@@ -171,7 +171,15 @@ fn p1_contractive_emits_typed_rule_projection_diagnostics() {
                         .expect("linear contract metadata should exist")
                         .backward_input_grad_rhs
                         .transform,
-                    TensorLayoutTransform::TransposedView
+                    TensorLayoutTransform::Identity
+                );
+                assert_eq!(
+                    spec.linear_layout
+                        .as_ref()
+                        .expect("linear contract metadata should exist")
+                        .forward_rhs
+                        .transform,
+                    TensorLayoutTransform::TransposedUnsqueezedView
                 );
                 *projection
             }

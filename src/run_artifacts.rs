@@ -930,6 +930,9 @@ fn tensor_layout_metadata_json(spec: &crate::TensorLayoutMetadata) -> Value {
             crate::TensorLayoutTransform::Identity => "identity",
             crate::TensorLayoutTransform::UnsqueezedView => "unsqueezed_view",
             crate::TensorLayoutTransform::TransposedView => "transposed_view",
+            crate::TensorLayoutTransform::TransposedUnsqueezedView => {
+                "transposed_unsqueezed_view"
+            }
         },
         "shape": spec.shape,
         "strides": spec.strides,
