@@ -37,7 +37,7 @@ use crate::{
         RunQualityOutcome, SpeciesRunArtifact, SpeciesRunStage, TournamentConfig,
         TrainingRuntimeArtifact,
     },
-    model::FractalModel,
+    model::{ForwardDebugProbe, FractalModel},
     rule_trait::FractalRule,
 };
 
@@ -1126,7 +1126,20 @@ where
             }
             log_species_debug_probe(species, &details);
         }
-        let loss = match model.loss(batch, &criterion, None, true) {
+        let debug_probe = if config
+            .launch_policy
+            .debug
+            .forward_trace_train_steps
+            .is_some_and(|limit| step < limit)
+        {
+            Some(ForwardDebugProbe {
+                train_step: Some(step),
+                position_log_interval: config.launch_policy.debug.forward_position_log_interval,
+            })
+        } else {
+            None
+        };
+        let loss = match model.loss(batch, &criterion, None, true, debug_probe) {
             Ok(loss) => loss,
             Err(error) => {
                 phase_timings.push(phase_timing(
@@ -1679,7 +1692,7 @@ where
 {
     let mut total_loss = 0.0f64;
     for batch in batches {
-        let loss = model.loss(batch, criterion, None, true)?;
+        let loss = model.loss(batch, criterion, None, true, None)?;
         total_loss += loss.into_scalar().elem::<f64>();
     }
     let mean_loss = total_loss / batches.len() as f64;
@@ -1969,7 +1982,7 @@ where
     R: FractalRule<B> + Module<B> + AutodiffModule<B> + ModuleDisplay + Clone + std::fmt::Debug,
     <R as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend> + ModuleDisplay,
 {
-    let stability_loss = model.loss(batch, criterion, Some(stability_depth), false)?;
+    let stability_loss = model.loss(batch, criterion, Some(stability_depth), false, None)?;
     let stability_grads = GradientsParams::from_grads(stability_loss.backward(), model);
     Ok(gradient_l2_norm(model, &stability_grads))
 }

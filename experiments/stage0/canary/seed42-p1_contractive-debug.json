@@ -137,7 +137,9 @@
         },
         "debug": {
           "train_step_log_interval_steps": 50,
-          "cuda_memory_log_interval_steps": 50
+          "cuda_memory_log_interval_steps": 50,
+          "forward_trace_train_steps": 1,
+          "forward_position_log_interval": 64
         }
       }
     },

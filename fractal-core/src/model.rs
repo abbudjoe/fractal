@@ -12,6 +12,19 @@ use crate::{
     state::FractalState,
 };
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ForwardDebugProbe {
+    pub train_step: Option<usize>,
+    pub position_log_interval: Option<usize>,
+}
+
+impl ForwardDebugProbe {
+    fn should_log_position(self, position: usize) -> bool {
+        self.position_log_interval
+            .is_some_and(|interval| position % interval == 0)
+    }
+}
+
 #[derive(Module, Debug)]
 pub struct FractalModel<B: Backend, R: Module<B>> {
     pub embedding: Embedding<B>,
@@ -52,7 +65,7 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
         &self,
         input_ids: Tensor<B, 2, Int>,
     ) -> Result<Tensor<B, 3>, FractalError> {
-        self.forward_tokens_with_controls(input_ids, None, true)
+        self.forward_tokens_with_controls(input_ids, None, true, None)
     }
 
     pub fn forward_tokens_with_controls(
@@ -60,6 +73,7 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
         input_ids: Tensor<B, 2, Int>,
         force_depth: Option<usize>,
         use_router: bool,
+        debug_probe: Option<ForwardDebugProbe>,
     ) -> Result<Tensor<B, 3>, FractalError> {
         let [batch_size, seq_len] = input_ids.dims();
         let device = input_ids.device();
@@ -77,10 +91,29 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
                 .clone()
                 .narrow(1, position, 1)
                 .reshape([batch_size, self.hidden_dim]);
+            if debug_probe.is_some_and(|probe| probe.should_log_position(position)) {
+                println!(
+                    "[phase:debug] forward train_step={:?} position={}/{} x_shape={:?}",
+                    debug_probe.and_then(|probe| probe.train_step),
+                    position,
+                    seq_len,
+                    x_t.dims()
+                );
+            }
             state = self.recurse_token(state, x_t, force_depth, use_router)?;
+            let readout = state.readout();
+            if debug_probe.is_some_and(|probe| probe.should_log_position(position)) {
+                println!(
+                    "[phase:debug] forward train_step={:?} position={}/{} readout_shape={:?}",
+                    debug_probe.and_then(|probe| probe.train_step),
+                    position,
+                    seq_len,
+                    readout.dims()
+                );
+            }
             let token_logits =
                 self.output
-                    .forward(state.readout())
+                    .forward(readout)
                     .reshape([batch_size, 1, self.vocab_size]);
             logits.push(token_logits);
         }
@@ -94,9 +127,14 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
         criterion: &CrossEntropyLoss<B>,
         force_depth: Option<usize>,
         use_router: bool,
+        debug_probe: Option<ForwardDebugProbe>,
     ) -> Result<Tensor<B, 1>, FractalError> {
-        let logits =
-            self.forward_tokens_with_controls(batch.input_ids.clone(), force_depth, use_router)?;
+        let logits = self.forward_tokens_with_controls(
+            batch.input_ids.clone(),
+            force_depth,
+            use_router,
+            debug_probe,
+        )?;
         let [batch_size, seq_len, vocab_size] = logits.dims();
         let targets = batch.target_ids.clone().reshape([batch_size * seq_len]);
         Ok(criterion.forward(logits.reshape([batch_size * seq_len, vocab_size]), targets))

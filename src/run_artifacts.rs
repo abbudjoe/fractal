@@ -434,6 +434,8 @@ fn launch_policy_json(spec: &crate::LaunchPolicySpec) -> Value {
         "debug": {
             "train_step_log_interval_steps": spec.debug.train_step_log_interval_steps,
             "cuda_memory_log_interval_steps": spec.debug.cuda_memory_log_interval_steps,
+            "forward_trace_train_steps": spec.debug.forward_trace_train_steps,
+            "forward_position_log_interval": spec.debug.forward_position_log_interval,
         },
     })
 }

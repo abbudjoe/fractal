@@ -1426,6 +1426,8 @@ impl ResumePolicy {
 pub struct DebugProbePolicy {
     pub train_step_log_interval_steps: Option<usize>,
     pub cuda_memory_log_interval_steps: Option<usize>,
+    pub forward_trace_train_steps: Option<usize>,
+    pub forward_position_log_interval: Option<usize>,
 }
 
 impl Default for DebugProbePolicy {
@@ -1439,13 +1441,18 @@ impl DebugProbePolicy {
         Self {
             train_step_log_interval_steps: None,
             cuda_memory_log_interval_steps: None,
+            forward_trace_train_steps: None,
+            forward_position_log_interval: None,
         }
     }
 
     pub fn label(&self) -> String {
         format!(
-            "train_step_log_interval_steps={:?} cuda_memory_log_interval_steps={:?}",
-            self.train_step_log_interval_steps, self.cuda_memory_log_interval_steps
+            "train_step_log_interval_steps={:?} cuda_memory_log_interval_steps={:?} forward_trace_train_steps={:?} forward_position_log_interval={:?}",
+            self.train_step_log_interval_steps,
+            self.cuda_memory_log_interval_steps,
+            self.forward_trace_train_steps,
+            self.forward_position_log_interval
         )
     }
 
@@ -1458,6 +1465,11 @@ impl DebugProbePolicy {
             (
                 "cuda_memory_log_interval_steps",
                 self.cuda_memory_log_interval_steps,
+            ),
+            ("forward_trace_train_steps", self.forward_trace_train_steps),
+            (
+                "forward_position_log_interval",
+                self.forward_position_log_interval,
             ),
         ] {
             if interval == Some(0) {

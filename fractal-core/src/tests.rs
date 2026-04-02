@@ -294,6 +294,14 @@ fn launch_policy_rejects_zero_debug_probe_intervals() {
     launch_policy.debug.train_step_log_interval_steps = None;
     launch_policy.debug.cuda_memory_log_interval_steps = Some(0);
     assert!(launch_policy.validate().is_err());
+
+    launch_policy.debug.cuda_memory_log_interval_steps = None;
+    launch_policy.debug.forward_trace_train_steps = Some(0);
+    assert!(launch_policy.validate().is_err());
+
+    launch_policy.debug.forward_trace_train_steps = None;
+    launch_policy.debug.forward_position_log_interval = Some(0);
+    assert!(launch_policy.validate().is_err());
 }
 
 #[test]
