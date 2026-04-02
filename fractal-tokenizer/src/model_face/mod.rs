@@ -7,6 +7,7 @@ mod bridge;
 mod native;
 mod ollama;
 mod overlay;
+mod server_envelope;
 mod traits;
 
 pub use batch::ModelFacingBatch;
@@ -30,6 +31,11 @@ pub use ollama::{
 pub use overlay::{
     OverlayModelFacingBatch, OverlayModelFacingDocument, OverlayTransportAdapter,
     OverlayTransportBatch, OverlayTransportConfig,
+};
+pub use server_envelope::{
+    OverlayEnvelopeServer, OverlayServerEmbeddingResponse, OverlayServerGenerationResponse,
+    OverlayServerPreparedBatch, OverlayServerPreparedDocument, OverlayServerPromptFrame,
+    OverlayServerRequest, OverlayServerRequestDocument,
 };
 pub use traits::{ModelAdapter, ModelBatch};
 

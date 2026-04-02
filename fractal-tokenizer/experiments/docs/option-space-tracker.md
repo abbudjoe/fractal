@@ -249,6 +249,41 @@ Read:
   a stateless typed envelope that crosses a real boundary and rematerializes
   exact canonical prompt text on the server side
 
+Latest `server-side overlay envelope` read on
+`codex/shared-overlay-dictionary-impl`:
+
+- typed runtime seam:
+  - `OverlayServerRequest`
+  - `OverlayServerPromptFrame`
+  - `OverlayEnvelopeServer`
+  - `OverlayServerPreparedBatch`
+  - `OverlayServerEmbeddingResponse`
+  - `OverlayServerGenerationResponse`
+- exactness:
+  - rematerialization stays exact before runtime dispatch
+  - deterministic generation output matches the plain baseline
+- local Ollama smokes:
+  - embedding path `OK`
+    - `payload_bytes = 478`
+    - `prompt_bytes = 308`
+    - `materialize_ms = 0.13`
+  - generation path `OK`
+    - `payload_bytes = 683`
+    - `materialize_ms = 0.33`
+    - deterministic output equality preserved
+- focused repetitive-fixture transport check:
+  - compact typed payload stays smaller than rematerialized prompt bytes
+
+Read:
+
+- the runtime boundary now exists as a typed, reversible contract instead of a
+  local-only materialization helper
+- switching payload measurement to a compact typed encoding fixed the most
+  obvious dead-weight problem from the naive JSON envelope
+- this is a real runtime seam, but not yet a blanket wire-efficiency win on
+  every small prompt; the main proof today is exactness and viable boundary
+  cost, not universal payload reduction
+
 ## Tried By Layer
 
 ### Primitive

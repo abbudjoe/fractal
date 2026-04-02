@@ -1,6 +1,7 @@
 use std::num::NonZeroUsize;
 
 use fractal_core::error::FractalError;
+use serde::{Deserialize, Serialize};
 
 use crate::overlay::{
     pack_overlay_documents_in_batches, OverlayBatchPack, OverlayBatchPackSummary,
@@ -80,7 +81,7 @@ impl From<Vec<OverlayModelFacingDocument>> for OverlayModelFacingBatch {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverlayTransportConfig {
     pub scope: OverlayDictionaryScope,
     pub sharing_policy: OverlaySharingPolicy,
@@ -99,7 +100,7 @@ impl Default for OverlayTransportConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OverlayTransportBatch {
     config: OverlayTransportConfig,
     pack: OverlayBatchPack,

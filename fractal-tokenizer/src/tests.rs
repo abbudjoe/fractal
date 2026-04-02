@@ -29,11 +29,13 @@ use crate::{
     NativeTokenizer, OllamaClientBenchmarkConfig, OllamaEmbeddingClient, OllamaEndpointConfig,
     OllamaGenerationClient, OllamaGenerationConfig, OllamaGenerationOptions,
     OverlayBatchPackingStrategy, OverlayBenchmarkRequest, OverlayDictionaryScope,
-    OverlayDocumentMode, OverlayModelFacingBatch, OverlayModelFacingDocument, OverlayPack,
-    OverlaySharingPolicy, OverlayTransportAdapter, OverlayTransportConfig, P1FractalHybrid,
-    P2Mandelbrot, PrimitiveRunSummary, PrototypeGranularityMode, RecursiveOverlayConfig,
-    RecursiveOverlayDocument, RecursiveOverlayMode, RecursiveTokenizer, StateSignature,
-    TokenRecord, TokenizerConfig, TokenizerSubstrateMode, FACEOFF_VOCAB_FORMAT_VERSION,
+    OverlayDocumentMode, OverlayEnvelopeServer, OverlayModelFacingBatch,
+    OverlayModelFacingDocument, OverlayPack, OverlayServerPromptFrame, OverlayServerRequest,
+    OverlayServerRequestDocument, OverlaySharingPolicy, OverlayTransportAdapter,
+    OverlayTransportConfig, P1FractalHybrid, P2Mandelbrot, PrimitiveRunSummary,
+    PrototypeGranularityMode, RecursiveOverlayConfig, RecursiveOverlayDocument,
+    RecursiveOverlayMode, RecursiveTokenizer, StateSignature, TokenRecord, TokenizerConfig,
+    TokenizerSubstrateMode, FACEOFF_VOCAB_FORMAT_VERSION,
 };
 
 type TestBackend = Candle<f32, i64>;
@@ -1277,6 +1279,105 @@ fn overlay_transport_adapter_respects_packing_config() {
 }
 
 #[test]
+fn overlay_server_request_rejects_mismatched_document_count() {
+    let text = "\
+2026-04-01T12:00:01Z INFO auth request_id=abc-1 route=/ready status=200 latency_ms=11\n\
+2026-04-01T12:00:02Z INFO auth request_id=abc-2 route=/ready status=500 latency_ms=14\n\
+";
+    let tokenizer = build_hf_native_tokenizer(&[text]);
+    let request = build_overlay_server_request(
+        &tokenizer,
+        &["doc-a".to_string(), "doc-b".to_string()],
+        &[text],
+        None,
+    )
+    .expect_err("request should reject mismatched document count");
+
+    assert!(
+        request
+            .to_string()
+            .contains("overlay server request document count mismatch"),
+        "unexpected server request validation error: {request}"
+    );
+}
+
+#[test]
+fn overlay_envelope_server_prepares_exact_prompt_texts_in_document_order() {
+    let text_a = "\
+{\"ts\": 1, \"level\": \"info\", \"route\": \"/health\", \"service\": \"auth\", \"status\": 200, \"req\": \"a1\"}\n\
+{\"ts\": 2, \"level\": \"info\", \"route\": \"/health\", \"service\": \"auth\", \"status\": 500, \"req\": \"a2\"}\n\
+";
+    let text_b = "\
+{\"ts\": 3, \"level\": \"info\", \"route\": \"/health\", \"service\": \"auth\", \"status\": 200, \"req\": \"b1\"}\n\
+{\"ts\": 4, \"level\": \"info\", \"route\": \"/health\", \"service\": \"auth\", \"status\": 500, \"req\": \"b2\"}\n\
+";
+    let tokenizer = build_hf_native_tokenizer(&[text_a, text_b]);
+    let request = build_overlay_server_request(
+        &tokenizer,
+        &["doc-a".to_string(), "doc-b".to_string()],
+        &[text_a, text_b],
+        None,
+    )
+    .unwrap();
+    let canonical_prompts = [text_a, text_b]
+        .into_iter()
+        .map(|text| {
+            let canonical = tokenizer.tokenize_with_byte_offsets(text).unwrap();
+            tokenizer.decode_token_ids(&canonical.token_ids).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let server = OverlayEnvelopeServer::new(tokenizer);
+
+    let prepared = server.prepare_batch(&request).unwrap();
+
+    assert_eq!(prepared.documents().len(), 2);
+    assert!(prepared.payload_bytes() > 0);
+    assert!(prepared.materialize_ms() >= 0.0);
+    assert_eq!(
+        prepared
+            .documents()
+            .iter()
+            .map(|document| document.document_id().to_string())
+            .collect::<Vec<_>>(),
+        vec!["doc-a".to_string(), "doc-b".to_string()]
+    );
+    assert_eq!(
+        prepared
+            .documents()
+            .iter()
+            .map(|document| document.prompt_text().to_string())
+            .collect::<Vec<_>>(),
+        canonical_prompts
+    );
+}
+
+#[test]
+fn overlay_server_request_payload_is_bounded_for_repetitive_structured_docs() {
+    let text_a = "\
+2026-04-01T12:00:01Z INFO auth request_id=abc-1 route=/ready status=200 latency_ms=11\n\
+2026-04-01T12:00:02Z INFO auth request_id=abc-2 route=/ready status=500 latency_ms=14\n\
+2026-04-01T12:00:03Z INFO auth request_id=abc-3 route=/ready status=200 latency_ms=09\n\
+2026-04-01T12:00:04Z INFO auth request_id=abc-4 route=/ready status=500 latency_ms=16\n\
+";
+    let text_b = text_a.replace("abc-", "def-");
+    let tokenizer = build_hf_native_tokenizer(&[text_a, text_b.as_str()]);
+    let request = build_overlay_server_request(
+        &tokenizer,
+        &["doc-a".to_string(), "doc-b".to_string()],
+        &[text_a, text_b.as_str()],
+        None,
+    )
+    .unwrap();
+    let server = OverlayEnvelopeServer::new(tokenizer);
+    let prepared = server.prepare_batch(&request).unwrap();
+
+    assert!(
+        prepared.payload_bytes() < prepared.prompt_bytes(),
+        "structured overlay envelope should stay smaller than the rematerialized prompt payload for repetitive records"
+    );
+}
+
+#[test]
 fn ollama_overlay_benchmark_rejects_zero_measure_rounds() {
     let client = OllamaEmbeddingClient::new(OllamaEndpointConfig::default()).unwrap();
     let tokenizer = build_hf_native_tokenizer(&["ts=1 level=info route=/ready status=200\n"]);
@@ -1439,6 +1540,85 @@ fn overlay_model_facing_ollama_embedding_smoke_uses_materialized_transport_text(
 }
 
 #[test]
+fn overlay_server_envelope_ollama_embedding_smoke_uses_exact_materialized_text() {
+    let Some(tokenizer_path) = local_qwen25_tokenizer_json_path() else {
+        println!("OLLAMA_SERVER_ENVELOPE_EMBED_SKIP=no local qwen25 tokenizer.json");
+        return;
+    };
+    let tokenizer = HuggingFaceNativeTokenizer::from_file(&tokenizer_path).unwrap();
+    let Some(client) = local_ollama_embedding_client().unwrap() else {
+        println!("OLLAMA_SERVER_ENVELOPE_EMBED_SKIP=embedding model unavailable");
+        return;
+    };
+    let texts = [
+        "{\"ts\": 1, \"level\": \"info\", \"route\": \"/ready\", \"status\": 200, \"req\": \"abc-1\"}\n{\"ts\": 2, \"level\": \"info\", \"route\": \"/ready\", \"status\": 500, \"req\": \"abc-2\"}\n",
+        "{\"ts\": 3, \"level\": \"info\", \"route\": \"/ready\", \"status\": 200, \"req\": \"def-1\"}\n{\"ts\": 4, \"level\": \"info\", \"route\": \"/ready\", \"status\": 500, \"req\": \"def-2\"}\n",
+    ];
+    let canonical_prompts = texts
+        .iter()
+        .map(|text| {
+            let canonical = tokenizer.tokenize_with_byte_offsets(text).unwrap();
+            tokenizer.decode_token_ids(&canonical.token_ids).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let request = build_overlay_server_request(
+        &tokenizer,
+        &["embed-a".to_string(), "embed-b".to_string()],
+        &texts,
+        None,
+    )
+    .unwrap();
+    let server = OverlayEnvelopeServer::new(tokenizer);
+
+    let response = server.embed(&request, &client).unwrap();
+
+    println!(
+        "OLLAMA_SERVER_ENVELOPE_EMBED_MODEL={}",
+        client.config().embedding_model
+    );
+    println!(
+        "OLLAMA_SERVER_ENVELOPE_EMBED_DOCS={}",
+        response.prepared().documents().len()
+    );
+    println!(
+        "OLLAMA_SERVER_ENVELOPE_EMBED_PAYLOAD_BYTES={}",
+        response.prepared().payload_bytes()
+    );
+    println!(
+        "OLLAMA_SERVER_ENVELOPE_EMBED_PROMPT_BYTES={}",
+        response.prepared().prompt_bytes()
+    );
+    println!(
+        "OLLAMA_SERVER_ENVELOPE_EMBED_MATERIALIZE_MS={:.2}",
+        response.prepared().materialize_ms()
+    );
+    println!(
+        "OLLAMA_SERVER_ENVELOPE_EMBED_DISPATCH_MS={:.2}",
+        response.dispatch_ms()
+    );
+    println!(
+        "OLLAMA_SERVER_ENVELOPE_EMBED_TOTAL_MS={:.2}",
+        response.total_ms()
+    );
+    println!(
+        "OLLAMA_SERVER_ENVELOPE_EMBED_DIM={}",
+        response.embeddings().first().map_or(0, Vec::len)
+    );
+    println!("OLLAMA_SERVER_ENVELOPE_EMBED_ROUNDTRIP=OK");
+
+    assert_eq!(
+        response
+            .prepared()
+            .documents()
+            .iter()
+            .map(|document| document.prompt_text().to_string())
+            .collect::<Vec<_>>(),
+        canonical_prompts
+    );
+    assert_eq!(response.embeddings().len(), texts.len());
+}
+
+#[test]
 fn overlay_model_facing_ollama_generation_smoke_uses_materialized_transport_text() {
     let Some(tokenizer_path) = local_qwen25_tokenizer_json_path() else {
         println!("OLLAMA_GENERATE_SKIP=no local qwen25 tokenizer.json configured/found");
@@ -1499,6 +1679,84 @@ fn overlay_model_facing_ollama_generation_smoke_uses_materialized_transport_text
 
     assert!(!overlay.output_text.trim().is_empty());
     assert_eq!(base.output_text.trim(), overlay.output_text.trim());
+}
+
+#[test]
+fn overlay_server_envelope_ollama_generation_smoke_matches_plain_prompt_output() {
+    let Some(tokenizer_path) = local_qwen25_tokenizer_json_path() else {
+        println!("OLLAMA_SERVER_ENVELOPE_GENERATE_SKIP=no local qwen25 tokenizer.json");
+        return;
+    };
+    let tokenizer = HuggingFaceNativeTokenizer::from_file(&tokenizer_path).unwrap();
+    let Some(client) = local_ollama_generation_client().unwrap() else {
+        println!("OLLAMA_SERVER_ENVELOPE_GENERATE_SKIP=generation model unavailable");
+        return;
+    };
+    let records = [
+        "{\"ts\": 1, \"level\": \"info\", \"route\": \"/ready\", \"status\": 200, \"req\": \"abc-1\"}\n{\"ts\": 2, \"level\": \"info\", \"route\": \"/ready\", \"status\": 500, \"req\": \"abc-2\"}\n",
+        "{\"ts\": 3, \"level\": \"info\", \"route\": \"/ready\", \"status\": 200, \"req\": \"def-1\"}\n{\"ts\": 4, \"level\": \"info\", \"route\": \"/ready\", \"status\": 500, \"req\": \"def-2\"}\n",
+    ];
+    let instruction =
+        "Read the log records and answer with the request ids in order, separated by commas.";
+    let (base_prompt, _) = build_overlay_generation_prompts(&tokenizer, &records, instruction);
+    let combined_overlay_text = records.concat();
+    let request = build_overlay_server_request(
+        &tokenizer,
+        &["generate-doc".to_string()],
+        &[combined_overlay_text.as_str()],
+        Some(OverlayServerPromptFrame::new(
+            format!("{instruction}\n\n"),
+            "",
+        )),
+    )
+    .unwrap();
+    let options = OllamaGenerationOptions {
+        max_tokens: 24,
+        ..OllamaGenerationOptions::default()
+    };
+    let server = OverlayEnvelopeServer::new(tokenizer);
+
+    let _ = client.generate_text(&base_prompt, &options).unwrap();
+    let base = client.generate_text(&base_prompt, &options).unwrap();
+    let response = server.generate(&request, &client, &options).unwrap();
+
+    println!(
+        "OLLAMA_SERVER_ENVELOPE_GENERATE_MODEL={}",
+        client.config().generation_model
+    );
+    println!(
+        "OLLAMA_SERVER_ENVELOPE_GENERATE_PAYLOAD_BYTES={}",
+        response.payload_bytes()
+    );
+    println!(
+        "OLLAMA_SERVER_ENVELOPE_GENERATE_MATERIALIZE_MS={:.2}",
+        response.materialize_ms()
+    );
+    println!(
+        "OLLAMA_SERVER_ENVELOPE_GENERATE_REQUEST_MS={:.2}",
+        response.generation().request_ms
+    );
+    println!(
+        "OLLAMA_SERVER_ENVELOPE_GENERATE_TOTAL_MS={:.2}",
+        response.total_ms()
+    );
+    println!(
+        "OLLAMA_SERVER_ENVELOPE_GENERATE_OUTPUT={}",
+        response
+            .generation()
+            .output_text
+            .trim()
+            .replace('\n', "\\n")
+    );
+    println!("OLLAMA_SERVER_ENVELOPE_GENERATE_ROUNDTRIP=OK");
+
+    assert_eq!(response.prepared().document_id(), "generate-doc");
+    assert_eq!(response.prepared().prompt_text(), base_prompt);
+    assert!(!response.generation().output_text.trim().is_empty());
+    assert_eq!(
+        base.output_text.trim(),
+        response.generation().output_text.trim()
+    );
 }
 
 fn unique_temp_path(prefix: &str, suffix: &str) -> PathBuf {
@@ -1691,6 +1949,40 @@ fn build_overlay_generation_prompts(
     let base_prompt = format!("{instruction}\n\n{}", canonical_texts.concat());
     let overlay_prompt = format!("{instruction}\n\n{}", materialized_texts.concat());
     (base_prompt, overlay_prompt)
+}
+
+fn build_overlay_server_request(
+    tokenizer: &HuggingFaceNativeTokenizer,
+    document_ids: &[String],
+    texts: &[&str],
+    prompt_frame: Option<OverlayServerPromptFrame>,
+) -> Result<OverlayServerRequest, fractal_core::error::FractalError> {
+    let documents = texts
+        .iter()
+        .map(|text| {
+            let canonical = tokenizer
+                .tokenize_with_byte_offsets(text)
+                .map_err(|error| {
+                    fractal_core::error::FractalError::InvalidState(error.to_string())
+                })?;
+            let overlay = build_recursive_overlay(
+                text,
+                canonical,
+                RecursiveOverlayMode::LocalRecordMacro,
+                &RecursiveOverlayConfig::default(),
+            );
+            OverlayModelFacingDocument::new(overlay)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let batch = OverlayModelFacingBatch::new(documents);
+    let transport =
+        OverlayTransportAdapter::new(OverlayTransportConfig::default()).prepare_batch(&batch)?;
+    let request_documents = document_ids
+        .iter()
+        .cloned()
+        .map(OverlayServerRequestDocument::new)
+        .collect::<Result<Vec<_>, _>>()?;
+    OverlayServerRequest::new(request_documents, prompt_frame, transport)
 }
 
 fn find_tokenizer_json_under(

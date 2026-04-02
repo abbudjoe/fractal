@@ -25,9 +25,12 @@ pub use model_face::{
     OllamaEmbeddingClient, OllamaEmbeddingRequestMetrics, OllamaEndpointConfig,
     OllamaGenerationClient, OllamaGenerationConfig, OllamaGenerationOptions,
     OllamaGenerationResult, OverlayBenchmarkRequest, OverlayClientBenchmarkResult,
-    OverlayModelFacingBatch, OverlayModelFacingDocument, OverlayTransportAdapter,
-    OverlayTransportBatch, OverlayTransportConfig, SlowSentencePieceTokenizer,
-    SlowSentencePieceTokenizerError, TypedEmbeddingBridge,
+    OverlayEnvelopeServer, OverlayModelFacingBatch, OverlayModelFacingDocument,
+    OverlayServerEmbeddingResponse, OverlayServerGenerationResponse, OverlayServerPreparedBatch,
+    OverlayServerPreparedDocument, OverlayServerPromptFrame, OverlayServerRequest,
+    OverlayServerRequestDocument, OverlayTransportAdapter, OverlayTransportBatch,
+    OverlayTransportConfig, SlowSentencePieceTokenizer, SlowSentencePieceTokenizerError,
+    TypedEmbeddingBridge,
 };
 pub use overlay::{
     build_recursive_overlay, pack_overlay_documents_in_batches, LocalMacro, LocalMacroKind,

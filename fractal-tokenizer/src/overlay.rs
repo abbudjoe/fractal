@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fractal_core::error::FractalError;
+use serde::{Deserialize, Serialize};
 
 use crate::CanonicalTokenization;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecursiveOverlayMode {
     #[default]
     Off,
@@ -22,7 +23,7 @@ impl RecursiveOverlayMode {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecursiveOverlayConfig {
     pub min_repeat_count: usize,
     pub min_span_tokens: usize,
@@ -41,19 +42,19 @@ impl Default for RecursiveOverlayConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OverlayDocumentMode {
     Passthrough,
     LocalMacro,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum LocalMacroKind {
     RepeatedLine,
     RepeatedRecordScaffold,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalMacro {
     pub macro_id: usize,
     pub kind: LocalMacroKind,
@@ -61,13 +62,13 @@ pub struct LocalMacro {
     pub use_count: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OverlaySegment {
     BaseSlice { start: usize, len: usize },
     MacroRef { macro_id: usize, span_len: usize },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OverlayDictionaryScope {
     DocumentLocal,
     BatchLocal,
@@ -84,7 +85,7 @@ impl OverlayDictionaryScope {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverlaySharingPolicy {
     pub min_net_gain_symbols: usize,
     pub min_factor_tokens: usize,
@@ -103,13 +104,13 @@ impl Default for OverlaySharingPolicy {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SharedMacroDefinitionSegment {
     TokenSpan { start: usize, len: usize },
     FactorRef { factor_id: usize, span_len: usize },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharedFactor {
     pub factor_id: usize,
     pub token_ids: Vec<u32>,
@@ -117,7 +118,7 @@ pub struct SharedFactor {
     pub total_use_count: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharedMacro {
     pub shared_macro_id: usize,
     pub kind: LocalMacroKind,
@@ -160,7 +161,7 @@ impl SharedMacro {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PackedOverlaySegment {
     BaseSlice {
         start: usize,
@@ -172,7 +173,7 @@ pub enum PackedOverlaySegment {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackedOverlayDocument {
     canonical_token_ids: Vec<u32>,
     pub segments: Vec<PackedOverlaySegment>,
@@ -240,7 +241,7 @@ impl PackedOverlayDocument {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverlayPack {
     pub scope: OverlayDictionaryScope,
     pub shared_factors: Vec<SharedFactor>,
@@ -271,7 +272,7 @@ impl OverlayTransportSummary {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PackedOverlayDocumentTransport {
     pub pack_index: usize,
     pub pack_document_index: usize,
@@ -297,7 +298,7 @@ impl PackedOverlayDocumentTransport {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OverlayBatchPackingStrategy {
     Sequential,
     StructureAware,
@@ -312,7 +313,7 @@ impl OverlayBatchPackingStrategy {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OverlayBatchPackSummary {
     pub scope: OverlayDictionaryScope,
     pub strategy: OverlayBatchPackingStrategy,
@@ -336,7 +337,7 @@ impl OverlayBatchPackSummary {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OverlayBatchPack {
     pub scope: OverlayDictionaryScope,
     pub strategy: OverlayBatchPackingStrategy,
