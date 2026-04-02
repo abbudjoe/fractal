@@ -40,6 +40,38 @@ impl Default for OllamaClientBenchmarkConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OllamaGenerationConfig {
+    pub base_url: String,
+    pub generation_model: String,
+}
+
+impl Default for OllamaGenerationConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "http://127.0.0.1:11434".to_string(),
+            generation_model: "qwen2.5:0.5b-instruct".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OllamaGenerationOptions {
+    pub temperature: f32,
+    pub seed: u64,
+    pub max_tokens: usize,
+}
+
+impl Default for OllamaGenerationOptions {
+    fn default() -> Self {
+        Self {
+            temperature: 0.0,
+            seed: 7,
+            max_tokens: 64,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct OverlayBenchmarkRequest<'a> {
     pub tokenizer: &'a HuggingFaceNativeTokenizer,
@@ -55,17 +87,15 @@ pub struct OllamaEmbeddingClient {
     config: OllamaEndpointConfig,
 }
 
+#[derive(Clone, Debug)]
+pub struct OllamaGenerationClient {
+    client: Client,
+    config: OllamaGenerationConfig,
+}
+
 impl OllamaEmbeddingClient {
     pub fn new(config: OllamaEndpointConfig) -> Result<Self, FractalError> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|error| {
-                FractalError::InvalidState(format!(
-                    "failed to build Ollama HTTP client for {}: {error}",
-                    config.base_url
-                ))
-            })?;
+        let client = build_ollama_http_client(&config.base_url)?;
         Ok(Self { client, config })
     }
 
@@ -74,26 +104,7 @@ impl OllamaEmbeddingClient {
     }
 
     pub fn available_models(&self) -> Result<Vec<String>, FractalError> {
-        let url = format!("{}/api/tags", self.config.base_url.trim_end_matches('/'));
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .map_err(|error| {
-                FractalError::InvalidState(format!(
-                    "failed to query Ollama tags from {url}: {error}"
-                ))
-            })?
-            .error_for_status()
-            .map_err(|error| {
-                FractalError::InvalidState(format!("Ollama tags request failed for {url}: {error}"))
-            })?;
-        let payload: OllamaTagsResponse = response.json().map_err(|error| {
-            FractalError::InvalidState(format!(
-                "failed to decode Ollama tags response from {url}: {error}"
-            ))
-        })?;
-        Ok(payload.models.into_iter().map(|model| model.name).collect())
+        query_ollama_available_models(&self.client, &self.config.base_url)
     }
 
     pub fn embedding_model_is_available(&self) -> Result<bool, FractalError> {
@@ -179,6 +190,78 @@ impl OllamaEmbeddingClient {
     }
 }
 
+impl OllamaGenerationClient {
+    pub fn new(config: OllamaGenerationConfig) -> Result<Self, FractalError> {
+        let client = build_ollama_http_client(&config.base_url)?;
+        Ok(Self { client, config })
+    }
+
+    pub fn config(&self) -> &OllamaGenerationConfig {
+        &self.config
+    }
+
+    pub fn available_models(&self) -> Result<Vec<String>, FractalError> {
+        query_ollama_available_models(&self.client, &self.config.base_url)
+    }
+
+    pub fn generation_model_is_available(&self) -> Result<bool, FractalError> {
+        Ok(self
+            .available_models()?
+            .into_iter()
+            .any(|name| name == self.config.generation_model))
+    }
+
+    pub fn generate_text(
+        &self,
+        prompt: &str,
+        options: &OllamaGenerationOptions,
+    ) -> Result<OllamaGenerationResult, FractalError> {
+        validate_generation_options(options)?;
+        let url = format!(
+            "{}/api/generate",
+            self.config.base_url.trim_end_matches('/')
+        );
+        let request = OllamaGenerateRequest {
+            model: self.config.generation_model.clone(),
+            prompt: prompt.to_string(),
+            stream: false,
+            options: OllamaGenerateRequestOptions {
+                temperature: options.temperature,
+                seed: options.seed,
+                num_predict: options.max_tokens,
+            },
+        };
+        let started = Instant::now();
+        let response = self
+            .client
+            .post(&url)
+            .json(&request)
+            .send()
+            .map_err(|error| {
+                FractalError::InvalidState(format!(
+                    "failed to request Ollama generation from {url}: {error}"
+                ))
+            })?
+            .error_for_status()
+            .map_err(|error| {
+                FractalError::InvalidState(format!(
+                    "Ollama generation request failed for {url}: {error}"
+                ))
+            })?;
+        let payload: OllamaGenerateResponse = response.json().map_err(|error| {
+            FractalError::InvalidState(format!(
+                "failed to decode Ollama generation response from {url}: {error}"
+            ))
+        })?;
+        Ok(OllamaGenerationResult {
+            output_text: payload.response,
+            request_ms: elapsed_ms(started),
+            prompt_eval_count: payload.prompt_eval_count,
+            eval_count: payload.eval_count,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct OllamaEmbeddingRequestMetrics {
     pub document_count: usize,
@@ -226,6 +309,14 @@ impl OverlayClientBenchmarkResult {
     pub fn request_delta_ms(&self) -> f64 {
         self.overlay_request_ms - self.base.request_ms
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OllamaGenerationResult {
+    pub output_text: String,
+    pub request_ms: f64,
+    pub prompt_eval_count: Option<usize>,
+    pub eval_count: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -518,6 +609,49 @@ fn validate_benchmark_config(config: &OllamaClientBenchmarkConfig) -> Result<(),
     Ok(())
 }
 
+fn validate_generation_options(options: &OllamaGenerationOptions) -> Result<(), FractalError> {
+    if options.max_tokens == 0 {
+        return Err(FractalError::InvalidConfig(
+            "Ollama generation max_tokens must be greater than zero".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn build_ollama_http_client(base_url: &str) -> Result<Client, FractalError> {
+    Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| {
+            FractalError::InvalidState(format!(
+                "failed to build Ollama HTTP client for {base_url}: {error}"
+            ))
+        })
+}
+
+fn query_ollama_available_models(
+    client: &Client,
+    base_url: &str,
+) -> Result<Vec<String>, FractalError> {
+    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
+    let response = client
+        .get(&url)
+        .send()
+        .map_err(|error| {
+            FractalError::InvalidState(format!("failed to query Ollama tags from {url}: {error}"))
+        })?
+        .error_for_status()
+        .map_err(|error| {
+            FractalError::InvalidState(format!("Ollama tags request failed for {url}: {error}"))
+        })?;
+    let payload: OllamaTagsResponse = response.json().map_err(|error| {
+        FractalError::InvalidState(format!(
+            "failed to decode Ollama tags response from {url}: {error}"
+        ))
+    })?;
+    Ok(payload.models.into_iter().map(|model| model.name).collect())
+}
+
 fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
 }
@@ -542,7 +676,29 @@ struct OllamaEmbedRequest {
     input: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct OllamaGenerateRequest {
+    model: String,
+    prompt: String,
+    stream: bool,
+    options: OllamaGenerateRequestOptions,
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaGenerateRequestOptions {
+    temperature: f32,
+    seed: u64,
+    num_predict: usize,
+}
+
 #[derive(Debug, Deserialize)]
 struct OllamaEmbedResponse {
     embeddings: Vec<Vec<f32>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaGenerateResponse {
+    response: String,
+    prompt_eval_count: Option<usize>,
+    eval_count: Option<usize>,
 }

@@ -27,6 +27,7 @@ use crate::{
     FaceoffTokenizer, FaceoffVocab, FaceoffVocabConfig, HuggingFaceNativeTokenizer, LocalMacroKind,
     ModelFacingBatch, ModelFacingDocument, NativeCollationSpec, NativeCompatibilityAdapter,
     NativeTokenizer, OllamaClientBenchmarkConfig, OllamaEmbeddingClient, OllamaEndpointConfig,
+    OllamaGenerationClient, OllamaGenerationConfig, OllamaGenerationOptions,
     OverlayBatchPackingStrategy, OverlayBenchmarkRequest, OverlayDictionaryScope,
     OverlayDocumentMode, OverlayModelFacingBatch, OverlayModelFacingDocument, OverlayPack,
     OverlaySharingPolicy, OverlayTransportAdapter, OverlayTransportConfig, P1FractalHybrid,
@@ -1304,6 +1305,27 @@ fn ollama_overlay_benchmark_rejects_zero_measure_rounds() {
 }
 
 #[test]
+fn ollama_generation_rejects_zero_max_tokens() {
+    let client = OllamaGenerationClient::new(OllamaGenerationConfig::default()).unwrap();
+    let error = client
+        .generate_text(
+            "say hello",
+            &OllamaGenerationOptions {
+                max_tokens: 0,
+                ..OllamaGenerationOptions::default()
+            },
+        )
+        .expect_err("zero max_tokens should be rejected before any live request");
+
+    assert!(
+        error
+            .to_string()
+            .contains("max_tokens must be greater than zero"),
+        "unexpected generation config error: {error}"
+    );
+}
+
+#[test]
 fn overlay_model_facing_ollama_embedding_smoke_uses_materialized_transport_text() {
     let Some(tokenizer_path) = local_qwen25_tokenizer_json_path() else {
         println!("OLLAMA_OVERLAY_SKIP=no local qwen25 tokenizer.json configured/found");
@@ -1414,6 +1436,69 @@ fn overlay_model_facing_ollama_embedding_smoke_uses_materialized_transport_text(
     assert!(benchmark.overlay_client_overhead_ms() >= 0.0);
     assert!(benchmark.base_total_ms() >= benchmark.base.request_ms);
     assert!(benchmark.overlay_total_ms() >= benchmark.overlay_request_ms);
+}
+
+#[test]
+fn overlay_model_facing_ollama_generation_smoke_uses_materialized_transport_text() {
+    let Some(tokenizer_path) = local_qwen25_tokenizer_json_path() else {
+        println!("OLLAMA_GENERATE_SKIP=no local qwen25 tokenizer.json configured/found");
+        return;
+    };
+    let Some(client) = local_ollama_generation_client()
+        .unwrap_or_else(|error| panic!("failed to probe local Ollama generation client: {error}"))
+    else {
+        println!("OLLAMA_GENERATE_SKIP=no local Ollama generation model configured/found");
+        return;
+    };
+
+    let text_a = "\
+{\"ts\":\"2026-04-01T12:00:01Z\",\"level\":\"info\",\"service\":\"auth\",\"route\":\"/ready\",\"status\":200,\"request_id\":\"abc-1\"}\n\
+{\"ts\":\"2026-04-01T12:00:02Z\",\"level\":\"info\",\"service\":\"auth\",\"route\":\"/ready\",\"status\":500,\"request_id\":\"abc-2\"}\n\
+";
+    let text_b = "\
+{\"ts\":\"2026-04-01T12:01:01Z\",\"level\":\"info\",\"service\":\"auth\",\"route\":\"/ready\",\"status\":200,\"request_id\":\"def-1\"}\n\
+{\"ts\":\"2026-04-01T12:01:02Z\",\"level\":\"info\",\"service\":\"auth\",\"route\":\"/ready\",\"status\":500,\"request_id\":\"def-2\"}\n\
+";
+    let tokenizer = HuggingFaceNativeTokenizer::from_file(&tokenizer_path).unwrap();
+    let instruction = "Read the records below and answer with only the four request_id values, comma-separated, in order.";
+    let (base_prompt, overlay_prompt) =
+        build_overlay_generation_prompts(&tokenizer, &[text_a, text_b], instruction);
+    assert_eq!(base_prompt, overlay_prompt);
+
+    let options = OllamaGenerationOptions::default();
+    let _warmup = client.generate_text(&base_prompt, &options).unwrap();
+    let base = client.generate_text(&base_prompt, &options).unwrap();
+    let overlay = client.generate_text(&overlay_prompt, &options).unwrap();
+
+    println!("OLLAMA_GENERATE_MODEL={}", client.config().generation_model);
+    println!("OLLAMA_GENERATE_BASE_URL={}", client.config().base_url);
+    println!("OLLAMA_GENERATE_PROMPT_BYTES={}", overlay_prompt.len());
+    println!("OLLAMA_GENERATE_BASE_REQUEST_MS={:.2}", base.request_ms);
+    println!(
+        "OLLAMA_GENERATE_OVERLAY_REQUEST_MS={:.2}",
+        overlay.request_ms
+    );
+    println!(
+        "OLLAMA_GENERATE_BASE_PROMPT_EVAL={}",
+        base.prompt_eval_count.unwrap_or(0)
+    );
+    println!(
+        "OLLAMA_GENERATE_OVERLAY_PROMPT_EVAL={}",
+        overlay.prompt_eval_count.unwrap_or(0)
+    );
+    println!("OLLAMA_GENERATE_BASE_EVAL={}", base.eval_count.unwrap_or(0));
+    println!(
+        "OLLAMA_GENERATE_OVERLAY_EVAL={}",
+        overlay.eval_count.unwrap_or(0)
+    );
+    println!(
+        "OLLAMA_GENERATE_OUTPUT={}",
+        overlay.output_text.trim().replace('\n', "\\n")
+    );
+    println!("OLLAMA_GENERATE_ROUNDTRIP=OK");
+
+    assert!(!overlay.output_text.trim().is_empty());
+    assert_eq!(base.output_text.trim(), overlay.output_text.trim());
 }
 
 fn unique_temp_path(prefix: &str, suffix: &str) -> PathBuf {
@@ -1543,6 +1628,69 @@ fn local_ollama_embedding_client(
         return Ok(None);
     }
     Ok(Some(client))
+}
+
+fn local_ollama_generation_client(
+) -> Result<Option<OllamaGenerationClient>, fractal_core::error::FractalError> {
+    let mut config = OllamaGenerationConfig::default();
+    if let Ok(base_url) = std::env::var("OLLAMA_BASE_URL") {
+        config.base_url = base_url;
+    }
+    if let Ok(model) = std::env::var("OLLAMA_OVERLAY_GENERATE_MODEL") {
+        config.generation_model = model;
+    }
+    let client = OllamaGenerationClient::new(config)?;
+    if !client.generation_model_is_available()? {
+        return Ok(None);
+    }
+    Ok(Some(client))
+}
+
+fn build_overlay_generation_prompts(
+    tokenizer: &HuggingFaceNativeTokenizer,
+    texts: &[&str],
+    instruction: &str,
+) -> (String, String) {
+    let originals = texts
+        .iter()
+        .map(|text| text.to_string())
+        .collect::<Vec<_>>();
+    let canonical_texts = originals
+        .iter()
+        .map(|text| {
+            let canonical = tokenizer.tokenize_with_byte_offsets(text).unwrap();
+            tokenizer.decode_token_ids(&canonical.token_ids).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let overlay_documents = originals
+        .iter()
+        .map(|text| {
+            let canonical = tokenizer.tokenize_with_byte_offsets(text).unwrap();
+            let overlay = build_recursive_overlay(
+                text,
+                canonical,
+                RecursiveOverlayMode::LocalRecordMacro,
+                &RecursiveOverlayConfig::default(),
+            );
+            OverlayModelFacingDocument::new(overlay).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let batch = OverlayModelFacingBatch::new(overlay_documents);
+    let prepared = OverlayTransportAdapter::new(OverlayTransportConfig::default())
+        .prepare_batch(&batch)
+        .unwrap();
+    let materialized_texts = prepared
+        .expanded_token_ids_by_document()
+        .unwrap()
+        .into_iter()
+        .map(|token_ids| tokenizer.decode_token_ids(&token_ids).unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(materialized_texts, canonical_texts);
+
+    let base_prompt = format!("{instruction}\n\n{}", canonical_texts.concat());
+    let overlay_prompt = format!("{instruction}\n\n{}", materialized_texts.concat());
+    (base_prompt, overlay_prompt)
 }
 
 fn find_tokenizer_json_under(

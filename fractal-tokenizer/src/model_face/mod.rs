@@ -24,7 +24,8 @@ pub use native::{
 };
 pub use ollama::{
     OllamaClientBenchmarkConfig, OllamaEmbeddingClient, OllamaEmbeddingRequestMetrics,
-    OllamaEndpointConfig, OverlayBenchmarkRequest, OverlayClientBenchmarkResult,
+    OllamaEndpointConfig, OllamaGenerationClient, OllamaGenerationConfig, OllamaGenerationOptions,
+    OllamaGenerationResult, OverlayBenchmarkRequest, OverlayClientBenchmarkResult,
 };
 pub use overlay::{
     OverlayModelFacingBatch, OverlayModelFacingDocument, OverlayTransportAdapter,
