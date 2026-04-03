@@ -4,7 +4,9 @@ use burn::{
 };
 
 use fractal_core::{
-    diagnostics::{ProjectionDiagnosticsSink, RuleProjectionDiagnosticContext, RuleProjectionKind},
+    diagnostics::{
+        ProjectionDiagnosticsSink, RuleProjectionDiagnosticContext, RuleProjectionKind,
+    },
     error::FractalError,
     primitives::{gated_sigmoid, one_minus},
     projection::{ProjectionLayoutPolicy, StructuredProjection, StructuredProjectionConfig},
@@ -59,7 +61,8 @@ impl<B: Backend> FractalRule<B> for P1Contractive<B> {
 
         let gate_input_shape = x.dims().into_iter().collect::<Vec<_>>();
         let gate_projection = self.g_proj.forward(x.clone());
-        if let (Some(recorder), Some(rule_context)) = (diagnostics.as_mut(), diagnostic_context) {
+        if let (Some(recorder), Some(rule_context)) = (diagnostics.as_mut(), diagnostic_context)
+        {
             recorder.emit_rule_projection(
                 RunPhase::Train,
                 rule_context,
@@ -76,7 +79,8 @@ impl<B: Backend> FractalRule<B> for P1Contractive<B> {
 
         let state_input_shape = state.dims().into_iter().collect::<Vec<_>>();
         let state_projection = self.w_h.forward(state.clone());
-        if let (Some(recorder), Some(rule_context)) = (diagnostics.as_mut(), diagnostic_context) {
+        if let (Some(recorder), Some(rule_context)) = (diagnostics.as_mut(), diagnostic_context)
+        {
             recorder.emit_rule_projection(
                 RunPhase::Train,
                 rule_context,
@@ -92,7 +96,8 @@ impl<B: Backend> FractalRule<B> for P1Contractive<B> {
 
         let input_mix_input_shape = x.dims().into_iter().collect::<Vec<_>>();
         let input_projection = self.u.forward(x.clone());
-        if let (Some(recorder), Some(rule_context)) = (diagnostics.as_mut(), diagnostic_context) {
+        if let (Some(recorder), Some(rule_context)) = (diagnostics.as_mut(), diagnostic_context)
+        {
             recorder.emit_rule_projection(
                 RunPhase::Train,
                 rule_context,

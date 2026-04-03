@@ -15,35 +15,6 @@ use crate::{
 
 use super::base::{cpu_random, expand, permute, sign, unfold};
 
-const SKINNY_RANK2_MATMUL_MAX_CONTRACTION: usize = 8;
-const SKINNY_RANK2_MATMUL_MAX_TEMP_ELEMENTS: usize = 8 * 1024 * 1024;
-
-fn try_skinny_rank2_matmul(lhs: &Tensor, rhs: &Tensor) -> Option<Tensor> {
-    let [m, k_lhs] = lhs.dims() else {
-        return None;
-    };
-    let [k_rhs, n] = rhs.dims() else {
-        return None;
-    };
-
-    if k_lhs != k_rhs || *k_lhs > SKINNY_RANK2_MATMUL_MAX_CONTRACTION {
-        return None;
-    }
-
-    let temp_elements = (*m)
-        .checked_mul(*k_lhs)
-        .and_then(|value| value.checked_mul(*n))?;
-    if temp_elements > SKINNY_RANK2_MATMUL_MAX_TEMP_ELEMENTS {
-        return None;
-    }
-
-    let lhs = lhs.reshape((*m, *k_lhs, 1)).ok()?;
-    let rhs = rhs.reshape((1, *k_rhs, *n)).ok()?;
-    let product = lhs.broadcast_mul(&rhs).ok()?;
-
-    product.sum(1).ok()
-}
-
 impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle<F, I> {
     fn float_from_data(data: TensorData, device: &Device<Self>) -> CandleTensor {
         match data.dtype {
@@ -197,19 +168,13 @@ impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle
         };
         let lhs_contiguous_shape = lhs_contiguous.dims().to_vec();
         let rhs_contiguous_shape = rhs_contiguous.dims().to_vec();
-        let result = if let Some(result) = try_skinny_rank2_matmul(&lhs_contiguous, &rhs_contiguous)
-        {
-            result
-        } else {
-            lhs_contiguous
-                .broadcast_matmul(&rhs_contiguous)
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "candle matmul failed: {error}; lhs_shape={lhs_shape:?} lhs_dtype={lhs_dtype:?} lhs_contiguous_before={lhs_contiguous_before} lhs_contiguous_shape={lhs_contiguous_shape:?} rhs_shape={rhs_shape:?} rhs_dtype={rhs_dtype:?} rhs_contiguous_before={rhs_contiguous_before} rhs_contiguous_shape={rhs_contiguous_shape:?}"
-                    )
-                })
-        };
-        CandleTensor::new(result)
+        CandleTensor::new(lhs_contiguous.broadcast_matmul(&rhs_contiguous).unwrap_or_else(
+            |error| {
+                panic!(
+                    "candle matmul failed: {error}; lhs_shape={lhs_shape:?} lhs_dtype={lhs_dtype:?} lhs_contiguous_before={lhs_contiguous_before} lhs_contiguous_shape={lhs_contiguous_shape:?} rhs_shape={rhs_shape:?} rhs_dtype={rhs_dtype:?} rhs_contiguous_before={rhs_contiguous_before} rhs_contiguous_shape={rhs_contiguous_shape:?}"
+                )
+            },
+        ))
     }
 
     fn float_cross(
@@ -652,42 +617,5 @@ impl<F: FloatCandleElement, I: IntCandleElement> FloatTensorOps<Self> for Candle
         } else {
             CandleTensor::new(tensor.tensor.to_dtype(dtype).unwrap())
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use burn_backend::TensorData;
-
-    use super::*;
-
-    #[test]
-    fn skinny_rank2_matmul_matches_reference_for_non_contiguous_lhs() {
-        let device = CandleDevice::Cpu;
-        let lhs_base = CandleTensor::from_data(
-            TensorData::from([[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]]),
-            device.clone(),
-        );
-        let lhs = CandleTensor::new(lhs_base.tensor.transpose(0, 1).unwrap());
-        let rhs = CandleTensor::from_data(
-            TensorData::from([[7.0f32, 8.0, 9.0], [10.0, 11.0, 12.0]]),
-            device,
-        );
-
-        let actual = <Candle<f32, i64> as FloatTensorOps<Candle<f32, i64>>>::float_matmul(
-            lhs.clone(),
-            rhs.clone(),
-        );
-        let expected = lhs
-            .tensor
-            .contiguous()
-            .unwrap()
-            .broadcast_matmul(&rhs.tensor)
-            .unwrap();
-
-        assert_eq!(
-            actual.tensor.to_vec2::<f32>().unwrap(),
-            expected.to_vec2::<f32>().unwrap()
-        );
     }
 }

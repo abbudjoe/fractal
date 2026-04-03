@@ -5,8 +5,8 @@ pub mod fitness;
 pub mod language_model_head;
 pub mod lifecycle;
 pub mod model;
-pub mod primitives;
 pub mod projection;
+pub mod primitives;
 pub mod registry;
 pub mod router;
 pub mod rule_trait;
@@ -19,13 +19,13 @@ pub use diagnostics::{
     BoundaryMemoryDelta, CudaMemorySnapshot, DiagnosticBoundary, DiagnosticEvent,
     DiagnosticEventKind, DiagnosticEventSummary, DiagnosticIdentity, DiagnosticProbeKind,
     DiagnosticProbeRequest, DiagnosticsPolicy, DiagnosticsRecorder, DiagnosticsRuntimeArtifact,
-    DiagnosticsRuntimeFailure, DiagnosticsRuntimeFailureKind, ForwardGraphBurden,
+    DiagnosticsRuntimeFailure, DiagnosticsRuntimeFailureKind, ForwardGraphBurden, ProbeCadence,
     LinearProjectionLayoutMetadata, OutputProjectionDiagnosticContext,
     OutputProjectionDiagnosticEventSummary, OutputProjectionDiagnosticSpec,
-    OutputProjectionIdentity, ProbeCadence, ProjectionDiagnosticsSink,
-    RuleProjectionDiagnosticContext, RuleProjectionDiagnosticEventSummary,
-    RuleProjectionDiagnosticSpec, RuleProjectionDiagnosticsSink, RuleProjectionIdentity,
-    RuleProjectionKind, StructuredDiagnosticsOutput, TensorLayoutMetadata, TensorLayoutOrigin,
+    OutputProjectionIdentity, ProjectionDiagnosticsSink, RuleProjectionDiagnosticContext,
+    RuleProjectionDiagnosticEventSummary, RuleProjectionDiagnosticSpec,
+    RuleProjectionDiagnosticsSink, RuleProjectionIdentity, RuleProjectionKind,
+    StructuredDiagnosticsOutput, TensorLayoutMetadata, TensorLayoutOrigin,
     TensorLayoutTransform, TrainStepDiagnosticContext,
 };
 pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
