@@ -360,8 +360,9 @@ where
             let root_readouts = local_step.root_readouts();
             roots = local_step.into_next_state();
             state.update_roots(roots.clone())?;
-            let sealed_leaf = state.append_root_readouts(
+            let sealed_leaf = state.append_root_readouts_with_active_root_count(
                 root_readouts.clone(),
+                ablation.active_root_count().unwrap_or(self.root_count),
                 &self.leaf_summarizer,
                 &self.tree_merge_cell,
             )?;
