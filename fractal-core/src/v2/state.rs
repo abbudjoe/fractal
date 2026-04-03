@@ -1,16 +1,18 @@
 use burn::prelude::ElementConversion;
+use burn::record::{PrecisionSettings, Record};
 use burn::tensor::{backend::Backend, Bool, Int, Tensor};
+use serde::{Deserialize, Serialize};
 
 use crate::error::FractalError;
 
 use super::{model::FractalV2ModelShape, router::FractalRouterHeadShape};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchTimelineMode {
     LockstepSharedTimeline,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenSpan {
     start: usize,
     end: usize,
@@ -48,7 +50,7 @@ impl TokenSpan {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetrievalPolicy {
     beam_width: usize,
     top_k_reads: usize,
@@ -90,7 +92,7 @@ impl RetrievalPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MergeCheckpointPolicy {
     FixedLeafSize { tokens_per_leaf: usize },
 }
@@ -110,20 +112,20 @@ impl MergeCheckpointPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FractalV2StateLayout {
-    pub batch_size: usize,
-    pub batch_timeline_mode: BatchTimelineMode,
-    pub root_count: usize,
-    pub root_state_dim: usize,
-    pub root_readout_dim: usize,
-    pub leaf_size: usize,
-    pub summary_dim: usize,
-    pub key_dim: usize,
-    pub value_dim: usize,
-    pub token_cache_key_dim: usize,
-    pub token_cache_value_dim: usize,
-    pub scale_embedding_dim: usize,
+    batch_size: usize,
+    batch_timeline_mode: BatchTimelineMode,
+    root_count: usize,
+    root_state_dim: usize,
+    root_readout_dim: usize,
+    leaf_size: usize,
+    summary_dim: usize,
+    key_dim: usize,
+    value_dim: usize,
+    token_cache_key_dim: usize,
+    token_cache_value_dim: usize,
+    scale_embedding_dim: usize,
 }
 
 impl FractalV2StateLayout {
@@ -166,6 +168,54 @@ impl FractalV2StateLayout {
         )?;
         ensure_nonzero("state_layout.scale_embedding_dim", self.scale_embedding_dim)
     }
+
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+
+    pub fn batch_timeline_mode(&self) -> BatchTimelineMode {
+        self.batch_timeline_mode
+    }
+
+    pub fn root_count(&self) -> usize {
+        self.root_count
+    }
+
+    pub fn root_state_dim(&self) -> usize {
+        self.root_state_dim
+    }
+
+    pub fn root_readout_dim(&self) -> usize {
+        self.root_readout_dim
+    }
+
+    pub fn leaf_size(&self) -> usize {
+        self.leaf_size
+    }
+
+    pub fn summary_dim(&self) -> usize {
+        self.summary_dim
+    }
+
+    pub fn key_dim(&self) -> usize {
+        self.key_dim
+    }
+
+    pub fn value_dim(&self) -> usize {
+        self.value_dim
+    }
+
+    pub fn token_cache_key_dim(&self) -> usize {
+        self.token_cache_key_dim
+    }
+
+    pub fn token_cache_value_dim(&self) -> usize {
+        self.token_cache_value_dim
+    }
+
+    pub fn scale_embedding_dim(&self) -> usize {
+        self.scale_embedding_dim
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +231,13 @@ pub struct MultiRootStateRecord<B: Backend> {
     pub recurrent: Tensor<B, 3>,
     pub read_intent: Tensor<B, 3>,
     pub write_intent: Tensor<B, 3>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiRootStateRecordItem<Tensor3Item> {
+    pub recurrent: Tensor3Item,
+    pub read_intent: Tensor3Item,
+    pub write_intent: Tensor3Item,
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +340,27 @@ impl<B: Backend> MultiRootState<B> {
     }
 }
 
+impl<B: Backend> Record<B> for MultiRootStateRecord<B> {
+    type Item<S: PrecisionSettings> =
+        MultiRootStateRecordItem<<Tensor<B, 3> as Record<B>>::Item<S>>;
+
+    fn into_item<S: PrecisionSettings>(self) -> Self::Item<S> {
+        MultiRootStateRecordItem {
+            recurrent: Record::<B>::into_item::<S>(self.recurrent),
+            read_intent: Record::<B>::into_item::<S>(self.read_intent),
+            write_intent: Record::<B>::into_item::<S>(self.write_intent),
+        }
+    }
+
+    fn from_item<S: PrecisionSettings>(item: Self::Item<S>, device: &B::Device) -> Self {
+        Self {
+            recurrent: Record::<B>::from_item::<S>(item.recurrent, device),
+            read_intent: Record::<B>::from_item::<S>(item.read_intent, device),
+            write_intent: Record::<B>::from_item::<S>(item.write_intent, device),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveLeafStateShape {
     pub batch_size: usize,
@@ -297,6 +375,13 @@ pub struct LiveLeafStateShape {
 #[derive(Debug, Clone)]
 pub struct LiveLeafStateRecord<B: Backend> {
     pub token_readouts: Tensor<B, 4>,
+    pub shared_span: TokenSpan,
+    pub shared_valid_tokens: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveLeafStateRecordItem<Tensor4Item> {
+    pub token_readouts: Tensor4Item,
     pub shared_span: TokenSpan,
     pub shared_valid_tokens: usize,
 }
@@ -398,6 +483,26 @@ impl<B: Backend> LiveLeafState<B> {
     }
 }
 
+impl<B: Backend> Record<B> for LiveLeafStateRecord<B> {
+    type Item<S: PrecisionSettings> = LiveLeafStateRecordItem<<Tensor<B, 4> as Record<B>>::Item<S>>;
+
+    fn into_item<S: PrecisionSettings>(self) -> Self::Item<S> {
+        LiveLeafStateRecordItem {
+            token_readouts: Record::<B>::into_item::<S>(self.token_readouts),
+            shared_span: self.shared_span,
+            shared_valid_tokens: self.shared_valid_tokens,
+        }
+    }
+
+    fn from_item<S: PrecisionSettings>(item: Self::Item<S>, device: &B::Device) -> Self {
+        Self {
+            token_readouts: Record::<B>::from_item::<S>(item.token_readouts, device),
+            shared_span: item.shared_span,
+            shared_valid_tokens: item.shared_valid_tokens,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeafSummaryStoreShape {
     pub batch_size: usize,
@@ -413,6 +518,14 @@ pub struct LeafSummaryStoreRecord<B: Backend> {
     pub summaries: Tensor<B, 3>,
     pub keys: Tensor<B, 3>,
     pub values: Tensor<B, 3>,
+    pub shared_spans: Vec<TokenSpan>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeafSummaryStoreRecordItem<Tensor3Item> {
+    pub summaries: Tensor3Item,
+    pub keys: Tensor3Item,
+    pub values: Tensor3Item,
     pub shared_spans: Vec<TokenSpan>,
 }
 
@@ -514,6 +627,29 @@ impl<B: Backend> LeafSummaryStore<B> {
     }
 }
 
+impl<B: Backend> Record<B> for LeafSummaryStoreRecord<B> {
+    type Item<S: PrecisionSettings> =
+        LeafSummaryStoreRecordItem<<Tensor<B, 3> as Record<B>>::Item<S>>;
+
+    fn into_item<S: PrecisionSettings>(self) -> Self::Item<S> {
+        LeafSummaryStoreRecordItem {
+            summaries: Record::<B>::into_item::<S>(self.summaries),
+            keys: Record::<B>::into_item::<S>(self.keys),
+            values: Record::<B>::into_item::<S>(self.values),
+            shared_spans: self.shared_spans,
+        }
+    }
+
+    fn from_item<S: PrecisionSettings>(item: Self::Item<S>, device: &B::Device) -> Self {
+        Self {
+            summaries: Record::<B>::from_item::<S>(item.summaries, device),
+            keys: Record::<B>::from_item::<S>(item.keys, device),
+            values: Record::<B>::from_item::<S>(item.values, device),
+            shared_spans: item.shared_spans,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TreeLevelStoreShape {
     pub batch_size: usize,
@@ -530,6 +666,15 @@ pub struct TreeLevelStoreRecord<B: Backend> {
     pub summaries: Tensor<B, 3>,
     pub keys: Tensor<B, 3>,
     pub values: Tensor<B, 3>,
+    pub level: usize,
+    pub shared_spans: Vec<TokenSpan>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreeLevelStoreRecordItem<Tensor3Item> {
+    pub summaries: Tensor3Item,
+    pub keys: Tensor3Item,
+    pub values: Tensor3Item,
     pub level: usize,
     pub shared_spans: Vec<TokenSpan>,
 }
@@ -640,6 +785,31 @@ impl<B: Backend> TreeLevelStore<B> {
     }
 }
 
+impl<B: Backend> Record<B> for TreeLevelStoreRecord<B> {
+    type Item<S: PrecisionSettings> =
+        TreeLevelStoreRecordItem<<Tensor<B, 3> as Record<B>>::Item<S>>;
+
+    fn into_item<S: PrecisionSettings>(self) -> Self::Item<S> {
+        TreeLevelStoreRecordItem {
+            summaries: Record::<B>::into_item::<S>(self.summaries),
+            keys: Record::<B>::into_item::<S>(self.keys),
+            values: Record::<B>::into_item::<S>(self.values),
+            level: self.level,
+            shared_spans: self.shared_spans,
+        }
+    }
+
+    fn from_item<S: PrecisionSettings>(item: Self::Item<S>, device: &B::Device) -> Self {
+        Self {
+            summaries: Record::<B>::from_item::<S>(item.summaries, device),
+            keys: Record::<B>::from_item::<S>(item.keys, device),
+            values: Record::<B>::from_item::<S>(item.values, device),
+            level: item.level,
+            shared_spans: item.shared_spans,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeSummaryStateShape {
     pub levels: Vec<TreeLevelStoreShape>,
@@ -648,6 +818,11 @@ pub struct TreeSummaryStateShape {
 #[derive(Debug, Clone)]
 pub struct TreeSummaryStateRecord<B: Backend> {
     pub levels: Vec<TreeLevelStoreRecord<B>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreeSummaryStateRecordItem<TreeLevelItem> {
+    pub levels: Vec<TreeLevelItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -764,6 +939,23 @@ impl<B: Backend> TreeSummaryState<B> {
     }
 }
 
+impl<B: Backend> Record<B> for TreeSummaryStateRecord<B> {
+    type Item<S: PrecisionSettings> =
+        TreeSummaryStateRecordItem<<TreeLevelStoreRecord<B> as Record<B>>::Item<S>>;
+
+    fn into_item<S: PrecisionSettings>(self) -> Self::Item<S> {
+        TreeSummaryStateRecordItem {
+            levels: Record::<B>::into_item::<S>(self.levels),
+        }
+    }
+
+    fn from_item<S: PrecisionSettings>(item: Self::Item<S>, device: &B::Device) -> Self {
+        Self {
+            levels: Record::<B>::from_item::<S>(item.levels, device),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeafTokenCacheShape {
     pub batch_size: usize,
@@ -779,6 +971,14 @@ pub struct LeafTokenCacheRecord<B: Backend> {
     pub keys: Tensor<B, 4>,
     pub values: Tensor<B, 4>,
     pub mask: Tensor<B, 3, Bool>,
+    pub shared_spans: Vec<TokenSpan>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeafTokenCacheRecordItem<Tensor4Item, MaskItem> {
+    pub keys: Tensor4Item,
+    pub values: Tensor4Item,
+    pub mask: MaskItem,
     pub shared_spans: Vec<TokenSpan>,
 }
 
@@ -914,6 +1114,31 @@ impl<B: Backend> LeafTokenCache<B> {
     }
 }
 
+impl<B: Backend> Record<B> for LeafTokenCacheRecord<B> {
+    type Item<S: PrecisionSettings> = LeafTokenCacheRecordItem<
+        <Tensor<B, 4> as Record<B>>::Item<S>,
+        <Tensor<B, 3, Bool> as Record<B>>::Item<S>,
+    >;
+
+    fn into_item<S: PrecisionSettings>(self) -> Self::Item<S> {
+        LeafTokenCacheRecordItem {
+            keys: Record::<B>::into_item::<S>(self.keys),
+            values: Record::<B>::into_item::<S>(self.values),
+            mask: Record::<B>::into_item::<S>(self.mask),
+            shared_spans: self.shared_spans,
+        }
+    }
+
+    fn from_item<S: PrecisionSettings>(item: Self::Item<S>, device: &B::Device) -> Self {
+        Self {
+            keys: Record::<B>::from_item::<S>(item.keys, device),
+            values: Record::<B>::from_item::<S>(item.values, device),
+            mask: Record::<B>::from_item::<S>(item.mask, device),
+            shared_spans: item.shared_spans,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FractalV2StateShape {
     pub layout: FractalV2StateLayout,
@@ -934,6 +1159,18 @@ pub struct FractalV2StateRecord<B: Backend> {
     pub sealed_leaves: LeafSummaryStoreRecord<B>,
     pub tree: TreeSummaryStateRecord<B>,
     pub leaf_token_cache: LeafTokenCacheRecord<B>,
+    pub retrieval_policy: RetrievalPolicy,
+    pub merge_policy: MergeCheckpointPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FractalV2StateRecordItem<RootsItem, LiveLeafItem, LeafSummaryItem, TreeItem, CacheItem> {
+    pub layout: FractalV2StateLayout,
+    pub roots: RootsItem,
+    pub live_leaf: LiveLeafItem,
+    pub sealed_leaves: LeafSummaryItem,
+    pub tree: TreeItem,
+    pub leaf_token_cache: CacheItem,
     pub retrieval_policy: RetrievalPolicy,
     pub merge_policy: MergeCheckpointPolicy,
 }
@@ -1108,6 +1345,42 @@ impl<B: Backend> FractalV2State<B> {
             leaf_token_cache: self.leaf_token_cache.shape(self.layout.batch_timeline_mode),
             retrieval_policy: self.retrieval_policy,
             merge_policy: self.merge_policy,
+        }
+    }
+}
+
+impl<B: Backend> Record<B> for FractalV2StateRecord<B> {
+    type Item<S: PrecisionSettings> = FractalV2StateRecordItem<
+        <MultiRootStateRecord<B> as Record<B>>::Item<S>,
+        <LiveLeafStateRecord<B> as Record<B>>::Item<S>,
+        <LeafSummaryStoreRecord<B> as Record<B>>::Item<S>,
+        <TreeSummaryStateRecord<B> as Record<B>>::Item<S>,
+        <LeafTokenCacheRecord<B> as Record<B>>::Item<S>,
+    >;
+
+    fn into_item<S: PrecisionSettings>(self) -> Self::Item<S> {
+        FractalV2StateRecordItem {
+            layout: self.layout,
+            roots: Record::<B>::into_item::<S>(self.roots),
+            live_leaf: Record::<B>::into_item::<S>(self.live_leaf),
+            sealed_leaves: Record::<B>::into_item::<S>(self.sealed_leaves),
+            tree: Record::<B>::into_item::<S>(self.tree),
+            leaf_token_cache: Record::<B>::into_item::<S>(self.leaf_token_cache),
+            retrieval_policy: self.retrieval_policy,
+            merge_policy: self.merge_policy,
+        }
+    }
+
+    fn from_item<S: PrecisionSettings>(item: Self::Item<S>, device: &B::Device) -> Self {
+        Self {
+            layout: item.layout,
+            roots: Record::<B>::from_item::<S>(item.roots, device),
+            live_leaf: Record::<B>::from_item::<S>(item.live_leaf, device),
+            sealed_leaves: Record::<B>::from_item::<S>(item.sealed_leaves, device),
+            tree: Record::<B>::from_item::<S>(item.tree, device),
+            leaf_token_cache: Record::<B>::from_item::<S>(item.leaf_token_cache, device),
+            retrieval_policy: item.retrieval_policy,
+            merge_policy: item.merge_policy,
         }
     }
 }
@@ -1458,7 +1731,10 @@ fn count_true<B: Backend, const D: usize>(mask: Tensor<B, D, Bool>) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use burn::backend::Candle;
+    use burn::{
+        backend::Candle,
+        record::{FullPrecisionSettings, Record},
+    };
 
     use super::*;
     use crate::v2::{
@@ -1805,6 +2081,31 @@ mod tests {
         let restored =
             FractalV2State::<TestBackend>::from_record(original.clone().into_record(), model_shape)
                 .unwrap();
+
+        assert_eq!(restored.shape(), original.shape());
+    }
+
+    #[test]
+    fn fractal_v2_state_record_supports_burn_record_roundtrip() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model_shape = test_model_shape();
+        let original = FractalV2State::<TestBackend>::for_model_shape(
+            model_shape,
+            2,
+            MergeCheckpointPolicy::FixedLeafSize {
+                tokens_per_leaf: 16,
+            },
+            &device,
+        )
+        .unwrap();
+
+        let item = Record::<TestBackend>::into_item::<FullPrecisionSettings>(
+            original.clone().into_record(),
+        );
+        let restored_record =
+            FractalV2StateRecord::<TestBackend>::from_item::<FullPrecisionSettings>(item, &device);
+        let restored =
+            FractalV2State::<TestBackend>::from_record(restored_record, model_shape).unwrap();
 
         assert_eq!(restored.shape(), original.shape());
     }
