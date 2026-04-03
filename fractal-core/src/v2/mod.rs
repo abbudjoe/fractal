@@ -1,3 +1,4 @@
+pub mod auditor;
 pub mod exact_read;
 pub mod leaf;
 pub mod local_trunk;
@@ -7,6 +8,14 @@ pub mod router;
 pub mod state;
 pub mod tree;
 
+pub use auditor::{
+    CausalMemoryAggregateStats, CausalMemoryAuditPlan, CausalMemoryAuditReport,
+    CausalMemoryAuditSample, CausalMemoryAuditSampleReport, CausalMemoryComponentFamily,
+    CausalMemoryComponentFamilyAggregate, CausalMemoryDeltaMetrics, CausalMemoryEvaluationContext,
+    CausalMemoryIntervention, CausalMemoryInterventionAggregate, CausalMemoryInterventionResult,
+    CausalMemoryRootAggregate, CausalMemoryRoutingDepthAggregate, CausalMemoryTaskFamily,
+    CausalMemoryTaskFamilyAggregate,
+};
 pub use exact_read::{
     BaselineExactLeafRead, BaselineExactLeafReadConfig, ExactLeafRead, ExactLeafReadDiagnostics,
     ExactLeafReadOutput, ExactLeafReadShape, ExactReadHistogramBin,

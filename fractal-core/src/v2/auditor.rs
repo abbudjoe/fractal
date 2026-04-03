@@ -1,0 +1,414 @@
+use std::collections::BTreeMap;
+
+use crate::error::FractalError;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CausalMemoryTaskFamily {
+    OrdinaryLm,
+    Copy,
+    AssociativeRecall,
+    Induction,
+    NoisyRetrieval,
+    Custom(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CausalMemoryIntervention {
+    NoTreeRead,
+    NoExactLeafRead,
+    NextBestSpanSubstitution,
+    RootDrop { root_index: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CausalMemoryAuditSample {
+    pub batch_index: usize,
+    pub position: usize,
+    pub task_family: CausalMemoryTaskFamily,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CausalMemoryAuditPlan {
+    samples: Vec<CausalMemoryAuditSample>,
+    include_no_tree_read: bool,
+    include_no_exact_leaf_read: bool,
+    include_next_best_span_substitution: bool,
+    include_root_drop: bool,
+}
+
+impl CausalMemoryAuditPlan {
+    pub fn all(samples: Vec<CausalMemoryAuditSample>) -> Result<Self, FractalError> {
+        let plan = Self {
+            samples,
+            include_no_tree_read: true,
+            include_no_exact_leaf_read: true,
+            include_next_best_span_substitution: true,
+            include_root_drop: true,
+        };
+        plan.validate()
+    }
+
+    pub fn samples(&self) -> &[CausalMemoryAuditSample] {
+        &self.samples
+    }
+
+    pub fn include_no_tree_read(&self) -> bool {
+        self.include_no_tree_read
+    }
+
+    pub fn include_no_exact_leaf_read(&self) -> bool {
+        self.include_no_exact_leaf_read
+    }
+
+    pub fn include_next_best_span_substitution(&self) -> bool {
+        self.include_next_best_span_substitution
+    }
+
+    pub fn include_root_drop(&self) -> bool {
+        self.include_root_drop
+    }
+
+    pub(crate) fn validate(self) -> Result<Self, FractalError> {
+        if self.samples.is_empty() {
+            return Err(FractalError::InvalidConfig(
+                "causal_memory_audit.samples must not be empty".to_string(),
+            ));
+        }
+        let mut seen = BTreeMap::new();
+        for sample in &self.samples {
+            let key = (
+                sample.batch_index,
+                sample.position,
+                sample.task_family.clone(),
+            );
+            if seen.insert(key, ()).is_some() {
+                return Err(FractalError::InvalidConfig(format!(
+                    "causal_memory_audit contains a duplicate sample for batch {} position {} task {:?}",
+                    sample.batch_index, sample.position, sample.task_family
+                )));
+            }
+        }
+        if !self.include_no_tree_read
+            && !self.include_no_exact_leaf_read
+            && !self.include_next_best_span_substitution
+            && !self.include_root_drop
+        {
+            return Err(FractalError::InvalidConfig(
+                "causal_memory_audit must enable at least one intervention".to_string(),
+            ));
+        }
+
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CausalMemoryEvaluationContext {
+    pub routing_depth: usize,
+    pub span_distance: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CausalMemoryDeltaMetrics {
+    pub loss_delta: f32,
+    pub target_logit_delta: f32,
+    pub kl_divergence: f32,
+    pub perplexity_delta: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CausalMemoryInterventionResult {
+    pub intervention: CausalMemoryIntervention,
+    pub applied: bool,
+    pub context: Option<CausalMemoryEvaluationContext>,
+    pub metrics: Option<CausalMemoryDeltaMetrics>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CausalMemoryAuditSampleReport {
+    pub sample: CausalMemoryAuditSample,
+    pub reference_context: CausalMemoryEvaluationContext,
+    pub target_token_id: i64,
+    pub reference_loss: f32,
+    pub reference_target_logit: f32,
+    pub interventions: Vec<CausalMemoryInterventionResult>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CausalMemoryAggregateStats {
+    pub count: usize,
+    pub average_loss_delta: f32,
+    pub average_target_logit_delta: f32,
+    pub average_kl_divergence: f32,
+    pub average_perplexity_delta: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CausalMemoryInterventionAggregate {
+    pub intervention: CausalMemoryIntervention,
+    pub stats: CausalMemoryAggregateStats,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CausalMemoryComponentFamily {
+    LocalTrunk,
+    TreeSummaryRetrieval,
+    ExactLeafRead,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CausalMemoryComponentFamilyAggregate {
+    pub component_family: CausalMemoryComponentFamily,
+    pub stats: CausalMemoryAggregateStats,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CausalMemoryRootAggregate {
+    pub root_index: usize,
+    pub stats: CausalMemoryAggregateStats,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CausalMemoryRoutingDepthAggregate {
+    pub routing_depth: usize,
+    pub stats: CausalMemoryAggregateStats,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CausalMemoryTaskFamilyAggregate {
+    pub task_family: CausalMemoryTaskFamily,
+    pub stats: CausalMemoryAggregateStats,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CausalMemoryAuditReport {
+    pub sample_reports: Vec<CausalMemoryAuditSampleReport>,
+    pub tree_retrieval_utility: Option<CausalMemoryAggregateStats>,
+    pub exact_leaf_read_utility: Option<CausalMemoryAggregateStats>,
+    pub utility_by_intervention: Vec<CausalMemoryInterventionAggregate>,
+    pub utility_by_component_family: Vec<CausalMemoryComponentFamilyAggregate>,
+    pub utility_by_root: Vec<CausalMemoryRootAggregate>,
+    pub utility_by_routing_depth: Vec<CausalMemoryRoutingDepthAggregate>,
+    pub utility_by_task_family: Vec<CausalMemoryTaskFamilyAggregate>,
+}
+
+impl CausalMemoryAuditReport {
+    pub(crate) fn from_sample_reports(sample_reports: Vec<CausalMemoryAuditSampleReport>) -> Self {
+        let mut intervention_groups: BTreeMap<
+            CausalMemoryIntervention,
+            Vec<CausalMemoryDeltaMetrics>,
+        > = BTreeMap::new();
+        let mut component_groups: BTreeMap<
+            CausalMemoryComponentFamily,
+            Vec<CausalMemoryDeltaMetrics>,
+        > = BTreeMap::new();
+        let mut root_groups: BTreeMap<usize, Vec<CausalMemoryDeltaMetrics>> = BTreeMap::new();
+        let mut depth_groups: BTreeMap<usize, Vec<CausalMemoryDeltaMetrics>> = BTreeMap::new();
+        let mut task_groups: BTreeMap<CausalMemoryTaskFamily, Vec<CausalMemoryDeltaMetrics>> =
+            BTreeMap::new();
+
+        for report in &sample_reports {
+            for result in &report.interventions {
+                let Some(metrics) = result.metrics else {
+                    continue;
+                };
+                intervention_groups
+                    .entry(result.intervention)
+                    .or_default()
+                    .push(metrics);
+                component_groups
+                    .entry(component_family_for(result.intervention))
+                    .or_default()
+                    .push(metrics);
+                depth_groups
+                    .entry(report.reference_context.routing_depth)
+                    .or_default()
+                    .push(metrics);
+                task_groups
+                    .entry(report.sample.task_family.clone())
+                    .or_default()
+                    .push(metrics);
+                if let CausalMemoryIntervention::RootDrop { root_index } = result.intervention {
+                    root_groups.entry(root_index).or_default().push(metrics);
+                }
+            }
+        }
+
+        let utility_by_intervention = aggregate_map(intervention_groups, |intervention, stats| {
+            CausalMemoryInterventionAggregate {
+                intervention,
+                stats,
+            }
+        });
+        let utility_by_component_family =
+            aggregate_map(component_groups, |component_family, stats| {
+                CausalMemoryComponentFamilyAggregate {
+                    component_family,
+                    stats,
+                }
+            });
+        let utility_by_root = aggregate_map(root_groups, |root_index, stats| {
+            CausalMemoryRootAggregate { root_index, stats }
+        });
+        let utility_by_routing_depth = aggregate_map(depth_groups, |routing_depth, stats| {
+            CausalMemoryRoutingDepthAggregate {
+                routing_depth,
+                stats,
+            }
+        });
+        let utility_by_task_family = aggregate_map(task_groups, |task_family, stats| {
+            CausalMemoryTaskFamilyAggregate { task_family, stats }
+        });
+
+        Self {
+            tree_retrieval_utility: utility_by_intervention
+                .iter()
+                .find(|aggregate| aggregate.intervention == CausalMemoryIntervention::NoTreeRead)
+                .map(|aggregate| aggregate.stats),
+            exact_leaf_read_utility: utility_by_intervention
+                .iter()
+                .find(|aggregate| {
+                    aggregate.intervention == CausalMemoryIntervention::NoExactLeafRead
+                })
+                .map(|aggregate| aggregate.stats),
+            sample_reports,
+            utility_by_intervention,
+            utility_by_component_family,
+            utility_by_root,
+            utility_by_routing_depth,
+            utility_by_task_family,
+        }
+    }
+}
+
+fn component_family_for(intervention: CausalMemoryIntervention) -> CausalMemoryComponentFamily {
+    match intervention {
+        CausalMemoryIntervention::NoTreeRead
+        | CausalMemoryIntervention::NextBestSpanSubstitution => {
+            CausalMemoryComponentFamily::TreeSummaryRetrieval
+        }
+        CausalMemoryIntervention::NoExactLeafRead => CausalMemoryComponentFamily::ExactLeafRead,
+        CausalMemoryIntervention::RootDrop { .. } => CausalMemoryComponentFamily::LocalTrunk,
+    }
+}
+
+fn aggregate_map<K, V, F>(groups: BTreeMap<K, Vec<CausalMemoryDeltaMetrics>>, build: F) -> Vec<V>
+where
+    K: Ord,
+    F: Fn(K, CausalMemoryAggregateStats) -> V,
+{
+    groups
+        .into_iter()
+        .map(|(key, metrics)| build(key, aggregate_metrics(&metrics)))
+        .collect()
+}
+
+fn aggregate_metrics(metrics: &[CausalMemoryDeltaMetrics]) -> CausalMemoryAggregateStats {
+    let count = metrics.len();
+    assert!(count > 0, "aggregate_metrics requires at least one metric");
+    let (loss_sum, target_logit_sum, kl_sum, perplexity_sum) = metrics.iter().fold(
+        (0.0f32, 0.0f32, 0.0f32, 0.0f32),
+        |(loss_acc, target_acc, kl_acc, perplexity_acc), metric| {
+            (
+                loss_acc + metric.loss_delta,
+                target_acc + metric.target_logit_delta,
+                kl_acc + metric.kl_divergence,
+                perplexity_acc + metric.perplexity_delta,
+            )
+        },
+    );
+
+    CausalMemoryAggregateStats {
+        count,
+        average_loss_delta: loss_sum / count as f32,
+        average_target_logit_delta: target_logit_sum / count as f32,
+        average_kl_divergence: kl_sum / count as f32,
+        average_perplexity_delta: perplexity_sum / count as f32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn causal_memory_audit_plan_rejects_duplicate_samples() {
+        let error = CausalMemoryAuditPlan::all(vec![
+            CausalMemoryAuditSample {
+                batch_index: 0,
+                position: 7,
+                task_family: CausalMemoryTaskFamily::OrdinaryLm,
+            },
+            CausalMemoryAuditSample {
+                batch_index: 0,
+                position: 7,
+                task_family: CausalMemoryTaskFamily::OrdinaryLm,
+            },
+        ])
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            FractalError::InvalidConfig(message) if message.contains("duplicate sample")
+        ));
+    }
+
+    #[test]
+    fn causal_memory_audit_report_aggregates_by_intervention_and_root() {
+        let report =
+            CausalMemoryAuditReport::from_sample_reports(vec![CausalMemoryAuditSampleReport {
+                sample: CausalMemoryAuditSample {
+                    batch_index: 0,
+                    position: 15,
+                    task_family: CausalMemoryTaskFamily::Copy,
+                },
+                reference_context: CausalMemoryEvaluationContext {
+                    routing_depth: 2,
+                    span_distance: Some(8),
+                },
+                target_token_id: 7,
+                reference_loss: 1.0,
+                reference_target_logit: 0.5,
+                interventions: vec![
+                    CausalMemoryInterventionResult {
+                        intervention: CausalMemoryIntervention::NoTreeRead,
+                        applied: true,
+                        context: Some(CausalMemoryEvaluationContext {
+                            routing_depth: 2,
+                            span_distance: Some(8),
+                        }),
+                        metrics: Some(CausalMemoryDeltaMetrics {
+                            loss_delta: 0.2,
+                            target_logit_delta: 0.3,
+                            kl_divergence: 0.4,
+                            perplexity_delta: 0.5,
+                        }),
+                    },
+                    CausalMemoryInterventionResult {
+                        intervention: CausalMemoryIntervention::RootDrop { root_index: 1 },
+                        applied: true,
+                        context: Some(CausalMemoryEvaluationContext {
+                            routing_depth: 2,
+                            span_distance: Some(8),
+                        }),
+                        metrics: Some(CausalMemoryDeltaMetrics {
+                            loss_delta: 0.6,
+                            target_logit_delta: 0.7,
+                            kl_divergence: 0.8,
+                            perplexity_delta: 0.9,
+                        }),
+                    },
+                ],
+            }]);
+
+        assert_eq!(
+            report.tree_retrieval_utility.unwrap().average_loss_delta,
+            0.2
+        );
+        assert_eq!(report.utility_by_root.len(), 1);
+        assert_eq!(report.utility_by_root[0].root_index, 1);
+        assert_eq!(report.utility_by_routing_depth.len(), 1);
+        assert_eq!(report.utility_by_routing_depth[0].routing_depth, 2);
+        assert_eq!(report.utility_by_task_family.len(), 1);
+    }
+}
