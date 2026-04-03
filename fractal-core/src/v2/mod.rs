@@ -12,7 +12,8 @@ pub use local_trunk::{
     LocalTrunkDiagnostics, LocalTrunkShape, LocalTrunkStepOutput, RootActivationStats,
 };
 pub use model::{
-    FractalV2Components, FractalV2LocalBaselineOutput, FractalV2Model, FractalV2ModelShape,
+    FractalV2Components, FractalV2LocalBaselineModel, FractalV2LocalBaselineOutput,
+    FractalV2LocalBaselineShape, FractalV2Model, FractalV2ModelShape,
 };
 pub use read_fusion::{ReadFusion, ReadFusionShape};
 pub use router::{FractalRouterHead, FractalRouterHeadShape};

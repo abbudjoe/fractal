@@ -16,7 +16,7 @@ use super::{
     },
     read_fusion::{ReadFusion, ReadFusionShape},
     router::{FractalRouterHead, FractalRouterHeadShape},
-    state::{FractalV2StateLayout, MultiRootState},
+    state::MultiRootState,
     tree::{TreeMergeCell, TreeMergeCellShape},
 };
 
@@ -78,6 +78,25 @@ impl<B: Backend> FractalV2LocalBaselineOutput<B> {
     pub fn diagnostics(&self) -> &LocalTrunkDiagnostics {
         &self.diagnostics
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FractalV2LocalBaselineShape {
+    pub vocab_size: usize,
+    pub token_dim: usize,
+    pub local_trunk: LocalTrunkShape,
+}
+
+#[derive(Module, Debug)]
+pub struct FractalV2LocalBaselineModel<B: Backend, LT: Module<B>> {
+    embedding: Embedding<B>,
+    local_trunk: LT,
+    vocab_size: usize,
+    token_dim: usize,
+    root_count: usize,
+    root_state_dim: usize,
+    root_readout_dim: usize,
+    leaf_size: usize,
 }
 
 #[derive(Module, Debug)]
@@ -249,8 +268,62 @@ where
             },
         }
     }
+}
 
-    pub fn forward_local_baseline(
+impl<B, LT> FractalV2LocalBaselineModel<B, LT>
+where
+    B: Backend,
+    LT: LocalTrunk<B> + Module<B>,
+{
+    pub fn new(
+        vocab_size: usize,
+        token_dim: usize,
+        local_trunk: LT,
+        device: &B::Device,
+    ) -> Result<Self, FractalError> {
+        let shape = FractalV2LocalBaselineShape {
+            vocab_size,
+            token_dim,
+            local_trunk: local_trunk.shape(),
+        }
+        .validate()?;
+        let embedding = EmbeddingConfig::new(vocab_size, token_dim).init(device);
+
+        Ok(Self {
+            embedding,
+            local_trunk,
+            vocab_size: shape.vocab_size,
+            token_dim: shape.token_dim,
+            root_count: shape.local_trunk.root_count,
+            root_state_dim: shape.local_trunk.root_state_dim,
+            root_readout_dim: shape.local_trunk.root_readout_dim,
+            leaf_size: shape.local_trunk.leaf_size,
+        })
+    }
+
+    pub fn embedding(&self) -> &Embedding<B> {
+        &self.embedding
+    }
+
+    pub fn local_trunk(&self) -> &LT {
+        &self.local_trunk
+    }
+
+    pub fn shape(&self) -> FractalV2LocalBaselineShape {
+        FractalV2LocalBaselineShape {
+            vocab_size: self.vocab_size,
+            token_dim: self.token_dim,
+            local_trunk: LocalTrunkShape {
+                token_dim: self.token_dim,
+                root_count: self.root_count,
+                root_state_dim: self.root_state_dim,
+                root_readout_dim: self.root_readout_dim,
+                leaf_size: self.leaf_size,
+            },
+        }
+    }
+
+    pub fn forward(
         &self,
         input_ids: Tensor<B, 2, Int>,
     ) -> Result<FractalV2LocalBaselineOutput<B>, FractalError> {
@@ -260,8 +333,8 @@ where
 
         let device = input_ids.device();
         let embeddings = self.embedding.forward(input_ids);
-        let layout = FractalV2StateLayout::from_model_shape(self.shape(), batch_size)?;
-        let mut state = MultiRootState::zeros(layout, &device);
+        let mut state =
+            MultiRootState::zeros_for_local_trunk(batch_size, self.shape().local_trunk, &device)?;
         let mut root_readouts = Vec::with_capacity(seq_len);
 
         for position in 0..seq_len {
@@ -293,6 +366,40 @@ where
             final_state: state,
             diagnostics,
         })
+    }
+}
+
+impl FractalV2LocalBaselineShape {
+    pub(crate) fn validate(self) -> Result<Self, FractalError> {
+        ensure_nonzero("local_baseline.vocab_size", self.vocab_size)?;
+        ensure_nonzero("local_baseline.token_dim", self.token_dim)?;
+        ensure_nonzero(
+            "local_baseline.local_trunk.token_dim",
+            self.local_trunk.token_dim,
+        )?;
+        ensure_nonzero(
+            "local_baseline.local_trunk.root_count",
+            self.local_trunk.root_count,
+        )?;
+        ensure_nonzero(
+            "local_baseline.local_trunk.root_state_dim",
+            self.local_trunk.root_state_dim,
+        )?;
+        ensure_nonzero(
+            "local_baseline.local_trunk.root_readout_dim",
+            self.local_trunk.root_readout_dim,
+        )?;
+        ensure_nonzero(
+            "local_baseline.local_trunk.leaf_size",
+            self.local_trunk.leaf_size,
+        )?;
+        ensure_match(
+            "local_baseline.local_trunk.token_dim",
+            self.local_trunk.token_dim,
+            self.token_dim,
+        )?;
+
+        Ok(self)
     }
 }
 
@@ -445,21 +552,7 @@ mod tests {
         StubRouter<TestBackend>,
         StubReadFusion<TestBackend>,
     >;
-    type BaselineComponents<B> = FractalV2Components<
-        BaselineLocalTrunk<B>,
-        StubLeafSummarizer<B>,
-        StubTreeMergeCell<B>,
-        StubRouter<B>,
-        StubReadFusion<B>,
-    >;
-    type BaselineModel<B> = FractalV2Model<
-        B,
-        BaselineLocalTrunk<B>,
-        StubLeafSummarizer<B>,
-        StubTreeMergeCell<B>,
-        StubRouter<B>,
-        StubReadFusion<B>,
-    >;
+    type BaselineModel<B> = FractalV2LocalBaselineModel<B, BaselineLocalTrunk<B>>;
 
     #[derive(Module, Debug)]
     struct StubLocalTrunk<B: Backend> {
@@ -699,46 +792,14 @@ mod tests {
         }
     }
 
-    fn baseline_components<B: Backend>(
-        root_count: usize,
-        device: &B::Device,
-    ) -> BaselineComponents<B> {
-        FractalV2Components {
-            local_trunk: BaselineLocalTrunkConfig::new(8, root_count, 6, 4, 16).init(device),
-            leaf_summarizer: StubLeafSummarizer::<B>::new(LeafSummarizerShape {
-                token_dim: 8,
-                leaf_size: 16,
-                summary_dim: 12,
-                key_dim: 4,
-                value_dim: 6,
-                token_cache_key_dim: 4,
-                token_cache_value_dim: 6,
-            }),
-            tree_merge_cell: StubTreeMergeCell::<B>::new(TreeMergeCellShape {
-                summary_dim: 12,
-                key_dim: 4,
-                value_dim: 6,
-                scale_embedding_dim: 3,
-            }),
-            router: StubRouter::<B>::new(FractalRouterHeadShape {
-                query_dim: 4,
-                key_dim: 4,
-                head_count: 2,
-                beam_width: 2,
-                top_leaf_reads: 2,
-                allow_early_stop: false,
-            }),
-            read_fusion: StubReadFusion::<B>::new(ReadFusionShape {
-                root_count,
-                root_readout_dim: 4,
-                retrieved_value_dim: 6,
-                fused_readout_dim: 6,
-            }),
-        }
-    }
-
     fn baseline_model<B: Backend>(root_count: usize, device: &B::Device) -> BaselineModel<B> {
-        FractalV2Model::new(64, 8, baseline_components(root_count, device), device).unwrap()
+        FractalV2LocalBaselineModel::new(
+            64,
+            8,
+            BaselineLocalTrunkConfig::new(8, root_count, 6, 4, 16).init(device),
+            device,
+        )
+        .unwrap()
     }
 
     fn token_ids<B: Backend>(
@@ -877,7 +938,7 @@ mod tests {
         let model = baseline_model::<TestBackend>(2, &device);
         let input_ids = token_ids::<TestBackend>(&[1, 2, 3, 4, 4, 3, 2, 1], [2, 4], &device);
 
-        let output = model.forward_local_baseline(input_ids).unwrap();
+        let output = model.forward(input_ids).unwrap();
 
         assert_eq!(output.root_readouts().dims(), [2, 4, 2, 4]);
         assert_eq!(output.mean_readouts().dims(), [2, 4, 4]);
@@ -897,8 +958,8 @@ mod tests {
         let input_a = token_ids::<TestBackend>(&[1, 2, 3, 4], [1, 4], &device);
         let input_b = token_ids::<TestBackend>(&[1, 2, 9, 4], [1, 4], &device);
 
-        let output_a = model.forward_local_baseline(input_a).unwrap();
-        let output_b = model.forward_local_baseline(input_b).unwrap();
+        let output_a = model.forward(input_a).unwrap();
+        let output_b = model.forward(input_b).unwrap();
         let prefix_a = output_a
             .root_readouts()
             .narrow(1, 0, 2)
@@ -923,11 +984,7 @@ mod tests {
         let model = baseline_model::<CpuTrainBackend>(2, &device);
         let input_ids = token_ids::<CpuTrainBackend>(&[1, 2, 3, 4, 4, 3, 2, 1], [2, 4], &device);
 
-        let loss = model
-            .forward_local_baseline(input_ids)
-            .unwrap()
-            .mean_readouts()
-            .sum();
+        let loss = model.forward(input_ids).unwrap().mean_readouts().sum();
         let grads = burn::optim::GradientsParams::from_grads(loss.backward(), &model);
 
         assert!(gradient_l2_norm(&model, &grads) > 0.0);
@@ -940,10 +997,8 @@ mod tests {
         let single_root_model = baseline_model::<TestBackend>(1, &device);
         let multi_root_model = baseline_model::<TestBackend>(2, &device);
 
-        let single = single_root_model
-            .forward_local_baseline(input_ids.clone())
-            .unwrap();
-        let multi = multi_root_model.forward_local_baseline(input_ids).unwrap();
+        let single = single_root_model.forward(input_ids.clone()).unwrap();
+        let multi = multi_root_model.forward(input_ids).unwrap();
 
         assert_eq!(single.root_readouts().dims(), [1, 4, 1, 4]);
         assert_eq!(multi.root_readouts().dims(), [1, 4, 2, 4]);
