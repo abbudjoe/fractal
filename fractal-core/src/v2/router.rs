@@ -75,6 +75,71 @@ pub struct FractalRouteOutput<B: Backend> {
 }
 
 impl<B: Backend> FractalRouteOutput<B> {
+    pub(crate) fn from_parts(
+        selected_leaf_indices: Tensor<B, 3, Int>,
+        selected_leaf_mask: Tensor<B, 3, Bool>,
+        selected_leaf_scores: Tensor<B, 3>,
+        selected_leaf_values: Tensor<B, 4>,
+        traces: Vec<HeadRouteTrace>,
+        diagnostics: FractalRoutingDiagnostics,
+    ) -> Result<Self, FractalError> {
+        let [batch_size, head_count, top_leaf_reads] = selected_leaf_indices.dims();
+        ensure_nonzero("route_output.batch_size", batch_size)?;
+        ensure_nonzero("route_output.head_count", head_count)?;
+        ensure_nonzero("route_output.top_leaf_reads", top_leaf_reads)?;
+        ensure_dims3(
+            "route_output.selected_leaf_mask",
+            selected_leaf_mask.dims(),
+            [batch_size, head_count, top_leaf_reads],
+        )?;
+        ensure_dims3(
+            "route_output.selected_leaf_scores",
+            selected_leaf_scores.dims(),
+            [batch_size, head_count, top_leaf_reads],
+        )?;
+        let [value_batch_size, value_head_count, value_top_leaf_reads, value_dim] =
+            selected_leaf_values.dims();
+        ensure_match(
+            "route_output.value_batch_size",
+            value_batch_size,
+            batch_size,
+        )?;
+        ensure_match(
+            "route_output.value_head_count",
+            value_head_count,
+            head_count,
+        )?;
+        ensure_match(
+            "route_output.value_top_leaf_reads",
+            value_top_leaf_reads,
+            top_leaf_reads,
+        )?;
+        ensure_nonzero("route_output.value_dim", value_dim)?;
+        ensure_match("route_output.trace_head_count", traces.len(), head_count)?;
+        if traces
+            .iter()
+            .any(|head_trace| head_trace.batch_routes.len() != batch_size)
+        {
+            return Err(FractalError::InvalidConfig(
+                "route_output traces must contain one batch route per batch item".to_string(),
+            ));
+        }
+        ensure_match(
+            "route_output.candidate_entropy_per_head",
+            diagnostics.candidate_entropy_per_head.len(),
+            head_count,
+        )?;
+
+        Ok(Self {
+            selected_leaf_indices,
+            selected_leaf_mask,
+            selected_leaf_scores,
+            selected_leaf_values,
+            traces,
+            diagnostics,
+        })
+    }
+
     pub fn selected_leaf_indices(&self) -> Tensor<B, 3, Int> {
         self.selected_leaf_indices.clone()
     }
@@ -335,14 +400,14 @@ impl<B: Backend> FractalRouterHead<B> for BaselineFractalRouterHead<B> {
             head_disagreement_rate: 1.0 - head_agreement_rate,
         };
 
-        Ok(FractalRouteOutput {
+        FractalRouteOutput::from_parts(
             selected_leaf_indices,
             selected_leaf_mask,
             selected_leaf_scores,
             selected_leaf_values,
             traces,
             diagnostics,
-        })
+        )
     }
 }
 
@@ -610,26 +675,23 @@ fn empty_route_output<B: Backend>(
     value_dim: usize,
     device: &B::Device,
 ) -> FractalRouteOutput<B> {
-    FractalRouteOutput {
-        selected_leaf_indices: Tensor::<B, 3, Int>::from_data(
+    FractalRouteOutput::from_parts(
+        Tensor::<B, 3, Int>::from_data(
             TensorData::new(
                 vec![-1i64; batch_size * shape.head_count * shape.top_leaf_reads],
                 [batch_size, shape.head_count, shape.top_leaf_reads],
             ),
             device,
         ),
-        selected_leaf_mask: Tensor::<B, 3, Bool>::from_data(
+        Tensor::<B, 3, Bool>::from_data(
             TensorData::new(
                 vec![false; batch_size * shape.head_count * shape.top_leaf_reads],
                 [batch_size, shape.head_count, shape.top_leaf_reads],
             ),
             device,
         ),
-        selected_leaf_scores: Tensor::<B, 3>::zeros(
-            [batch_size, shape.head_count, shape.top_leaf_reads],
-            device,
-        ),
-        selected_leaf_values: Tensor::<B, 4>::zeros(
+        Tensor::<B, 3>::zeros([batch_size, shape.head_count, shape.top_leaf_reads], device),
+        Tensor::<B, 4>::zeros(
             [
                 batch_size,
                 shape.head_count,
@@ -638,7 +700,7 @@ fn empty_route_output<B: Backend>(
             ],
             device,
         ),
-        traces: (0..shape.head_count)
+        (0..shape.head_count)
             .map(|_| HeadRouteTrace {
                 batch_routes: (0..batch_size)
                     .map(|_| BatchHeadRoute {
@@ -650,14 +712,15 @@ fn empty_route_output<B: Backend>(
                     .collect(),
             })
             .collect(),
-        diagnostics: FractalRoutingDiagnostics {
+        FractalRoutingDiagnostics {
             routing_depth_histogram: Vec::new(),
             candidate_entropy_per_head: vec![0.0; shape.head_count],
             selected_span_distance_histogram: Vec::new(),
             head_agreement_rate: 1.0,
             head_disagreement_rate: 0.0,
         },
-    }
+    )
+    .expect("empty route output must satisfy route output contract")
 }
 
 fn pairwise_head_agreement(primary_leaf_indices: &[Vec<Option<usize>>]) -> f32 {
@@ -761,6 +824,17 @@ fn invalid_state_from_data(
     }
 }
 
+fn ensure_dims3(name: &str, actual: [usize; 3], expected: [usize; 3]) -> Result<(), FractalError> {
+    if actual != expected {
+        return Err(FractalError::InvalidConfig(format!(
+            "{name} mismatch: expected {:?}, got {:?}",
+            expected, actual
+        )));
+    }
+
+    Ok(())
+}
+
 fn ensure_nonzero(name: &str, value: usize) -> Result<(), FractalError> {
     if value == 0 {
         return Err(FractalError::InvalidConfig(format!(
@@ -800,8 +874,9 @@ mod tests {
 
     use super::*;
     use crate::v2::{
-        FractalV2ModelShape, FractalV2StateLayout, LeafSummarizerShape, LocalTrunkShape,
-        ReadFusionShape, TreeLevelStoreRecord, TreeMergeCellShape, TreeSummaryStateRecord,
+        ExactLeafReadShape, FractalV2ModelShape, FractalV2StateLayout, LeafSummarizerShape,
+        LocalTrunkShape, ReadFusionShape, TreeLevelStoreRecord, TreeMergeCellShape,
+        TreeSummaryStateRecord,
     };
 
     type TestBackend = Candle<f32, i64>;
@@ -839,6 +914,14 @@ mod tests {
                 beam_width: 2,
                 top_leaf_reads: 2,
                 allow_early_stop: false,
+            },
+            exact_read: ExactLeafReadShape {
+                query_dim: 2,
+                key_dim: 2,
+                value_dim: 3,
+                head_count: 4,
+                top_leaf_reads: 2,
+                leaf_size: 16,
             },
             read_fusion: ReadFusionShape {
                 root_count: 2,

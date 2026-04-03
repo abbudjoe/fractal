@@ -10,6 +10,7 @@ use crate::{
 };
 
 use super::{
+    exact_read::{ExactLeafRead, ExactLeafReadShape},
     leaf::{LeafSummarizer, LeafSummarizerShape},
     local_trunk::{
         summarize_root_readout_sequence, LocalTrunk, LocalTrunkDiagnostics, LocalTrunkShape,
@@ -28,29 +29,23 @@ pub struct FractalV2ModelShape {
     pub leaf_summarizer: LeafSummarizerShape,
     pub tree_merge_cell: TreeMergeCellShape,
     pub router: FractalRouterHeadShape,
+    pub exact_read: ExactLeafReadShape,
     pub read_fusion: ReadFusionShape,
 }
 
 impl FractalV2ModelShape {
     pub(crate) fn validate(self) -> Result<Self, FractalError> {
-        validate_fractal_v2_model_shape(
-            self.vocab_size,
-            self.token_dim,
-            self.local_trunk,
-            self.leaf_summarizer,
-            self.tree_merge_cell,
-            self.router,
-            self.read_fusion,
-        )
+        validate_fractal_v2_model_shape(self)
     }
 }
 
 #[derive(Debug)]
-pub struct FractalV2Components<LT, LS, TM, RH, RF> {
+pub struct FractalV2Components<LT, LS, TM, RH, ER, RF> {
     pub local_trunk: LT,
     pub leaf_summarizer: LS,
     pub tree_merge_cell: TM,
     pub router: RH,
+    pub exact_read: ER,
     pub read_fusion: RF,
 }
 
@@ -106,6 +101,7 @@ pub struct FractalV2Model<
     LS: Module<B>,
     TM: Module<B>,
     RH: Module<B>,
+    ER: Module<B>,
     RF: Module<B>,
 > {
     embedding: Embedding<B>,
@@ -113,6 +109,7 @@ pub struct FractalV2Model<
     leaf_summarizer: LS,
     tree_merge_cell: TM,
     router: RH,
+    exact_read: ER,
     read_fusion: RF,
     output: LanguageModelHead<B>,
     vocab_size: usize,
@@ -131,22 +128,28 @@ pub struct FractalV2Model<
     beam_width: usize,
     top_leaf_reads: usize,
     allow_early_stop: bool,
+    exact_read_query_dim: usize,
+    exact_read_key_dim: usize,
+    exact_read_value_dim: usize,
+    exact_read_head_count: usize,
+    exact_read_leaf_size: usize,
     fused_readout_dim: usize,
 }
 
-impl<B, LT, LS, TM, RH, RF> FractalV2Model<B, LT, LS, TM, RH, RF>
+impl<B, LT, LS, TM, RH, ER, RF> FractalV2Model<B, LT, LS, TM, RH, ER, RF>
 where
     B: Backend,
     LT: LocalTrunk<B> + Module<B>,
     LS: LeafSummarizer<B> + Module<B>,
     TM: TreeMergeCell<B> + Module<B>,
     RH: FractalRouterHead<B> + Module<B>,
+    ER: ExactLeafRead<B> + Module<B>,
     RF: ReadFusion<B> + Module<B>,
 {
     pub fn new(
         vocab_size: usize,
         token_dim: usize,
-        components: FractalV2Components<LT, LS, TM, RH, RF>,
+        components: FractalV2Components<LT, LS, TM, RH, ER, RF>,
         device: &B::Device,
     ) -> Result<Self, FractalError> {
         let FractalV2Components {
@@ -154,6 +157,7 @@ where
             leaf_summarizer,
             tree_merge_cell,
             router,
+            exact_read,
             read_fusion,
         } = components;
         let shape = FractalV2ModelShape {
@@ -163,6 +167,7 @@ where
             leaf_summarizer: leaf_summarizer.shape(),
             tree_merge_cell: tree_merge_cell.shape(),
             router: router.shape(),
+            exact_read: exact_read.shape(),
             read_fusion: read_fusion.shape(),
         }
         .validate()?;
@@ -176,6 +181,7 @@ where
             leaf_summarizer,
             tree_merge_cell,
             router,
+            exact_read,
             read_fusion,
             output,
             vocab_size: shape.vocab_size,
@@ -194,6 +200,11 @@ where
             beam_width: shape.router.beam_width,
             top_leaf_reads: shape.router.top_leaf_reads,
             allow_early_stop: shape.router.allow_early_stop,
+            exact_read_query_dim: shape.exact_read.query_dim,
+            exact_read_key_dim: shape.exact_read.key_dim,
+            exact_read_value_dim: shape.exact_read.value_dim,
+            exact_read_head_count: shape.exact_read.head_count,
+            exact_read_leaf_size: shape.exact_read.leaf_size,
             fused_readout_dim: shape.read_fusion.fused_readout_dim,
         })
     }
@@ -216,6 +227,10 @@ where
 
     pub fn router(&self) -> &RH {
         &self.router
+    }
+
+    pub fn exact_read(&self) -> &ER {
+        &self.exact_read
     }
 
     pub fn read_fusion(&self) -> &RF {
@@ -259,6 +274,14 @@ where
                 beam_width: self.beam_width,
                 top_leaf_reads: self.top_leaf_reads,
                 allow_early_stop: self.allow_early_stop,
+            },
+            exact_read: ExactLeafReadShape {
+                query_dim: self.exact_read_query_dim,
+                key_dim: self.exact_read_key_dim,
+                value_dim: self.exact_read_value_dim,
+                head_count: self.exact_read_head_count,
+                top_leaf_reads: self.top_leaf_reads,
+                leaf_size: self.exact_read_leaf_size,
             },
             read_fusion: ReadFusionShape {
                 root_count: self.root_count,
@@ -410,14 +433,19 @@ impl FractalV2LocalBaselineShape {
 }
 
 fn validate_fractal_v2_model_shape(
-    vocab_size: usize,
-    token_dim: usize,
-    local_trunk: LocalTrunkShape,
-    leaf: LeafSummarizerShape,
-    tree: TreeMergeCellShape,
-    router: FractalRouterHeadShape,
-    read_fusion: ReadFusionShape,
+    shape: FractalV2ModelShape,
 ) -> Result<FractalV2ModelShape, FractalError> {
+    let FractalV2ModelShape {
+        vocab_size,
+        token_dim,
+        local_trunk,
+        leaf_summarizer: leaf,
+        tree_merge_cell: tree,
+        router,
+        exact_read,
+        read_fusion,
+    } = shape;
+
     ensure_nonzero("vocab_size", vocab_size)?;
     ensure_nonzero("token_dim", token_dim)?;
     ensure_nonzero("local_trunk.token_dim", local_trunk.token_dim)?;
@@ -455,6 +483,12 @@ fn validate_fractal_v2_model_shape(
             "router.allow_early_stop must remain false in v1".to_string(),
         ));
     }
+    ensure_nonzero("exact_read.query_dim", exact_read.query_dim)?;
+    ensure_nonzero("exact_read.key_dim", exact_read.key_dim)?;
+    ensure_nonzero("exact_read.value_dim", exact_read.value_dim)?;
+    ensure_nonzero("exact_read.head_count", exact_read.head_count)?;
+    ensure_nonzero("exact_read.top_leaf_reads", exact_read.top_leaf_reads)?;
+    ensure_nonzero("exact_read.leaf_size", exact_read.leaf_size)?;
     ensure_nonzero("read_fusion.root_count", read_fusion.root_count)?;
     ensure_nonzero("read_fusion.root_readout_dim", read_fusion.root_readout_dim)?;
     ensure_nonzero(
@@ -491,6 +525,36 @@ fn validate_fractal_v2_model_shape(
     )?;
     ensure_match("router.key_dim", router.key_dim, tree.key_dim)?;
     ensure_match(
+        "exact_read.query_dim",
+        exact_read.query_dim,
+        local_trunk.root_readout_dim,
+    )?;
+    ensure_match(
+        "exact_read.key_dim",
+        exact_read.key_dim,
+        leaf.token_cache_key_dim,
+    )?;
+    ensure_match(
+        "exact_read.value_dim",
+        exact_read.value_dim,
+        leaf.token_cache_value_dim,
+    )?;
+    ensure_match(
+        "exact_read.head_count",
+        exact_read.head_count,
+        router.head_count,
+    )?;
+    ensure_match(
+        "exact_read.top_leaf_reads",
+        exact_read.top_leaf_reads,
+        router.top_leaf_reads,
+    )?;
+    ensure_match(
+        "exact_read.leaf_size",
+        exact_read.leaf_size,
+        local_trunk.leaf_size,
+    )?;
+    ensure_match(
         "read_fusion.root_count",
         read_fusion.root_count,
         local_trunk.root_count,
@@ -503,7 +567,7 @@ fn validate_fractal_v2_model_shape(
     ensure_match(
         "read_fusion.retrieved_value_dim",
         read_fusion.retrieved_value_dim,
-        leaf.token_cache_value_dim,
+        exact_read.value_dim,
     )?;
 
     Ok(FractalV2ModelShape {
@@ -513,6 +577,7 @@ fn validate_fractal_v2_model_shape(
         leaf_summarizer: leaf,
         tree_merge_cell: tree,
         router,
+        exact_read,
         read_fusion,
     })
 }
@@ -560,6 +625,7 @@ mod tests {
         StubLeafSummarizer<TestBackend>,
         StubTreeMergeCell<TestBackend>,
         StubRouter<TestBackend>,
+        StubExactRead<TestBackend>,
         StubReadFusion<TestBackend>,
     >;
     type BaselineModel<B> = FractalV2LocalBaselineModel<B, BaselineLocalTrunk<B>>;
@@ -612,6 +678,17 @@ mod tests {
         root_readout_dim: usize,
         retrieved_value_dim: usize,
         fused_readout_dim: usize,
+        _marker: PhantomData<B>,
+    }
+
+    #[derive(Module, Debug)]
+    struct StubExactRead<B: Backend> {
+        query_dim: usize,
+        key_dim: usize,
+        value_dim: usize,
+        head_count: usize,
+        top_leaf_reads: usize,
+        leaf_size: usize,
         _marker: PhantomData<B>,
     }
 
@@ -676,6 +753,20 @@ mod tests {
                 root_readout_dim: shape.root_readout_dim,
                 retrieved_value_dim: shape.retrieved_value_dim,
                 fused_readout_dim: shape.fused_readout_dim,
+                _marker: PhantomData,
+            }
+        }
+    }
+
+    impl<B: Backend> StubExactRead<B> {
+        fn new(shape: ExactLeafReadShape) -> Self {
+            Self {
+                query_dim: shape.query_dim,
+                key_dim: shape.key_dim,
+                value_dim: shape.value_dim,
+                head_count: shape.head_count,
+                top_leaf_reads: shape.top_leaf_reads,
+                leaf_size: shape.leaf_size,
                 _marker: PhantomData,
             }
         }
@@ -837,6 +928,31 @@ mod tests {
         }
     }
 
+    impl<B: Backend> ExactLeafRead<B> for StubExactRead<B> {
+        fn shape(&self) -> ExactLeafReadShape {
+            ExactLeafReadShape {
+                query_dim: self.query_dim,
+                key_dim: self.key_dim,
+                value_dim: self.value_dim,
+                head_count: self.head_count,
+                top_leaf_reads: self.top_leaf_reads,
+                leaf_size: self.leaf_size,
+            }
+        }
+
+        fn read(
+            &self,
+            _query: Tensor<B, 2>,
+            _query_position: usize,
+            _routed: &crate::v2::FractalRouteOutput<B>,
+            _leaf_token_cache: &crate::v2::LeafTokenCache<B>,
+        ) -> Result<crate::v2::ExactLeafReadOutput<B>, FractalError> {
+            Err(FractalError::InvalidState(
+                "stub exact read does not implement token-level reads".to_string(),
+            ))
+        }
+    }
+
     fn valid_components() -> TestComponents {
         FractalV2Components {
             local_trunk: StubLocalTrunk::<TestBackend>::new(LocalTrunkShape {
@@ -868,6 +984,14 @@ mod tests {
                 beam_width: 2,
                 top_leaf_reads: 2,
                 allow_early_stop: false,
+            }),
+            exact_read: StubExactRead::<TestBackend>::new(ExactLeafReadShape {
+                query_dim: 64,
+                key_dim: 48,
+                value_dim: 56,
+                head_count: 4,
+                top_leaf_reads: 2,
+                leaf_size: 16,
             }),
             read_fusion: StubReadFusion::<TestBackend>::new(ReadFusionShape {
                 root_count: 2,
@@ -947,6 +1071,14 @@ mod tests {
                     top_leaf_reads: 2,
                     allow_early_stop: false,
                 },
+                exact_read: ExactLeafReadShape {
+                    query_dim: 64,
+                    key_dim: 48,
+                    value_dim: 56,
+                    head_count: 4,
+                    top_leaf_reads: 2,
+                    leaf_size: 16,
+                },
                 read_fusion: ReadFusionShape {
                     root_count: 2,
                     root_readout_dim: 64,
@@ -1000,6 +1132,15 @@ mod tests {
     }
 
     #[test]
+    fn fractal_v2_model_rejects_zero_width_exact_read_value_dim() {
+        let mut components = valid_components();
+        components.exact_read.value_dim = 0;
+        components.read_fusion.retrieved_value_dim = 0;
+
+        assert_invalid_config(components, "exact_read.value_dim");
+    }
+
+    #[test]
     fn fractal_v2_model_rejects_zero_width_fused_readout_dim() {
         let mut components = valid_components();
         components.read_fusion.fused_readout_dim = 0;
@@ -1013,9 +1154,11 @@ mod tests {
         let mut model = FractalV2Model::new(32_000, 128, valid_components(), &device).unwrap();
 
         model.router.query_dim = 17;
+        model.exact_read.key_dim = 23;
         model.read_fusion.fused_readout_dim = 23;
 
         assert_eq!(model.shape().router.query_dim, 64);
+        assert_eq!(model.shape().exact_read.key_dim, 48);
         assert_eq!(model.shape().read_fusion.fused_readout_dim, 96);
         assert_eq!(model.output().logical_dims(), [96, 32_000]);
     }

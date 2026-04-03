@@ -70,10 +70,12 @@ pub use registry::{
 pub use router::EarlyExitRouter;
 pub use state::{FractalState, StateLayout};
 pub use v2::{
-    summarize_root_readout_sequence, BaselineFractalRouterHead, BaselineFractalRouterHeadConfig,
-    BaselineLeafSummarizer, BaselineLeafSummarizerConfig, BaselineLocalTrunk,
-    BaselineLocalTrunkConfig, BaselineTreeMergeCell, BaselineTreeMergeCellConfig, BatchHeadRoute,
-    BatchRouteStep, BatchTimelineMode, FractalRouteOutput, FractalRouterHead,
+    summarize_root_readout_sequence, BaselineExactLeafRead, BaselineExactLeafReadConfig,
+    BaselineFractalRouterHead, BaselineFractalRouterHeadConfig, BaselineLeafSummarizer,
+    BaselineLeafSummarizerConfig, BaselineLocalTrunk, BaselineLocalTrunkConfig,
+    BaselineTreeMergeCell, BaselineTreeMergeCellConfig, BatchHeadRoute, BatchRouteStep,
+    BatchTimelineMode, ExactLeafRead, ExactLeafReadDiagnostics, ExactLeafReadOutput,
+    ExactLeafReadShape, ExactReadHistogramBin, FractalRouteOutput, FractalRouterHead,
     FractalRouterHeadShape, FractalRoutingDiagnostics, FractalV2Components,
     FractalV2LocalBaselineModel, FractalV2LocalBaselineOutput, FractalV2LocalBaselineShape,
     FractalV2Model, FractalV2ModelShape, FractalV2State, FractalV2StateLayout,

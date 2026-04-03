@@ -1,3 +1,4 @@
+pub mod exact_read;
 pub mod leaf;
 pub mod local_trunk;
 pub mod model;
@@ -6,6 +7,10 @@ pub mod router;
 pub mod state;
 pub mod tree;
 
+pub use exact_read::{
+    BaselineExactLeafRead, BaselineExactLeafReadConfig, ExactLeafRead, ExactLeafReadDiagnostics,
+    ExactLeafReadOutput, ExactLeafReadShape, ExactReadHistogramBin,
+};
 pub use leaf::{
     BaselineLeafSummarizer, BaselineLeafSummarizerConfig, LeafSummarizer, LeafSummarizerOutput,
     LeafSummarizerShape,

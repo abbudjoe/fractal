@@ -2858,8 +2858,9 @@ mod tests {
     use super::*;
     use crate::v2::{
         BaselineLeafSummarizer, BaselineLeafSummarizerConfig, BaselineTreeMergeCell,
-        BaselineTreeMergeCellConfig, FractalRouterHeadShape, FractalV2ModelShape,
-        LeafSummarizerShape, LocalTrunkShape, ReadFusionShape, TreeMergeCellShape,
+        BaselineTreeMergeCellConfig, ExactLeafReadShape, FractalRouterHeadShape,
+        FractalV2ModelShape, LeafSummarizerShape, LocalTrunkShape, ReadFusionShape,
+        TreeMergeCellShape,
     };
 
     type TestBackend = Candle<f32, i64>;
@@ -2897,6 +2898,14 @@ mod tests {
                 beam_width: 2,
                 top_leaf_reads: 2,
                 allow_early_stop: false,
+            },
+            exact_read: ExactLeafReadShape {
+                query_dim: 64,
+                key_dim: 40,
+                value_dim: 56,
+                head_count: 4,
+                top_leaf_reads: 2,
+                leaf_size: 16,
             },
             read_fusion: ReadFusionShape {
                 root_count: 2,
