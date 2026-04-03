@@ -1108,6 +1108,158 @@ impl<B: Backend> TreeLevelStore<B> {
                 .reshape([batch_size, value_dim]),
         )
     }
+
+    fn push_node(
+        &mut self,
+        node: TreeNodeBatch<B>,
+        shared_span: TokenSpan,
+    ) -> Result<usize, FractalError> {
+        let [batch_size, summary_dim] = node.summary().dims();
+        let [key_batch_size, key_dim] = node.key().dims();
+        let [value_batch_size, value_dim] = node.value().dims();
+        let [expected_batch_size, node_count, expected_summary_dim] = self.summaries.dims();
+        let [_, _, expected_key_dim] = self.keys.dims();
+        let [_, _, expected_value_dim] = self.values.dims();
+        ensure_match(
+            "tree_level.push.batch_size",
+            batch_size,
+            expected_batch_size,
+        )?;
+        ensure_match(
+            "tree_level.push.key_batch_size",
+            key_batch_size,
+            expected_batch_size,
+        )?;
+        ensure_match(
+            "tree_level.push.value_batch_size",
+            value_batch_size,
+            expected_batch_size,
+        )?;
+        ensure_match(
+            "tree_level.push.summary_dim",
+            summary_dim,
+            expected_summary_dim,
+        )?;
+        ensure_match("tree_level.push.key_dim", key_dim, expected_key_dim)?;
+        ensure_match("tree_level.push.value_dim", value_dim, expected_value_dim)?;
+        validate_token_span("tree_level.push.shared_span", shared_span)?;
+
+        let expected_start = self
+            .shared_spans
+            .last()
+            .map(TokenSpan::end)
+            .unwrap_or_default();
+        ensure_match(
+            "tree_level.push.shared_span.start",
+            shared_span.start(),
+            expected_start,
+        )?;
+
+        self.summaries = Tensor::cat(
+            vec![
+                self.summaries.clone(),
+                node.summary().reshape([batch_size, 1, summary_dim]),
+            ],
+            1,
+        );
+        self.keys = Tensor::cat(
+            vec![
+                self.keys.clone(),
+                node.key().reshape([batch_size, 1, key_dim]),
+            ],
+            1,
+        );
+        self.values = Tensor::cat(
+            vec![
+                self.values.clone(),
+                node.value().reshape([batch_size, 1, value_dim]),
+            ],
+            1,
+        );
+        self.shared_spans.push(shared_span);
+
+        Ok(node_count)
+    }
+
+    fn replace_last_node(
+        &mut self,
+        node: TreeNodeBatch<B>,
+        shared_span: TokenSpan,
+    ) -> Result<usize, FractalError> {
+        let [batch_size, summary_dim] = node.summary().dims();
+        let [key_batch_size, key_dim] = node.key().dims();
+        let [value_batch_size, value_dim] = node.value().dims();
+        let [expected_batch_size, node_count, expected_summary_dim] = self.summaries.dims();
+        let [_, _, expected_key_dim] = self.keys.dims();
+        let [_, _, expected_value_dim] = self.values.dims();
+        ensure_match(
+            "tree_level.replace_last.batch_size",
+            batch_size,
+            expected_batch_size,
+        )?;
+        ensure_match(
+            "tree_level.replace_last.key_batch_size",
+            key_batch_size,
+            expected_batch_size,
+        )?;
+        ensure_match(
+            "tree_level.replace_last.value_batch_size",
+            value_batch_size,
+            expected_batch_size,
+        )?;
+        ensure_match(
+            "tree_level.replace_last.summary_dim",
+            summary_dim,
+            expected_summary_dim,
+        )?;
+        ensure_match("tree_level.replace_last.key_dim", key_dim, expected_key_dim)?;
+        ensure_match(
+            "tree_level.replace_last.value_dim",
+            value_dim,
+            expected_value_dim,
+        )?;
+        validate_token_span("tree_level.replace_last.shared_span", shared_span)?;
+        if node_count == 0 {
+            return Err(FractalError::InvalidState(format!(
+                "tree level {} cannot replace the last node of an empty level",
+                self.level
+            )));
+        }
+
+        let last_index = node_count - 1;
+        let previous_span = self.shared_spans[last_index];
+        ensure_match(
+            "tree_level.replace_last.shared_span.start",
+            shared_span.start(),
+            previous_span.start(),
+        )?;
+        if shared_span.end() < previous_span.end() {
+            return Err(FractalError::InvalidState(format!(
+                "tree level {} right frontier span cannot shrink from [{}, {}) to [{}, {})",
+                self.level,
+                previous_span.start(),
+                previous_span.end(),
+                shared_span.start(),
+                shared_span.end()
+            )));
+        }
+
+        self.summaries = self.summaries.clone().slice_assign(
+            [0..batch_size, last_index..last_index + 1, 0..summary_dim],
+            node.summary().reshape([batch_size, 1, summary_dim]),
+        );
+        self.keys = self.keys.clone().slice_assign(
+            [0..batch_size, last_index..last_index + 1, 0..key_dim],
+            node.key().reshape([batch_size, 1, key_dim]),
+        );
+        self.values = self.values.clone().slice_assign(
+            [0..batch_size, last_index..last_index + 1, 0..value_dim],
+            node.value().reshape([batch_size, 1, value_dim]),
+        );
+        self.shared_spans[last_index] = shared_span;
+
+        Ok(last_index)
+    }
 }
 
 impl<B: Backend> Record<B> for TreeLevelStoreRecord<B> {
@@ -1225,27 +1377,7 @@ impl<B: Backend> TreeSummaryState<B> {
         sealed_leaves: &LeafSummaryStore<B>,
         tree_merge_cell: &TM,
     ) -> Result<(), FractalError> {
-        let merge_shape = tree_merge_cell.shape();
-        ensure_match(
-            "tree_merge_cell.summary_dim",
-            merge_shape.summary_dim,
-            self.layout.summary_dim,
-        )?;
-        ensure_match(
-            "tree_merge_cell.key_dim",
-            merge_shape.key_dim,
-            self.layout.key_dim,
-        )?;
-        ensure_match(
-            "tree_merge_cell.value_dim",
-            merge_shape.value_dim,
-            self.layout.value_dim,
-        )?;
-        ensure_match(
-            "tree_merge_cell.scale_embedding_dim",
-            merge_shape.scale_embedding_dim,
-            self.layout.scale_embedding_dim,
-        )?;
+        validate_tree_merge_shape(self.layout, tree_merge_cell.shape())?;
 
         if sealed_leaves.shared_spans().is_empty() {
             self.levels.clear();
@@ -1272,6 +1404,80 @@ impl<B: Backend> TreeSummaryState<B> {
         }
 
         self.levels = rebuilt_levels;
+        validate_tree_level_prefix(self)
+    }
+
+    pub fn append_sealed_leaf<TM: TreeMergeCell<B>>(
+        &mut self,
+        node: TreeNodeBatch<B>,
+        shared_span: TokenSpan,
+        tree_merge_cell: &TM,
+    ) -> Result<(), FractalError> {
+        validate_tree_merge_shape(self.layout, tree_merge_cell.shape())?;
+        validate_token_span("tree.append_sealed_leaf.shared_span", shared_span)?;
+        ensure_match(
+            "tree.append_sealed_leaf.shared_span.len",
+            shared_span.len(),
+            self.layout.leaf_size,
+        )?;
+
+        if self.levels.is_empty() {
+            let mut level0 = TreeLevelStore::empty(0, self.layout, &node.summary().device());
+            level0.push_node(node, shared_span)?;
+            self.levels.push(level0);
+            return validate_tree_level_prefix(self);
+        }
+
+        self.levels[0].push_node(node, shared_span)?;
+        let mut child_level_index = 0usize;
+        loop {
+            let child_level = &self.levels[child_level_index];
+            let child_count = child_level.node_count();
+            if child_count <= 1 {
+                break;
+            }
+
+            let parent_level_index = child_level_index + 1;
+            let (parent_node, parent_span, replace_last) = if child_count.is_multiple_of(2) {
+                let left_index = child_count - 2;
+                let right_index = child_count - 1;
+                let merged = tree_merge_cell
+                    .merge_pair(
+                        child_level.node(left_index)?,
+                        child_level.node(right_index)?,
+                        parent_level_index,
+                    )?
+                    .into_node()?;
+                let span = TokenSpan::new(
+                    child_level.shared_spans()[left_index].start(),
+                    child_level.shared_spans()[right_index].end(),
+                )?;
+                (merged, span, parent_level_index < self.levels.len())
+            } else {
+                (
+                    child_level.node(child_count - 1)?,
+                    child_level.shared_spans()[child_count - 1],
+                    false,
+                )
+            };
+
+            if parent_level_index == self.levels.len() {
+                let mut parent_level = TreeLevelStore::empty(
+                    parent_level_index,
+                    self.layout,
+                    &parent_node.summary().device(),
+                );
+                parent_level.push_node(parent_node, parent_span)?;
+                self.levels.push(parent_level);
+            } else if replace_last {
+                self.levels[parent_level_index].replace_last_node(parent_node, parent_span)?;
+            } else {
+                self.levels[parent_level_index].push_node(parent_node, parent_span)?;
+            }
+
+            child_level_index = parent_level_index;
+        }
+
         validate_tree_level_prefix(self)
     }
 
@@ -1965,8 +2171,11 @@ impl<B: Backend> FractalV2State<B> {
             cache_leaf_index,
             leaf_index,
         )?;
-        self.tree
-            .rebuild_from_sealed_leaves(&self.sealed_leaves, tree_merge_cell)?;
+        self.tree.append_sealed_leaf(
+            TreeNodeBatch::from_tensors(summary.clone(), key.clone(), value.clone())?,
+            shared_span,
+            tree_merge_cell,
+        )?;
         validate_state_consistency(
             self.layout,
             &self.live_leaf,
@@ -2260,6 +2469,32 @@ fn stack_rank2_batches<B: Backend>(
     }
 
     Ok(Tensor::cat(reshaped, 1))
+}
+
+fn validate_tree_merge_shape(
+    layout: FractalV2StateLayout,
+    merge_shape: crate::v2::TreeMergeCellShape,
+) -> Result<(), FractalError> {
+    ensure_match(
+        "tree_merge_cell.summary_dim",
+        merge_shape.summary_dim,
+        layout.summary_dim,
+    )?;
+    ensure_match(
+        "tree_merge_cell.key_dim",
+        merge_shape.key_dim,
+        layout.key_dim,
+    )?;
+    ensure_match(
+        "tree_merge_cell.value_dim",
+        merge_shape.value_dim,
+        layout.value_dim,
+    )?;
+    ensure_match(
+        "tree_merge_cell.scale_embedding_dim",
+        merge_shape.scale_embedding_dim,
+        layout.scale_embedding_dim,
+    )
 }
 
 fn validate_tree_level_prefix<B: Backend>(tree: &TreeSummaryState<B>) -> Result<(), FractalError> {
