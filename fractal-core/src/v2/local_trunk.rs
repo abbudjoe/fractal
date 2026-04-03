@@ -95,7 +95,35 @@ pub struct BaselineLocalTrunk<B: Backend> {
 }
 
 impl BaselineLocalTrunkConfig {
+    pub fn validate(&self) -> Result<(), FractalError> {
+        ensure_nonzero("baseline_local_trunk.token_dim", self.token_dim)?;
+        ensure_nonzero("baseline_local_trunk.root_count", self.root_count)?;
+        ensure_nonzero("baseline_local_trunk.root_state_dim", self.root_state_dim)?;
+        ensure_nonzero(
+            "baseline_local_trunk.root_readout_dim",
+            self.root_readout_dim,
+        )?;
+        if self.leaf_size != 16 {
+            return Err(FractalError::InvalidConfig(format!(
+                "baseline_local_trunk.leaf_size must equal 16 in phase 3, got {}",
+                self.leaf_size
+            )));
+        }
+
+        Ok(())
+    }
+
     pub fn init<B: Backend>(&self, device: &B::Device) -> BaselineLocalTrunk<B> {
+        self.try_init(device).unwrap_or_else(|error| {
+            panic!("invalid baseline local trunk config: {error}");
+        })
+    }
+
+    pub fn try_init<B: Backend>(
+        &self,
+        device: &B::Device,
+    ) -> Result<BaselineLocalTrunk<B>, FractalError> {
+        self.validate()?;
         let projection_initializer = Initializer::Uniform {
             min: CONTRACTIVE_INIT_MIN,
             max: CONTRACTIVE_INIT_MAX,
@@ -107,7 +135,7 @@ impl BaselineLocalTrunkConfig {
                 .init(device)
         };
 
-        BaselineLocalTrunk {
+        Ok(BaselineLocalTrunk {
             token_drive: projection(self.token_dim, self.root_state_dim),
             token_gate: projection(self.token_dim, self.root_state_dim),
             recurrent_drive: projection(self.root_state_dim, self.root_state_dim),
@@ -121,7 +149,7 @@ impl BaselineLocalTrunkConfig {
                 root_readout_dim: self.root_readout_dim,
                 leaf_size: self.leaf_size,
             },
-        }
+        })
     }
 }
 
@@ -510,5 +538,29 @@ mod tests {
         let grads = burn::optim::GradientsParams::from_grads(loss.backward(), &trunk);
 
         assert!(crate::registry::gradient_l2_norm(&trunk, &grads) > 0.0);
+    }
+
+    #[test]
+    fn baseline_local_trunk_try_init_rejects_zero_root_count() {
+        let device = <TestBackend as Backend>::Device::default();
+        let error = BaselineLocalTrunkConfig::new(8, 0, 6, 4, 16)
+            .try_init::<TestBackend>(&device)
+            .unwrap_err();
+
+        assert!(
+            matches!(error, FractalError::InvalidConfig(message) if message.contains("baseline_local_trunk.root_count"))
+        );
+    }
+
+    #[test]
+    fn baseline_local_trunk_try_init_rejects_non_phase_three_leaf_size() {
+        let device = <TestBackend as Backend>::Device::default();
+        let error = BaselineLocalTrunkConfig::new(8, 2, 6, 4, 8)
+            .try_init::<TestBackend>(&device)
+            .unwrap_err();
+
+        assert!(
+            matches!(error, FractalError::InvalidConfig(message) if message.contains("baseline_local_trunk.leaf_size"))
+        );
     }
 }

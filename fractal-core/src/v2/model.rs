@@ -393,6 +393,12 @@ impl FractalV2LocalBaselineShape {
             "local_baseline.local_trunk.leaf_size",
             self.local_trunk.leaf_size,
         )?;
+        if self.local_trunk.leaf_size != 16 {
+            return Err(FractalError::InvalidConfig(format!(
+                "local_baseline.local_trunk.leaf_size must equal 16 in phase 3, got {}",
+                self.local_trunk.leaf_size
+            )));
+        }
         ensure_match(
             "local_baseline.local_trunk.token_dim",
             self.local_trunk.token_dim,
@@ -796,7 +802,9 @@ mod tests {
         FractalV2LocalBaselineModel::new(
             64,
             8,
-            BaselineLocalTrunkConfig::new(8, root_count, 6, 4, 16).init(device),
+            BaselineLocalTrunkConfig::new(8, root_count, 6, 4, 16)
+                .try_init(device)
+                .unwrap(),
             device,
         )
         .unwrap()
@@ -1005,5 +1013,27 @@ mod tests {
         assert_eq!(single.diagnostics().per_root.len(), 1);
         assert_eq!(multi.diagnostics().per_root.len(), 2);
         assert!(multi.diagnostics().mean_pairwise_cosine_similarity < 0.9999);
+    }
+
+    #[test]
+    fn fractal_v2_local_baseline_model_rejects_non_phase_three_leaf_size() {
+        let device = <TestBackend as Backend>::Device::default();
+        let error = FractalV2LocalBaselineModel::new(
+            64,
+            8,
+            StubLocalTrunk::<TestBackend>::new(LocalTrunkShape {
+                token_dim: 8,
+                root_count: 2,
+                root_state_dim: 6,
+                root_readout_dim: 4,
+                leaf_size: 8,
+            }),
+            &device,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, FractalError::InvalidConfig(message) if message.contains("local_baseline.local_trunk.leaf_size"))
+        );
     }
 }
