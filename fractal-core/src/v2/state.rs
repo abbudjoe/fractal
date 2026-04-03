@@ -2186,6 +2186,24 @@ impl<B: Backend> FractalV2State<B> {
         leaf_summarizer: &LS,
         tree_merge_cell: &TM,
     ) -> Result<Option<SealedLeafMaterialization<B>>, FractalError> {
+        self.append_root_readouts_with_active_root_count(
+            root_readouts,
+            self.layout.root_count,
+            leaf_summarizer,
+            tree_merge_cell,
+        )
+    }
+
+    pub fn append_root_readouts_with_active_root_count<
+        LS: LeafSummarizer<B>,
+        TM: TreeMergeCell<B>,
+    >(
+        &mut self,
+        root_readouts: Tensor<B, 3>,
+        active_root_count: usize,
+        leaf_summarizer: &LS,
+        tree_merge_cell: &TM,
+    ) -> Result<Option<SealedLeafMaterialization<B>>, FractalError> {
         let [batch_size, root_count, readout_dim] = root_readouts.dims();
         ensure_match(
             "state.append_root_readouts.batch_size",
@@ -2202,6 +2220,11 @@ impl<B: Backend> FractalV2State<B> {
             readout_dim,
             self.layout.root_readout_dim,
         )?;
+        if active_root_count == 0 || active_root_count > root_count {
+            return Err(FractalError::InvalidConfig(format!(
+                "state.append_root_readouts.active_root_count must be within 1..={root_count}, got {active_root_count}"
+            )));
+        }
         let summarizer_shape = leaf_summarizer.shape();
         ensure_match(
             "state.append_root_readouts.summarizer.readout_dim",
@@ -2271,6 +2294,11 @@ impl<B: Backend> FractalV2State<B> {
                 &self.leaf_token_cache,
             )?;
             return Ok(None);
+        };
+        let sealed_token_readouts = if active_root_count == root_count {
+            sealed_token_readouts
+        } else {
+            sealed_token_readouts.narrow(1, 0, active_root_count)
         };
 
         let (summary, key, value, token_keys, token_values, token_mask) = leaf_summarizer
@@ -2936,7 +2964,8 @@ mod tests {
             read_fusion: ReadFusionShape {
                 root_count: 2,
                 root_readout_dim: 64,
-                retrieved_value_dim: 56,
+                routed_value_dim: 72,
+                exact_read_value_dim: 56,
                 fused_readout_dim: 96,
             },
         }
@@ -3439,6 +3468,99 @@ mod tests {
                 .reshape([2, 1, 16])
                 .to_data()
                 .convert::<bool>()
+        );
+    }
+
+    #[test]
+    fn fractal_v2_state_append_root_readouts_with_active_root_count_materializes_ablated_memory() {
+        let device = <TestBackend as Backend>::Device::default();
+        let mut state = FractalV2State::<TestBackend>::for_model_shape(
+            test_model_shape(),
+            2,
+            MergeCheckpointPolicy::FixedLeafSize {
+                tokens_per_leaf: 16,
+            },
+            &device,
+        )
+        .unwrap();
+        let summarizer = test_leaf_summarizer(&device);
+        let tree_merge_cell = test_tree_merge_cell(&device);
+        let mut expected_tokens = Vec::with_capacity(16);
+        let mut sealed_leaf = None;
+
+        for token_index in 0..16 {
+            let root_readouts = root_readouts_for_token(token_index, &device);
+            expected_tokens.push(root_readouts.clone().narrow(1, 0, 1).reshape([2, 1, 1, 64]));
+            sealed_leaf = state
+                .append_root_readouts_with_active_root_count(
+                    root_readouts,
+                    1,
+                    &summarizer,
+                    &tree_merge_cell,
+                )
+                .unwrap();
+        }
+
+        let sealed_leaf = sealed_leaf.expect("the 16th append should seal the leaf");
+        let expected = summarizer
+            .summarize_sealed_leaf(Tensor::cat(expected_tokens, 2))
+            .unwrap();
+
+        assert_eq!(
+            sealed_leaf.summary().to_data().convert::<f32>(),
+            expected.summary().to_data().convert::<f32>()
+        );
+        assert_eq!(
+            sealed_leaf.key().to_data().convert::<f32>(),
+            expected.key().to_data().convert::<f32>()
+        );
+        assert_eq!(
+            sealed_leaf.value().to_data().convert::<f32>(),
+            expected.value().to_data().convert::<f32>()
+        );
+        assert_eq!(
+            sealed_leaf.token_keys().to_data().convert::<f32>(),
+            expected.token_keys().to_data().convert::<f32>()
+        );
+        assert_eq!(
+            sealed_leaf.token_values().to_data().convert::<f32>(),
+            expected.token_values().to_data().convert::<f32>()
+        );
+        assert_eq!(
+            sealed_leaf.token_mask().to_data().convert::<bool>(),
+            expected.token_mask().to_data().convert::<bool>()
+        );
+        assert_eq!(
+            state.sealed_leaves().summaries().to_data().convert::<f32>(),
+            expected
+                .summary()
+                .reshape([2, 1, 80])
+                .to_data()
+                .convert::<f32>()
+        );
+        assert_eq!(
+            state.sealed_leaves().values().to_data().convert::<f32>(),
+            expected
+                .value()
+                .reshape([2, 1, 72])
+                .to_data()
+                .convert::<f32>()
+        );
+        assert_eq!(
+            state.tree().levels()[0].values().to_data().convert::<f32>(),
+            expected
+                .value()
+                .reshape([2, 1, 72])
+                .to_data()
+                .convert::<f32>()
+        );
+        assert_eq!(
+            state.leaf_token_cache().values().to_data().convert::<f32>(),
+            expected
+                .token_values()
+                .reshape([2, 1, 16, 56])
+                .to_data()
+                .convert::<f32>()
         );
     }
 

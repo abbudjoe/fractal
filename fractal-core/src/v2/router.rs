@@ -926,7 +926,8 @@ mod tests {
             read_fusion: ReadFusionShape {
                 root_count: 2,
                 root_readout_dim: 2,
-                retrieved_value_dim: 3,
+                routed_value_dim: 3,
+                exact_read_value_dim: 3,
                 fused_readout_dim: 5,
             },
         }

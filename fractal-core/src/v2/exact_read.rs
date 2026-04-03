@@ -717,7 +717,8 @@ mod tests {
                 read_fusion: ReadFusionShape {
                     root_count: 1,
                     root_readout_dim: 1,
-                    retrieved_value_dim: 2,
+                    routed_value_dim: 2,
+                    exact_read_value_dim: 2,
                     fused_readout_dim: 2,
                 },
                 exact_read: ExactLeafReadShape {
