@@ -82,12 +82,8 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
         )?;
         let mut logits = Vec::with_capacity(seq_len);
         let mut diagnostics = diagnostics;
-        let mut graph_burden = ForwardGraphBurdenAccumulator::new(
-            batch_size,
-            seq_len,
-            use_router,
-            force_depth,
-        );
+        let mut graph_burden =
+            ForwardGraphBurdenAccumulator::new(batch_size, seq_len, use_router, force_depth);
 
         for position in 0..seq_len {
             let x_t = embeddings
@@ -293,7 +289,7 @@ impl<B: Backend, R: FractalRule<B> + Module<B>> FractalModel<B, R> {
                     sequence_length,
                     recursion_depth: depth_index + 1,
                     max_recursion_depth: depth_limit,
-                    }),
+                }),
             )?;
             state = state.batch_mask_where(active_mask.clone(), next_state)?;
             let exit_mask = self.router.exit_mask(state.readout());

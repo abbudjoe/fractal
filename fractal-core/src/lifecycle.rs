@@ -1954,8 +1954,16 @@ impl FailureSnapshotRuntimeState {
             contract.validate()?;
         }
         if let Some(last_rule_projection_event) = &self.last_rule_projection_event {
-            if last_rule_projection_event.identity.rule_name.trim().is_empty()
-                || last_rule_projection_event.identity.projection_name.trim().is_empty()
+            if last_rule_projection_event
+                .identity
+                .rule_name
+                .trim()
+                .is_empty()
+                || last_rule_projection_event
+                    .identity
+                    .projection_name
+                    .trim()
+                    .is_empty()
             {
                 return Err(FractalError::InvalidConfig(
                     "failure snapshot last_rule_projection_event must record a non-empty rule identity"
@@ -1964,7 +1972,11 @@ impl FailureSnapshotRuntimeState {
             }
         }
         if let Some(last_output_projection_event) = &self.last_output_projection_event {
-            if last_output_projection_event.identity.model_name.trim().is_empty()
+            if last_output_projection_event
+                .identity
+                .model_name
+                .trim()
+                .is_empty()
                 || last_output_projection_event
                     .identity
                     .projection_name

@@ -33,10 +33,10 @@ use crate::{
         ForwardGraphBurden, OutputProjectionDiagnosticContext,
         OutputProjectionDiagnosticEventSummary, OutputProjectionDiagnosticSpec,
         OutputProjectionIdentity, ProbeCadence, ProjectionDiagnosticsSink,
-        RuleProjectionDiagnosticContext,
-        RuleProjectionDiagnosticEventSummary, RuleProjectionDiagnosticSpec,
-        RuleProjectionIdentity, RuleProjectionKind, TensorLayoutMetadata,
-        TensorLayoutOrigin, TensorLayoutTransform, TrainStepDiagnosticContext,
+        RuleProjectionDiagnosticContext, RuleProjectionDiagnosticEventSummary,
+        RuleProjectionDiagnosticSpec, RuleProjectionIdentity, RuleProjectionKind,
+        TensorLayoutMetadata, TensorLayoutOrigin, TensorLayoutTransform,
+        TrainStepDiagnosticContext,
     },
     error::FractalError,
     fitness::SpeciesRawMetrics,
@@ -47,8 +47,8 @@ use crate::{
         FailureSnapshotCaptureTiming, FailureSnapshotPolicy, FailureSnapshotRuntimeState,
         LaneIntent, LaunchPolicySpec, LearningRateScheduleSpec, ModelContractSpec,
         NumericPrecisionKind, OptimizerKind, OptimizerSpec, QuantizationPolicy,
-        QuantizedPrecisionKind, RunExecutionOutcome, RunOutcomeClass, RunQualityOutcome,
-        RunPhase, RuntimeSurfaceSpec, TextCorpusFormat, TextCorpusSourceSpec, TextCorpusSplitSpec,
+        QuantizedPrecisionKind, RunExecutionOutcome, RunOutcomeClass, RunPhase, RunQualityOutcome,
+        RuntimeSurfaceSpec, TextCorpusFormat, TextCorpusSourceSpec, TextCorpusSplitSpec,
         TokenizerArtifactSpec, Tournament, TournamentConfig, TournamentPreset,
         TournamentProgressEvent, TournamentSequence, TrainingInputSpec, WeightExportFormat,
         WeightExportPhase, WeightExportPolicy, WeightExportRuntimeState,
@@ -1883,8 +1883,7 @@ fn recurrent_model_routes_recursion_per_sample() {
     model.router.projection.weight = Param::from_data(TensorData::from([[1.0f32]]), &device);
     model.router.projection.bias = Some(Param::from_data(TensorData::from([0.0f32]), &device));
     let mut output_record = model.output.clone().into_record();
-    output_record.weight =
-        Param::from_data(TensorData::from([[1.0f32, 1.0, 1.0]]), &device);
+    output_record.weight = Param::from_data(TensorData::from([[1.0f32, 1.0, 1.0]]), &device);
     output_record.bias = Some(Param::from_data(
         TensorData::from([0.0f32, 0.0, 0.0]),
         &device,

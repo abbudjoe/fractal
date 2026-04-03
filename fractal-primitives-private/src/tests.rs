@@ -12,7 +12,7 @@ use fractal_core::{
     registry::SpeciesId,
     rule_trait::{ApplyContext, FractalRule},
     state::{FractalState, StateLayout},
-    StructuredDiagnosticsOutput, RunPhase,
+    RunPhase, StructuredDiagnosticsOutput,
 };
 
 use crate::{
