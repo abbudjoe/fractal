@@ -6,7 +6,10 @@ use burn::{
     },
     nn::Initializer,
     record::{PrecisionSettings, Record},
-    tensor::{backend::{AutodiffBackend, Backend}, Tensor},
+    tensor::{
+        backend::{AutodiffBackend, Backend},
+        Tensor,
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -15,17 +18,12 @@ use crate::diagnostics::{
     TensorLayoutTransform,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectionLayoutPolicy {
+    #[default]
     InputByOutput,
     OutputByInput,
-}
-
-impl Default for ProjectionLayoutPolicy {
-    fn default() -> Self {
-        Self::InputByOutput
-    }
 }
 
 impl core::fmt::Display for ProjectionLayoutPolicy {
@@ -117,9 +115,7 @@ pub struct StructuredProjectionConfig {
     pub d_output: usize,
     #[config(default = true)]
     pub bias: bool,
-    #[config(
-        default = "Initializer::KaimingUniform{gain:1.0/3.0_f64.sqrt(), fan_out_only:false}"
-    )]
+    #[config(default = "Initializer::KaimingUniform{gain:1.0/3.0_f64.sqrt(), fan_out_only:false}")]
     pub initializer: Initializer,
     #[config(default = "ProjectionLayoutPolicy::InputByOutput")]
     pub layout_policy: ProjectionLayoutPolicy,
@@ -242,10 +238,14 @@ impl<B: Backend> StructuredProjection<B> {
         record_weight: Param<Tensor<B, 2>>,
         source_layout: ProjectionLayoutPolicy,
     ) -> Param<Tensor<B, 2>> {
-        let weight = self.weight.clone().load_record(record_weight).map(|tensor| {
-            self.layout_policy
-                .convert_weight_for_storage(tensor, source_layout)
-        });
+        let weight = self
+            .weight
+            .clone()
+            .load_record(record_weight)
+            .map(|tensor| {
+                self.layout_policy
+                    .convert_weight_for_storage(tensor, source_layout)
+            });
 
         let expected_shape = self
             .layout_policy
@@ -456,10 +456,8 @@ mod tests {
             .with_layout_policy(ProjectionLayoutPolicy::OutputByInput)
             .with_initializer(Initializer::Constant { value: 0.125 })
             .init::<TestBackend>(&device);
-        let input = burn::tensor::Tensor::<TestBackend, 2>::from_data(
-            [[1.0, 2.0, 3.0, 4.0]],
-            &device,
-        );
+        let input =
+            burn::tensor::Tensor::<TestBackend, 2>::from_data([[1.0, 2.0, 3.0, 4.0]], &device);
         let expected = projection.clone().forward(input.clone()).into_data();
         let reloaded = StructuredProjectionConfig::new(4, 3)
             .with_layout_policy(ProjectionLayoutPolicy::OutputByInput)
@@ -479,14 +477,16 @@ mod tests {
         let linear = LinearConfig::new(2, 2)
             .with_initializer(Initializer::Constant { value: 1.0 })
             .init::<TestBackend>(&device);
-        let legacy_record = StructuredProjectionLegacyLinearRecordItem {
-            weight: <Param<burn::tensor::Tensor<TestBackend, 2>> as Record<TestBackend>>::into_item::<
-                FullPrecisionSettings,
-            >(linear.weight),
-            bias: <Option<Param<burn::tensor::Tensor<TestBackend, 1>>> as Record<TestBackend>>::into_item::<
-                FullPrecisionSettings,
-            >(linear.bias),
-        };
+        let legacy_record =
+            StructuredProjectionLegacyLinearRecordItem {
+                weight:
+                    <Param<burn::tensor::Tensor<TestBackend, 2>> as Record<TestBackend>>::into_item::<
+                        FullPrecisionSettings,
+                    >(linear.weight),
+                bias: <Option<Param<burn::tensor::Tensor<TestBackend, 1>>> as Record<
+                    TestBackend,
+                >>::into_item::<FullPrecisionSettings>(linear.bias),
+            };
         let encoded = serde_json::to_vec(&legacy_record).expect("legacy item should serialize");
         let decoded = serde_json::from_slice::<
             <StructuredProjectionRecord<TestBackend> as Record<TestBackend>>::Item<
@@ -495,9 +495,10 @@ mod tests {
         >(&encoded)
         .expect("legacy item should deserialize into structured projection record");
         assert_eq!(decoded.layout_policy, ProjectionLayoutPolicy::InputByOutput);
-        let weight = <Param<burn::tensor::Tensor<TestBackend, 2>> as Record<
-            TestBackend,
-        >>::from_item::<FullPrecisionSettings>(decoded.weight, &device);
+        let weight =
+            <Param<burn::tensor::Tensor<TestBackend, 2>> as Record<TestBackend>>::from_item::<
+                FullPrecisionSettings,
+            >(decoded.weight, &device);
         weight.to_data().assert_approx_eq::<f32>(
             &TensorData::from([[1.0, 1.0], [1.0, 1.0]]),
             Tolerance::default(),

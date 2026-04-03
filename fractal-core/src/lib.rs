@@ -5,12 +5,13 @@ pub mod fitness;
 pub mod language_model_head;
 pub mod lifecycle;
 pub mod model;
-pub mod projection;
 pub mod primitives;
+pub mod projection;
 pub mod registry;
 pub mod router;
 pub mod rule_trait;
 pub mod state;
+pub mod v2;
 
 pub use data_generator::{
     GeneratorDepthConfig, SimpleHierarchicalGenerator, TaskFamily, TokenBatch, PAD_TOKEN,
@@ -19,13 +20,13 @@ pub use diagnostics::{
     BoundaryMemoryDelta, CudaMemorySnapshot, DiagnosticBoundary, DiagnosticEvent,
     DiagnosticEventKind, DiagnosticEventSummary, DiagnosticIdentity, DiagnosticProbeKind,
     DiagnosticProbeRequest, DiagnosticsPolicy, DiagnosticsRecorder, DiagnosticsRuntimeArtifact,
-    DiagnosticsRuntimeFailure, DiagnosticsRuntimeFailureKind, ForwardGraphBurden, ProbeCadence,
+    DiagnosticsRuntimeFailure, DiagnosticsRuntimeFailureKind, ForwardGraphBurden,
     LinearProjectionLayoutMetadata, OutputProjectionDiagnosticContext,
     OutputProjectionDiagnosticEventSummary, OutputProjectionDiagnosticSpec,
-    OutputProjectionIdentity, ProjectionDiagnosticsSink, RuleProjectionDiagnosticContext,
-    RuleProjectionDiagnosticEventSummary, RuleProjectionDiagnosticSpec,
-    RuleProjectionDiagnosticsSink, RuleProjectionIdentity, RuleProjectionKind,
-    StructuredDiagnosticsOutput, TensorLayoutMetadata, TensorLayoutOrigin,
+    OutputProjectionIdentity, ProbeCadence, ProjectionDiagnosticsSink,
+    RuleProjectionDiagnosticContext, RuleProjectionDiagnosticEventSummary,
+    RuleProjectionDiagnosticSpec, RuleProjectionDiagnosticsSink, RuleProjectionIdentity,
+    RuleProjectionKind, StructuredDiagnosticsOutput, TensorLayoutMetadata, TensorLayoutOrigin,
     TensorLayoutTransform, TrainStepDiagnosticContext,
 };
 pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
@@ -68,6 +69,11 @@ pub use registry::{
 };
 pub use router::EarlyExitRouter;
 pub use state::{FractalState, StateLayout};
+pub use v2::{
+    FractalRouterHead, FractalRouterHeadShape, FractalV2Components, FractalV2Model,
+    FractalV2ModelShape, LeafSummarizer, LeafSummarizerShape, LocalTrunk, LocalTrunkShape,
+    ReadFusion, ReadFusionShape, TreeMergeCell, TreeMergeCellShape,
+};
 
 #[cfg(test)]
 mod tests;
