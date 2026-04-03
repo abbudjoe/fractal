@@ -794,6 +794,7 @@ mod tests {
         head_count: usize,
         top_leaf_reads: usize,
         leaf_size: usize,
+        fill_value: f32,
         _marker: PhantomData<B>,
     }
 
@@ -864,7 +865,7 @@ mod tests {
     }
 
     impl<B: Backend> StubExactRead<B> {
-        fn new(shape: ExactLeafReadShape) -> Self {
+        fn new(shape: ExactLeafReadShape, fill_value: f32) -> Self {
             Self {
                 query_dim: shape.query_dim,
                 key_dim: shape.key_dim,
@@ -872,6 +873,7 @@ mod tests {
                 head_count: shape.head_count,
                 top_leaf_reads: shape.top_leaf_reads,
                 leaf_size: shape.leaf_size,
+                fill_value,
                 _marker: PhantomData,
             }
         }
@@ -1137,6 +1139,11 @@ mod tests {
                 .unwrap();
             let mut local_indices = vec![-1i64; batch_size * head_count * top_leaf_reads];
             let mut absolute_positions = vec![-1i64; batch_size * head_count * top_leaf_reads];
+            let mut token_scores = vec![0.0f32; batch_size * head_count * top_leaf_reads];
+            let mut attention_weights =
+                vec![0.0f32; batch_size * head_count * top_leaf_reads * self.leaf_size];
+            let mut read_values =
+                vec![0.0f32; batch_size * head_count * top_leaf_reads * self.value_dim];
             for (flat_index, is_active) in leaf_mask_data.iter().copied().enumerate() {
                 if !is_active {
                     continue;
@@ -1145,6 +1152,11 @@ mod tests {
                 local_indices[flat_index] = 0;
                 absolute_positions[flat_index] =
                     leaf_token_cache.shared_spans()[leaf_index].start() as i64;
+                token_scores[flat_index] = 1.0;
+                let attention_offset = flat_index * self.leaf_size;
+                attention_weights[attention_offset] = 1.0;
+                let value_offset = flat_index * self.value_dim;
+                read_values[value_offset..value_offset + self.value_dim].fill(self.fill_value);
             }
 
             crate::v2::ExactLeafReadOutput::new(
@@ -1157,16 +1169,22 @@ mod tests {
                     &selected_leaf_mask.device(),
                 ),
                 selected_leaf_mask.clone(),
-                Tensor::<B, 3>::zeros(
-                    [batch_size, head_count, top_leaf_reads],
+                Tensor::<B, 3>::from_data(
+                    TensorData::new(token_scores, [batch_size, head_count, top_leaf_reads]),
                     &selected_leaf_mask.device(),
                 ),
-                Tensor::<B, 4>::zeros(
-                    [batch_size, head_count, top_leaf_reads, self.leaf_size],
+                Tensor::<B, 4>::from_data(
+                    TensorData::new(
+                        attention_weights,
+                        [batch_size, head_count, top_leaf_reads, self.leaf_size],
+                    ),
                     &selected_leaf_mask.device(),
                 ),
-                Tensor::<B, 4>::zeros(
-                    [batch_size, head_count, top_leaf_reads, self.value_dim],
+                Tensor::<B, 4>::from_data(
+                    TensorData::new(
+                        read_values,
+                        [batch_size, head_count, top_leaf_reads, self.value_dim],
+                    ),
                     &selected_leaf_mask.device(),
                 ),
                 crate::v2::ExactLeafReadDiagnostics {
@@ -1191,7 +1209,7 @@ mod tests {
         }
     }
 
-    fn valid_components() -> TestComponents {
+    fn valid_components_with_exact_read_fill(fill_value: f32) -> TestComponents {
         FractalV2Components {
             local_trunk: StubLocalTrunk::<TestBackend>::new(LocalTrunkShape {
                 token_dim: 128,
@@ -1223,14 +1241,17 @@ mod tests {
                 top_leaf_reads: 2,
                 allow_early_stop: false,
             }),
-            exact_read: StubExactRead::<TestBackend>::new(ExactLeafReadShape {
-                query_dim: 64,
-                key_dim: 48,
-                value_dim: 56,
-                head_count: 4,
-                top_leaf_reads: 2,
-                leaf_size: 16,
-            }),
+            exact_read: StubExactRead::<TestBackend>::new(
+                ExactLeafReadShape {
+                    query_dim: 64,
+                    key_dim: 48,
+                    value_dim: 56,
+                    head_count: 4,
+                    top_leaf_reads: 2,
+                    leaf_size: 16,
+                },
+                fill_value,
+            ),
             read_fusion: StubReadFusion::<TestBackend>::new(ReadFusionShape {
                 root_count: 2,
                 root_readout_dim: 64,
@@ -1238,6 +1259,10 @@ mod tests {
                 fused_readout_dim: 96,
             }),
         }
+    }
+
+    fn valid_components() -> TestComponents {
+        valid_components_with_exact_read_fill(1.0)
     }
 
     fn baseline_model<B: Backend>(root_count: usize, device: &B::Device) -> BaselineModel<B> {
@@ -1496,6 +1521,65 @@ mod tests {
             trace.final_state().leaf_token_cache().shared_spans().len(),
             1
         );
+    }
+
+    #[test]
+    fn fractal_v2_model_forward_retrieval_trace_supports_no_exact_read_ablation() {
+        let device = <TestBackend as Backend>::Device::default();
+        let enabled = FractalV2Model::new(
+            32_000,
+            128,
+            valid_components_with_exact_read_fill(1.0),
+            &device,
+        )
+        .unwrap();
+        let disabled = FractalV2Model::new(
+            32_000,
+            128,
+            valid_components_with_exact_read_fill(0.0),
+            &device,
+        )
+        .unwrap();
+        let input_ids = token_ids::<TestBackend>(
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            [1, 16],
+            &device,
+        );
+
+        let enabled_trace = enabled.forward_retrieval_trace(input_ids.clone()).unwrap();
+        let disabled_trace = disabled.forward_retrieval_trace(input_ids).unwrap();
+        let enabled_final = enabled_trace.steps().last().unwrap();
+        let disabled_final = disabled_trace.steps().last().unwrap();
+
+        assert_eq!(
+            enabled_final
+                .routed()
+                .selected_leaf_mask()
+                .to_data()
+                .convert::<bool>(),
+            disabled_final
+                .routed()
+                .selected_leaf_mask()
+                .to_data()
+                .convert::<bool>()
+        );
+        let enabled_values = enabled_final
+            .exact_read()
+            .read_values()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .unwrap();
+        let disabled_values = disabled_final
+            .exact_read()
+            .read_values()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .unwrap();
+        assert!(enabled_values.iter().any(|value| *value > 0.0));
+        assert!(disabled_values.iter().all(|value| *value == 0.0));
+        assert_ne!(enabled_values, disabled_values);
     }
 
     #[test]
