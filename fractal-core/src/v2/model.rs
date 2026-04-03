@@ -766,6 +766,40 @@ mod tests {
                 scale_embedding_dim: self.scale_embedding_dim,
             }
         }
+
+        fn merge_pair(
+            &self,
+            left: crate::v2::TreeNodeBatch<B>,
+            _right: crate::v2::TreeNodeBatch<B>,
+            _level: usize,
+        ) -> Result<crate::v2::TreeMergeOutput<B>, FractalError> {
+            let [batch_size, summary_dim] = left.summary().dims();
+            let [key_batch_size, key_dim] = left.key().dims();
+            let [value_batch_size, value_dim] = left.value().dims();
+            ensure_match(
+                "stub_tree_merge_cell.key_batch_size",
+                key_batch_size,
+                batch_size,
+            )?;
+            ensure_match(
+                "stub_tree_merge_cell.value_batch_size",
+                value_batch_size,
+                batch_size,
+            )?;
+            ensure_match(
+                "stub_tree_merge_cell.summary_dim",
+                summary_dim,
+                self.summary_dim,
+            )?;
+            ensure_match("stub_tree_merge_cell.key_dim", key_dim, self.key_dim)?;
+            ensure_match("stub_tree_merge_cell.value_dim", value_dim, self.value_dim)?;
+
+            Ok(crate::v2::TreeMergeOutput::new(
+                Tensor::<B, 2>::zeros([batch_size, self.summary_dim], &left.summary().device()),
+                Tensor::<B, 2>::zeros([batch_size, self.key_dim], &left.summary().device()),
+                Tensor::<B, 2>::zeros([batch_size, self.value_dim], &left.summary().device()),
+            ))
+        }
     }
 
     impl<B: Backend> FractalRouterHead<B> for StubRouter<B> {

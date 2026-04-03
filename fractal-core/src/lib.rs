@@ -71,18 +71,20 @@ pub use router::EarlyExitRouter;
 pub use state::{FractalState, StateLayout};
 pub use v2::{
     summarize_root_readout_sequence, BaselineLeafSummarizer, BaselineLeafSummarizerConfig,
-    BaselineLocalTrunk, BaselineLocalTrunkConfig, BatchTimelineMode, FractalRouterHead,
-    FractalRouterHeadShape, FractalV2Components, FractalV2LocalBaselineModel,
-    FractalV2LocalBaselineOutput, FractalV2LocalBaselineShape, FractalV2Model, FractalV2ModelShape,
-    FractalV2State, FractalV2StateLayout, FractalV2StateRecord, FractalV2StateShape,
-    LeafSummarizer, LeafSummarizerOutput, LeafSummarizerShape, LeafSummaryStore,
-    LeafSummaryStoreRecord, LeafSummaryStoreShape, LeafTokenCache, LeafTokenCacheRecord,
-    LeafTokenCacheShape, LiveLeafState, LiveLeafStateRecord, LiveLeafStateShape, LocalTrunk,
-    LocalTrunkDiagnostics, LocalTrunkShape, LocalTrunkStepOutput, MergeCheckpointPolicy,
-    MultiRootState, MultiRootStateRecord, MultiRootStateShape, ReadFusion, ReadFusionShape,
-    RetrievalPolicy, RootActivationStats, SealedLeafMaterialization, TokenSpan, TreeLevelStore,
-    TreeLevelStoreRecord, TreeLevelStoreShape, TreeMergeCell, TreeMergeCellShape, TreeSummaryState,
-    TreeSummaryStateRecord, TreeSummaryStateShape,
+    BaselineLocalTrunk, BaselineLocalTrunkConfig, BaselineTreeMergeCell,
+    BaselineTreeMergeCellConfig, BatchTimelineMode, FractalRouterHead, FractalRouterHeadShape,
+    FractalV2Components, FractalV2LocalBaselineModel, FractalV2LocalBaselineOutput,
+    FractalV2LocalBaselineShape, FractalV2Model, FractalV2ModelShape, FractalV2State,
+    FractalV2StateLayout, FractalV2StateRecord, FractalV2StateShape, LeafSummarizer,
+    LeafSummarizerOutput, LeafSummarizerShape, LeafSummaryStore, LeafSummaryStoreRecord,
+    LeafSummaryStoreShape, LeafTokenCache, LeafTokenCacheRecord, LeafTokenCacheShape,
+    LiveLeafState, LiveLeafStateRecord, LiveLeafStateShape, LocalTrunk, LocalTrunkDiagnostics,
+    LocalTrunkShape, LocalTrunkStepOutput, MergeCheckpointPolicy, MultiRootState,
+    MultiRootStateRecord, MultiRootStateShape, ReadFusion, ReadFusionShape, RetrievalPolicy,
+    RootActivationStats, SealedLeafMaterialization, TokenSpan, TreeLevelStore,
+    TreeLevelStoreRecord, TreeLevelStoreShape, TreeMergeCell, TreeMergeCellShape, TreeMergeOutput,
+    TreeNodeBatch, TreeSummaryDiagnostics, TreeSummaryState, TreeSummaryStateRecord,
+    TreeSummaryStateShape,
 };
 
 #[cfg(test)]

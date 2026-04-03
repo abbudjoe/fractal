@@ -29,4 +29,7 @@ pub use state::{
     TreeLevelStoreRecord, TreeLevelStoreShape, TreeSummaryState, TreeSummaryStateRecord,
     TreeSummaryStateShape,
 };
-pub use tree::{TreeMergeCell, TreeMergeCellShape};
+pub use tree::{
+    BaselineTreeMergeCell, BaselineTreeMergeCellConfig, TreeMergeCell, TreeMergeCellShape,
+    TreeMergeOutput, TreeNodeBatch, TreeSummaryDiagnostics,
+};
