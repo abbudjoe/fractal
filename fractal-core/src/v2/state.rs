@@ -805,11 +805,12 @@ impl<B: Backend> LeafSummaryStore<B> {
         &self.shared_spans
     }
 
-    pub fn push_sealed_leaf(
+    pub(crate) fn push_sealed_leaf(
         &mut self,
         summary: Tensor<B, 2>,
         key: Tensor<B, 2>,
         value: Tensor<B, 2>,
+        tokens_per_leaf: usize,
         shared_span: TokenSpan,
     ) -> Result<usize, FractalError> {
         let [batch_size, summary_dim] = summary.dims();
@@ -840,16 +841,22 @@ impl<B: Backend> LeafSummaryStore<B> {
         )?;
         ensure_match("leaf_summary.push.key_dim", key_dim, expected_key_dim)?;
         ensure_match("leaf_summary.push.value_dim", value_dim, expected_value_dim)?;
+        ensure_nonzero("leaf_summary.push.tokens_per_leaf", tokens_per_leaf)?;
+        ensure_match(
+            "leaf_summary.push.shared_span.len",
+            shared_span.len(),
+            tokens_per_leaf,
+        )?;
 
         let leaf_index = leaf_count;
         let expected_span = TokenSpan::new(
-            leaf_index.checked_mul(shared_span.len()).ok_or_else(|| {
+            leaf_index.checked_mul(tokens_per_leaf).ok_or_else(|| {
                 FractalError::InvalidState(
                     "sealed leaf index overflow while computing expected span".to_string(),
                 )
             })?,
             (leaf_index + 1)
-                .checked_mul(shared_span.len())
+                .checked_mul(tokens_per_leaf)
                 .ok_or_else(|| {
                     FractalError::InvalidState(
                         "sealed leaf index overflow while computing expected span".to_string(),
@@ -1376,11 +1383,12 @@ impl<B: Backend> LeafTokenCache<B> {
         &self.shared_spans
     }
 
-    pub fn push_sealed_leaf(
+    pub(crate) fn push_sealed_leaf(
         &mut self,
         keys: Tensor<B, 3>,
         values: Tensor<B, 3>,
         mask: Tensor<B, 2, Bool>,
+        tokens_per_leaf_limit: usize,
         shared_span: TokenSpan,
     ) -> Result<usize, FractalError> {
         let [batch_size, tokens_per_leaf, key_dim] = keys.dims();
@@ -1425,6 +1433,20 @@ impl<B: Backend> LeafTokenCache<B> {
             value_dim,
             expected_value_dim,
         )?;
+        ensure_nonzero(
+            "leaf_token_cache.push.tokens_per_leaf_limit",
+            tokens_per_leaf_limit,
+        )?;
+        ensure_match(
+            "leaf_token_cache.push.tokens_per_leaf_limit",
+            tokens_per_leaf_limit,
+            expected_tokens_per_leaf,
+        )?;
+        ensure_match(
+            "leaf_token_cache.push.shared_span.len",
+            shared_span.len(),
+            tokens_per_leaf_limit,
+        )?;
         let expected_true_count = checked_usize_product(
             "leaf_token_cache.push.mask_true_count",
             &[expected_batch_size, expected_tokens_per_leaf],
@@ -1437,13 +1459,15 @@ impl<B: Backend> LeafTokenCache<B> {
 
         let leaf_index = leaf_count;
         let expected_span = TokenSpan::new(
-            leaf_index.checked_mul(shared_span.len()).ok_or_else(|| {
-                FractalError::InvalidState(
-                    "leaf token cache index overflow while computing expected span".to_string(),
-                )
-            })?,
+            leaf_index
+                .checked_mul(tokens_per_leaf_limit)
+                .ok_or_else(|| {
+                    FractalError::InvalidState(
+                        "leaf token cache index overflow while computing expected span".to_string(),
+                    )
+                })?,
             (leaf_index + 1)
-                .checked_mul(shared_span.len())
+                .checked_mul(tokens_per_leaf_limit)
                 .ok_or_else(|| {
                     FractalError::InvalidState(
                         "leaf token cache index overflow while computing expected span".to_string(),
@@ -1786,12 +1810,14 @@ impl<B: Backend> FractalV2State<B> {
             summary.clone(),
             key.clone(),
             value.clone(),
+            self.layout.leaf_size,
             shared_span,
         )?;
         let cache_leaf_index = self.leaf_token_cache.push_sealed_leaf(
             token_keys.clone(),
             token_values.clone(),
             token_mask.clone(),
+            self.layout.leaf_size,
             shared_span,
         )?;
         ensure_match(
@@ -2611,6 +2637,63 @@ mod tests {
 
         assert!(
             matches!(error, FractalError::InvalidConfig(message) if message.contains("state.append_root_readouts.readout_dim"))
+        );
+    }
+
+    #[test]
+    fn leaf_summary_store_push_rejects_non_fixed_sealed_span_width() {
+        let device = <TestBackend as Backend>::Device::default();
+        let layout = FractalV2StateLayout::from_model_shape(test_model_shape(), 2).unwrap();
+        let mut store = LeafSummaryStore::<TestBackend>::empty(layout, &device);
+
+        let error = store
+            .push_sealed_leaf(
+                Tensor::<TestBackend, 2>::zeros([layout.batch_size, layout.summary_dim], &device),
+                Tensor::<TestBackend, 2>::zeros([layout.batch_size, layout.key_dim], &device),
+                Tensor::<TestBackend, 2>::zeros([layout.batch_size, layout.value_dim], &device),
+                layout.leaf_size,
+                TokenSpan::new(0, layout.leaf_size / 2).unwrap(),
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(error, FractalError::InvalidConfig(message) if message.contains("leaf_summary.push.shared_span.len"))
+        );
+    }
+
+    #[test]
+    fn leaf_token_cache_push_rejects_non_fixed_sealed_span_width() {
+        let device = <TestBackend as Backend>::Device::default();
+        let layout = FractalV2StateLayout::from_model_shape(test_model_shape(), 2).unwrap();
+        let mut cache = LeafTokenCache::<TestBackend>::empty(layout, &device);
+
+        let error = cache
+            .push_sealed_leaf(
+                Tensor::<TestBackend, 3>::zeros(
+                    [
+                        layout.batch_size,
+                        layout.leaf_size,
+                        layout.token_cache_key_dim,
+                    ],
+                    &device,
+                ),
+                Tensor::<TestBackend, 3>::zeros(
+                    [
+                        layout.batch_size,
+                        layout.leaf_size,
+                        layout.token_cache_value_dim,
+                    ],
+                    &device,
+                ),
+                Tensor::<TestBackend, 2, Int>::ones([layout.batch_size, layout.leaf_size], &device)
+                    .greater_elem(0),
+                layout.leaf_size,
+                TokenSpan::new(0, layout.leaf_size / 2).unwrap(),
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(error, FractalError::InvalidConfig(message) if message.contains("leaf_token_cache.push.shared_span.len"))
         );
     }
 
