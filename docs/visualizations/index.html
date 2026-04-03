@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fractal Architecture Visualizations</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+    <div class="page-shell">
+        <header class="hero">
+            <div>
+                <div class="eyebrow">
+                    <span class="pulse-dot"></span>
+                    Visualization Bundle
+                </div>
+                <h1 class="title">LLM Architecture in 3D</h1>
+                <p class="subtitle">
+                    Four interactive pages to compare standard transformers, hybrids, our original
+                    recursive attempt, and the new recursive-memory direction. The goal is not
+                    photorealism. The goal is a better mental model.
+                </p>
+            </div>
+            <nav class="nav-cluster">
+                <a class="nav-link" href="./gpt.html">GPT / Transformer</a>
+                <a class="nav-link" href="./hybrid.html">Hybrid / Jamba</a>
+                <a class="nav-link" href="./fractal-v1.html">Fractal v1</a>
+                <a class="nav-link" href="./fractal-v2.html">Fractal v2</a>
+            </nav>
+        </header>
+
+        <section class="home-grid">
+            <a class="home-card" href="./gpt.html">
+                <span class="home-chip">Page 1</span>
+                <h2>GPT-Like LLM</h2>
+                <p>
+                    Dense token-addressable memory, stacked attention layers, KV cache behavior,
+                    and separate runtime views for training, prefill, decode, and synthesis.
+                </p>
+            </a>
+
+            <a class="home-card" href="./hybrid.html">
+                <span class="home-chip">Page 2</span>
+                <h2>Hybrid Model</h2>
+                <p>
+                    Alternating attention and selective state paths, showing why hybrids can trade
+                    off speed and retrieval better than all-or-nothing designs.
+                </p>
+            </a>
+
+            <a class="home-card" href="./fractal-v1.html">
+                <span class="home-chip">Page 3</span>
+                <h2>What We Built</h2>
+                <p>
+                    The single-root recursive kernel in 3D, with a focused failure view that shows
+                    where training pressure accumulated and why v1 stopped feeling like the right thesis.
+                </p>
+            </a>
+
+            <a class="home-card" href="./fractal-v2.html">
+                <span class="home-chip">Page 4</span>
+                <h2>What We Are Building Now</h2>
+                <p>
+                    Parallel roots, leaf blocks, dyadic tree summaries, sparse routing heads, exact
+                    leaf reads, and runtime views for training, prefill, decode, and synthesis.
+                </p>
+            </a>
+        </section>
+
+        <p class="footer-note">
+            Recommended use: open the pages side by side and flip modes while comparing the same
+            runtime phase across architectures. That tends to make the memory story and the cost
+            story click much faster than reading prose alone.
+        </p>
+    </div>
+</body>
+</html>
