@@ -21,15 +21,11 @@ use super::{
 pub struct FractalV2ModelShape {
     pub vocab_size: usize,
     pub token_dim: usize,
-    pub root_count: usize,
-    pub leaf_size: usize,
-    pub summary_dim: usize,
-    pub tree_key_dim: usize,
-    pub tree_value_dim: usize,
-    pub routing_head_count: usize,
-    pub beam_width: usize,
-    pub top_leaf_reads: usize,
-    pub fused_readout_dim: usize,
+    pub local_trunk: LocalTrunkShape,
+    pub leaf_summarizer: LeafSummarizerShape,
+    pub tree_merge_cell: TreeMergeCellShape,
+    pub router: FractalRouterHeadShape,
+    pub read_fusion: ReadFusionShape,
 }
 
 #[derive(Debug)]
@@ -50,15 +46,30 @@ pub struct FractalV2Model<
     RH: Module<B>,
     RF: Module<B>,
 > {
-    pub embedding: Embedding<B>,
-    pub local_trunk: LT,
-    pub leaf_summarizer: LS,
-    pub tree_merge_cell: TM,
-    pub router: RH,
-    pub read_fusion: RF,
-    pub output: LanguageModelHead<B>,
+    embedding: Embedding<B>,
+    local_trunk: LT,
+    leaf_summarizer: LS,
+    tree_merge_cell: TM,
+    router: RH,
+    read_fusion: RF,
+    output: LanguageModelHead<B>,
     vocab_size: usize,
     token_dim: usize,
+    root_count: usize,
+    root_state_dim: usize,
+    root_readout_dim: usize,
+    leaf_size: usize,
+    summary_dim: usize,
+    key_dim: usize,
+    value_dim: usize,
+    token_cache_key_dim: usize,
+    token_cache_value_dim: usize,
+    scale_embedding_dim: usize,
+    routing_head_count: usize,
+    beam_width: usize,
+    top_leaf_reads: usize,
+    allow_early_stop: bool,
+    fused_readout_dim: usize,
 }
 
 impl<B, LT, LS, TM, RH, RF> FractalV2Model<B, LT, LS, TM, RH, RF>
@@ -93,7 +104,8 @@ where
             read_fusion.shape(),
         )?;
         let embedding = EmbeddingConfig::new(vocab_size, token_dim).init(device);
-        let output = LanguageModelHeadConfig::new(shape.fused_readout_dim, vocab_size).init(device);
+        let output = LanguageModelHeadConfig::new(shape.read_fusion.fused_readout_dim, vocab_size)
+            .init(device);
 
         Ok(Self {
             embedding,
@@ -105,26 +117,92 @@ where
             output,
             vocab_size: shape.vocab_size,
             token_dim: shape.token_dim,
+            root_count: shape.local_trunk.root_count,
+            root_state_dim: shape.local_trunk.root_state_dim,
+            root_readout_dim: shape.local_trunk.root_readout_dim,
+            leaf_size: shape.local_trunk.leaf_size,
+            summary_dim: shape.leaf_summarizer.summary_dim,
+            key_dim: shape.leaf_summarizer.key_dim,
+            value_dim: shape.leaf_summarizer.value_dim,
+            token_cache_key_dim: shape.leaf_summarizer.token_cache_key_dim,
+            token_cache_value_dim: shape.leaf_summarizer.token_cache_value_dim,
+            scale_embedding_dim: shape.tree_merge_cell.scale_embedding_dim,
+            routing_head_count: shape.router.head_count,
+            beam_width: shape.router.beam_width,
+            top_leaf_reads: shape.router.top_leaf_reads,
+            allow_early_stop: shape.router.allow_early_stop,
+            fused_readout_dim: shape.read_fusion.fused_readout_dim,
         })
     }
 
-    pub fn shape(&self) -> FractalV2ModelShape {
-        let local_trunk = self.local_trunk.shape();
-        let tree = self.tree_merge_cell.shape();
-        let router = self.router.shape();
+    pub fn embedding(&self) -> &Embedding<B> {
+        &self.embedding
+    }
 
+    pub fn local_trunk(&self) -> &LT {
+        &self.local_trunk
+    }
+
+    pub fn leaf_summarizer(&self) -> &LS {
+        &self.leaf_summarizer
+    }
+
+    pub fn tree_merge_cell(&self) -> &TM {
+        &self.tree_merge_cell
+    }
+
+    pub fn router(&self) -> &RH {
+        &self.router
+    }
+
+    pub fn read_fusion(&self) -> &RF {
+        &self.read_fusion
+    }
+
+    pub fn output(&self) -> &LanguageModelHead<B> {
+        &self.output
+    }
+
+    pub fn shape(&self) -> FractalV2ModelShape {
         FractalV2ModelShape {
             vocab_size: self.vocab_size,
             token_dim: self.token_dim,
-            root_count: local_trunk.root_count,
-            leaf_size: local_trunk.leaf_size,
-            summary_dim: tree.summary_dim,
-            tree_key_dim: tree.key_dim,
-            tree_value_dim: tree.value_dim,
-            routing_head_count: router.head_count,
-            beam_width: router.beam_width,
-            top_leaf_reads: router.top_leaf_reads,
-            fused_readout_dim: self.read_fusion.shape().fused_readout_dim,
+            local_trunk: LocalTrunkShape {
+                token_dim: self.token_dim,
+                root_count: self.root_count,
+                root_state_dim: self.root_state_dim,
+                root_readout_dim: self.root_readout_dim,
+                leaf_size: self.leaf_size,
+            },
+            leaf_summarizer: LeafSummarizerShape {
+                token_dim: self.token_dim,
+                leaf_size: self.leaf_size,
+                summary_dim: self.summary_dim,
+                key_dim: self.key_dim,
+                value_dim: self.value_dim,
+                token_cache_key_dim: self.token_cache_key_dim,
+                token_cache_value_dim: self.token_cache_value_dim,
+            },
+            tree_merge_cell: TreeMergeCellShape {
+                summary_dim: self.summary_dim,
+                key_dim: self.key_dim,
+                value_dim: self.value_dim,
+                scale_embedding_dim: self.scale_embedding_dim,
+            },
+            router: FractalRouterHeadShape {
+                query_dim: self.root_readout_dim,
+                key_dim: self.key_dim,
+                head_count: self.routing_head_count,
+                beam_width: self.beam_width,
+                top_leaf_reads: self.top_leaf_reads,
+                allow_early_stop: self.allow_early_stop,
+            },
+            read_fusion: ReadFusionShape {
+                root_count: self.root_count,
+                root_readout_dim: self.root_readout_dim,
+                retrieved_value_dim: self.token_cache_value_dim,
+                fused_readout_dim: self.fused_readout_dim,
+            },
         }
     }
 
@@ -219,15 +297,11 @@ where
         Ok(FractalV2ModelShape {
             vocab_size,
             token_dim,
-            root_count: local_trunk.root_count,
-            leaf_size: local_trunk.leaf_size,
-            summary_dim: tree.summary_dim,
-            tree_key_dim: tree.key_dim,
-            tree_value_dim: tree.value_dim,
-            routing_head_count: router.head_count,
-            beam_width: router.beam_width,
-            top_leaf_reads: router.top_leaf_reads,
-            fused_readout_dim: read_fusion.fused_readout_dim,
+            local_trunk,
+            leaf_summarizer: leaf,
+            tree_merge_cell: tree,
+            router,
+            read_fusion,
         })
     }
 }
@@ -507,18 +581,45 @@ mod tests {
             FractalV2ModelShape {
                 vocab_size: 32_000,
                 token_dim: 128,
-                root_count: 2,
-                leaf_size: 16,
-                summary_dim: 80,
-                tree_key_dim: 48,
-                tree_value_dim: 72,
-                routing_head_count: 4,
-                beam_width: 2,
-                top_leaf_reads: 2,
-                fused_readout_dim: 96,
+                local_trunk: LocalTrunkShape {
+                    token_dim: 128,
+                    root_count: 2,
+                    root_state_dim: 96,
+                    root_readout_dim: 64,
+                    leaf_size: 16,
+                },
+                leaf_summarizer: LeafSummarizerShape {
+                    token_dim: 128,
+                    leaf_size: 16,
+                    summary_dim: 80,
+                    key_dim: 48,
+                    value_dim: 72,
+                    token_cache_key_dim: 48,
+                    token_cache_value_dim: 56,
+                },
+                tree_merge_cell: TreeMergeCellShape {
+                    summary_dim: 80,
+                    key_dim: 48,
+                    value_dim: 72,
+                    scale_embedding_dim: 12,
+                },
+                router: FractalRouterHeadShape {
+                    query_dim: 64,
+                    key_dim: 48,
+                    head_count: 4,
+                    beam_width: 2,
+                    top_leaf_reads: 2,
+                    allow_early_stop: false,
+                },
+                read_fusion: ReadFusionShape {
+                    root_count: 2,
+                    root_readout_dim: 64,
+                    retrieved_value_dim: 56,
+                    fused_readout_dim: 96,
+                },
             }
         );
-        assert_eq!(model.output.logical_dims(), [96, 32_000]);
+        assert_eq!(model.output().logical_dims(), [96, 32_000]);
     }
 
     #[test]
@@ -568,5 +669,18 @@ mod tests {
         components.read_fusion.fused_readout_dim = 0;
 
         assert_invalid_config(components, "read_fusion.fused_readout_dim");
+    }
+
+    #[test]
+    fn fractal_v2_model_shape_uses_validated_contract_not_live_component_state() {
+        let device = <TestBackend as Backend>::Device::default();
+        let mut model = FractalV2Model::new(32_000, 128, valid_components(), &device).unwrap();
+
+        model.router.query_dim = 17;
+        model.read_fusion.fused_readout_dim = 23;
+
+        assert_eq!(model.shape().router.query_dim, 64);
+        assert_eq!(model.shape().read_fusion.fused_readout_dim, 96);
+        assert_eq!(model.output().logical_dims(), [96, 32_000]);
     }
 }
