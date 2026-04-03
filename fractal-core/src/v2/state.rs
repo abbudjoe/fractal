@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::FractalError;
 
-use super::{model::FractalV2ModelShape, router::FractalRouterHeadShape};
+use super::{
+    local_trunk::LocalTrunkShape, model::FractalV2ModelShape, router::FractalRouterHeadShape,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchTimelineMode {
@@ -248,6 +250,74 @@ pub struct MultiRootState<B: Backend> {
 }
 
 impl<B: Backend> MultiRootState<B> {
+    pub fn from_tensors(
+        recurrent: Tensor<B, 3>,
+        read_intent: Tensor<B, 3>,
+        write_intent: Tensor<B, 3>,
+    ) -> Result<Self, FractalError> {
+        let [batch_size, root_count, recurrent_dim] = recurrent.dims();
+        let [read_batch, read_root_count, intent_dim] = read_intent.dims();
+        let [write_batch, write_root_count, write_intent_dim] = write_intent.dims();
+
+        ensure_nonzero("multi_root.batch_size", batch_size)?;
+        ensure_nonzero("multi_root.root_count", root_count)?;
+        ensure_match("multi_root.read_intent.batch_size", read_batch, batch_size)?;
+        ensure_match(
+            "multi_root.read_intent.root_count",
+            read_root_count,
+            root_count,
+        )?;
+        ensure_match(
+            "multi_root.write_intent.batch_size",
+            write_batch,
+            batch_size,
+        )?;
+        ensure_match(
+            "multi_root.write_intent.root_count",
+            write_root_count,
+            root_count,
+        )?;
+        ensure_match(
+            "multi_root.write_intent.intent_dim",
+            write_intent_dim,
+            intent_dim,
+        )?;
+        ensure_nonzero("multi_root.recurrent_dim", recurrent_dim)?;
+        ensure_nonzero("multi_root.intent_dim", intent_dim)?;
+
+        Ok(Self {
+            recurrent,
+            read_intent,
+            write_intent,
+        })
+    }
+
+    pub fn zeros_for_local_trunk(
+        batch_size: usize,
+        shape: LocalTrunkShape,
+        device: &B::Device,
+    ) -> Result<Self, FractalError> {
+        ensure_nonzero("multi_root.batch_size", batch_size)?;
+        ensure_nonzero("multi_root.root_count", shape.root_count)?;
+        ensure_nonzero("multi_root.recurrent_dim", shape.root_state_dim)?;
+        ensure_nonzero("multi_root.intent_dim", shape.root_readout_dim)?;
+
+        Ok(Self {
+            recurrent: Tensor::<B, 3>::zeros(
+                [batch_size, shape.root_count, shape.root_state_dim],
+                device,
+            ),
+            read_intent: Tensor::<B, 3>::zeros(
+                [batch_size, shape.root_count, shape.root_readout_dim],
+                device,
+            ),
+            write_intent: Tensor::<B, 3>::zeros(
+                [batch_size, shape.root_count, shape.root_readout_dim],
+                device,
+            ),
+        })
+    }
+
     pub fn zeros(layout: FractalV2StateLayout, device: &B::Device) -> Self {
         Self {
             recurrent: Tensor::<B, 3>::zeros(
@@ -1803,6 +1873,36 @@ mod tests {
         assert_eq!(policy.beam_width(), 2);
         assert_eq!(policy.top_k_reads(), 2);
         assert!(!policy.allow_early_stop());
+    }
+
+    #[test]
+    fn multi_root_state_from_tensors_rejects_zero_batch_size() {
+        let device = <TestBackend as Backend>::Device::default();
+        let error = MultiRootState::from_tensors(
+            Tensor::<TestBackend, 3>::zeros([0, 2, 4], &device),
+            Tensor::<TestBackend, 3>::zeros([0, 2, 3], &device),
+            Tensor::<TestBackend, 3>::zeros([0, 2, 3], &device),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, FractalError::InvalidConfig(message) if message.contains("multi_root.batch_size"))
+        );
+    }
+
+    #[test]
+    fn multi_root_state_from_tensors_rejects_zero_root_count() {
+        let device = <TestBackend as Backend>::Device::default();
+        let error = MultiRootState::from_tensors(
+            Tensor::<TestBackend, 3>::zeros([1, 0, 4], &device),
+            Tensor::<TestBackend, 3>::zeros([1, 0, 3], &device),
+            Tensor::<TestBackend, 3>::zeros([1, 0, 3], &device),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, FractalError::InvalidConfig(message) if message.contains("multi_root.root_count"))
+        );
     }
 
     #[test]
