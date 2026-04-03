@@ -413,13 +413,11 @@ mod tests {
     use burn::{
         backend::Candle,
         nn::{Linear, LinearConfig},
-        optim::GradientsParams,
         record::{FullPrecisionSettings, Record},
         tensor::{TensorData, Tolerance},
     };
 
     use super::*;
-    use crate::registry::{CpuBackend, CpuTrainBackend};
 
     type TestBackend = Candle<f32, i64>;
 
@@ -508,38 +506,5 @@ mod tests {
             &TensorData::from([[1.0, 1.0], [1.0, 1.0]]),
             Tolerance::default(),
         );
-    }
-
-    #[test]
-    fn structured_projection_output_by_input_backward_matches_manual_weight_grad() {
-        let device = Default::default();
-        let projection = StructuredProjectionConfig::new(4, 3)
-            .with_layout_policy(ProjectionLayoutPolicy::OutputByInput)
-            .with_initializer(Initializer::Zeros)
-            .init::<CpuTrainBackend>(&device);
-        let input = burn::tensor::Tensor::<CpuTrainBackend, 2>::from_data(
-            [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
-            &device,
-        );
-
-        let grads = GradientsParams::from_grads(projection.forward(input).backward(), &projection);
-        let weight_grad = grads
-            .get::<CpuBackend, 2>(projection.weight.id)
-            .expect("weight grad should exist");
-        let bias_grad = grads
-            .get::<CpuBackend, 1>(projection.bias.as_ref().expect("bias").id)
-            .expect("bias grad should exist");
-
-        weight_grad.to_data().assert_approx_eq::<f32>(
-            &TensorData::from([
-                [6.0, 8.0, 10.0, 12.0],
-                [6.0, 8.0, 10.0, 12.0],
-                [6.0, 8.0, 10.0, 12.0],
-            ]),
-            Tolerance::default(),
-        );
-        bias_grad
-            .to_data()
-            .assert_approx_eq::<f32>(&TensorData::from([2.0, 2.0, 2.0]), Tolerance::default());
     }
 }

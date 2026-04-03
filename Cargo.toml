@@ -33,7 +33,6 @@ burn-candle = "=0.20.1"
 rand = "0.8"
 
 [patch.crates-io]
-burn-autodiff = { path = "vendor/burn-autodiff" }
 burn-candle = { path = "vendor/burn-candle" }
 
 [dependencies]
