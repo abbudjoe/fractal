@@ -284,12 +284,9 @@ impl<B: Backend> FractalRouterHead<B> for BaselineFractalRouterHead<B> {
                 entropy_sum += routed.entropy_sum;
                 entropy_count += routed.entropy_count;
                 routing_depths.push(routed.depth);
-                selected_distances.extend(
-                    routed
-                        .selected_leaf_spans
-                        .iter()
-                        .map(|span| query_position.saturating_sub(span.end())),
-                );
+                for span in &routed.selected_leaf_spans {
+                    selected_distances.push(selected_span_distance(query_position, *span)?);
+                }
                 batch_routes.push(routed.into_batch_route());
             }
 
@@ -395,7 +392,19 @@ fn route_single_batch<B: Backend>(
     let mut entropy_count = 0usize;
 
     while active[0].level() > 0 {
-        let considered = collect_child_candidates(tree, &active)?;
+        let considered = collect_child_candidates(tree, &active, query_position)?;
+        if considered.is_empty() {
+            let depth = steps.len();
+            return Ok(RoutedBatchSelection {
+                steps,
+                selected_leaf_indices: Vec::new(),
+                selected_leaf_spans: Vec::new(),
+                selected_leaf_scores: Vec::new(),
+                entropy_sum,
+                entropy_count,
+                depth,
+            });
+        }
         let next_is_leaf = considered[0].level() == 0;
         let keep = if next_is_leaf {
             shape.top_leaf_reads.min(considered.len())
@@ -428,7 +437,6 @@ fn route_single_batch<B: Backend>(
         .map(|step| step.surviving_candidate_scores.clone())
         .unwrap_or_else(|| vec![1.0]);
     let depth = steps.len();
-    let _ = query_position;
 
     Ok(RoutedBatchSelection {
         steps,
@@ -490,15 +498,15 @@ fn select_top_candidates<B: Backend>(
 fn collect_child_candidates<B: Backend>(
     tree: &TreeSummaryState<B>,
     active: &[TreeNodeAddress],
+    query_position: usize,
 ) -> Result<Vec<TreeNodeAddress>, FractalError> {
     let mut children = Vec::new();
     for node in active {
-        children.extend(tree.child_addresses(*node)?);
-    }
-    if children.is_empty() {
-        return Err(FractalError::InvalidState(
-            "router could not descend because the active tree frontier had no children".to_string(),
-        ));
+        children.extend(
+            tree.child_addresses(*node)?
+                .into_iter()
+                .filter(|child| child.shared_span().end() <= query_position),
+        );
     }
 
     Ok(children)
@@ -702,6 +710,17 @@ fn entropy(probabilities: &[f32]) -> f32 {
         .filter(|probability| *probability > 0.0)
         .map(|probability| -probability * probability.ln())
         .sum()
+}
+
+fn selected_span_distance(query_position: usize, span: TokenSpan) -> Result<usize, FractalError> {
+    query_position.checked_sub(span.end()).ok_or_else(|| {
+        FractalError::InvalidState(format!(
+            "router selected future span [{}, {}) for query position {}",
+            span.start(),
+            span.end(),
+            query_position
+        ))
+    })
 }
 
 fn selection_flat_index(
@@ -1015,6 +1034,39 @@ mod tests {
             .unwrap();
 
         assert_ne!(positive_indices[0], negative_indices[0]);
+    }
+
+    #[test]
+    fn baseline_router_rejects_future_leaf_spans_for_earlier_query_positions() {
+        let device = Default::default();
+        let tree = manual_tree(&device);
+        let router = test_router(&device);
+        let routed = router
+            .route(
+                Tensor::<TestBackend, 2>::from_data([[-3.0, 0.0]], &device),
+                32,
+                &tree,
+            )
+            .unwrap();
+        let selected_indices = routed
+            .selected_leaf_indices()
+            .to_data()
+            .convert::<i64>()
+            .into_vec::<i64>()
+            .unwrap();
+        let selected_mask = routed
+            .selected_leaf_mask()
+            .to_data()
+            .into_vec::<bool>()
+            .unwrap();
+
+        for (flat_index, is_selected) in selected_mask.iter().enumerate() {
+            if !is_selected {
+                continue;
+            }
+            let selected = usize::try_from(selected_indices[flat_index]).unwrap();
+            assert!(selected < 2);
+        }
     }
 
     #[test]
