@@ -70,21 +70,23 @@ pub use registry::{
 pub use router::EarlyExitRouter;
 pub use state::{FractalState, StateLayout};
 pub use v2::{
-    summarize_root_readout_sequence, BaselineLeafSummarizer, BaselineLeafSummarizerConfig,
-    BaselineLocalTrunk, BaselineLocalTrunkConfig, BaselineTreeMergeCell,
-    BaselineTreeMergeCellConfig, BatchTimelineMode, FractalRouterHead, FractalRouterHeadShape,
-    FractalV2Components, FractalV2LocalBaselineModel, FractalV2LocalBaselineOutput,
-    FractalV2LocalBaselineShape, FractalV2Model, FractalV2ModelShape, FractalV2State,
-    FractalV2StateLayout, FractalV2StateRecord, FractalV2StateShape, LeafSummarizer,
+    summarize_root_readout_sequence, BaselineFractalRouterHead, BaselineFractalRouterHeadConfig,
+    BaselineLeafSummarizer, BaselineLeafSummarizerConfig, BaselineLocalTrunk,
+    BaselineLocalTrunkConfig, BaselineTreeMergeCell, BaselineTreeMergeCellConfig, BatchHeadRoute,
+    BatchRouteStep, BatchTimelineMode, FractalRouteOutput, FractalRouterHead,
+    FractalRouterHeadShape, FractalRoutingDiagnostics, FractalV2Components,
+    FractalV2LocalBaselineModel, FractalV2LocalBaselineOutput, FractalV2LocalBaselineShape,
+    FractalV2Model, FractalV2ModelShape, FractalV2State, FractalV2StateLayout,
+    FractalV2StateRecord, FractalV2StateShape, HeadRouteTrace, LeafSummarizer,
     LeafSummarizerOutput, LeafSummarizerShape, LeafSummaryStore, LeafSummaryStoreRecord,
     LeafSummaryStoreShape, LeafTokenCache, LeafTokenCacheRecord, LeafTokenCacheShape,
     LiveLeafState, LiveLeafStateRecord, LiveLeafStateShape, LocalTrunk, LocalTrunkDiagnostics,
     LocalTrunkShape, LocalTrunkStepOutput, MergeCheckpointPolicy, MultiRootState,
     MultiRootStateRecord, MultiRootStateShape, ReadFusion, ReadFusionShape, RetrievalPolicy,
-    RootActivationStats, SealedLeafMaterialization, TokenSpan, TreeLevelStore,
+    RootActivationStats, RoutingHistogramBin, SealedLeafMaterialization, TokenSpan, TreeLevelStore,
     TreeLevelStoreRecord, TreeLevelStoreShape, TreeMergeCell, TreeMergeCellShape, TreeMergeOutput,
-    TreeNodeBatch, TreeSummaryDiagnostics, TreeSummaryState, TreeSummaryStateRecord,
-    TreeSummaryStateShape,
+    TreeNodeAddress, TreeNodeBatch, TreeSummaryDiagnostics, TreeSummaryState,
+    TreeSummaryStateRecord, TreeSummaryStateShape,
 };
 
 #[cfg(test)]

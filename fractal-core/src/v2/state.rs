@@ -1292,6 +1292,27 @@ pub struct TreeSummaryStateShape {
     pub levels: Vec<TreeLevelStoreShape>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TreeNodeAddress {
+    level: usize,
+    index: usize,
+    shared_span: TokenSpan,
+}
+
+impl TreeNodeAddress {
+    pub fn level(&self) -> usize {
+        self.level
+    }
+
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    pub fn shared_span(&self) -> TokenSpan {
+        self.shared_span
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TreeSummaryStateRecord<B: Backend> {
     pub levels: Vec<TreeLevelStoreRecord<B>>,
@@ -1362,6 +1383,83 @@ impl<B: Backend> TreeSummaryState<B> {
 
     pub fn levels(&self) -> &[TreeLevelStore<B>] {
         &self.levels
+    }
+
+    pub fn level(&self, level: usize) -> Option<&TreeLevelStore<B>> {
+        self.levels.get(level)
+    }
+
+    pub fn key_dim(&self) -> usize {
+        self.layout.key_dim
+    }
+
+    pub fn value_dim(&self) -> usize {
+        self.layout.value_dim
+    }
+
+    pub fn root_address(&self) -> Option<TreeNodeAddress> {
+        self.levels
+            .last()
+            .and_then(|level| self.node_address(level.level(), 0).ok())
+    }
+
+    pub fn node_address(
+        &self,
+        level: usize,
+        index: usize,
+    ) -> Result<TreeNodeAddress, FractalError> {
+        let level_store = self.level(level).ok_or_else(|| {
+            FractalError::InvalidState(format!("tree level {level} does not exist"))
+        })?;
+        let shared_span = level_store
+            .shared_spans()
+            .get(index)
+            .copied()
+            .ok_or_else(|| {
+                FractalError::InvalidState(format!(
+                    "tree level {level} node index {index} is out of bounds for {} nodes",
+                    level_store.node_count()
+                ))
+            })?;
+
+        Ok(TreeNodeAddress {
+            level,
+            index,
+            shared_span,
+        })
+    }
+
+    pub fn child_addresses(
+        &self,
+        node: TreeNodeAddress,
+    ) -> Result<Vec<TreeNodeAddress>, FractalError> {
+        if node.level == 0 {
+            return Ok(Vec::new());
+        }
+
+        let node = self.node_address(node.level, node.index)?;
+        let child_level = self.level(node.level - 1).ok_or_else(|| {
+            FractalError::InvalidState(format!(
+                "tree level {} does not exist while resolving children for level {} node {}",
+                node.level - 1,
+                node.level,
+                node.index
+            ))
+        })?;
+        let mut children = Vec::new();
+
+        for (index, span) in child_level.shared_spans().iter().copied().enumerate() {
+            if span.start() >= node.shared_span.start() && span.end() <= node.shared_span.end() {
+                children.push(TreeNodeAddress {
+                    level: node.level - 1,
+                    index,
+                    shared_span: span,
+                });
+            }
+        }
+
+        validate_child_partition(node, &children)?;
+        Ok(children)
     }
 
     pub fn diagnostics(&self) -> TreeSummaryDiagnostics {
@@ -2659,6 +2757,41 @@ fn validate_state_consistency<B: Backend>(
     }
 
     validate_tree_parent_chain(tree, sealed_leaves.shared_spans())
+}
+
+fn validate_child_partition(
+    parent: TreeNodeAddress,
+    children: &[TreeNodeAddress],
+) -> Result<(), FractalError> {
+    if children.is_empty() {
+        return Err(FractalError::InvalidState(format!(
+            "tree level {} node {} has no child nodes in level {}",
+            parent.level(),
+            parent.index(),
+            parent.level().saturating_sub(1)
+        )));
+    }
+
+    ensure_match(
+        "tree_node.children.first_start",
+        children[0].shared_span().start(),
+        parent.shared_span().start(),
+    )?;
+    ensure_match(
+        "tree_node.children.last_end",
+        children[children.len() - 1].shared_span().end(),
+        parent.shared_span().end(),
+    )?;
+
+    for window in children.windows(2) {
+        ensure_match(
+            "tree_node.children.contiguous_spans",
+            window[0].shared_span().end(),
+            window[1].shared_span().start(),
+        )?;
+    }
+
+    Ok(())
 }
 
 fn validate_live_leaf_zero_tail<B: Backend>(
