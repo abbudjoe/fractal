@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::FractalError;
 
 use super::{
-    local_trunk::LocalTrunkShape, model::FractalV2ModelShape, router::FractalRouterHeadShape,
+    leaf::LeafSummarizer, local_trunk::LocalTrunkShape, model::FractalV2ModelShape,
+    router::FractalRouterHeadShape,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -551,6 +552,68 @@ impl<B: Backend> LiveLeafState<B> {
     pub fn shared_valid_tokens(&self) -> usize {
         self.shared_valid_tokens
     }
+
+    pub fn append_root_readouts(
+        &mut self,
+        root_readouts: Tensor<B, 3>,
+    ) -> Result<Option<(Tensor<B, 4>, TokenSpan)>, FractalError> {
+        let [batch_size, root_count, readout_dim] = root_readouts.dims();
+        let [expected_batch_size, expected_root_count, leaf_size, expected_readout_dim] =
+            self.token_readouts.dims();
+        ensure_match(
+            "live_leaf.append.batch_size",
+            batch_size,
+            expected_batch_size,
+        )?;
+        ensure_match(
+            "live_leaf.append.root_count",
+            root_count,
+            expected_root_count,
+        )?;
+        ensure_match(
+            "live_leaf.append.readout_dim",
+            readout_dim,
+            expected_readout_dim,
+        )?;
+        ensure_at_most(
+            "live_leaf.append.shared_valid_tokens",
+            self.shared_valid_tokens,
+            leaf_size,
+        )?;
+        if self.shared_valid_tokens == leaf_size {
+            return Err(FractalError::InvalidState(
+                "live leaf is full before append; it should have been sealed already".to_string(),
+            ));
+        }
+
+        let token_index = self.shared_valid_tokens;
+        self.token_readouts = self.token_readouts.clone().slice_assign(
+            [
+                0..batch_size,
+                0..root_count,
+                token_index..token_index + 1,
+                0..readout_dim,
+            ],
+            root_readouts.reshape([batch_size, root_count, 1, readout_dim]),
+        );
+        self.shared_valid_tokens += 1;
+        self.shared_span = TokenSpan::new(self.shared_span.start(), self.shared_span.end() + 1)?;
+
+        if self.shared_valid_tokens < leaf_size {
+            return Ok(None);
+        }
+
+        let sealed_token_readouts = self.token_readouts.clone();
+        let sealed_span = self.shared_span;
+        self.token_readouts = Tensor::<B, 4>::zeros(
+            [batch_size, root_count, leaf_size, readout_dim],
+            &sealed_token_readouts.device(),
+        );
+        self.shared_valid_tokens = 0;
+        self.shared_span = TokenSpan::empty_at(sealed_span.end());
+
+        Ok(Some((sealed_token_readouts, sealed_span)))
+    }
 }
 
 impl<B: Backend> Record<B> for LiveLeafStateRecord<B> {
@@ -570,6 +633,52 @@ impl<B: Backend> Record<B> for LiveLeafStateRecord<B> {
             shared_span: item.shared_span,
             shared_valid_tokens: item.shared_valid_tokens,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SealedLeafMaterialization<B: Backend> {
+    leaf_index: usize,
+    shared_span: TokenSpan,
+    summary: Tensor<B, 2>,
+    key: Tensor<B, 2>,
+    value: Tensor<B, 2>,
+    token_keys: Tensor<B, 3>,
+    token_values: Tensor<B, 3>,
+    token_mask: Tensor<B, 2, Bool>,
+}
+
+impl<B: Backend> SealedLeafMaterialization<B> {
+    pub fn leaf_index(&self) -> usize {
+        self.leaf_index
+    }
+
+    pub fn shared_span(&self) -> TokenSpan {
+        self.shared_span
+    }
+
+    pub fn summary(&self) -> Tensor<B, 2> {
+        self.summary.clone()
+    }
+
+    pub fn key(&self) -> Tensor<B, 2> {
+        self.key.clone()
+    }
+
+    pub fn value(&self) -> Tensor<B, 2> {
+        self.value.clone()
+    }
+
+    pub fn token_keys(&self) -> Tensor<B, 3> {
+        self.token_keys.clone()
+    }
+
+    pub fn token_values(&self) -> Tensor<B, 3> {
+        self.token_values.clone()
+    }
+
+    pub fn token_mask(&self) -> Tensor<B, 2, Bool> {
+        self.token_mask.clone()
     }
 }
 
@@ -694,6 +803,90 @@ impl<B: Backend> LeafSummaryStore<B> {
 
     pub fn shared_spans(&self) -> &[TokenSpan] {
         &self.shared_spans
+    }
+
+    pub fn push_sealed_leaf(
+        &mut self,
+        summary: Tensor<B, 2>,
+        key: Tensor<B, 2>,
+        value: Tensor<B, 2>,
+        shared_span: TokenSpan,
+    ) -> Result<usize, FractalError> {
+        let [batch_size, summary_dim] = summary.dims();
+        let [key_batch_size, key_dim] = key.dims();
+        let [value_batch_size, value_dim] = value.dims();
+        let [expected_batch_size, leaf_count, expected_summary_dim] = self.summaries.dims();
+        let [_, _, expected_key_dim] = self.keys.dims();
+        let [_, _, expected_value_dim] = self.values.dims();
+        ensure_match(
+            "leaf_summary.push.batch_size",
+            batch_size,
+            expected_batch_size,
+        )?;
+        ensure_match(
+            "leaf_summary.push.key_batch_size",
+            key_batch_size,
+            expected_batch_size,
+        )?;
+        ensure_match(
+            "leaf_summary.push.value_batch_size",
+            value_batch_size,
+            expected_batch_size,
+        )?;
+        ensure_match(
+            "leaf_summary.push.summary_dim",
+            summary_dim,
+            expected_summary_dim,
+        )?;
+        ensure_match("leaf_summary.push.key_dim", key_dim, expected_key_dim)?;
+        ensure_match("leaf_summary.push.value_dim", value_dim, expected_value_dim)?;
+
+        let leaf_index = leaf_count;
+        let expected_span = TokenSpan::new(
+            leaf_index.checked_mul(shared_span.len()).ok_or_else(|| {
+                FractalError::InvalidState(
+                    "sealed leaf index overflow while computing expected span".to_string(),
+                )
+            })?,
+            (leaf_index + 1)
+                .checked_mul(shared_span.len())
+                .ok_or_else(|| {
+                    FractalError::InvalidState(
+                        "sealed leaf index overflow while computing expected span".to_string(),
+                    )
+                })?,
+        )?;
+        if shared_span != expected_span {
+            return Err(FractalError::InvalidState(format!(
+                "sealed leaf span mismatch: expected [{}, {}), got [{}, {})",
+                expected_span.start(),
+                expected_span.end(),
+                shared_span.start(),
+                shared_span.end()
+            )));
+        }
+
+        self.summaries = Tensor::cat(
+            vec![
+                self.summaries.clone(),
+                summary.reshape([batch_size, 1, summary_dim]),
+            ],
+            1,
+        );
+        self.keys = Tensor::cat(
+            vec![self.keys.clone(), key.reshape([batch_size, 1, key_dim])],
+            1,
+        );
+        self.values = Tensor::cat(
+            vec![
+                self.values.clone(),
+                value.reshape([batch_size, 1, value_dim]),
+            ],
+            1,
+        );
+        self.shared_spans.push(shared_span);
+
+        Ok(leaf_index)
     }
 }
 
@@ -1182,6 +1375,116 @@ impl<B: Backend> LeafTokenCache<B> {
     pub fn shared_spans(&self) -> &[TokenSpan] {
         &self.shared_spans
     }
+
+    pub fn push_sealed_leaf(
+        &mut self,
+        keys: Tensor<B, 3>,
+        values: Tensor<B, 3>,
+        mask: Tensor<B, 2, Bool>,
+        shared_span: TokenSpan,
+    ) -> Result<usize, FractalError> {
+        let [batch_size, tokens_per_leaf, key_dim] = keys.dims();
+        let [value_batch_size, value_tokens_per_leaf, value_dim] = values.dims();
+        let [mask_batch_size, mask_tokens_per_leaf] = mask.dims();
+        let [expected_batch_size, leaf_count, expected_tokens_per_leaf, expected_key_dim] =
+            self.keys.dims();
+        let [_, _, _, expected_value_dim] = self.values.dims();
+        ensure_match(
+            "leaf_token_cache.push.batch_size",
+            batch_size,
+            expected_batch_size,
+        )?;
+        ensure_match(
+            "leaf_token_cache.push.value_batch_size",
+            value_batch_size,
+            expected_batch_size,
+        )?;
+        ensure_match(
+            "leaf_token_cache.push.mask_batch_size",
+            mask_batch_size,
+            expected_batch_size,
+        )?;
+        ensure_match(
+            "leaf_token_cache.push.tokens_per_leaf",
+            tokens_per_leaf,
+            expected_tokens_per_leaf,
+        )?;
+        ensure_match(
+            "leaf_token_cache.push.value_tokens_per_leaf",
+            value_tokens_per_leaf,
+            expected_tokens_per_leaf,
+        )?;
+        ensure_match(
+            "leaf_token_cache.push.mask_tokens_per_leaf",
+            mask_tokens_per_leaf,
+            expected_tokens_per_leaf,
+        )?;
+        ensure_match("leaf_token_cache.push.key_dim", key_dim, expected_key_dim)?;
+        ensure_match(
+            "leaf_token_cache.push.value_dim",
+            value_dim,
+            expected_value_dim,
+        )?;
+        let expected_true_count = checked_usize_product(
+            "leaf_token_cache.push.mask_true_count",
+            &[expected_batch_size, expected_tokens_per_leaf],
+        )?;
+        ensure_match(
+            "leaf_token_cache.push.mask_true_count",
+            count_true(mask.clone()),
+            expected_true_count,
+        )?;
+
+        let leaf_index = leaf_count;
+        let expected_span = TokenSpan::new(
+            leaf_index.checked_mul(shared_span.len()).ok_or_else(|| {
+                FractalError::InvalidState(
+                    "leaf token cache index overflow while computing expected span".to_string(),
+                )
+            })?,
+            (leaf_index + 1)
+                .checked_mul(shared_span.len())
+                .ok_or_else(|| {
+                    FractalError::InvalidState(
+                        "leaf token cache index overflow while computing expected span".to_string(),
+                    )
+                })?,
+        )?;
+        if shared_span != expected_span {
+            return Err(FractalError::InvalidState(format!(
+                "leaf token cache span mismatch: expected [{}, {}), got [{}, {})",
+                expected_span.start(),
+                expected_span.end(),
+                shared_span.start(),
+                shared_span.end()
+            )));
+        }
+
+        self.keys = Tensor::cat(
+            vec![
+                self.keys.clone(),
+                keys.reshape([batch_size, 1, tokens_per_leaf, key_dim]),
+            ],
+            1,
+        );
+        self.values = Tensor::cat(
+            vec![
+                self.values.clone(),
+                values.reshape([batch_size, 1, tokens_per_leaf, value_dim]),
+            ],
+            1,
+        );
+        self.mask = Tensor::cat(
+            vec![
+                self.mask.clone(),
+                mask.reshape([batch_size, 1, tokens_per_leaf]),
+            ],
+            1,
+        );
+        self.shared_spans.push(shared_span);
+
+        Ok(leaf_index)
+    }
 }
 
 impl<B: Backend> Record<B> for LeafTokenCacheRecord<B> {
@@ -1403,6 +1706,117 @@ impl<B: Backend> FractalV2State<B> {
 
     pub fn merge_policy(&self) -> MergeCheckpointPolicy {
         self.merge_policy
+    }
+
+    pub fn append_root_readouts<LS: LeafSummarizer<B>>(
+        &mut self,
+        root_readouts: Tensor<B, 3>,
+        leaf_summarizer: &LS,
+    ) -> Result<Option<SealedLeafMaterialization<B>>, FractalError> {
+        let [batch_size, root_count, readout_dim] = root_readouts.dims();
+        ensure_match(
+            "state.append_root_readouts.batch_size",
+            batch_size,
+            self.layout.batch_size,
+        )?;
+        ensure_match(
+            "state.append_root_readouts.root_count",
+            root_count,
+            self.layout.root_count,
+        )?;
+        ensure_match(
+            "state.append_root_readouts.readout_dim",
+            readout_dim,
+            self.layout.root_readout_dim,
+        )?;
+        let summarizer_shape = leaf_summarizer.shape();
+        ensure_match(
+            "state.append_root_readouts.summarizer.readout_dim",
+            summarizer_shape.readout_dim,
+            self.layout.root_readout_dim,
+        )?;
+        ensure_match(
+            "state.append_root_readouts.summarizer.leaf_size",
+            summarizer_shape.leaf_size,
+            self.layout.leaf_size,
+        )?;
+        ensure_match(
+            "state.append_root_readouts.summarizer.summary_dim",
+            summarizer_shape.summary_dim,
+            self.layout.summary_dim,
+        )?;
+        ensure_match(
+            "state.append_root_readouts.summarizer.key_dim",
+            summarizer_shape.key_dim,
+            self.layout.key_dim,
+        )?;
+        ensure_match(
+            "state.append_root_readouts.summarizer.value_dim",
+            summarizer_shape.value_dim,
+            self.layout.value_dim,
+        )?;
+        ensure_match(
+            "state.append_root_readouts.summarizer.token_cache_key_dim",
+            summarizer_shape.token_cache_key_dim,
+            self.layout.token_cache_key_dim,
+        )?;
+        ensure_match(
+            "state.append_root_readouts.summarizer.token_cache_value_dim",
+            summarizer_shape.token_cache_value_dim,
+            self.layout.token_cache_value_dim,
+        )?;
+
+        let Some((sealed_token_readouts, shared_span)) =
+            self.live_leaf.append_root_readouts(root_readouts)?
+        else {
+            validate_state_consistency(
+                self.layout,
+                &self.live_leaf,
+                &self.sealed_leaves,
+                &self.tree,
+                &self.leaf_token_cache,
+            )?;
+            return Ok(None);
+        };
+
+        let (summary, key, value, token_keys, token_values, token_mask) = leaf_summarizer
+            .summarize_sealed_leaf(sealed_token_readouts)?
+            .into_parts();
+        let leaf_index = self.sealed_leaves.push_sealed_leaf(
+            summary.clone(),
+            key.clone(),
+            value.clone(),
+            shared_span,
+        )?;
+        let cache_leaf_index = self.leaf_token_cache.push_sealed_leaf(
+            token_keys.clone(),
+            token_values.clone(),
+            token_mask.clone(),
+            shared_span,
+        )?;
+        ensure_match(
+            "state.append_root_readouts.cache_leaf_index",
+            cache_leaf_index,
+            leaf_index,
+        )?;
+        validate_state_consistency(
+            self.layout,
+            &self.live_leaf,
+            &self.sealed_leaves,
+            &self.tree,
+            &self.leaf_token_cache,
+        )?;
+
+        Ok(Some(SealedLeafMaterialization {
+            leaf_index,
+            shared_span,
+            summary,
+            key,
+            value,
+            token_keys,
+            token_values,
+            token_mask,
+        }))
     }
 
     pub fn shape(&self) -> FractalV2StateShape {
@@ -1745,6 +2159,10 @@ fn validate_state_consistency<B: Backend>(
         ));
     }
 
+    if tree.levels().is_empty() {
+        return Ok(());
+    }
+
     validate_tree_parent_chain(tree, sealed_leaves.shared_spans())
 }
 
@@ -1804,12 +2222,14 @@ mod tests {
     use burn::{
         backend::Candle,
         record::{FullPrecisionSettings, Record},
+        tensor::TensorData,
     };
 
     use super::*;
     use crate::v2::{
-        FractalRouterHeadShape, FractalV2ModelShape, LeafSummarizerShape, LocalTrunkShape,
-        ReadFusionShape, TreeMergeCellShape,
+        BaselineLeafSummarizer, BaselineLeafSummarizerConfig, FractalRouterHeadShape,
+        FractalV2ModelShape, LeafSummarizerShape, LocalTrunkShape, ReadFusionShape,
+        TreeMergeCellShape,
     };
 
     type TestBackend = Candle<f32, i64>;
@@ -1826,7 +2246,7 @@ mod tests {
                 leaf_size: 16,
             },
             leaf_summarizer: LeafSummarizerShape {
-                token_dim: 128,
+                readout_dim: 64,
                 leaf_size: 16,
                 summary_dim: 80,
                 key_dim: 48,
@@ -1855,6 +2275,32 @@ mod tests {
                 fused_readout_dim: 96,
             },
         }
+    }
+
+    fn test_leaf_summarizer(
+        device: &<TestBackend as Backend>::Device,
+    ) -> BaselineLeafSummarizer<TestBackend> {
+        BaselineLeafSummarizerConfig::new(64, 16, 80, 48, 72, 40, 56).init(device)
+    }
+
+    fn root_readouts_for_token(
+        token_index: usize,
+        device: &<TestBackend as Backend>::Device,
+    ) -> Tensor<TestBackend, 3> {
+        let base = token_index as f32 + 1.0;
+        let mut values = Vec::with_capacity(2 * 2 * 64);
+        for batch_index in 0..2 {
+            for root_index in 0..2 {
+                for readout_index in 0..64 {
+                    values.push(
+                        base + batch_index as f32 * 0.1
+                            + root_index as f32 * 0.01
+                            + readout_index as f32 * 0.001,
+                    );
+                }
+            }
+        }
+        Tensor::<TestBackend, 3>::from_data(TensorData::new(values, [2, 2, 64]), device)
     }
 
     #[test]
@@ -1984,6 +2430,187 @@ mod tests {
                     tokens_per_leaf: 16
                 },
             }
+        );
+    }
+
+    #[test]
+    fn fractal_v2_state_append_root_readouts_updates_live_leaf_without_future_leakage() {
+        let device = <TestBackend as Backend>::Device::default();
+        let mut state = FractalV2State::<TestBackend>::for_model_shape(
+            test_model_shape(),
+            2,
+            MergeCheckpointPolicy::FixedLeafSize {
+                tokens_per_leaf: 16,
+            },
+            &device,
+        )
+        .unwrap();
+        let summarizer = test_leaf_summarizer(&device);
+
+        let sealed = state
+            .append_root_readouts(root_readouts_for_token(0, &device), &summarizer)
+            .unwrap();
+
+        assert!(sealed.is_none());
+        assert_eq!(
+            state.live_leaf().shared_span(),
+            TokenSpan::new(0, 1).unwrap()
+        );
+        assert_eq!(state.live_leaf().shared_valid_tokens(), 1);
+        assert!(state.sealed_leaves().shared_spans().is_empty());
+        assert!(state.leaf_token_cache().shared_spans().is_empty());
+
+        let live_data = state
+            .live_leaf()
+            .token_readouts()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .unwrap();
+        let readout_stride = 64;
+        let token_stride = 16 * readout_stride;
+        let root_stride = token_stride;
+        let batch_stride = 2 * root_stride;
+        for batch_index in 0..2 {
+            for root_index in 0..2 {
+                for token_index in 1..16 {
+                    for readout_index in 0..64 {
+                        let flat_index = batch_index * batch_stride
+                            + root_index * root_stride
+                            + token_index * readout_stride
+                            + readout_index;
+                        assert_eq!(live_data[flat_index], 0.0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fractal_v2_state_append_root_readouts_seals_leaf_and_populates_cache() {
+        let device = <TestBackend as Backend>::Device::default();
+        let mut state = FractalV2State::<TestBackend>::for_model_shape(
+            test_model_shape(),
+            2,
+            MergeCheckpointPolicy::FixedLeafSize {
+                tokens_per_leaf: 16,
+            },
+            &device,
+        )
+        .unwrap();
+        let summarizer = test_leaf_summarizer(&device);
+        let mut sealed_leaf = None;
+
+        for token_index in 0..16 {
+            sealed_leaf = state
+                .append_root_readouts(root_readouts_for_token(token_index, &device), &summarizer)
+                .unwrap();
+        }
+
+        let sealed_leaf = sealed_leaf.expect("the 16th append should seal the leaf");
+        assert_eq!(sealed_leaf.leaf_index(), 0);
+        assert_eq!(sealed_leaf.shared_span(), TokenSpan::new(0, 16).unwrap());
+        assert_eq!(sealed_leaf.summary().dims(), [2, 80]);
+        assert_eq!(sealed_leaf.key().dims(), [2, 48]);
+        assert_eq!(sealed_leaf.value().dims(), [2, 72]);
+        assert_eq!(sealed_leaf.token_keys().dims(), [2, 16, 40]);
+        assert_eq!(sealed_leaf.token_values().dims(), [2, 16, 56]);
+        assert_eq!(sealed_leaf.token_mask().dims(), [2, 16]);
+
+        assert_eq!(state.live_leaf().shared_span(), TokenSpan::empty_at(16));
+        assert_eq!(state.live_leaf().shared_valid_tokens(), 0);
+        assert_eq!(
+            state.sealed_leaves().shared_spans(),
+            &[TokenSpan::new(0, 16).unwrap()]
+        );
+        assert_eq!(
+            state.leaf_token_cache().shared_spans(),
+            &[TokenSpan::new(0, 16).unwrap()]
+        );
+        assert_eq!(state.sealed_leaves().summaries().dims(), [2, 1, 80]);
+        assert_eq!(state.leaf_token_cache().keys().dims(), [2, 1, 16, 40]);
+        assert_eq!(state.leaf_token_cache().values().dims(), [2, 1, 16, 56]);
+        assert_eq!(count_true(state.leaf_token_cache().mask()), 32);
+    }
+
+    #[test]
+    fn fractal_v2_state_leaf_sealing_is_deterministic() {
+        let device = <TestBackend as Backend>::Device::default();
+        let summarizer = test_leaf_summarizer(&device);
+        let build_state = || {
+            FractalV2State::<TestBackend>::for_model_shape(
+                test_model_shape(),
+                2,
+                MergeCheckpointPolicy::FixedLeafSize {
+                    tokens_per_leaf: 16,
+                },
+                &device,
+            )
+            .unwrap()
+        };
+        let mut first = build_state();
+        let mut second = build_state();
+
+        for token_index in 0..16 {
+            first
+                .append_root_readouts(root_readouts_for_token(token_index, &device), &summarizer)
+                .unwrap();
+            second
+                .append_root_readouts(root_readouts_for_token(token_index, &device), &summarizer)
+                .unwrap();
+        }
+
+        assert_eq!(
+            first.sealed_leaves().summaries().to_data().convert::<f32>(),
+            second
+                .sealed_leaves()
+                .summaries()
+                .to_data()
+                .convert::<f32>()
+        );
+        assert_eq!(
+            first.sealed_leaves().keys().to_data().convert::<f32>(),
+            second.sealed_leaves().keys().to_data().convert::<f32>()
+        );
+        assert_eq!(
+            first.sealed_leaves().values().to_data().convert::<f32>(),
+            second.sealed_leaves().values().to_data().convert::<f32>()
+        );
+        assert_eq!(
+            first.leaf_token_cache().keys().to_data().convert::<f32>(),
+            second.leaf_token_cache().keys().to_data().convert::<f32>()
+        );
+        assert_eq!(
+            first.leaf_token_cache().values().to_data().convert::<f32>(),
+            second
+                .leaf_token_cache()
+                .values()
+                .to_data()
+                .convert::<f32>()
+        );
+    }
+
+    #[test]
+    fn fractal_v2_state_append_root_readouts_rejects_mismatched_readout_dim() {
+        let device = <TestBackend as Backend>::Device::default();
+        let mut state = FractalV2State::<TestBackend>::for_model_shape(
+            test_model_shape(),
+            2,
+            MergeCheckpointPolicy::FixedLeafSize {
+                tokens_per_leaf: 16,
+            },
+            &device,
+        )
+        .unwrap();
+        let summarizer = test_leaf_summarizer(&device);
+        let invalid = Tensor::<TestBackend, 3>::zeros([2, 2, 63], &device);
+
+        let error = state
+            .append_root_readouts(invalid, &summarizer)
+            .unwrap_err();
+
+        assert!(
+            matches!(error, FractalError::InvalidConfig(message) if message.contains("state.append_root_readouts.readout_dim"))
         );
     }
 
@@ -2507,7 +3134,7 @@ mod tests {
     }
 
     #[test]
-    fn fractal_v2_state_record_rejects_missing_tree_after_sealing_leaf() {
+    fn fractal_v2_state_record_allows_sealed_leaves_before_tree_materialization() {
         let device = <TestBackend as Backend>::Device::default();
         let model_shape = test_model_shape();
         let state = FractalV2State::<TestBackend>::for_model_shape(
@@ -2573,10 +3200,12 @@ mod tests {
             shared_valid_tokens: 0,
         };
 
-        let error = FractalV2State::<TestBackend>::from_record(record, model_shape).unwrap_err();
+        let restored = FractalV2State::<TestBackend>::from_record(record, model_shape).unwrap();
 
-        assert!(
-            matches!(error, FractalError::InvalidConfig(message) if message.contains("tree must include level 0 once sealed leaves exist"))
+        assert!(restored.tree().levels().is_empty());
+        assert_eq!(
+            restored.sealed_leaves().shared_spans(),
+            &[TokenSpan::new(0, layout.leaf_size).unwrap()]
         );
     }
 

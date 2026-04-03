@@ -238,7 +238,7 @@ where
                 leaf_size: self.leaf_size,
             },
             leaf_summarizer: LeafSummarizerShape {
-                token_dim: self.token_dim,
+                readout_dim: self.root_readout_dim,
                 leaf_size: self.leaf_size,
                 summary_dim: self.summary_dim,
                 key_dim: self.key_dim,
@@ -425,7 +425,7 @@ fn validate_fractal_v2_model_shape(
     ensure_nonzero("local_trunk.root_state_dim", local_trunk.root_state_dim)?;
     ensure_nonzero("local_trunk.root_readout_dim", local_trunk.root_readout_dim)?;
     ensure_nonzero("local_trunk.leaf_size", local_trunk.leaf_size)?;
-    ensure_nonzero("leaf_summarizer.token_dim", leaf.token_dim)?;
+    ensure_nonzero("leaf_summarizer.readout_dim", leaf.readout_dim)?;
     ensure_nonzero("leaf_summarizer.leaf_size", leaf.leaf_size)?;
     ensure_nonzero("leaf_summarizer.summary_dim", leaf.summary_dim)?;
     ensure_nonzero("leaf_summarizer.key_dim", leaf.key_dim)?;
@@ -467,7 +467,11 @@ fn validate_fractal_v2_model_shape(
     )?;
 
     ensure_match("local_trunk.token_dim", local_trunk.token_dim, token_dim)?;
-    ensure_match("leaf_summarizer.token_dim", leaf.token_dim, token_dim)?;
+    ensure_match(
+        "leaf_summarizer.readout_dim",
+        leaf.readout_dim,
+        local_trunk.root_readout_dim,
+    )?;
     ensure_match(
         "leaf_summarizer.leaf_size",
         leaf.leaf_size,
@@ -572,7 +576,7 @@ mod tests {
 
     #[derive(Module, Debug)]
     struct StubLeafSummarizer<B: Backend> {
-        token_dim: usize,
+        readout_dim: usize,
         leaf_size: usize,
         summary_dim: usize,
         key_dim: usize,
@@ -627,7 +631,7 @@ mod tests {
     impl<B: Backend> StubLeafSummarizer<B> {
         fn new(shape: LeafSummarizerShape) -> Self {
             Self {
-                token_dim: shape.token_dim,
+                readout_dim: shape.readout_dim,
                 leaf_size: shape.leaf_size,
                 summary_dim: shape.summary_dim,
                 key_dim: shape.key_dim,
@@ -711,7 +715,7 @@ mod tests {
     impl<B: Backend> LeafSummarizer<B> for StubLeafSummarizer<B> {
         fn shape(&self) -> LeafSummarizerShape {
             LeafSummarizerShape {
-                token_dim: self.token_dim,
+                readout_dim: self.readout_dim,
                 leaf_size: self.leaf_size,
                 summary_dim: self.summary_dim,
                 key_dim: self.key_dim,
@@ -719,6 +723,37 @@ mod tests {
                 token_cache_key_dim: self.token_cache_key_dim,
                 token_cache_value_dim: self.token_cache_value_dim,
             }
+        }
+
+        fn summarize_sealed_leaf(
+            &self,
+            token_readouts: Tensor<B, 4>,
+        ) -> Result<crate::v2::LeafSummarizerOutput<B>, FractalError> {
+            let [batch_size, _root_count, leaf_size, readout_dim] = token_readouts.dims();
+            ensure_match("stub_leaf_summarizer.leaf_size", leaf_size, self.leaf_size)?;
+            ensure_match(
+                "stub_leaf_summarizer.readout_dim",
+                readout_dim,
+                self.readout_dim,
+            )?;
+
+            Ok(crate::v2::LeafSummarizerOutput::new(
+                Tensor::<B, 2>::zeros([batch_size, self.summary_dim], &token_readouts.device()),
+                Tensor::<B, 2>::zeros([batch_size, self.key_dim], &token_readouts.device()),
+                Tensor::<B, 2>::zeros([batch_size, self.value_dim], &token_readouts.device()),
+                Tensor::<B, 3>::zeros(
+                    [batch_size, leaf_size, self.token_cache_key_dim],
+                    &token_readouts.device(),
+                ),
+                Tensor::<B, 3>::zeros(
+                    [batch_size, leaf_size, self.token_cache_value_dim],
+                    &token_readouts.device(),
+                ),
+                Tensor::<B, 2, burn::tensor::Bool>::ones(
+                    [batch_size, leaf_size],
+                    &token_readouts.device(),
+                ),
+            ))
         }
     }
 
@@ -767,7 +802,7 @@ mod tests {
                 leaf_size: 16,
             }),
             leaf_summarizer: StubLeafSummarizer::<TestBackend>::new(LeafSummarizerShape {
-                token_dim: 128,
+                readout_dim: 64,
                 leaf_size: 16,
                 summary_dim: 80,
                 key_dim: 48,
@@ -845,7 +880,7 @@ mod tests {
                     leaf_size: 16,
                 },
                 leaf_summarizer: LeafSummarizerShape {
-                    token_dim: 128,
+                    readout_dim: 64,
                     leaf_size: 16,
                     summary_dim: 80,
                     key_dim: 48,

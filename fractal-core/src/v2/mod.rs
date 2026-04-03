@@ -6,7 +6,10 @@ pub mod router;
 pub mod state;
 pub mod tree;
 
-pub use leaf::{LeafSummarizer, LeafSummarizerShape};
+pub use leaf::{
+    BaselineLeafSummarizer, BaselineLeafSummarizerConfig, LeafSummarizer, LeafSummarizerOutput,
+    LeafSummarizerShape,
+};
 pub use local_trunk::{
     summarize_root_readout_sequence, BaselineLocalTrunk, BaselineLocalTrunkConfig, LocalTrunk,
     LocalTrunkDiagnostics, LocalTrunkShape, LocalTrunkStepOutput, RootActivationStats,
@@ -22,7 +25,8 @@ pub use state::{
     FractalV2StateShape, LeafSummaryStore, LeafSummaryStoreRecord, LeafSummaryStoreShape,
     LeafTokenCache, LeafTokenCacheRecord, LeafTokenCacheShape, LiveLeafState, LiveLeafStateRecord,
     LiveLeafStateShape, MergeCheckpointPolicy, MultiRootState, MultiRootStateRecord,
-    MultiRootStateShape, RetrievalPolicy, TokenSpan, TreeLevelStore, TreeLevelStoreRecord,
-    TreeLevelStoreShape, TreeSummaryState, TreeSummaryStateRecord, TreeSummaryStateShape,
+    MultiRootStateShape, RetrievalPolicy, SealedLeafMaterialization, TokenSpan, TreeLevelStore,
+    TreeLevelStoreRecord, TreeLevelStoreShape, TreeSummaryState, TreeSummaryStateRecord,
+    TreeSummaryStateShape,
 };
 pub use tree::{TreeMergeCell, TreeMergeCellShape};
