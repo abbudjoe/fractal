@@ -248,6 +248,46 @@ pub struct MultiRootState<B: Backend> {
 }
 
 impl<B: Backend> MultiRootState<B> {
+    pub fn from_tensors(
+        recurrent: Tensor<B, 3>,
+        read_intent: Tensor<B, 3>,
+        write_intent: Tensor<B, 3>,
+    ) -> Result<Self, FractalError> {
+        let [batch_size, root_count, recurrent_dim] = recurrent.dims();
+        let [read_batch, read_root_count, intent_dim] = read_intent.dims();
+        let [write_batch, write_root_count, write_intent_dim] = write_intent.dims();
+
+        ensure_match("multi_root.read_intent.batch_size", read_batch, batch_size)?;
+        ensure_match(
+            "multi_root.read_intent.root_count",
+            read_root_count,
+            root_count,
+        )?;
+        ensure_match(
+            "multi_root.write_intent.batch_size",
+            write_batch,
+            batch_size,
+        )?;
+        ensure_match(
+            "multi_root.write_intent.root_count",
+            write_root_count,
+            root_count,
+        )?;
+        ensure_match(
+            "multi_root.write_intent.intent_dim",
+            write_intent_dim,
+            intent_dim,
+        )?;
+        ensure_nonzero("multi_root.recurrent_dim", recurrent_dim)?;
+        ensure_nonzero("multi_root.intent_dim", intent_dim)?;
+
+        Ok(Self {
+            recurrent,
+            read_intent,
+            write_intent,
+        })
+    }
+
     pub fn zeros(layout: FractalV2StateLayout, device: &B::Device) -> Self {
         Self {
             recurrent: Tensor::<B, 3>::zeros(

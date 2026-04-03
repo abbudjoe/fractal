@@ -1,7 +1,7 @@
 use burn::{
     module::Module,
     nn::{Embedding, EmbeddingConfig},
-    tensor::backend::Backend,
+    tensor::{backend::Backend, Int, Tensor},
 };
 
 use crate::{
@@ -11,9 +11,12 @@ use crate::{
 
 use super::{
     leaf::{LeafSummarizer, LeafSummarizerShape},
-    local_trunk::{LocalTrunk, LocalTrunkShape},
+    local_trunk::{
+        summarize_root_readout_sequence, LocalTrunk, LocalTrunkDiagnostics, LocalTrunkShape,
+    },
     read_fusion::{ReadFusion, ReadFusionShape},
     router::{FractalRouterHead, FractalRouterHeadShape},
+    state::{FractalV2StateLayout, MultiRootState},
     tree::{TreeMergeCell, TreeMergeCellShape},
 };
 
@@ -49,6 +52,32 @@ pub struct FractalV2Components<LT, LS, TM, RH, RF> {
     pub tree_merge_cell: TM,
     pub router: RH,
     pub read_fusion: RF,
+}
+
+#[derive(Debug, Clone)]
+pub struct FractalV2LocalBaselineOutput<B: Backend> {
+    root_readouts: Tensor<B, 4>,
+    mean_readouts: Tensor<B, 3>,
+    final_state: MultiRootState<B>,
+    diagnostics: LocalTrunkDiagnostics,
+}
+
+impl<B: Backend> FractalV2LocalBaselineOutput<B> {
+    pub fn root_readouts(&self) -> Tensor<B, 4> {
+        self.root_readouts.clone()
+    }
+
+    pub fn mean_readouts(&self) -> Tensor<B, 3> {
+        self.mean_readouts.clone()
+    }
+
+    pub fn final_state(&self) -> &MultiRootState<B> {
+        &self.final_state
+    }
+
+    pub fn diagnostics(&self) -> &LocalTrunkDiagnostics {
+        &self.diagnostics
+    }
 }
 
 #[derive(Module, Debug)]
@@ -220,6 +249,51 @@ where
             },
         }
     }
+
+    pub fn forward_local_baseline(
+        &self,
+        input_ids: Tensor<B, 2, Int>,
+    ) -> Result<FractalV2LocalBaselineOutput<B>, FractalError> {
+        let [batch_size, seq_len] = input_ids.dims();
+        ensure_nonzero("local_baseline.batch_size", batch_size)?;
+        ensure_nonzero("local_baseline.seq_len", seq_len)?;
+
+        let device = input_ids.device();
+        let embeddings = self.embedding.forward(input_ids);
+        let layout = FractalV2StateLayout::from_model_shape(self.shape(), batch_size)?;
+        let mut state = MultiRootState::zeros(layout, &device);
+        let mut root_readouts = Vec::with_capacity(seq_len);
+
+        for position in 0..seq_len {
+            let token_embedding = embeddings
+                .clone()
+                .narrow(1, position, 1)
+                .reshape([batch_size, self.token_dim]);
+            let step = self.local_trunk.step(token_embedding, state)?;
+            root_readouts.push(step.root_readouts().reshape([
+                batch_size,
+                1,
+                self.root_count,
+                self.root_readout_dim,
+            ]));
+            state = step.into_next_state();
+        }
+
+        let root_readouts = Tensor::cat(root_readouts, 1);
+        let mean_readouts = root_readouts
+            .clone()
+            .sum_dim(2)
+            .mul_scalar(1.0 / self.root_count as f64)
+            .reshape([batch_size, seq_len, self.root_readout_dim]);
+        let diagnostics = summarize_root_readout_sequence(root_readouts.clone())?;
+
+        Ok(FractalV2LocalBaselineOutput {
+            root_readouts,
+            mean_readouts,
+            final_state: state,
+            diagnostics,
+        })
+    }
 }
 
 fn validate_fractal_v2_model_shape(
@@ -350,9 +424,18 @@ fn ensure_match(name: &str, actual: usize, expected: usize) -> Result<(), Fracta
 mod tests {
     use core::marker::PhantomData;
 
-    use burn::{backend::Candle, module::Module};
+    use burn::{
+        backend::Candle,
+        module::Module,
+        tensor::{Tensor, TensorData},
+    };
 
     use super::*;
+    use crate::{
+        registry::gradient_l2_norm,
+        registry::CpuTrainBackend,
+        v2::local_trunk::{BaselineLocalTrunk, BaselineLocalTrunkConfig, LocalTrunkStepOutput},
+    };
 
     type TestBackend = Candle<f32, i64>;
     type TestComponents = FractalV2Components<
@@ -361,6 +444,21 @@ mod tests {
         StubTreeMergeCell<TestBackend>,
         StubRouter<TestBackend>,
         StubReadFusion<TestBackend>,
+    >;
+    type BaselineComponents<B> = FractalV2Components<
+        BaselineLocalTrunk<B>,
+        StubLeafSummarizer<B>,
+        StubTreeMergeCell<B>,
+        StubRouter<B>,
+        StubReadFusion<B>,
+    >;
+    type BaselineModel<B> = FractalV2Model<
+        B,
+        BaselineLocalTrunk<B>,
+        StubLeafSummarizer<B>,
+        StubTreeMergeCell<B>,
+        StubRouter<B>,
+        StubReadFusion<B>,
     >;
 
     #[derive(Module, Debug)]
@@ -490,6 +588,25 @@ mod tests {
                 leaf_size: self.leaf_size,
             }
         }
+
+        fn step(
+            &self,
+            token_embedding: Tensor<B, 2>,
+            state: MultiRootState<B>,
+        ) -> Result<LocalTrunkStepOutput<B>, FractalError> {
+            let [batch_size, _] = token_embedding.dims();
+            let root_readouts = Tensor::<B, 3>::zeros(
+                [batch_size, self.root_count, self.root_readout_dim],
+                &token_embedding.device(),
+            );
+            let next_state = MultiRootState::from_tensors(
+                state.recurrent(),
+                root_readouts.clone(),
+                root_readouts.clone(),
+            )?;
+
+            Ok(LocalTrunkStepOutput::new(next_state, root_readouts))
+        }
     }
 
     impl<B: Backend> LeafSummarizer<B> for StubLeafSummarizer<B> {
@@ -580,6 +697,56 @@ mod tests {
                 fused_readout_dim: 96,
             }),
         }
+    }
+
+    fn baseline_components<B: Backend>(
+        root_count: usize,
+        device: &B::Device,
+    ) -> BaselineComponents<B> {
+        FractalV2Components {
+            local_trunk: BaselineLocalTrunkConfig::new(8, root_count, 6, 4, 16).init(device),
+            leaf_summarizer: StubLeafSummarizer::<B>::new(LeafSummarizerShape {
+                token_dim: 8,
+                leaf_size: 16,
+                summary_dim: 12,
+                key_dim: 4,
+                value_dim: 6,
+                token_cache_key_dim: 4,
+                token_cache_value_dim: 6,
+            }),
+            tree_merge_cell: StubTreeMergeCell::<B>::new(TreeMergeCellShape {
+                summary_dim: 12,
+                key_dim: 4,
+                value_dim: 6,
+                scale_embedding_dim: 3,
+            }),
+            router: StubRouter::<B>::new(FractalRouterHeadShape {
+                query_dim: 4,
+                key_dim: 4,
+                head_count: 2,
+                beam_width: 2,
+                top_leaf_reads: 2,
+                allow_early_stop: false,
+            }),
+            read_fusion: StubReadFusion::<B>::new(ReadFusionShape {
+                root_count,
+                root_readout_dim: 4,
+                retrieved_value_dim: 6,
+                fused_readout_dim: 6,
+            }),
+        }
+    }
+
+    fn baseline_model<B: Backend>(root_count: usize, device: &B::Device) -> BaselineModel<B> {
+        FractalV2Model::new(64, 8, baseline_components(root_count, device), device).unwrap()
+    }
+
+    fn token_ids<B: Backend>(
+        values: &[i64],
+        shape: [usize; 2],
+        device: &B::Device,
+    ) -> Tensor<B, 2, Int> {
+        Tensor::<B, 2, Int>::from_data(TensorData::new(values.to_vec(), shape), device)
     }
 
     fn assert_invalid_config(components: TestComponents, expected_field: &str) {
@@ -702,5 +869,86 @@ mod tests {
         assert_eq!(model.shape().router.query_dim, 64);
         assert_eq!(model.shape().read_fusion.fused_readout_dim, 96);
         assert_eq!(model.output().logical_dims(), [96, 32_000]);
+    }
+
+    #[test]
+    fn fractal_v2_local_baseline_forward_returns_inspectable_multi_root_outputs() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = baseline_model::<TestBackend>(2, &device);
+        let input_ids = token_ids::<TestBackend>(&[1, 2, 3, 4, 4, 3, 2, 1], [2, 4], &device);
+
+        let output = model.forward_local_baseline(input_ids).unwrap();
+
+        assert_eq!(output.root_readouts().dims(), [2, 4, 2, 4]);
+        assert_eq!(output.mean_readouts().dims(), [2, 4, 4]);
+        assert_eq!(output.final_state().shape().batch_size, 2);
+        assert_eq!(output.final_state().shape().root_count, 2);
+        assert_eq!(output.diagnostics().per_root.len(), 2);
+        assert!(output
+            .diagnostics()
+            .mean_pairwise_cosine_similarity
+            .is_finite());
+    }
+
+    #[test]
+    fn fractal_v2_local_baseline_is_causal_over_sequence_positions() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = baseline_model::<TestBackend>(2, &device);
+        let input_a = token_ids::<TestBackend>(&[1, 2, 3, 4], [1, 4], &device);
+        let input_b = token_ids::<TestBackend>(&[1, 2, 9, 4], [1, 4], &device);
+
+        let output_a = model.forward_local_baseline(input_a).unwrap();
+        let output_b = model.forward_local_baseline(input_b).unwrap();
+        let prefix_a = output_a
+            .root_readouts()
+            .narrow(1, 0, 2)
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .unwrap();
+        let prefix_b = output_b
+            .root_readouts()
+            .narrow(1, 0, 2)
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .unwrap();
+
+        assert_eq!(prefix_a, prefix_b);
+    }
+
+    #[test]
+    fn fractal_v2_local_baseline_training_step_backpropagates() {
+        let device = <CpuTrainBackend as Backend>::Device::default();
+        let model = baseline_model::<CpuTrainBackend>(2, &device);
+        let input_ids = token_ids::<CpuTrainBackend>(&[1, 2, 3, 4, 4, 3, 2, 1], [2, 4], &device);
+
+        let loss = model
+            .forward_local_baseline(input_ids)
+            .unwrap()
+            .mean_readouts()
+            .sum();
+        let grads = burn::optim::GradientsParams::from_grads(loss.backward(), &model);
+
+        assert!(gradient_l2_norm(&model, &grads) > 0.0);
+    }
+
+    #[test]
+    fn fractal_v2_local_baseline_runs_for_single_and_multi_root_configs() {
+        let device = <TestBackend as Backend>::Device::default();
+        let input_ids = token_ids::<TestBackend>(&[1, 2, 3, 4], [1, 4], &device);
+        let single_root_model = baseline_model::<TestBackend>(1, &device);
+        let multi_root_model = baseline_model::<TestBackend>(2, &device);
+
+        let single = single_root_model
+            .forward_local_baseline(input_ids.clone())
+            .unwrap();
+        let multi = multi_root_model.forward_local_baseline(input_ids).unwrap();
+
+        assert_eq!(single.root_readouts().dims(), [1, 4, 1, 4]);
+        assert_eq!(multi.root_readouts().dims(), [1, 4, 2, 4]);
+        assert_eq!(single.diagnostics().per_root.len(), 1);
+        assert_eq!(multi.diagnostics().per_root.len(), 2);
+        assert!(multi.diagnostics().mean_pairwise_cosine_similarity < 0.9999);
     }
 }
