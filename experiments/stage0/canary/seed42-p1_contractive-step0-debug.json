@@ -162,6 +162,14 @@
               "position_interval": 2048
             },
             {
+              "kind": "rule_projection",
+              "cadence": {
+                "kind": "first_n_steps",
+                "steps": 1
+              },
+              "position_interval": 2048
+            },
+            {
               "kind": "output_projection",
               "cadence": {
                 "kind": "first_n_steps",
