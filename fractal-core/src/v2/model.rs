@@ -813,6 +813,17 @@ mod tests {
                 allow_early_stop: self.allow_early_stop,
             }
         }
+
+        fn route(
+            &self,
+            _query: Tensor<B, 2>,
+            _query_position: usize,
+            _tree: &crate::v2::TreeSummaryState<B>,
+        ) -> Result<crate::v2::router::FractalRouteOutput<B>, FractalError> {
+            Err(FractalError::InvalidState(
+                "stub router does not implement routing".to_string(),
+            ))
+        }
     }
 
     impl<B: Backend> ReadFusion<B> for StubReadFusion<B> {
