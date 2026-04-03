@@ -2557,6 +2557,73 @@ mod tests {
         assert_eq!(state.leaf_token_cache().keys().dims(), [2, 1, 16, 40]);
         assert_eq!(state.leaf_token_cache().values().dims(), [2, 1, 16, 56]);
         assert_eq!(count_true(state.leaf_token_cache().mask()), 32);
+        assert_eq!(
+            state.leaf_token_cache().keys().to_data().convert::<f32>(),
+            sealed_leaf
+                .token_keys()
+                .reshape([2, 1, 16, 40])
+                .to_data()
+                .convert::<f32>()
+        );
+        assert_eq!(
+            state.leaf_token_cache().values().to_data().convert::<f32>(),
+            sealed_leaf
+                .token_values()
+                .reshape([2, 1, 16, 56])
+                .to_data()
+                .convert::<f32>()
+        );
+        assert_eq!(
+            state.leaf_token_cache().mask().to_data().convert::<bool>(),
+            sealed_leaf
+                .token_mask()
+                .reshape([2, 1, 16])
+                .to_data()
+                .convert::<bool>()
+        );
+    }
+
+    #[test]
+    fn fractal_v2_state_append_root_readouts_starts_new_live_leaf_after_seal() {
+        let device = <TestBackend as Backend>::Device::default();
+        let mut state = FractalV2State::<TestBackend>::for_model_shape(
+            test_model_shape(),
+            2,
+            MergeCheckpointPolicy::FixedLeafSize {
+                tokens_per_leaf: 16,
+            },
+            &device,
+        )
+        .unwrap();
+        let summarizer = test_leaf_summarizer(&device);
+
+        for token_index in 0..16 {
+            state
+                .append_root_readouts(root_readouts_for_token(token_index, &device), &summarizer)
+                .unwrap();
+        }
+
+        let seventeenth = root_readouts_for_token(16, &device);
+        let sealed = state
+            .append_root_readouts(seventeenth.clone(), &summarizer)
+            .unwrap();
+
+        assert!(sealed.is_none());
+        assert_eq!(
+            state.live_leaf().shared_span(),
+            TokenSpan::new(16, 17).unwrap()
+        );
+        assert_eq!(state.live_leaf().shared_valid_tokens(), 1);
+        assert_eq!(
+            state
+                .live_leaf()
+                .token_readouts()
+                .narrow(2, 0, 1)
+                .reshape([2, 2, 64])
+                .to_data()
+                .convert::<f32>(),
+            seventeenth.to_data().convert::<f32>()
+        );
     }
 
     #[test]
