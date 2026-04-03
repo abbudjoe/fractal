@@ -70,9 +70,15 @@ pub use registry::{
 pub use router::EarlyExitRouter;
 pub use state::{FractalState, StateLayout};
 pub use v2::{
-    FractalRouterHead, FractalRouterHeadShape, FractalV2Components, FractalV2Model,
-    FractalV2ModelShape, LeafSummarizer, LeafSummarizerShape, LocalTrunk, LocalTrunkShape,
-    ReadFusion, ReadFusionShape, TreeMergeCell, TreeMergeCellShape,
+    BatchTimelineMode, FractalRouterHead, FractalRouterHeadShape, FractalV2Components,
+    FractalV2Model, FractalV2ModelShape, FractalV2State, FractalV2StateLayout,
+    FractalV2StateRecord, FractalV2StateShape, LeafSummarizer, LeafSummarizerShape,
+    LeafSummaryStore, LeafSummaryStoreRecord, LeafSummaryStoreShape, LeafTokenCache,
+    LeafTokenCacheRecord, LeafTokenCacheShape, LiveLeafState, LiveLeafStateRecord,
+    LiveLeafStateShape, LocalTrunk, LocalTrunkShape, MergeCheckpointPolicy, MultiRootState,
+    MultiRootStateRecord, MultiRootStateShape, ReadFusion, ReadFusionShape, RetrievalPolicy,
+    TokenSpan, TreeLevelStore, TreeLevelStoreRecord, TreeLevelStoreShape, TreeMergeCell,
+    TreeMergeCellShape, TreeSummaryState, TreeSummaryStateRecord, TreeSummaryStateShape,
 };
 
 #[cfg(test)]

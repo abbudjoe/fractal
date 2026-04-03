@@ -28,6 +28,20 @@ pub struct FractalV2ModelShape {
     pub read_fusion: ReadFusionShape,
 }
 
+impl FractalV2ModelShape {
+    pub(crate) fn validate(self) -> Result<Self, FractalError> {
+        validate_fractal_v2_model_shape(
+            self.vocab_size,
+            self.token_dim,
+            self.local_trunk,
+            self.leaf_summarizer,
+            self.tree_merge_cell,
+            self.router,
+            self.read_fusion,
+        )
+    }
+}
+
 #[derive(Debug)]
 pub struct FractalV2Components<LT, LS, TM, RH, RF> {
     pub local_trunk: LT,
@@ -94,15 +108,16 @@ where
             router,
             read_fusion,
         } = components;
-        let shape = Self::resolve_shape(
+        let shape = FractalV2ModelShape {
             vocab_size,
             token_dim,
-            local_trunk.shape(),
-            leaf_summarizer.shape(),
-            tree_merge_cell.shape(),
-            router.shape(),
-            read_fusion.shape(),
-        )?;
+            local_trunk: local_trunk.shape(),
+            leaf_summarizer: leaf_summarizer.shape(),
+            tree_merge_cell: tree_merge_cell.shape(),
+            router: router.shape(),
+            read_fusion: read_fusion.shape(),
+        }
+        .validate()?;
         let embedding = EmbeddingConfig::new(vocab_size, token_dim).init(device);
         let output = LanguageModelHeadConfig::new(shape.read_fusion.fused_readout_dim, vocab_size)
             .init(device);
@@ -205,105 +220,110 @@ where
             },
         }
     }
+}
 
-    fn resolve_shape(
-        vocab_size: usize,
-        token_dim: usize,
-        local_trunk: LocalTrunkShape,
-        leaf: LeafSummarizerShape,
-        tree: TreeMergeCellShape,
-        router: FractalRouterHeadShape,
-        read_fusion: ReadFusionShape,
-    ) -> Result<FractalV2ModelShape, FractalError> {
-        ensure_nonzero("vocab_size", vocab_size)?;
-        ensure_nonzero("token_dim", token_dim)?;
-        ensure_nonzero("local_trunk.token_dim", local_trunk.token_dim)?;
-        ensure_nonzero("local_trunk.root_count", local_trunk.root_count)?;
-        ensure_nonzero("local_trunk.root_state_dim", local_trunk.root_state_dim)?;
-        ensure_nonzero("local_trunk.root_readout_dim", local_trunk.root_readout_dim)?;
-        ensure_nonzero("local_trunk.leaf_size", local_trunk.leaf_size)?;
-        ensure_nonzero("leaf_summarizer.token_dim", leaf.token_dim)?;
-        ensure_nonzero("leaf_summarizer.leaf_size", leaf.leaf_size)?;
-        ensure_nonzero("leaf_summarizer.summary_dim", leaf.summary_dim)?;
-        ensure_nonzero("leaf_summarizer.key_dim", leaf.key_dim)?;
-        ensure_nonzero("leaf_summarizer.value_dim", leaf.value_dim)?;
-        ensure_nonzero(
-            "leaf_summarizer.token_cache_key_dim",
-            leaf.token_cache_key_dim,
-        )?;
-        ensure_nonzero(
-            "leaf_summarizer.token_cache_value_dim",
-            leaf.token_cache_value_dim,
-        )?;
-        ensure_nonzero("tree_merge_cell.summary_dim", tree.summary_dim)?;
-        ensure_nonzero("tree_merge_cell.key_dim", tree.key_dim)?;
-        ensure_nonzero("tree_merge_cell.value_dim", tree.value_dim)?;
-        ensure_nonzero(
-            "tree_merge_cell.scale_embedding_dim",
-            tree.scale_embedding_dim,
-        )?;
-        ensure_nonzero("router.query_dim", router.query_dim)?;
-        ensure_nonzero("router.key_dim", router.key_dim)?;
-        ensure_nonzero("router.head_count", router.head_count)?;
-        ensure_nonzero("router.beam_width", router.beam_width)?;
-        ensure_nonzero("router.top_leaf_reads", router.top_leaf_reads)?;
-        ensure_nonzero("read_fusion.root_count", read_fusion.root_count)?;
-        ensure_nonzero("read_fusion.root_readout_dim", read_fusion.root_readout_dim)?;
-        ensure_nonzero(
-            "read_fusion.retrieved_value_dim",
-            read_fusion.retrieved_value_dim,
-        )?;
-        ensure_nonzero(
-            "read_fusion.fused_readout_dim",
-            read_fusion.fused_readout_dim,
-        )?;
-
-        ensure_match("local_trunk.token_dim", local_trunk.token_dim, token_dim)?;
-        ensure_match("leaf_summarizer.token_dim", leaf.token_dim, token_dim)?;
-        ensure_match(
-            "leaf_summarizer.leaf_size",
-            leaf.leaf_size,
-            local_trunk.leaf_size,
-        )?;
-        ensure_match(
-            "tree_merge_cell.summary_dim",
-            tree.summary_dim,
-            leaf.summary_dim,
-        )?;
-        ensure_match("tree_merge_cell.key_dim", tree.key_dim, leaf.key_dim)?;
-        ensure_match("tree_merge_cell.value_dim", tree.value_dim, leaf.value_dim)?;
-        ensure_match(
-            "router.query_dim",
-            router.query_dim,
-            local_trunk.root_readout_dim,
-        )?;
-        ensure_match("router.key_dim", router.key_dim, tree.key_dim)?;
-        ensure_match(
-            "read_fusion.root_count",
-            read_fusion.root_count,
-            local_trunk.root_count,
-        )?;
-        ensure_match(
-            "read_fusion.root_readout_dim",
-            read_fusion.root_readout_dim,
-            local_trunk.root_readout_dim,
-        )?;
-        ensure_match(
-            "read_fusion.retrieved_value_dim",
-            read_fusion.retrieved_value_dim,
-            leaf.token_cache_value_dim,
-        )?;
-
-        Ok(FractalV2ModelShape {
-            vocab_size,
-            token_dim,
-            local_trunk,
-            leaf_summarizer: leaf,
-            tree_merge_cell: tree,
-            router,
-            read_fusion,
-        })
+fn validate_fractal_v2_model_shape(
+    vocab_size: usize,
+    token_dim: usize,
+    local_trunk: LocalTrunkShape,
+    leaf: LeafSummarizerShape,
+    tree: TreeMergeCellShape,
+    router: FractalRouterHeadShape,
+    read_fusion: ReadFusionShape,
+) -> Result<FractalV2ModelShape, FractalError> {
+    ensure_nonzero("vocab_size", vocab_size)?;
+    ensure_nonzero("token_dim", token_dim)?;
+    ensure_nonzero("local_trunk.token_dim", local_trunk.token_dim)?;
+    ensure_nonzero("local_trunk.root_count", local_trunk.root_count)?;
+    ensure_nonzero("local_trunk.root_state_dim", local_trunk.root_state_dim)?;
+    ensure_nonzero("local_trunk.root_readout_dim", local_trunk.root_readout_dim)?;
+    ensure_nonzero("local_trunk.leaf_size", local_trunk.leaf_size)?;
+    ensure_nonzero("leaf_summarizer.token_dim", leaf.token_dim)?;
+    ensure_nonzero("leaf_summarizer.leaf_size", leaf.leaf_size)?;
+    ensure_nonzero("leaf_summarizer.summary_dim", leaf.summary_dim)?;
+    ensure_nonzero("leaf_summarizer.key_dim", leaf.key_dim)?;
+    ensure_nonzero("leaf_summarizer.value_dim", leaf.value_dim)?;
+    ensure_nonzero(
+        "leaf_summarizer.token_cache_key_dim",
+        leaf.token_cache_key_dim,
+    )?;
+    ensure_nonzero(
+        "leaf_summarizer.token_cache_value_dim",
+        leaf.token_cache_value_dim,
+    )?;
+    ensure_nonzero("tree_merge_cell.summary_dim", tree.summary_dim)?;
+    ensure_nonzero("tree_merge_cell.key_dim", tree.key_dim)?;
+    ensure_nonzero("tree_merge_cell.value_dim", tree.value_dim)?;
+    ensure_nonzero(
+        "tree_merge_cell.scale_embedding_dim",
+        tree.scale_embedding_dim,
+    )?;
+    ensure_nonzero("router.query_dim", router.query_dim)?;
+    ensure_nonzero("router.key_dim", router.key_dim)?;
+    ensure_nonzero("router.head_count", router.head_count)?;
+    ensure_nonzero("router.beam_width", router.beam_width)?;
+    ensure_nonzero("router.top_leaf_reads", router.top_leaf_reads)?;
+    if router.allow_early_stop {
+        return Err(FractalError::InvalidConfig(
+            "router.allow_early_stop must remain false in v1".to_string(),
+        ));
     }
+    ensure_nonzero("read_fusion.root_count", read_fusion.root_count)?;
+    ensure_nonzero("read_fusion.root_readout_dim", read_fusion.root_readout_dim)?;
+    ensure_nonzero(
+        "read_fusion.retrieved_value_dim",
+        read_fusion.retrieved_value_dim,
+    )?;
+    ensure_nonzero(
+        "read_fusion.fused_readout_dim",
+        read_fusion.fused_readout_dim,
+    )?;
+
+    ensure_match("local_trunk.token_dim", local_trunk.token_dim, token_dim)?;
+    ensure_match("leaf_summarizer.token_dim", leaf.token_dim, token_dim)?;
+    ensure_match(
+        "leaf_summarizer.leaf_size",
+        leaf.leaf_size,
+        local_trunk.leaf_size,
+    )?;
+    ensure_match(
+        "tree_merge_cell.summary_dim",
+        tree.summary_dim,
+        leaf.summary_dim,
+    )?;
+    ensure_match("tree_merge_cell.key_dim", tree.key_dim, leaf.key_dim)?;
+    ensure_match("tree_merge_cell.value_dim", tree.value_dim, leaf.value_dim)?;
+    ensure_match(
+        "router.query_dim",
+        router.query_dim,
+        local_trunk.root_readout_dim,
+    )?;
+    ensure_match("router.key_dim", router.key_dim, tree.key_dim)?;
+    ensure_match(
+        "read_fusion.root_count",
+        read_fusion.root_count,
+        local_trunk.root_count,
+    )?;
+    ensure_match(
+        "read_fusion.root_readout_dim",
+        read_fusion.root_readout_dim,
+        local_trunk.root_readout_dim,
+    )?;
+    ensure_match(
+        "read_fusion.retrieved_value_dim",
+        read_fusion.retrieved_value_dim,
+        leaf.token_cache_value_dim,
+    )?;
+
+    Ok(FractalV2ModelShape {
+        vocab_size,
+        token_dim,
+        local_trunk,
+        leaf_summarizer: leaf,
+        tree_merge_cell: tree,
+        router,
+        read_fusion,
+    })
 }
 
 fn ensure_nonzero(name: &str, value: usize) -> Result<(), FractalError> {
