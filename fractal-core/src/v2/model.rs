@@ -139,11 +139,46 @@ where
     ) -> Result<FractalV2ModelShape, FractalError> {
         ensure_nonzero("vocab_size", vocab_size)?;
         ensure_nonzero("token_dim", token_dim)?;
+        ensure_nonzero("local_trunk.token_dim", local_trunk.token_dim)?;
         ensure_nonzero("local_trunk.root_count", local_trunk.root_count)?;
+        ensure_nonzero("local_trunk.root_state_dim", local_trunk.root_state_dim)?;
+        ensure_nonzero("local_trunk.root_readout_dim", local_trunk.root_readout_dim)?;
         ensure_nonzero("local_trunk.leaf_size", local_trunk.leaf_size)?;
+        ensure_nonzero("leaf_summarizer.token_dim", leaf.token_dim)?;
+        ensure_nonzero("leaf_summarizer.leaf_size", leaf.leaf_size)?;
+        ensure_nonzero("leaf_summarizer.summary_dim", leaf.summary_dim)?;
+        ensure_nonzero("leaf_summarizer.key_dim", leaf.key_dim)?;
+        ensure_nonzero("leaf_summarizer.value_dim", leaf.value_dim)?;
+        ensure_nonzero(
+            "leaf_summarizer.token_cache_key_dim",
+            leaf.token_cache_key_dim,
+        )?;
+        ensure_nonzero(
+            "leaf_summarizer.token_cache_value_dim",
+            leaf.token_cache_value_dim,
+        )?;
+        ensure_nonzero("tree_merge_cell.summary_dim", tree.summary_dim)?;
+        ensure_nonzero("tree_merge_cell.key_dim", tree.key_dim)?;
+        ensure_nonzero("tree_merge_cell.value_dim", tree.value_dim)?;
+        ensure_nonzero(
+            "tree_merge_cell.scale_embedding_dim",
+            tree.scale_embedding_dim,
+        )?;
+        ensure_nonzero("router.query_dim", router.query_dim)?;
+        ensure_nonzero("router.key_dim", router.key_dim)?;
         ensure_nonzero("router.head_count", router.head_count)?;
         ensure_nonzero("router.beam_width", router.beam_width)?;
         ensure_nonzero("router.top_leaf_reads", router.top_leaf_reads)?;
+        ensure_nonzero("read_fusion.root_count", read_fusion.root_count)?;
+        ensure_nonzero("read_fusion.root_readout_dim", read_fusion.root_readout_dim)?;
+        ensure_nonzero(
+            "read_fusion.retrieved_value_dim",
+            read_fusion.retrieved_value_dim,
+        )?;
+        ensure_nonzero(
+            "read_fusion.fused_readout_dim",
+            read_fusion.fused_readout_dim,
+        )?;
 
         ensure_match("local_trunk.token_dim", local_trunk.token_dim, token_dim)?;
         ensure_match("leaf_summarizer.token_dim", leaf.token_dim, token_dim)?;
@@ -226,6 +261,13 @@ mod tests {
     use super::*;
 
     type TestBackend = Candle<f32, i64>;
+    type TestComponents = FractalV2Components<
+        StubLocalTrunk<TestBackend>,
+        StubLeafSummarizer<TestBackend>,
+        StubTreeMergeCell<TestBackend>,
+        StubRouter<TestBackend>,
+        StubReadFusion<TestBackend>,
+    >;
 
     #[derive(Module, Debug)]
     struct StubLocalTrunk<B: Backend> {
@@ -405,53 +447,60 @@ mod tests {
         }
     }
 
+    fn valid_components() -> TestComponents {
+        FractalV2Components {
+            local_trunk: StubLocalTrunk::<TestBackend>::new(LocalTrunkShape {
+                token_dim: 128,
+                root_count: 2,
+                root_state_dim: 96,
+                root_readout_dim: 64,
+                leaf_size: 16,
+            }),
+            leaf_summarizer: StubLeafSummarizer::<TestBackend>::new(LeafSummarizerShape {
+                token_dim: 128,
+                leaf_size: 16,
+                summary_dim: 80,
+                key_dim: 48,
+                value_dim: 72,
+                token_cache_key_dim: 48,
+                token_cache_value_dim: 56,
+            }),
+            tree_merge_cell: StubTreeMergeCell::<TestBackend>::new(TreeMergeCellShape {
+                summary_dim: 80,
+                key_dim: 48,
+                value_dim: 72,
+                scale_embedding_dim: 12,
+            }),
+            router: StubRouter::<TestBackend>::new(FractalRouterHeadShape {
+                query_dim: 64,
+                key_dim: 48,
+                head_count: 4,
+                beam_width: 2,
+                top_leaf_reads: 2,
+                allow_early_stop: false,
+            }),
+            read_fusion: StubReadFusion::<TestBackend>::new(ReadFusionShape {
+                root_count: 2,
+                root_readout_dim: 64,
+                retrieved_value_dim: 56,
+                fused_readout_dim: 96,
+            }),
+        }
+    }
+
+    fn assert_invalid_config(components: TestComponents, expected_field: &str) {
+        let device = <TestBackend as Backend>::Device::default();
+        let error = FractalV2Model::new(32_000, 128, components, &device).unwrap_err();
+
+        assert!(
+            matches!(error, FractalError::InvalidConfig(message) if message.contains(expected_field))
+        );
+    }
+
     #[test]
     fn fractal_v2_model_builds_from_consistent_boundaries() {
         let device = <TestBackend as Backend>::Device::default();
-        let model = FractalV2Model::new(
-            32_000,
-            128,
-            FractalV2Components {
-                local_trunk: StubLocalTrunk::<TestBackend>::new(LocalTrunkShape {
-                    token_dim: 128,
-                    root_count: 2,
-                    root_state_dim: 96,
-                    root_readout_dim: 64,
-                    leaf_size: 16,
-                }),
-                leaf_summarizer: StubLeafSummarizer::<TestBackend>::new(LeafSummarizerShape {
-                    token_dim: 128,
-                    leaf_size: 16,
-                    summary_dim: 80,
-                    key_dim: 48,
-                    value_dim: 72,
-                    token_cache_key_dim: 48,
-                    token_cache_value_dim: 56,
-                }),
-                tree_merge_cell: StubTreeMergeCell::<TestBackend>::new(TreeMergeCellShape {
-                    summary_dim: 80,
-                    key_dim: 48,
-                    value_dim: 72,
-                    scale_embedding_dim: 12,
-                }),
-                router: StubRouter::<TestBackend>::new(FractalRouterHeadShape {
-                    query_dim: 64,
-                    key_dim: 48,
-                    head_count: 4,
-                    beam_width: 2,
-                    top_leaf_reads: 2,
-                    allow_early_stop: false,
-                }),
-                read_fusion: StubReadFusion::<TestBackend>::new(ReadFusionShape {
-                    root_count: 2,
-                    root_readout_dim: 64,
-                    retrieved_value_dim: 56,
-                    fused_readout_dim: 96,
-                }),
-            },
-            &device,
-        )
-        .unwrap();
+        let model = FractalV2Model::new(32_000, 128, valid_components(), &device).unwrap();
 
         assert_eq!(
             model.shape(),
@@ -474,54 +523,50 @@ mod tests {
 
     #[test]
     fn fractal_v2_model_rejects_mismatched_router_query_dim() {
-        let device = <TestBackend as Backend>::Device::default();
-        let error = FractalV2Model::new(
-            32_000,
-            128,
-            FractalV2Components {
-                local_trunk: StubLocalTrunk::<TestBackend>::new(LocalTrunkShape {
-                    token_dim: 128,
-                    root_count: 2,
-                    root_state_dim: 96,
-                    root_readout_dim: 64,
-                    leaf_size: 16,
-                }),
-                leaf_summarizer: StubLeafSummarizer::<TestBackend>::new(LeafSummarizerShape {
-                    token_dim: 128,
-                    leaf_size: 16,
-                    summary_dim: 80,
-                    key_dim: 48,
-                    value_dim: 72,
-                    token_cache_key_dim: 48,
-                    token_cache_value_dim: 56,
-                }),
-                tree_merge_cell: StubTreeMergeCell::<TestBackend>::new(TreeMergeCellShape {
-                    summary_dim: 80,
-                    key_dim: 48,
-                    value_dim: 72,
-                    scale_embedding_dim: 12,
-                }),
-                router: StubRouter::<TestBackend>::new(FractalRouterHeadShape {
-                    query_dim: 63,
-                    key_dim: 48,
-                    head_count: 4,
-                    beam_width: 2,
-                    top_leaf_reads: 2,
-                    allow_early_stop: false,
-                }),
-                read_fusion: StubReadFusion::<TestBackend>::new(ReadFusionShape {
-                    root_count: 2,
-                    root_readout_dim: 64,
-                    retrieved_value_dim: 56,
-                    fused_readout_dim: 96,
-                }),
-            },
-            &device,
-        )
-        .unwrap_err();
+        let mut components = valid_components();
+        components.router.query_dim = 63;
 
-        assert!(
-            matches!(error, FractalError::InvalidConfig(message) if message.contains("router.query_dim"))
-        );
+        assert_invalid_config(components, "router.query_dim");
+    }
+
+    #[test]
+    fn fractal_v2_model_rejects_zero_width_root_state_dim() {
+        let mut components = valid_components();
+        components.local_trunk.root_state_dim = 0;
+
+        assert_invalid_config(components, "local_trunk.root_state_dim");
+    }
+
+    #[test]
+    fn fractal_v2_model_rejects_zero_width_leaf_summary_dim() {
+        let mut components = valid_components();
+        components.leaf_summarizer.summary_dim = 0;
+
+        assert_invalid_config(components, "leaf_summarizer.summary_dim");
+    }
+
+    #[test]
+    fn fractal_v2_model_rejects_zero_width_token_cache_value_dim() {
+        let mut components = valid_components();
+        components.leaf_summarizer.token_cache_value_dim = 0;
+        components.read_fusion.retrieved_value_dim = 0;
+
+        assert_invalid_config(components, "leaf_summarizer.token_cache_value_dim");
+    }
+
+    #[test]
+    fn fractal_v2_model_rejects_zero_width_scale_embedding_dim() {
+        let mut components = valid_components();
+        components.tree_merge_cell.scale_embedding_dim = 0;
+
+        assert_invalid_config(components, "tree_merge_cell.scale_embedding_dim");
+    }
+
+    #[test]
+    fn fractal_v2_model_rejects_zero_width_fused_readout_dim() {
+        let mut components = valid_components();
+        components.read_fusion.fused_readout_dim = 0;
+
+        assert_invalid_config(components, "read_fusion.fused_readout_dim");
     }
 }
