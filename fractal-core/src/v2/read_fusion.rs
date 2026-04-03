@@ -464,7 +464,7 @@ impl<B: Backend> BaselineReadFusion<B> {
         Ok((masked_values * score_broadcast)
             .sum_dim(2)
             .sum_dim(1)
-            .mul_scalar(1.0 / (head_count * top_leaf_reads) as f64)
+            .mul_scalar(1.0 / head_count as f64)
             .reshape([batch_size, value_dim]))
     }
 }

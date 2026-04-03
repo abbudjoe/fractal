@@ -316,13 +316,21 @@ where
         input_ids: Tensor<B, 2, Int>,
         ablation: ReadFusionAblation,
     ) -> Result<FractalV2ForwardOutput<B>, FractalError> {
-        let trace = self.forward_retrieval_trace(input_ids)?;
+        let trace = self.forward_retrieval_trace_with_ablation(input_ids, ablation)?;
         self.forward_from_retrieval_trace(trace, ablation)
     }
 
     pub fn forward_retrieval_trace(
         &self,
         input_ids: Tensor<B, 2, Int>,
+    ) -> Result<FractalV2RetrievalTrace<B>, FractalError> {
+        self.forward_retrieval_trace_with_ablation(input_ids, ReadFusionAblation::default())
+    }
+
+    pub fn forward_retrieval_trace_with_ablation(
+        &self,
+        input_ids: Tensor<B, 2, Int>,
+        ablation: ReadFusionAblation,
     ) -> Result<FractalV2RetrievalTrace<B>, FractalError> {
         let [batch_size, seq_len] = input_ids.dims();
         ensure_nonzero("fractal_v2_retrieval_trace.batch_size", batch_size)?;
@@ -357,11 +365,12 @@ where
                 &self.leaf_summarizer,
                 &self.tree_merge_cell,
             )?;
-            let query = root_readouts
-                .clone()
-                .sum_dim(1)
-                .mul_scalar(1.0 / self.root_count as f64)
-                .reshape([batch_size, self.root_readout_dim]);
+            let query = summarize_query_from_roots(
+                root_readouts.clone(),
+                ablation.active_root_count().unwrap_or(self.root_count),
+                self.root_count,
+                self.root_readout_dim,
+            )?;
             let query_position = position + 1;
             let routed = self
                 .router
@@ -476,6 +485,33 @@ where
             },
         }
     }
+}
+
+fn summarize_query_from_roots<B: Backend>(
+    root_readouts: Tensor<B, 3>,
+    active_root_count: usize,
+    total_root_count: usize,
+    root_readout_dim: usize,
+) -> Result<Tensor<B, 2>, FractalError> {
+    if active_root_count == 0 || active_root_count > total_root_count {
+        return Err(FractalError::InvalidConfig(format!(
+            "fractal_v2_query.active_root_count must be within 1..={total_root_count}, got {active_root_count}"
+        )));
+    }
+
+    let [batch_size, root_count, actual_root_readout_dim] = root_readouts.dims();
+    ensure_match("fractal_v2_query.root_count", root_count, total_root_count)?;
+    ensure_match(
+        "fractal_v2_query.root_readout_dim",
+        actual_root_readout_dim,
+        root_readout_dim,
+    )?;
+
+    Ok(root_readouts
+        .narrow(1, 0, active_root_count)
+        .sum_dim(1)
+        .mul_scalar(1.0 / active_root_count as f64)
+        .reshape([batch_size, root_readout_dim]))
 }
 
 impl<B, LT> FractalV2LocalBaselineModel<B, LT>
@@ -808,7 +844,12 @@ mod tests {
         registry::gradient_l2_norm,
         registry::CpuTrainBackend,
         v2::local_trunk::{BaselineLocalTrunk, BaselineLocalTrunkConfig, LocalTrunkStepOutput},
-        v2::ReadFusionOutput,
+        v2::{
+            BaselineExactLeafRead, BaselineExactLeafReadConfig, BaselineFractalRouterHead,
+            BaselineFractalRouterHeadConfig, BaselineLeafSummarizer, BaselineLeafSummarizerConfig,
+            BaselineReadFusion, BaselineReadFusionConfig, BaselineTreeMergeCell,
+            BaselineTreeMergeCellConfig, ReadFusionOutput,
+        },
     };
 
     type TestBackend = Candle<f32, i64>;
@@ -821,6 +862,15 @@ mod tests {
         StubReadFusion<TestBackend>,
     >;
     type BaselineModel<B> = FractalV2LocalBaselineModel<B, BaselineLocalTrunk<B>>;
+    type BaselineV2Model<B> = FractalV2Model<
+        B,
+        BaselineLocalTrunk<B>,
+        BaselineLeafSummarizer<B>,
+        BaselineTreeMergeCell<B>,
+        BaselineFractalRouterHead<B>,
+        BaselineExactLeafRead<B>,
+        BaselineReadFusion<B>,
+    >;
 
     #[derive(Module, Debug)]
     struct StubLocalTrunk<B: Backend> {
@@ -1126,7 +1176,17 @@ mod tests {
             let [batch_size, query_dim] = query.dims();
             ensure_match("stub_router.query_dim", query_dim, self.query_dim)?;
             let value_dim = tree.value_dim();
+            let leaf_count = tree.level(0).map(|level| level.node_count()).unwrap_or(0);
             let has_tree = tree.root_address().is_some();
+            let query_signal = query
+                .clone()
+                .slice([0..batch_size, 0..1])
+                .reshape([batch_size]);
+            let query_signal = query_signal
+                .to_data()
+                .convert::<f32>()
+                .into_vec::<f32>()
+                .unwrap();
             let mut selected_leaf_indices =
                 vec![-1i64; batch_size * self.head_count * self.top_leaf_reads];
             let mut selected_leaf_mask =
@@ -1134,11 +1194,16 @@ mod tests {
             let mut selected_leaf_scores =
                 vec![0.0f32; batch_size * self.head_count * self.top_leaf_reads];
             if has_tree {
-                for batch_index in 0..batch_size {
+                for (batch_index, signal) in query_signal.iter().enumerate().take(batch_size) {
+                    let primary_leaf_index = if leaf_count > 1 && *signal >= 1.25 {
+                        1
+                    } else {
+                        0
+                    };
                     for head_index in 0..self.head_count {
                         let flat_index =
                             (batch_index * self.head_count + head_index) * self.top_leaf_reads;
-                        selected_leaf_indices[flat_index] = 0;
+                        selected_leaf_indices[flat_index] = primary_leaf_index as i64;
                         selected_leaf_mask[flat_index] = true;
                         selected_leaf_scores[flat_index] = 1.0;
                     }
@@ -1174,12 +1239,25 @@ mod tests {
                 (0..self.head_count)
                     .map(|_| crate::v2::HeadRouteTrace {
                         batch_routes: (0..batch_size)
-                            .map(|_| crate::v2::BatchHeadRoute {
+                            .map(|batch_index| crate::v2::BatchHeadRoute {
                                 steps: Vec::new(),
-                                selected_leaf_indices: if has_tree { vec![0] } else { Vec::new() },
+                                selected_leaf_indices: if has_tree {
+                                    vec![if leaf_count > 1 && query_signal[batch_index] >= 1.25 {
+                                        1
+                                    } else {
+                                        0
+                                    }]
+                                } else {
+                                    Vec::new()
+                                },
                                 selected_leaf_spans: if has_tree {
-                                    vec![crate::v2::TokenSpan::new(0, self.top_leaf_reads * 8)
-                                        .unwrap()]
+                                    let start =
+                                        if leaf_count > 1 && query_signal[batch_index] >= 1.25 {
+                                            16
+                                        } else {
+                                            0
+                                        };
+                                    vec![crate::v2::TokenSpan::new(start, start + 16).unwrap()]
                                 } else {
                                     Vec::new()
                                 },
@@ -1425,7 +1503,7 @@ mod tests {
         Ok((masked_values * score_broadcast)
             .sum_dim(2)
             .sum_dim(1)
-            .mul_scalar(1.0 / (head_count * top_leaf_reads) as f64)
+            .mul_scalar(1.0 / head_count as f64)
             .reshape([batch_size, expected_value_dim]))
     }
 
@@ -1493,6 +1571,80 @@ mod tests {
             BaselineLocalTrunkConfig::new(8, root_count, 6, 4, 16)
                 .try_init(device)
                 .unwrap(),
+            device,
+        )
+        .unwrap()
+    }
+
+    fn baseline_v2_model<B: Backend>(device: &B::Device) -> BaselineV2Model<B> {
+        FractalV2Model::new(
+            64,
+            8,
+            FractalV2Components {
+                local_trunk: BaselineLocalTrunkConfig::new(8, 2, 6, 4, 16)
+                    .try_init(device)
+                    .unwrap(),
+                leaf_summarizer: BaselineLeafSummarizerConfig {
+                    readout_dim: 4,
+                    leaf_size: 16,
+                    summary_dim: 6,
+                    key_dim: 4,
+                    value_dim: 5,
+                    token_cache_key_dim: 4,
+                    token_cache_value_dim: 6,
+                }
+                .try_init(device)
+                .unwrap(),
+                tree_merge_cell: BaselineTreeMergeCellConfig {
+                    summary_dim: 6,
+                    key_dim: 4,
+                    value_dim: 5,
+                    scale_embedding_dim: 4,
+                }
+                .try_init(device)
+                .unwrap(),
+                router: BaselineFractalRouterHeadConfig {
+                    query_dim: 4,
+                    key_dim: 4,
+                    head_count: 2,
+                    beam_width: 2,
+                    top_leaf_reads: 2,
+                    allow_early_stop: false,
+                    initializer: burn::nn::Initializer::Uniform {
+                        min: -0.08,
+                        max: 0.08,
+                    },
+                }
+                .try_init(device)
+                .unwrap(),
+                exact_read: BaselineExactLeafReadConfig {
+                    query_dim: 4,
+                    key_dim: 4,
+                    value_dim: 6,
+                    head_count: 2,
+                    top_leaf_reads: 2,
+                    leaf_size: 16,
+                    initializer: burn::nn::Initializer::Uniform {
+                        min: -0.08,
+                        max: 0.08,
+                    },
+                }
+                .try_init(device)
+                .unwrap(),
+                read_fusion: BaselineReadFusionConfig {
+                    root_count: 2,
+                    root_readout_dim: 4,
+                    routed_value_dim: 5,
+                    exact_read_value_dim: 6,
+                    fused_readout_dim: 8,
+                    initializer: burn::nn::Initializer::Uniform {
+                        min: -0.08,
+                        max: 0.08,
+                    },
+                }
+                .try_init(device)
+                .unwrap(),
+            },
             device,
         )
         .unwrap()
@@ -1898,6 +2050,99 @@ mod tests {
         assert_ne!(
             enabled.logits().to_data().convert::<f32>(),
             single_root.logits().to_data().convert::<f32>()
+        );
+    }
+
+    #[test]
+    fn fractal_v2_retrieval_trace_extra_root_ablation_changes_retrieval_path() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = FractalV2Model::new(32_000, 128, valid_components(), &device).unwrap();
+        let input_ids = token_ids::<TestBackend>(
+            &(1..=32).map(i64::from).collect::<Vec<_>>(),
+            [1, 32],
+            &device,
+        );
+
+        let enabled = model
+            .forward_retrieval_trace_with_ablation(input_ids.clone(), ReadFusionAblation::full())
+            .unwrap();
+        let single_root = model
+            .forward_retrieval_trace_with_ablation(
+                input_ids,
+                ReadFusionAblation::with_active_root_count(1),
+            )
+            .unwrap();
+        let enabled_final = enabled.steps().last().unwrap();
+        let single_root_final = single_root.steps().last().unwrap();
+
+        assert_ne!(
+            enabled_final
+                .routed()
+                .selected_leaf_indices()
+                .to_data()
+                .convert::<i64>(),
+            single_root_final
+                .routed()
+                .selected_leaf_indices()
+                .to_data()
+                .convert::<i64>()
+        );
+        assert_ne!(
+            enabled_final
+                .exact_read()
+                .selected_token_absolute_positions()
+                .to_data()
+                .convert::<i64>(),
+            single_root_final
+                .exact_read()
+                .selected_token_absolute_positions()
+                .to_data()
+                .convert::<i64>()
+        );
+    }
+
+    #[test]
+    fn fractal_v2_baseline_stack_forward_runs_end_to_end() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = baseline_v2_model::<TestBackend>(&device);
+        let input_ids = token_ids::<TestBackend>(
+            &(1..=32)
+                .map(|value| (value % 63 + 1) as i64)
+                .collect::<Vec<_>>(),
+            [1, 32],
+            &device,
+        );
+
+        let output = model.forward(input_ids.clone()).unwrap();
+        let no_routed = model
+            .forward_with_ablation(
+                input_ids.clone(),
+                ReadFusionAblation::without_routed_values(),
+            )
+            .unwrap();
+        let no_exact = model
+            .forward_with_ablation(
+                input_ids.clone(),
+                ReadFusionAblation::without_exact_read_values(),
+            )
+            .unwrap();
+        let one_root = model
+            .forward_with_ablation(input_ids, ReadFusionAblation::with_active_root_count(1))
+            .unwrap();
+
+        assert_eq!(output.fused_readouts().dims(), [1, 32, 8]);
+        assert_eq!(output.logits().dims(), [1, 32, 64]);
+        assert_ne!(
+            output.logits().to_data().convert::<f32>(),
+            no_routed.logits().to_data().convert::<f32>()
+        );
+        assert_ne!(
+            output.logits().to_data().convert::<f32>(),
+            no_exact.logits().to_data().convert::<f32>()
+        );
+        assert_ne!(
+            output.logits().to_data().convert::<f32>(),
+            one_root.logits().to_data().convert::<f32>()
         );
     }
 
