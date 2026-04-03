@@ -108,6 +108,14 @@ pub struct CausalMemoryEvaluationContext {
     pub span_distance: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CausalMemoryHeadContext {
+    pub head_index: usize,
+    pub routing_depth: usize,
+    pub span_distance: Option<usize>,
+    pub selected_leaf_index: Option<usize>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CausalMemoryDeltaMetrics {
     pub loss_delta: f32,
@@ -121,6 +129,7 @@ pub struct CausalMemoryInterventionResult {
     pub intervention: CausalMemoryIntervention,
     pub applied: bool,
     pub context: Option<CausalMemoryEvaluationContext>,
+    pub head_contexts: Vec<CausalMemoryHeadContext>,
     pub metrics: Option<CausalMemoryDeltaMetrics>,
 }
 
@@ -128,6 +137,7 @@ pub struct CausalMemoryInterventionResult {
 pub struct CausalMemoryAuditSampleReport {
     pub sample: CausalMemoryAuditSample,
     pub reference_context: CausalMemoryEvaluationContext,
+    pub reference_head_contexts: Vec<CausalMemoryHeadContext>,
     pub target_token_id: i64,
     pub reference_loss: f32,
     pub reference_target_logit: f32,
@@ -175,6 +185,24 @@ pub struct CausalMemoryRoutingDepthAggregate {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct CausalMemoryRoutingHeadAggregate {
+    pub head_index: usize,
+    pub stats: CausalMemoryAggregateStats,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CausalMemorySpanDistanceAggregate {
+    pub span_distance: usize,
+    pub stats: CausalMemoryAggregateStats,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CausalMemorySelectedLeafAggregate {
+    pub selected_leaf_index: usize,
+    pub stats: CausalMemoryAggregateStats,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct CausalMemoryTaskFamilyAggregate {
     pub task_family: CausalMemoryTaskFamily,
     pub stats: CausalMemoryAggregateStats,
@@ -189,6 +217,9 @@ pub struct CausalMemoryAuditReport {
     pub utility_by_component_family: Vec<CausalMemoryComponentFamilyAggregate>,
     pub utility_by_root: Vec<CausalMemoryRootAggregate>,
     pub utility_by_routing_depth: Vec<CausalMemoryRoutingDepthAggregate>,
+    pub utility_by_routing_head: Vec<CausalMemoryRoutingHeadAggregate>,
+    pub utility_by_span_distance: Vec<CausalMemorySpanDistanceAggregate>,
+    pub utility_by_selected_leaf: Vec<CausalMemorySelectedLeafAggregate>,
     pub utility_by_task_family: Vec<CausalMemoryTaskFamilyAggregate>,
 }
 
@@ -204,6 +235,11 @@ impl CausalMemoryAuditReport {
         > = BTreeMap::new();
         let mut root_groups: BTreeMap<usize, Vec<CausalMemoryDeltaMetrics>> = BTreeMap::new();
         let mut depth_groups: BTreeMap<usize, Vec<CausalMemoryDeltaMetrics>> = BTreeMap::new();
+        let mut head_groups: BTreeMap<usize, Vec<CausalMemoryDeltaMetrics>> = BTreeMap::new();
+        let mut span_distance_groups: BTreeMap<usize, Vec<CausalMemoryDeltaMetrics>> =
+            BTreeMap::new();
+        let mut selected_leaf_groups: BTreeMap<usize, Vec<CausalMemoryDeltaMetrics>> =
+            BTreeMap::new();
         let mut task_groups: BTreeMap<CausalMemoryTaskFamily, Vec<CausalMemoryDeltaMetrics>> =
             BTreeMap::new();
 
@@ -216,20 +252,40 @@ impl CausalMemoryAuditReport {
                     .entry(result.intervention)
                     .or_default()
                     .push(metrics);
-                component_groups
-                    .entry(component_family_for(result.intervention))
-                    .or_default()
-                    .push(metrics);
-                depth_groups
-                    .entry(report.reference_context.routing_depth)
-                    .or_default()
-                    .push(metrics);
+                if let Some(component_family) = component_family_for(result.intervention) {
+                    component_groups
+                        .entry(component_family)
+                        .or_default()
+                        .push(metrics);
+                }
                 task_groups
                     .entry(report.sample.task_family.clone())
                     .or_default()
                     .push(metrics);
                 if let CausalMemoryIntervention::RootDrop { root_index } = result.intervention {
                     root_groups.entry(root_index).or_default().push(metrics);
+                }
+                for head_context in &result.head_contexts {
+                    depth_groups
+                        .entry(head_context.routing_depth)
+                        .or_default()
+                        .push(metrics);
+                    head_groups
+                        .entry(head_context.head_index)
+                        .or_default()
+                        .push(metrics);
+                    if let Some(span_distance) = head_context.span_distance {
+                        span_distance_groups
+                            .entry(span_distance)
+                            .or_default()
+                            .push(metrics);
+                    }
+                    if let Some(selected_leaf_index) = head_context.selected_leaf_index {
+                        selected_leaf_groups
+                            .entry(selected_leaf_index)
+                            .or_default()
+                            .push(metrics);
+                    }
                 }
             }
         }
@@ -256,6 +312,23 @@ impl CausalMemoryAuditReport {
                 stats,
             }
         });
+        let utility_by_routing_head = aggregate_map(head_groups, |head_index, stats| {
+            CausalMemoryRoutingHeadAggregate { head_index, stats }
+        });
+        let utility_by_span_distance =
+            aggregate_map(span_distance_groups, |span_distance, stats| {
+                CausalMemorySpanDistanceAggregate {
+                    span_distance,
+                    stats,
+                }
+            });
+        let utility_by_selected_leaf =
+            aggregate_map(selected_leaf_groups, |selected_leaf_index, stats| {
+                CausalMemorySelectedLeafAggregate {
+                    selected_leaf_index,
+                    stats,
+                }
+            });
         let utility_by_task_family = aggregate_map(task_groups, |task_family, stats| {
             CausalMemoryTaskFamilyAggregate { task_family, stats }
         });
@@ -276,19 +349,26 @@ impl CausalMemoryAuditReport {
             utility_by_component_family,
             utility_by_root,
             utility_by_routing_depth,
+            utility_by_routing_head,
+            utility_by_span_distance,
+            utility_by_selected_leaf,
             utility_by_task_family,
         }
     }
 }
 
-fn component_family_for(intervention: CausalMemoryIntervention) -> CausalMemoryComponentFamily {
+fn component_family_for(
+    intervention: CausalMemoryIntervention,
+) -> Option<CausalMemoryComponentFamily> {
     match intervention {
-        CausalMemoryIntervention::NoTreeRead
-        | CausalMemoryIntervention::NextBestSpanSubstitution => {
-            CausalMemoryComponentFamily::TreeSummaryRetrieval
+        CausalMemoryIntervention::NoTreeRead => {
+            Some(CausalMemoryComponentFamily::TreeSummaryRetrieval)
         }
-        CausalMemoryIntervention::NoExactLeafRead => CausalMemoryComponentFamily::ExactLeafRead,
-        CausalMemoryIntervention::RootDrop { .. } => CausalMemoryComponentFamily::LocalTrunk,
+        CausalMemoryIntervention::NoExactLeafRead => {
+            Some(CausalMemoryComponentFamily::ExactLeafRead)
+        }
+        CausalMemoryIntervention::NextBestSpanSubstitution => None,
+        CausalMemoryIntervention::RootDrop { .. } => Some(CausalMemoryComponentFamily::LocalTrunk),
     }
 }
 
@@ -327,6 +407,25 @@ fn aggregate_metrics(metrics: &[CausalMemoryDeltaMetrics]) -> CausalMemoryAggreg
     }
 }
 
+pub(crate) fn summarize_head_contexts(
+    head_contexts: &[CausalMemoryHeadContext],
+) -> CausalMemoryEvaluationContext {
+    let routing_depth = head_contexts
+        .iter()
+        .map(|head_context| head_context.routing_depth)
+        .max()
+        .unwrap_or(0);
+    let span_distance = head_contexts
+        .iter()
+        .filter_map(|head_context| head_context.span_distance)
+        .min();
+
+    CausalMemoryEvaluationContext {
+        routing_depth,
+        span_distance,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn causal_memory_audit_report_aggregates_by_intervention_and_root() {
+    fn causal_memory_audit_report_aggregates_by_intervention_root_and_head() {
         let report =
             CausalMemoryAuditReport::from_sample_reports(vec![CausalMemoryAuditSampleReport {
                 sample: CausalMemoryAuditSample {
@@ -366,6 +465,12 @@ mod tests {
                     routing_depth: 2,
                     span_distance: Some(8),
                 },
+                reference_head_contexts: vec![CausalMemoryHeadContext {
+                    head_index: 0,
+                    routing_depth: 2,
+                    span_distance: Some(8),
+                    selected_leaf_index: Some(1),
+                }],
                 target_token_id: 7,
                 reference_loss: 1.0,
                 reference_target_logit: 0.5,
@@ -377,6 +482,12 @@ mod tests {
                             routing_depth: 2,
                             span_distance: Some(8),
                         }),
+                        head_contexts: vec![CausalMemoryHeadContext {
+                            head_index: 0,
+                            routing_depth: 2,
+                            span_distance: Some(8),
+                            selected_leaf_index: Some(1),
+                        }],
                         metrics: Some(CausalMemoryDeltaMetrics {
                             loss_delta: 0.2,
                             target_logit_delta: 0.3,
@@ -391,6 +502,12 @@ mod tests {
                             routing_depth: 2,
                             span_distance: Some(8),
                         }),
+                        head_contexts: vec![CausalMemoryHeadContext {
+                            head_index: 0,
+                            routing_depth: 2,
+                            span_distance: Some(8),
+                            selected_leaf_index: Some(1),
+                        }],
                         metrics: Some(CausalMemoryDeltaMetrics {
                             loss_delta: 0.6,
                             target_logit_delta: 0.7,
@@ -409,6 +526,9 @@ mod tests {
         assert_eq!(report.utility_by_root[0].root_index, 1);
         assert_eq!(report.utility_by_routing_depth.len(), 1);
         assert_eq!(report.utility_by_routing_depth[0].routing_depth, 2);
+        assert_eq!(report.utility_by_routing_head.len(), 1);
+        assert_eq!(report.utility_by_span_distance.len(), 1);
+        assert_eq!(report.utility_by_selected_leaf.len(), 1);
         assert_eq!(report.utility_by_task_family.len(), 1);
     }
 }

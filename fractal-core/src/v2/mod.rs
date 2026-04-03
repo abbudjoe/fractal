@@ -12,9 +12,10 @@ pub use auditor::{
     CausalMemoryAggregateStats, CausalMemoryAuditPlan, CausalMemoryAuditReport,
     CausalMemoryAuditSample, CausalMemoryAuditSampleReport, CausalMemoryComponentFamily,
     CausalMemoryComponentFamilyAggregate, CausalMemoryDeltaMetrics, CausalMemoryEvaluationContext,
-    CausalMemoryIntervention, CausalMemoryInterventionAggregate, CausalMemoryInterventionResult,
-    CausalMemoryRootAggregate, CausalMemoryRoutingDepthAggregate, CausalMemoryTaskFamily,
-    CausalMemoryTaskFamilyAggregate,
+    CausalMemoryHeadContext, CausalMemoryIntervention, CausalMemoryInterventionAggregate,
+    CausalMemoryInterventionResult, CausalMemoryRootAggregate, CausalMemoryRoutingDepthAggregate,
+    CausalMemoryRoutingHeadAggregate, CausalMemorySelectedLeafAggregate,
+    CausalMemorySpanDistanceAggregate, CausalMemoryTaskFamily, CausalMemoryTaskFamilyAggregate,
 };
 pub use exact_read::{
     BaselineExactLeafRead, BaselineExactLeafReadConfig, ExactLeafRead, ExactLeafReadDiagnostics,

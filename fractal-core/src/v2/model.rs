@@ -13,9 +13,9 @@ use crate::{
 
 use super::{
     auditor::{
-        CausalMemoryAuditPlan, CausalMemoryAuditReport, CausalMemoryAuditSampleReport,
-        CausalMemoryDeltaMetrics, CausalMemoryEvaluationContext, CausalMemoryIntervention,
-        CausalMemoryInterventionResult,
+        summarize_head_contexts, CausalMemoryAuditPlan, CausalMemoryAuditReport,
+        CausalMemoryAuditSampleReport, CausalMemoryDeltaMetrics, CausalMemoryEvaluationContext,
+        CausalMemoryHeadContext, CausalMemoryIntervention, CausalMemoryInterventionResult,
     },
     exact_read::{ExactLeafRead, ExactLeafReadShape},
     leaf::{LeafSummarizer, LeafSummarizerShape},
@@ -522,9 +522,12 @@ where
                     negative_log_likelihood(&reference_logits_row, target_token_id)?;
                 let reference_target_logit =
                     target_logit(&reference_logits_row, target_token_id, self.vocab_size)?;
-                let reference_context = route_context(&routed, sample.batch_index, query_position)?;
+                let reference_head_contexts =
+                    head_contexts_for_route(&routed, sample.batch_index, query_position)?;
+                let reference_context = summarize_head_contexts(&reference_head_contexts);
                 let reference_metrics = AuditMetricReference {
                     context: reference_context,
+                    head_contexts: &reference_head_contexts,
                     reference_loss,
                     reference_target_logit,
                     reference_logits: &reference_logits_row,
@@ -567,13 +570,23 @@ where
                 }
 
                 if plan.include_next_best_span_substitution() {
-                    match next_best_route_for_batch(&routed, sample.batch_index, query_position)? {
+                    match next_best_route_for_batch(
+                        &routed,
+                        state.tree(),
+                        sample.batch_index,
+                        query_position,
+                    )? {
                         Some(next_best) => {
                             let exact = self.exact_read.read(
                                 query.clone(),
                                 query_position,
                                 &next_best,
                                 state.leaf_token_cache(),
+                            )?;
+                            let next_best_head_contexts = head_contexts_for_route(
+                                &next_best,
+                                sample.batch_index,
+                                query_position,
                             )?;
                             let logits = self.project_step_logits(
                                 root_readouts.clone(),
@@ -586,11 +599,8 @@ where
                             interventions.push(intervention_result(
                                 CausalMemoryIntervention::NextBestSpanSubstitution,
                                 AuditMetricReference {
-                                    context: route_context(
-                                        &next_best,
-                                        sample.batch_index,
-                                        query_position,
-                                    )?,
+                                    context: summarize_head_contexts(&next_best_head_contexts),
+                                    head_contexts: &next_best_head_contexts,
                                     ..reference_metrics
                                 },
                                 logits,
@@ -600,6 +610,7 @@ where
                             intervention: CausalMemoryIntervention::NextBestSpanSubstitution,
                             applied: false,
                             context: None,
+                            head_contexts: Vec::new(),
                             metrics: None,
                         }),
                     }
@@ -630,6 +641,7 @@ where
                 sample_reports.push(CausalMemoryAuditSampleReport {
                     sample: sample.clone(),
                     reference_context,
+                    reference_head_contexts,
                     target_token_id,
                     reference_loss,
                     reference_target_logit,
@@ -913,32 +925,36 @@ fn softmax_vec(logits: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-fn route_context<B: Backend>(
+fn head_contexts_for_route<B: Backend>(
     routed: &crate::v2::FractalRouteOutput<B>,
     batch_index: usize,
     query_position: usize,
-) -> Result<CausalMemoryEvaluationContext, FractalError> {
-    let head_trace = routed.traces().first().ok_or_else(|| {
-        FractalError::InvalidState("route output must contain at least one head trace".to_string())
-    })?;
-    let batch_route = head_trace.batch_routes.get(batch_index).ok_or_else(|| {
-        FractalError::InvalidState(format!(
-            "route output batch {} is out of bounds for {} batch routes",
-            batch_index,
-            head_trace.batch_routes.len()
-        ))
-    })?;
-    let span_distance = batch_route
-        .selected_leaf_spans
-        .first()
-        .copied()
-        .map(|span| selected_span_distance(query_position, span))
-        .transpose()?;
+) -> Result<Vec<CausalMemoryHeadContext>, FractalError> {
+    let mut head_contexts = Vec::with_capacity(routed.traces().len());
 
-    Ok(CausalMemoryEvaluationContext {
-        routing_depth: batch_route.steps.len(),
-        span_distance,
-    })
+    for (head_index, head_trace) in routed.traces().iter().enumerate() {
+        let batch_route = head_trace.batch_routes.get(batch_index).ok_or_else(|| {
+            FractalError::InvalidState(format!(
+                "route output batch {} is out of bounds for {} batch routes",
+                batch_index,
+                head_trace.batch_routes.len()
+            ))
+        })?;
+        let span_distance = batch_route
+            .selected_leaf_spans
+            .first()
+            .copied()
+            .map(|span| selected_span_distance(query_position, span))
+            .transpose()?;
+        head_contexts.push(CausalMemoryHeadContext {
+            head_index,
+            routing_depth: batch_route.steps.len(),
+            span_distance,
+            selected_leaf_index: batch_route.selected_leaf_indices.first().copied(),
+        });
+    }
+
+    Ok(head_contexts)
 }
 
 fn selected_span_distance(
@@ -960,6 +976,7 @@ fn selected_span_distance(
 #[derive(Clone, Copy)]
 struct AuditMetricReference<'a> {
     context: CausalMemoryEvaluationContext,
+    head_contexts: &'a [CausalMemoryHeadContext],
     reference_loss: f32,
     reference_target_logit: f32,
     reference_logits: &'a [f32],
@@ -989,6 +1006,7 @@ fn intervention_result<B: Backend>(
         intervention,
         applied: true,
         context: Some(reference.context),
+        head_contexts: reference.head_contexts.to_vec(),
         metrics: Some(CausalMemoryDeltaMetrics {
             loss_delta: perturbed_loss - reference.reference_loss,
             target_logit_delta: reference.reference_target_logit - perturbed_target_logit,
@@ -1028,6 +1046,7 @@ fn zero_root_readout_for_batch<B: Backend>(
 
 fn next_best_route_for_batch<B: Backend>(
     routed: &crate::v2::FractalRouteOutput<B>,
+    tree: &crate::v2::TreeSummaryState<B>,
     batch_index: usize,
     query_position: usize,
 ) -> Result<Option<crate::v2::FractalRouteOutput<B>>, FractalError> {
@@ -1075,13 +1094,6 @@ fn next_best_route_for_batch<B: Backend>(
     for head_index in 0..head_count {
         let primary_flat =
             selection_flat_index(batch_index, head_index, 0, head_count, top_leaf_reads);
-        let alternate_flat =
-            selection_flat_index(batch_index, head_index, 1, head_count, top_leaf_reads);
-        if !mask_data[alternate_flat] {
-            return Ok(None);
-        }
-        let next_index = index_data[alternate_flat];
-        let next_score = score_data[alternate_flat];
         let batch_route = traces
             .get_mut(head_index)
             .and_then(|trace| trace.batch_routes.get_mut(batch_index))
@@ -1091,47 +1103,78 @@ fn next_best_route_for_batch<B: Backend>(
                     head_index, batch_index
                 ))
             })?;
-        let next_span = batch_route
-            .selected_leaf_spans
-            .get(1)
-            .copied()
-            .ok_or_else(|| {
-                FractalError::InvalidState(format!(
-                    "missing next-best span for head {} batch {}",
-                    head_index, batch_index
-                ))
-            })?;
-        if batch_route.steps.len()
-            != route_context(routed, batch_index, query_position)?.routing_depth
-        {
+        let final_step = batch_route.steps.last().ok_or_else(|| {
+            FractalError::InvalidState(format!(
+                "missing final routing step for head {} batch {} while building next-best route",
+                head_index, batch_index
+            ))
+        })?;
+        if final_step.level != 0 {
             return Err(FractalError::InvalidState(
-                "next-best route depth drifted from reference depth".to_string(),
+                "next-best substitution requires the final routing step to target leaf nodes"
+                    .to_string(),
             ));
         }
-        index_data[primary_flat] = next_index;
+        let selected_set = batch_route
+            .selected_leaf_indices
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut alternate = None;
+        for candidate_slot in top_scored_candidate_slots(&final_step.considered_candidate_scores) {
+            let leaf_index = final_step.considered_candidate_indices[candidate_slot];
+            if selected_set.contains(&leaf_index) {
+                continue;
+            }
+            let span = final_step.considered_candidate_spans[candidate_slot];
+            if span.end() > query_position {
+                return Err(FractalError::InvalidState(format!(
+                    "next-best leaf span [{}, {}) ends after query position {}",
+                    span.start(),
+                    span.end(),
+                    query_position
+                )));
+            }
+            alternate = Some((
+                leaf_index,
+                final_step.considered_candidate_scores[candidate_slot],
+                span,
+            ));
+            break;
+        }
+        let Some((next_index, next_score, next_span)) = alternate else {
+            return Ok(None);
+        };
+        index_data[primary_flat] = next_index as i64;
         mask_data[primary_flat] = true;
         score_data[primary_flat] = next_score;
-        index_data[alternate_flat] = -1;
-        mask_data[alternate_flat] = false;
-        score_data[alternate_flat] = 0.0;
-        for dim_index in 0..value_dim {
+        let next_value = tree
+            .level(0)
+            .ok_or_else(|| {
+                FractalError::InvalidState(
+                    "next-best substitution requires tree level 0 to be present".to_string(),
+                )
+            })?
+            .values()
+            .slice([
+                batch_index..batch_index + 1,
+                next_index..next_index + 1,
+                0..value_dim,
+            ])
+            .reshape([value_dim])
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .map_err(invalid_state_from_data("next_best.selected_leaf_value"))?;
+        for (dim_index, value) in next_value.iter().copied().enumerate().take(value_dim) {
             let primary_value_flat = ((((batch_index * head_count) + head_index) * top_leaf_reads)
                 * value_dim)
                 + dim_index;
-            let alternate_value_flat =
-                ((((batch_index * head_count) + head_index) * top_leaf_reads + 1) * value_dim)
-                    + dim_index;
-            value_data[primary_value_flat] = value_data[alternate_value_flat];
-            value_data[alternate_value_flat] = 0.0;
+            value_data[primary_value_flat] = value;
         }
-        batch_route.selected_leaf_indices = vec![usize::try_from(next_index).map_err(|_| {
-            FractalError::InvalidState(format!(
-                "next-best route produced negative leaf index {}",
-                next_index
-            ))
-        })?];
-        batch_route.selected_leaf_spans = vec![next_span];
-        batch_route.selected_leaf_scores = vec![next_score];
+        batch_route.selected_leaf_indices[0] = next_index;
+        batch_route.selected_leaf_spans[0] = next_span;
+        batch_route.selected_leaf_scores[0] = next_score;
     }
 
     Ok(Some(crate::v2::FractalRouteOutput::from_parts(
@@ -1157,6 +1200,12 @@ fn next_best_route_for_batch<B: Backend>(
         traces,
         diagnostics,
     )?))
+}
+
+fn top_scored_candidate_slots(scores: &[f32]) -> Vec<usize> {
+    let mut slots = scores.iter().copied().enumerate().collect::<Vec<_>>();
+    slots.sort_by(|(_, left), (_, right)| right.total_cmp(left));
+    slots.into_iter().map(|(index, _)| index).collect()
 }
 
 fn selection_flat_index(
@@ -2838,16 +2887,16 @@ mod tests {
         let device = <TestBackend as Backend>::Device::default();
         let model = baseline_v2_model::<TestBackend>(&device);
         let input_ids = token_ids::<TestBackend>(
-            &(1..=32)
+            &(1..=64)
                 .map(|value| (value % 63 + 1) as i64)
                 .collect::<Vec<_>>(),
-            [1, 32],
+            [1, 64],
             &device,
         );
-        let target_ids = repeated_target_ids::<TestBackend>(7, [1, 32], &device);
+        let target_ids = repeated_target_ids::<TestBackend>(7, [1, 64], &device);
         let plan = CausalMemoryAuditPlan::all(vec![crate::v2::CausalMemoryAuditSample {
             batch_index: 0,
-            position: 31,
+            position: 63,
             task_family: crate::v2::CausalMemoryTaskFamily::OrdinaryLm,
         }])
         .unwrap();
