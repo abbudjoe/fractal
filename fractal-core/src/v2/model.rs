@@ -17,7 +17,7 @@ use super::{
     },
     read_fusion::{ReadFusion, ReadFusionShape},
     router::{FractalRouterHead, FractalRouterHeadShape},
-    state::MultiRootState,
+    state::{FractalV2State, MergeCheckpointPolicy, MultiRootState, SealedLeafMaterialization},
     tree::{TreeMergeCell, TreeMergeCellShape},
 };
 
@@ -55,6 +55,48 @@ pub struct FractalV2LocalBaselineOutput<B: Backend> {
     mean_readouts: Tensor<B, 3>,
     final_state: MultiRootState<B>,
     diagnostics: LocalTrunkDiagnostics,
+}
+
+#[derive(Debug, Clone)]
+pub struct FractalV2RetrievalStepOutput<B: Backend> {
+    root_readouts: Tensor<B, 3>,
+    sealed_leaf: Option<SealedLeafMaterialization<B>>,
+    routed: crate::v2::FractalRouteOutput<B>,
+    exact_read: crate::v2::ExactLeafReadOutput<B>,
+}
+
+impl<B: Backend> FractalV2RetrievalStepOutput<B> {
+    pub fn root_readouts(&self) -> Tensor<B, 3> {
+        self.root_readouts.clone()
+    }
+
+    pub fn sealed_leaf(&self) -> Option<&SealedLeafMaterialization<B>> {
+        self.sealed_leaf.as_ref()
+    }
+
+    pub fn routed(&self) -> &crate::v2::FractalRouteOutput<B> {
+        &self.routed
+    }
+
+    pub fn exact_read(&self) -> &crate::v2::ExactLeafReadOutput<B> {
+        &self.exact_read
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FractalV2RetrievalTrace<B: Backend> {
+    steps: Vec<FractalV2RetrievalStepOutput<B>>,
+    final_state: FractalV2State<B>,
+}
+
+impl<B: Backend> FractalV2RetrievalTrace<B> {
+    pub fn steps(&self) -> &[FractalV2RetrievalStepOutput<B>] {
+        &self.steps
+    }
+
+    pub fn final_state(&self) -> &FractalV2State<B> {
+        &self.final_state
+    }
 }
 
 impl<B: Backend> FractalV2LocalBaselineOutput<B> {
@@ -239,6 +281,69 @@ where
 
     pub fn output(&self) -> &LanguageModelHead<B> {
         &self.output
+    }
+
+    pub fn forward_retrieval_trace(
+        &self,
+        input_ids: Tensor<B, 2, Int>,
+    ) -> Result<FractalV2RetrievalTrace<B>, FractalError> {
+        let [batch_size, seq_len] = input_ids.dims();
+        ensure_nonzero("fractal_v2_retrieval_trace.batch_size", batch_size)?;
+        ensure_nonzero("fractal_v2_retrieval_trace.seq_len", seq_len)?;
+
+        let shape = self.shape();
+        let device = input_ids.device();
+        let embeddings = self.embedding.forward(input_ids);
+        let mut roots =
+            MultiRootState::zeros_for_local_trunk(batch_size, shape.local_trunk, &device)?;
+        let mut state = FractalV2State::for_model_shape(
+            shape,
+            batch_size,
+            MergeCheckpointPolicy::FixedLeafSize {
+                tokens_per_leaf: self.leaf_size,
+            },
+            &device,
+        )?;
+        let mut steps = Vec::with_capacity(seq_len);
+
+        for position in 0..seq_len {
+            let token_embedding = embeddings
+                .clone()
+                .narrow(1, position, 1)
+                .reshape([batch_size, self.token_dim]);
+            let local_step = self.local_trunk.step(token_embedding, roots)?;
+            let root_readouts = local_step.root_readouts();
+            roots = local_step.into_next_state();
+            state.update_roots(roots.clone())?;
+            let sealed_leaf = state.append_root_readouts(
+                root_readouts.clone(),
+                &self.leaf_summarizer,
+                &self.tree_merge_cell,
+            )?;
+            let query = root_readouts
+                .clone()
+                .sum_dim(1)
+                .mul_scalar(1.0 / self.root_count as f64)
+                .reshape([batch_size, self.root_readout_dim]);
+            let query_position = position + 1;
+            let routed = self
+                .router
+                .route(query.clone(), query_position, state.tree())?;
+            let exact_read =
+                self.exact_read
+                    .read(query, query_position, &routed, state.leaf_token_cache())?;
+            steps.push(FractalV2RetrievalStepOutput {
+                root_readouts,
+                sealed_leaf,
+                routed,
+                exact_read,
+            });
+        }
+
+        Ok(FractalV2RetrievalTrace {
+            steps,
+            final_state: state,
+        })
     }
 
     pub fn shape(&self) -> FractalV2ModelShape {
@@ -907,13 +1012,82 @@ mod tests {
 
         fn route(
             &self,
-            _query: Tensor<B, 2>,
+            query: Tensor<B, 2>,
             _query_position: usize,
-            _tree: &crate::v2::TreeSummaryState<B>,
+            tree: &crate::v2::TreeSummaryState<B>,
         ) -> Result<crate::v2::router::FractalRouteOutput<B>, FractalError> {
-            Err(FractalError::InvalidState(
-                "stub router does not implement routing".to_string(),
-            ))
+            let [batch_size, query_dim] = query.dims();
+            ensure_match("stub_router.query_dim", query_dim, self.query_dim)?;
+            let value_dim = tree.value_dim();
+            let has_tree = tree.root_address().is_some();
+            let mut selected_leaf_indices =
+                vec![-1i64; batch_size * self.head_count * self.top_leaf_reads];
+            let mut selected_leaf_mask =
+                vec![false; batch_size * self.head_count * self.top_leaf_reads];
+            let mut selected_leaf_scores =
+                vec![0.0f32; batch_size * self.head_count * self.top_leaf_reads];
+            if has_tree {
+                for batch_index in 0..batch_size {
+                    for head_index in 0..self.head_count {
+                        let flat_index =
+                            (batch_index * self.head_count + head_index) * self.top_leaf_reads;
+                        selected_leaf_indices[flat_index] = 0;
+                        selected_leaf_mask[flat_index] = true;
+                        selected_leaf_scores[flat_index] = 1.0;
+                    }
+                }
+            }
+            crate::v2::router::FractalRouteOutput::from_parts(
+                Tensor::<B, 3, Int>::from_data(
+                    TensorData::new(
+                        selected_leaf_indices,
+                        [batch_size, self.head_count, self.top_leaf_reads],
+                    ),
+                    &query.device(),
+                ),
+                Tensor::<B, 3, burn::tensor::Bool>::from_data(
+                    TensorData::new(
+                        selected_leaf_mask,
+                        [batch_size, self.head_count, self.top_leaf_reads],
+                    ),
+                    &query.device(),
+                ),
+                Tensor::<B, 3>::from_data(
+                    TensorData::new(
+                        selected_leaf_scores,
+                        [batch_size, self.head_count, self.top_leaf_reads],
+                    ),
+                    &query.device(),
+                ),
+                Tensor::<B, 4>::zeros(
+                    [batch_size, self.head_count, self.top_leaf_reads, value_dim],
+                    &query.device(),
+                ),
+                (0..self.head_count)
+                    .map(|_| crate::v2::HeadRouteTrace {
+                        batch_routes: (0..batch_size)
+                            .map(|_| crate::v2::BatchHeadRoute {
+                                steps: Vec::new(),
+                                selected_leaf_indices: if has_tree { vec![0] } else { Vec::new() },
+                                selected_leaf_spans: if has_tree {
+                                    vec![crate::v2::TokenSpan::new(0, self.top_leaf_reads * 8)
+                                        .unwrap()]
+                                } else {
+                                    Vec::new()
+                                },
+                                selected_leaf_scores: if has_tree { vec![1.0] } else { Vec::new() },
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                crate::v2::FractalRoutingDiagnostics {
+                    routing_depth_histogram: Vec::new(),
+                    candidate_entropy_per_head: vec![0.0; self.head_count],
+                    selected_span_distance_histogram: Vec::new(),
+                    head_agreement_rate: 1.0,
+                    head_disagreement_rate: 0.0,
+                },
+            )
         }
     }
 
@@ -944,12 +1118,76 @@ mod tests {
             &self,
             _query: Tensor<B, 2>,
             _query_position: usize,
-            _routed: &crate::v2::FractalRouteOutput<B>,
-            _leaf_token_cache: &crate::v2::LeafTokenCache<B>,
+            routed: &crate::v2::FractalRouteOutput<B>,
+            leaf_token_cache: &crate::v2::LeafTokenCache<B>,
         ) -> Result<crate::v2::ExactLeafReadOutput<B>, FractalError> {
-            Err(FractalError::InvalidState(
-                "stub exact read does not implement token-level reads".to_string(),
-            ))
+            let selected_leaf_indices = routed.selected_leaf_indices();
+            let selected_leaf_mask = routed.selected_leaf_mask();
+            let [batch_size, head_count, top_leaf_reads] = selected_leaf_indices.dims();
+            let leaf_mask_data = selected_leaf_mask
+                .clone()
+                .to_data()
+                .convert::<bool>()
+                .into_vec::<bool>()
+                .unwrap();
+            let leaf_index_data = selected_leaf_indices
+                .to_data()
+                .convert::<i64>()
+                .into_vec::<i64>()
+                .unwrap();
+            let mut local_indices = vec![-1i64; batch_size * head_count * top_leaf_reads];
+            let mut absolute_positions = vec![-1i64; batch_size * head_count * top_leaf_reads];
+            for (flat_index, is_active) in leaf_mask_data.iter().copied().enumerate() {
+                if !is_active {
+                    continue;
+                }
+                let leaf_index = usize::try_from(leaf_index_data[flat_index]).unwrap();
+                local_indices[flat_index] = 0;
+                absolute_positions[flat_index] =
+                    leaf_token_cache.shared_spans()[leaf_index].start() as i64;
+            }
+
+            crate::v2::ExactLeafReadOutput::new(
+                Tensor::<B, 3, Int>::from_data(
+                    TensorData::new(local_indices, [batch_size, head_count, top_leaf_reads]),
+                    &selected_leaf_mask.device(),
+                ),
+                Tensor::<B, 3, Int>::from_data(
+                    TensorData::new(absolute_positions, [batch_size, head_count, top_leaf_reads]),
+                    &selected_leaf_mask.device(),
+                ),
+                selected_leaf_mask.clone(),
+                Tensor::<B, 3>::zeros(
+                    [batch_size, head_count, top_leaf_reads],
+                    &selected_leaf_mask.device(),
+                ),
+                Tensor::<B, 4>::zeros(
+                    [batch_size, head_count, top_leaf_reads, self.leaf_size],
+                    &selected_leaf_mask.device(),
+                ),
+                Tensor::<B, 4>::zeros(
+                    [batch_size, head_count, top_leaf_reads, self.value_dim],
+                    &selected_leaf_mask.device(),
+                ),
+                crate::v2::ExactLeafReadDiagnostics {
+                    fraction_using_exact_read: if leaf_mask_data.iter().any(|value| *value) {
+                        1.0 / top_leaf_reads as f32
+                    } else {
+                        0.0
+                    },
+                    selected_token_position_histogram: if leaf_mask_data.iter().any(|value| *value)
+                    {
+                        vec![crate::v2::ExactReadHistogramBin {
+                            value: 0,
+                            count: leaf_mask_data.iter().filter(|value| **value).count(),
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    average_attention_entropy_per_head: vec![0.0; head_count],
+                    average_top_token_probability_per_head: vec![0.0; head_count],
+                },
+            )
         }
     }
 
@@ -1207,6 +1445,57 @@ mod tests {
             .unwrap();
 
         assert_eq!(prefix_a, prefix_b);
+    }
+
+    #[test]
+    fn fractal_v2_model_forward_retrieval_trace_reaches_exact_read_path() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = FractalV2Model::new(32_000, 128, valid_components(), &device).unwrap();
+        let input_ids = token_ids::<TestBackend>(
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            [1, 16],
+            &device,
+        );
+
+        let trace = model.forward_retrieval_trace(input_ids).unwrap();
+
+        assert_eq!(trace.steps().len(), 16);
+        let final_step = trace.steps().last().unwrap();
+        assert!(final_step.sealed_leaf().is_some());
+        assert_eq!(
+            final_step
+                .routed()
+                .selected_leaf_mask()
+                .to_data()
+                .convert::<bool>()
+                .into_vec::<bool>()
+                .unwrap(),
+            vec![true, false, true, false, true, false, true, false]
+        );
+        assert_eq!(
+            final_step
+                .exact_read()
+                .selected_token_mask()
+                .to_data()
+                .convert::<bool>()
+                .into_vec::<bool>()
+                .unwrap(),
+            vec![true, false, true, false, true, false, true, false]
+        );
+        assert_eq!(
+            final_step
+                .exact_read()
+                .selected_token_absolute_positions()
+                .to_data()
+                .convert::<i64>()
+                .into_vec::<i64>()
+                .unwrap(),
+            vec![0, -1, 0, -1, 0, -1, 0, -1]
+        );
+        assert_eq!(
+            trace.final_state().leaf_token_cache().shared_spans().len(),
+            1
+        );
     }
 
     #[test]

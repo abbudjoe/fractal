@@ -2130,6 +2130,32 @@ impl<B: Backend> FractalV2State<B> {
         &self.roots
     }
 
+    pub fn update_roots(&mut self, roots: MultiRootState<B>) -> Result<(), FractalError> {
+        let shape = roots.shape();
+        ensure_match(
+            "state.update_roots.batch_size",
+            shape.batch_size,
+            self.layout.batch_size,
+        )?;
+        ensure_match(
+            "state.update_roots.root_count",
+            shape.root_count,
+            self.layout.root_count,
+        )?;
+        ensure_match(
+            "state.update_roots.recurrent_dim",
+            shape.recurrent_dim,
+            self.layout.root_state_dim,
+        )?;
+        ensure_match(
+            "state.update_roots.intent_dim",
+            shape.intent_dim,
+            self.layout.root_readout_dim,
+        )?;
+        self.roots = roots;
+        Ok(())
+    }
+
     pub fn live_leaf(&self) -> &LiveLeafState<B> {
         &self.live_leaf
     }
