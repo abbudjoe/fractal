@@ -266,6 +266,7 @@ fn mode_label(mode: SyntheticProbeMode) -> &'static str {
         SyntheticProbeMode::TreePlusExactRead => "TreePlusExactRead",
         SyntheticProbeMode::OracleTreeOnly => "OracleTreeOnly",
         SyntheticProbeMode::OracleTreePlusExactRead => "OracleTreePlusExactRead",
+        SyntheticProbeMode::OracleTreePlusOracleExactRead => "OracleTreePlusOracleExactRead",
     }
 }
 

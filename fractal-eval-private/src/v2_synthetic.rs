@@ -3,6 +3,7 @@ use burn::{
     tensor::{backend::Backend, Int, Tensor, TensorData},
 };
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 use fractal_core::{
     error::FractalError, BatchHeadRoute, ExactLeafRead, FractalRouteOutput, FractalRouterHead,
@@ -43,6 +44,7 @@ pub enum SyntheticProbeMode {
     TreePlusExactRead,
     OracleTreeOnly,
     OracleTreePlusExactRead,
+    OracleTreePlusOracleExactRead,
 }
 
 impl SyntheticProbeMode {
@@ -53,13 +55,14 @@ impl SyntheticProbeMode {
         Self::TreePlusExactRead,
     ];
 
-    pub const ALL_WITH_ORACLE: [Self; 6] = [
+    pub const ALL_WITH_ORACLE: [Self; 7] = [
         Self::NoMemory,
         Self::SummariesOnly,
         Self::TreeOnly,
         Self::TreePlusExactRead,
         Self::OracleTreeOnly,
         Self::OracleTreePlusExactRead,
+        Self::OracleTreePlusOracleExactRead,
     ];
 
     pub fn memory_mode(self) -> Option<FractalV2MemoryMode> {
@@ -68,7 +71,9 @@ impl SyntheticProbeMode {
             Self::SummariesOnly => Some(FractalV2MemoryMode::SummariesOnly),
             Self::TreeOnly => Some(FractalV2MemoryMode::TreeOnly),
             Self::TreePlusExactRead => Some(FractalV2MemoryMode::TreePlusExactRead),
-            Self::OracleTreeOnly | Self::OracleTreePlusExactRead => None,
+            Self::OracleTreeOnly
+            | Self::OracleTreePlusExactRead
+            | Self::OracleTreePlusOracleExactRead => None,
         }
     }
 
@@ -82,17 +87,31 @@ impl SyntheticProbeMode {
                     | Self::TreePlusExactRead
                     | Self::OracleTreeOnly
                     | Self::OracleTreePlusExactRead
+                    | Self::OracleTreePlusOracleExactRead
             ),
             Self::TreePlusExactRead => {
                 matches!(
                     self,
-                    Self::TreePlusExactRead | Self::OracleTreePlusExactRead
+                    Self::TreePlusExactRead
+                        | Self::OracleTreePlusExactRead
+                        | Self::OracleTreePlusOracleExactRead
                 )
             }
             Self::OracleTreeOnly => {
-                matches!(self, Self::OracleTreeOnly | Self::OracleTreePlusExactRead)
+                matches!(
+                    self,
+                    Self::OracleTreeOnly
+                        | Self::OracleTreePlusExactRead
+                        | Self::OracleTreePlusOracleExactRead
+                )
             }
-            Self::OracleTreePlusExactRead => matches!(self, Self::OracleTreePlusExactRead),
+            Self::OracleTreePlusExactRead => matches!(
+                self,
+                Self::OracleTreePlusExactRead | Self::OracleTreePlusOracleExactRead
+            ),
+            Self::OracleTreePlusOracleExactRead => {
+                matches!(self, Self::OracleTreePlusOracleExactRead)
+            }
         }
     }
 }
@@ -105,6 +124,7 @@ pub struct SyntheticProbeSample {
     pub target_position: usize,
     pub target_token_id: i64,
     pub evidence_span: TokenSpan,
+    pub oracle_exact_token_position: usize,
     pub minimum_mode: SyntheticProbeMode,
 }
 
@@ -115,6 +135,7 @@ impl SyntheticProbeSample {
         input_ids: Vec<i64>,
         target_token_id: i64,
         evidence_span: TokenSpan,
+        oracle_exact_token_position: usize,
         minimum_mode: SyntheticProbeMode,
     ) -> Result<Self, FractalError> {
         if input_ids.is_empty() {
@@ -131,6 +152,7 @@ impl SyntheticProbeSample {
             target_position,
             target_token_id,
             evidence_span,
+            oracle_exact_token_position,
             minimum_mode,
         })
     }
@@ -227,6 +249,24 @@ impl SyntheticProbeSample {
             return Err(FractalError::InvalidConfig(format!(
                 "synthetic_probe_sample '{}' minimum_mode must require memory",
                 self.name
+            )));
+        }
+        if self.oracle_exact_token_position >= self.input_ids.len() {
+            return Err(FractalError::InvalidConfig(format!(
+                "synthetic_probe_sample '{}' oracle_exact_token_position {} is out of bounds for input length {}",
+                self.name,
+                self.oracle_exact_token_position,
+                self.input_ids.len()
+            )));
+        }
+        if self.oracle_exact_token_position < self.evidence_span.start()
+            || self.oracle_exact_token_position >= self.evidence_span.end()
+        {
+            return Err(FractalError::InvalidConfig(format!(
+                "synthetic_probe_sample '{}' oracle_exact_token_position {} must lie within evidence_span {:?}",
+                self.name,
+                self.oracle_exact_token_position,
+                self.evidence_span
             )));
         }
 
@@ -403,7 +443,10 @@ where
 {
     let memory_mode = match mode {
         SyntheticProbeMode::OracleTreeOnly => FractalV2MemoryMode::TreeOnly,
-        SyntheticProbeMode::OracleTreePlusExactRead => FractalV2MemoryMode::TreePlusExactRead,
+        SyntheticProbeMode::OracleTreePlusExactRead
+        | SyntheticProbeMode::OracleTreePlusOracleExactRead => {
+            FractalV2MemoryMode::TreePlusExactRead
+        }
         _ => {
             return Err(FractalError::InvalidConfig(format!(
                 "synthetic_probe oracle logits require an oracle mode, got {:?}",
@@ -433,12 +476,22 @@ where
         query_position,
         &query.device(),
     )?;
-    let oracle_exact = model.exact_read().read(
-        query,
-        query_position,
-        &oracle_routed,
-        trace.final_state().leaf_token_cache(),
-    )?;
+    let oracle_exact = match mode {
+        SyntheticProbeMode::OracleTreePlusOracleExactRead => oracle_exact_read_output(
+            model.exact_read().shape(),
+            &oracle_routed,
+            trace.final_state().leaf_token_cache(),
+            sample.oracle_exact_token_position,
+            query_position,
+            &query.device(),
+        )?,
+        _ => model.exact_read().read(
+            query,
+            query_position,
+            &oracle_routed,
+            trace.final_state().leaf_token_cache(),
+        )?,
+    };
     let logits = model.project_retrieval_step_logits_with_memory_mode(
         root_readouts,
         &oracle_routed,
@@ -565,6 +618,169 @@ fn oracle_route_output<B: Backend>(
             }],
             head_agreement_rate: 1.0,
             head_disagreement_rate: 0.0,
+        },
+    )
+}
+
+fn oracle_exact_read_output<B: Backend>(
+    shape: fractal_core::ExactLeafReadShape,
+    routed: &FractalRouteOutput<B>,
+    leaf_token_cache: &fractal_core::LeafTokenCache<B>,
+    oracle_exact_token_position: usize,
+    query_position: usize,
+    device: &B::Device,
+) -> Result<fractal_core::ExactLeafReadOutput<B>, FractalError> {
+    let selected_leaf_indices = routed.selected_leaf_indices();
+    let selected_leaf_mask = routed.selected_leaf_mask();
+    let [batch_size, head_count, top_leaf_reads] = selected_leaf_indices.dims();
+    let leaf_index_data = selected_leaf_indices
+        .to_data()
+        .convert::<i64>()
+        .into_vec::<i64>()
+        .map_err(invalid_state_from_data(
+            "oracle_exact_read.selected_leaf_indices",
+        ))?;
+    let leaf_mask_data = selected_leaf_mask
+        .clone()
+        .to_data()
+        .convert::<bool>()
+        .into_vec::<bool>()
+        .map_err(invalid_state_from_data(
+            "oracle_exact_read.selected_leaf_mask",
+        ))?;
+    let [cache_batch_size, cache_leaf_count, cache_leaf_size, value_dim] =
+        leaf_token_cache.values().dims();
+    if cache_batch_size != batch_size {
+        return Err(FractalError::InvalidState(format!(
+            "oracle exact read batch size mismatch: route batch {} vs cache batch {}",
+            batch_size, cache_batch_size
+        )));
+    }
+    if cache_leaf_size != shape.leaf_size {
+        return Err(FractalError::InvalidState(format!(
+            "oracle exact read leaf size mismatch: exact read {} vs cache {}",
+            shape.leaf_size, cache_leaf_size
+        )));
+    }
+    if value_dim != shape.value_dim {
+        return Err(FractalError::InvalidState(format!(
+            "oracle exact read value dim mismatch: exact read {} vs cache {}",
+            shape.value_dim, value_dim
+        )));
+    }
+    let cache_values = leaf_token_cache
+        .values()
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .map_err(invalid_state_from_data(
+            "oracle_exact_read.leaf_token_cache_values",
+        ))?;
+    let mut selected_token_indices = vec![-1i64; batch_size * head_count * top_leaf_reads];
+    let mut selected_token_absolute_positions =
+        vec![-1i64; batch_size * head_count * top_leaf_reads];
+    let mut selected_token_scores = vec![0.0f32; batch_size * head_count * top_leaf_reads];
+    let mut attention_weights =
+        vec![0.0f32; batch_size * head_count * top_leaf_reads * shape.leaf_size];
+    let mut read_values = vec![0.0f32; batch_size * head_count * top_leaf_reads * shape.value_dim];
+    let mut selected_local_positions = Vec::new();
+
+    for flat_index in 0..leaf_mask_data.len() {
+        if !leaf_mask_data[flat_index] {
+            continue;
+        }
+        let leaf_index = usize::try_from(leaf_index_data[flat_index]).map_err(|_| {
+            FractalError::InvalidState(format!(
+                "oracle exact read received negative selected leaf index {}",
+                leaf_index_data[flat_index]
+            ))
+        })?;
+        if leaf_index >= cache_leaf_count {
+            return Err(FractalError::InvalidState(format!(
+                "oracle exact read selected leaf index {leaf_index} but cache only holds {cache_leaf_count} leaves"
+            )));
+        }
+        let selected_span = leaf_token_cache.shared_spans()[leaf_index];
+        if oracle_exact_token_position < selected_span.start()
+            || oracle_exact_token_position >= selected_span.end()
+        {
+            return Err(FractalError::InvalidState(format!(
+                "oracle exact read token position {} does not lie within selected span [{}, {})",
+                oracle_exact_token_position,
+                selected_span.start(),
+                selected_span.end()
+            )));
+        }
+        if oracle_exact_token_position >= query_position {
+            return Err(FractalError::InvalidState(format!(
+                "oracle exact read token position {} must be before query position {}",
+                oracle_exact_token_position, query_position
+            )));
+        }
+
+        let local_index = oracle_exact_token_position - selected_span.start();
+        selected_token_indices[flat_index] = local_index as i64;
+        selected_token_absolute_positions[flat_index] = oracle_exact_token_position as i64;
+        selected_token_scores[flat_index] = 1.0;
+        attention_weights[flat_index * shape.leaf_size + local_index] = 1.0;
+        selected_local_positions.push(local_index);
+
+        let batch_index = flat_index / (head_count * top_leaf_reads);
+        let slot_index = flat_index % top_leaf_reads;
+        let head_index = (flat_index / top_leaf_reads) % head_count;
+        let cache_offset = ((batch_index * cache_leaf_count + leaf_index) * shape.leaf_size
+            + local_index)
+            * shape.value_dim;
+        let read_offset = ((batch_index * head_count + head_index) * top_leaf_reads + slot_index)
+            * shape.value_dim;
+        read_values[read_offset..read_offset + shape.value_dim]
+            .copy_from_slice(&cache_values[cache_offset..cache_offset + shape.value_dim]);
+    }
+
+    fractal_core::ExactLeafReadOutput::new(
+        Tensor::<B, 3, Int>::from_data(
+            TensorData::new(
+                selected_token_indices,
+                [batch_size, head_count, top_leaf_reads],
+            ),
+            device,
+        ),
+        Tensor::<B, 3, Int>::from_data(
+            TensorData::new(
+                selected_token_absolute_positions,
+                [batch_size, head_count, top_leaf_reads],
+            ),
+            device,
+        ),
+        selected_leaf_mask,
+        Tensor::<B, 3>::from_data(
+            TensorData::new(
+                selected_token_scores,
+                [batch_size, head_count, top_leaf_reads],
+            ),
+            device,
+        ),
+        Tensor::<B, 4>::from_data(
+            TensorData::new(
+                attention_weights,
+                [batch_size, head_count, top_leaf_reads, shape.leaf_size],
+            ),
+            device,
+        ),
+        Tensor::<B, 4>::from_data(
+            TensorData::new(
+                read_values,
+                [batch_size, head_count, top_leaf_reads, shape.value_dim],
+            ),
+            device,
+        ),
+        fractal_core::ExactLeafReadDiagnostics {
+            fraction_using_exact_read: leaf_mask_data.iter().filter(|selected| **selected).count()
+                as f32
+                / leaf_mask_data.len() as f32,
+            selected_token_position_histogram: exact_read_histogram(&selected_local_positions),
+            average_attention_entropy_per_head: vec![0.0; head_count],
+            average_top_token_probability_per_head: vec![1.0; head_count],
         },
     )
 }
@@ -799,6 +1015,17 @@ fn invalid_state_from_data(
     move |error| FractalError::InvalidState(format!("{label} data conversion failed: {error}"))
 }
 
+fn exact_read_histogram(values: &[usize]) -> Vec<fractal_core::ExactReadHistogramBin> {
+    let mut counts = BTreeMap::<usize, usize>::new();
+    for &value in values {
+        *counts.entry(value).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(value, count)| fractal_core::ExactReadHistogramBin { value, count })
+        .collect()
+}
+
 fn span(start: usize, end: usize) -> TokenSpan {
     TokenSpan::new(start, end).expect("default synthetic spans must be valid")
 }
@@ -847,6 +1074,7 @@ fn copy_probe_suite() -> SyntheticProbeSuite {
                 ],
                 41,
                 span(1, 2),
+                1,
                 SyntheticProbeMode::TreePlusExactRead,
             )
             .unwrap(),
@@ -889,6 +1117,7 @@ fn copy_probe_suite() -> SyntheticProbeSuite {
                 ],
                 42,
                 span(1, 2),
+                1,
                 SyntheticProbeMode::TreePlusExactRead,
             )
             .unwrap(),
@@ -940,6 +1169,7 @@ fn associative_recall_probe_suite() -> SyntheticProbeSuite {
                 ],
                 34,
                 span(7, 9),
+                8,
                 SyntheticProbeMode::TreeOnly,
             )
             .unwrap(),
@@ -982,6 +1212,7 @@ fn associative_recall_probe_suite() -> SyntheticProbeSuite {
                 ],
                 45,
                 span(9, 11),
+                10,
                 SyntheticProbeMode::TreeOnly,
             )
             .unwrap(),
@@ -1033,6 +1264,7 @@ fn induction_probe_suite() -> SyntheticProbeSuite {
                 ],
                 11,
                 span(1, 4),
+                3,
                 SyntheticProbeMode::TreeOnly,
             )
             .unwrap(),
@@ -1075,6 +1307,7 @@ fn induction_probe_suite() -> SyntheticProbeSuite {
                 ],
                 12,
                 span(1, 4),
+                3,
                 SyntheticProbeMode::TreeOnly,
             )
             .unwrap(),
@@ -1126,6 +1359,7 @@ fn noisy_retrieval_probe_suite() -> SyntheticProbeSuite {
                 ],
                 56,
                 span(1, 3),
+                2,
                 SyntheticProbeMode::TreePlusExactRead,
             )
             .unwrap(),
@@ -1168,6 +1402,7 @@ fn noisy_retrieval_probe_suite() -> SyntheticProbeSuite {
                 ],
                 47,
                 span(1, 3),
+                2,
                 SyntheticProbeMode::TreePlusExactRead,
             )
             .unwrap(),
@@ -1219,6 +1454,7 @@ fn far_token_comparison_probe_suite() -> SyntheticProbeSuite {
                 ],
                 LESS_THAN_TOKEN,
                 span(1, 2),
+                1,
                 SyntheticProbeMode::TreeOnly,
             )
             .unwrap(),
@@ -1261,6 +1497,7 @@ fn far_token_comparison_probe_suite() -> SyntheticProbeSuite {
                 ],
                 EQUAL_TOKEN,
                 span(1, 2),
+                1,
                 SyntheticProbeMode::TreeOnly,
             )
             .unwrap(),
@@ -1707,6 +1944,7 @@ mod tests {
                 ],
                 31,
                 span(1, 3),
+                2,
                 SyntheticProbeMode::TreeOnly,
             )
             .unwrap()],
@@ -1801,6 +2039,10 @@ mod tests {
         assert!(!SyntheticProbeMode::OracleTreeOnly.supports(SyntheticProbeMode::TreePlusExactRead));
         assert!(SyntheticProbeMode::OracleTreePlusExactRead
             .supports(SyntheticProbeMode::TreePlusExactRead));
+        assert!(SyntheticProbeMode::OracleTreePlusOracleExactRead
+            .supports(SyntheticProbeMode::TreePlusExactRead));
+        assert!(SyntheticProbeMode::OracleTreePlusOracleExactRead
+            .supports(SyntheticProbeMode::OracleTreePlusExactRead));
         assert!(SyntheticProbeMode::OracleTreePlusExactRead.supports(SyntheticProbeMode::TreeOnly));
         assert!(!SyntheticProbeMode::NoMemory.supports(SyntheticProbeMode::TreeOnly));
     }
@@ -2005,6 +2247,50 @@ mod tests {
     }
 
     #[test]
+    fn oracle_exact_read_output_selects_the_explicit_evidence_token() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = structural_v2_model::<TestBackend>(&device);
+        let suite = noisy_retrieval_probe_suite();
+        let sample = &suite.samples[0];
+        let input_ids = Tensor::<TestBackend, 2, Int>::from_data(
+            TensorData::new(sample.input_ids.clone(), [1, sample.input_ids.len()]),
+            &device,
+        );
+        let trace = model
+            .forward_retrieval_trace_with_memory_mode(input_ids, FractalV2MemoryMode::TreeOnly)
+            .unwrap();
+        let step = trace.steps().last().unwrap();
+        let query = model
+            .routing_query_from_root_readouts(
+                step.root_readouts(),
+                model.shape().local_trunk.root_count,
+            )
+            .unwrap();
+        let routed = oracle_route_output(
+            model.router().shape(),
+            trace.final_state().tree(),
+            sample.evidence_span,
+            sample.target_position + 1,
+            &query.device(),
+        )
+        .unwrap();
+        let exact = oracle_exact_read_output(
+            model.exact_read().shape(),
+            &routed,
+            trace.final_state().leaf_token_cache(),
+            sample.oracle_exact_token_position,
+            sample.target_position + 1,
+            &query.device(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            selected_absolute_positions(&exact),
+            vec![sample.oracle_exact_token_position]
+        );
+    }
+
+    #[test]
     fn oracle_probe_modes_extend_the_fixture_harness() {
         let fixture = FixtureModel {
             vocab_size: 64,
@@ -2013,6 +2299,7 @@ mod tests {
         let modes = [
             SyntheticProbeMode::OracleTreeOnly,
             SyntheticProbeMode::OracleTreePlusExactRead,
+            SyntheticProbeMode::OracleTreePlusOracleExactRead,
         ];
         let report = run_v2_synthetic_probe_suites_with_modes(
             &fixture,
@@ -2036,6 +2323,13 @@ mod tests {
         );
         assert_eq!(
             copy.mode_report(SyntheticProbeMode::OracleTreePlusExactRead)
+                .unwrap()
+                .metrics
+                .accuracy,
+            1.0
+        );
+        assert_eq!(
+            copy.mode_report(SyntheticProbeMode::OracleTreePlusOracleExactRead)
                 .unwrap()
                 .metrics
                 .accuracy,

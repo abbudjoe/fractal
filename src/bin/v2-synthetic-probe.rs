@@ -297,7 +297,7 @@ fn render_report(
 
 fn render_note(note: &str, oracle: bool) -> String {
     if oracle {
-        format!("{note}; oracle routing forced to the evidence leaf")
+        format!("{note}; oracle diagnostics forced to the evidence leaf and explicit evidence token where available")
     } else {
         note.to_string()
     }
@@ -383,6 +383,9 @@ fn mode_label(mode: fractal_eval_private::SyntheticProbeMode) -> &'static str {
         fractal_eval_private::SyntheticProbeMode::OracleTreeOnly => "OracleTreeOnly",
         fractal_eval_private::SyntheticProbeMode::OracleTreePlusExactRead => {
             "OracleTreePlusExactRead"
+        }
+        fractal_eval_private::SyntheticProbeMode::OracleTreePlusOracleExactRead => {
+            "OracleTreePlusOracleExactRead"
         }
     }
 }
