@@ -2,7 +2,10 @@ pub mod model;
 pub mod rescue_attention;
 pub mod retrieval_gather;
 
-pub use model::{HybridModelShape, HybridRescuePrevalidationMode};
+pub use model::{
+    FractalHybridRescuePrevalidationModel, HybridModelShape, HybridRescueForwardOutput,
+    HybridRescuePrevalidationMode, HybridRescueStepOutput,
+};
 pub use rescue_attention::{
     BaselineRescueAttentionBlock, BaselineRescueAttentionConfig, RescueAttentionBlock,
     RescueAttentionDiagnostics, RescueAttentionInput, RescueAttentionOutput, RescueAttentionShape,
@@ -11,5 +14,5 @@ pub use rescue_attention::{
 };
 pub use retrieval_gather::{
     GatheredCandidateRecall, GatheredRetrievalContext, GatheredRetrievalContextShape,
-    GatheredRetrievalLayout, GatheredRetrievalProvenance,
+    GatheredRetrievalLayout, GatheredRetrievalProvenance, SealedTokenStateStore,
 };
