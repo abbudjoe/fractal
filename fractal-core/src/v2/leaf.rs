@@ -44,7 +44,7 @@ pub struct LeafSummarizerOutput<B: Backend> {
 }
 
 impl<B: Backend> LeafSummarizerOutput<B> {
-    pub(crate) fn new(
+    pub fn new(
         summary: Tensor<B, 2>,
         key: Tensor<B, 2>,
         value: Tensor<B, 2>,

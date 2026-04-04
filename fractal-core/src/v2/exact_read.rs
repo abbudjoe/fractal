@@ -52,7 +52,7 @@ pub struct ExactLeafReadOutput<B: Backend> {
 }
 
 impl<B: Backend> ExactLeafReadOutput<B> {
-    pub(crate) fn new(
+    pub fn new(
         selected_token_indices: Tensor<B, 3, Int>,
         selected_token_absolute_positions: Tensor<B, 3, Int>,
         selected_token_mask: Tensor<B, 3, Bool>,

@@ -114,6 +114,20 @@ impl SyntheticProbeSample {
                 self.name
             )));
         }
+        let minimum_input_len = leaf_size.checked_mul(2).ok_or_else(|| {
+            FractalError::InvalidConfig(format!(
+                "synthetic_probe_sample '{}' minimum input length overflowed leaf_size {}",
+                self.name, leaf_size
+            ))
+        })?;
+        if self.input_ids.len() < minimum_input_len {
+            return Err(FractalError::InvalidConfig(format!(
+                "synthetic_probe_sample '{}' input length {} must span at least two sealed leaves of size {}",
+                self.name,
+                self.input_ids.len(),
+                leaf_size
+            )));
+        }
         if self.target_position >= self.input_ids.len() {
             return Err(FractalError::InvalidConfig(format!(
                 "synthetic_probe_sample '{}' target_position {} is out of bounds for input length {}",
@@ -803,6 +817,8 @@ fn noisy_retrieval_probe_suite() -> SyntheticProbeSuite {
                 "noisy-alpha",
                 vec![
                     NOISY_SENTINEL,
+                    16,
+                    56,
                     11,
                     51,
                     12,
@@ -814,9 +830,6 @@ fn noisy_retrieval_probe_suite() -> SyntheticProbeSuite {
                     15,
                     55,
                     16,
-                    56,
-                    17,
-                    57,
                     18,
                     58,
                     11,
@@ -832,11 +845,12 @@ fn noisy_retrieval_probe_suite() -> SyntheticProbeSuite {
                     16,
                     52,
                     17,
+                    18,
                     QUERY_SENTINEL,
                     16,
                 ],
                 56,
-                span(11, 13),
+                span(1, 3),
                 SyntheticProbeMode::TreePlusExactRead,
             )
             .unwrap(),
@@ -845,6 +859,8 @@ fn noisy_retrieval_probe_suite() -> SyntheticProbeSuite {
                 "noisy-beta",
                 vec![
                     NOISY_SENTINEL,
+                    27,
+                    47,
                     21,
                     41,
                     22,
@@ -856,9 +872,6 @@ fn noisy_retrieval_probe_suite() -> SyntheticProbeSuite {
                     25,
                     45,
                     26,
-                    46,
-                    27,
-                    47,
                     28,
                     48,
                     21,
@@ -874,11 +887,12 @@ fn noisy_retrieval_probe_suite() -> SyntheticProbeSuite {
                     26,
                     54,
                     27,
+                    28,
                     QUERY_SENTINEL,
                     27,
                 ],
                 47,
-                span(13, 15),
+                span(1, 3),
                 SyntheticProbeMode::TreePlusExactRead,
             )
             .unwrap(),
@@ -982,11 +996,20 @@ fn far_token_comparison_probe_suite() -> SyntheticProbeSuite {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::{backend::Candle, nn::Initializer};
+    use std::marker::PhantomData;
+
+    use burn::{
+        backend::Candle,
+        module::Module,
+        nn::Initializer,
+        tensor::{Bool, Int, Tensor, TensorData},
+    };
     use fractal_core::{
         v2::{BaselineReadFusion, BaselineReadFusionConfig},
         BaselineExactLeafReadConfig, BaselineFractalRouterHeadConfig, BaselineLeafSummarizerConfig,
-        BaselineLocalTrunkConfig, BaselineTreeMergeCellConfig, FractalV2Components,
+        BaselineLocalTrunkConfig, BaselineTreeMergeCellConfig, BatchHeadRoute,
+        ExactLeafReadDiagnostics, ExactLeafReadOutput, ExactLeafReadShape, FractalRouteOutput,
+        FractalRouterHeadShape, FractalRoutingDiagnostics, FractalV2Components, HeadRouteTrace,
     };
 
     type TestBackend = Candle<f32, i64>;
@@ -999,6 +1022,244 @@ mod tests {
         fractal_core::BaselineExactLeafRead<B>,
         BaselineReadFusion<B>,
     >;
+    type StructuralV2Model<B> = FractalV2Model<
+        B,
+        fractal_core::BaselineLocalTrunk<B>,
+        fractal_core::BaselineLeafSummarizer<B>,
+        fractal_core::BaselineTreeMergeCell<B>,
+        StructuralProbeRouter<B>,
+        StructuralProbeExactRead<B>,
+        BaselineReadFusion<B>,
+    >;
+
+    #[derive(Module, Debug)]
+    struct StructuralProbeRouter<B: Backend> {
+        shape: FractalRouterHeadShape,
+        _marker: PhantomData<B>,
+    }
+
+    #[derive(Module, Debug)]
+    struct StructuralProbeExactRead<B: Backend> {
+        shape: ExactLeafReadShape,
+        selected_local_index: usize,
+        fill_value: f32,
+        _marker: PhantomData<B>,
+    }
+
+    impl<B: Backend> StructuralProbeRouter<B> {
+        fn new(shape: FractalRouterHeadShape) -> Self {
+            Self {
+                shape,
+                _marker: PhantomData,
+            }
+        }
+    }
+
+    impl<B: Backend> StructuralProbeExactRead<B> {
+        fn new(shape: ExactLeafReadShape, selected_local_index: usize, fill_value: f32) -> Self {
+            Self {
+                shape,
+                selected_local_index,
+                fill_value,
+                _marker: PhantomData,
+            }
+        }
+    }
+
+    impl<B: Backend> FractalRouterHead<B> for StructuralProbeRouter<B> {
+        fn shape(&self) -> FractalRouterHeadShape {
+            self.shape
+        }
+
+        fn route(
+            &self,
+            query: Tensor<B, 2>,
+            _query_position: usize,
+            tree: &fractal_core::TreeSummaryState<B>,
+        ) -> Result<FractalRouteOutput<B>, FractalError> {
+            let [batch_size, query_dim] = query.dims();
+            assert_eq!(query_dim, self.shape.query_dim);
+            let level_zero = tree.level(0);
+            let leaf_count = level_zero.map(|level| level.node_count()).unwrap_or(0);
+            let has_tree = leaf_count > 0;
+            let selected_leaf_index = if has_tree { 0i64 } else { -1i64 };
+            let selected_leaf_mask = has_tree;
+            let value_dim = tree.value_dim();
+
+            FractalRouteOutput::from_parts(
+                Tensor::<B, 3, Int>::from_data(
+                    TensorData::new(
+                        vec![
+                            selected_leaf_index;
+                            batch_size * self.shape.head_count * self.shape.top_leaf_reads
+                        ],
+                        [batch_size, self.shape.head_count, self.shape.top_leaf_reads],
+                    ),
+                    &query.device(),
+                ),
+                Tensor::<B, 3, Bool>::from_data(
+                    TensorData::new(
+                        vec![
+                            selected_leaf_mask;
+                            batch_size * self.shape.head_count * self.shape.top_leaf_reads
+                        ],
+                        [batch_size, self.shape.head_count, self.shape.top_leaf_reads],
+                    ),
+                    &query.device(),
+                ),
+                Tensor::<B, 3>::from_data(
+                    TensorData::new(
+                        vec![
+                            if has_tree { 1.0 } else { 0.0 };
+                            batch_size * self.shape.head_count * self.shape.top_leaf_reads
+                        ],
+                        [batch_size, self.shape.head_count, self.shape.top_leaf_reads],
+                    ),
+                    &query.device(),
+                ),
+                Tensor::<B, 4>::zeros(
+                    [
+                        batch_size,
+                        self.shape.head_count,
+                        self.shape.top_leaf_reads,
+                        value_dim,
+                    ],
+                    &query.device(),
+                ),
+                (0..self.shape.head_count)
+                    .map(|_| HeadRouteTrace {
+                        batch_routes: (0..batch_size)
+                            .map(|_| BatchHeadRoute {
+                                steps: Vec::new(),
+                                selected_leaf_indices: if has_tree { vec![0] } else { Vec::new() },
+                                selected_leaf_spans: if has_tree {
+                                    vec![level_zero.unwrap().shared_spans()[0]]
+                                } else {
+                                    Vec::new()
+                                },
+                                selected_leaf_scores: if has_tree { vec![1.0] } else { Vec::new() },
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                FractalRoutingDiagnostics {
+                    routing_depth_histogram: Vec::new(),
+                    candidate_entropy_per_head: vec![0.0; self.shape.head_count],
+                    selected_span_distance_histogram: Vec::new(),
+                    head_agreement_rate: 1.0,
+                    head_disagreement_rate: 0.0,
+                },
+            )
+        }
+    }
+
+    impl<B: Backend> ExactLeafRead<B> for StructuralProbeExactRead<B> {
+        fn shape(&self) -> ExactLeafReadShape {
+            self.shape
+        }
+
+        fn read(
+            &self,
+            query: Tensor<B, 2>,
+            _query_position: usize,
+            routed: &FractalRouteOutput<B>,
+            leaf_token_cache: &fractal_core::LeafTokenCache<B>,
+        ) -> Result<ExactLeafReadOutput<B>, FractalError> {
+            let [batch_size, query_dim] = query.dims();
+            assert_eq!(query_dim, self.shape.query_dim);
+            let selected_leaf_indices = routed.selected_leaf_indices();
+            let selected_leaf_mask = routed.selected_leaf_mask();
+            let [mask_batch_size, head_count, top_leaf_reads] = selected_leaf_mask.dims();
+            assert_eq!(mask_batch_size, batch_size);
+
+            let leaf_indices = selected_leaf_indices
+                .to_data()
+                .convert::<i64>()
+                .into_vec::<i64>()
+                .unwrap();
+            let mask = selected_leaf_mask
+                .clone()
+                .to_data()
+                .convert::<bool>()
+                .into_vec::<bool>()
+                .unwrap();
+            let local_index = self.selected_local_index.min(self.shape.leaf_size - 1) as i64;
+            let mut selected_token_indices = vec![-1i64; batch_size * head_count * top_leaf_reads];
+            let mut selected_token_positions =
+                vec![-1i64; batch_size * head_count * top_leaf_reads];
+            let mut selected_token_scores = vec![0.0f32; batch_size * head_count * top_leaf_reads];
+            let mut attention_weights =
+                vec![0.0f32; batch_size * head_count * top_leaf_reads * self.shape.leaf_size];
+            let mut read_values =
+                vec![0.0f32; batch_size * head_count * top_leaf_reads * self.shape.value_dim];
+
+            for (flat_index, is_selected) in mask.iter().copied().enumerate() {
+                if !is_selected {
+                    continue;
+                }
+                let leaf_index = usize::try_from(leaf_indices[flat_index]).unwrap();
+                selected_token_indices[flat_index] = local_index;
+                selected_token_positions[flat_index] =
+                    (leaf_token_cache.shared_spans()[leaf_index].start() + local_index as usize)
+                        as i64;
+                selected_token_scores[flat_index] = 1.0;
+                let attention_offset = flat_index * self.shape.leaf_size + local_index as usize;
+                attention_weights[attention_offset] = 1.0;
+                let value_offset = flat_index * self.shape.value_dim;
+                read_values[value_offset..value_offset + self.shape.value_dim]
+                    .fill(self.fill_value);
+            }
+
+            ExactLeafReadOutput::new(
+                Tensor::<B, 3, Int>::from_data(
+                    TensorData::new(
+                        selected_token_indices,
+                        [batch_size, head_count, top_leaf_reads],
+                    ),
+                    &query.device(),
+                ),
+                Tensor::<B, 3, Int>::from_data(
+                    TensorData::new(
+                        selected_token_positions,
+                        [batch_size, head_count, top_leaf_reads],
+                    ),
+                    &query.device(),
+                ),
+                selected_leaf_mask.clone(),
+                Tensor::<B, 3>::from_data(
+                    TensorData::new(
+                        selected_token_scores,
+                        [batch_size, head_count, top_leaf_reads],
+                    ),
+                    &query.device(),
+                ),
+                Tensor::<B, 4>::from_data(
+                    TensorData::new(
+                        attention_weights,
+                        [batch_size, head_count, top_leaf_reads, self.shape.leaf_size],
+                    ),
+                    &query.device(),
+                ),
+                Tensor::<B, 4>::from_data(
+                    TensorData::new(
+                        read_values,
+                        [batch_size, head_count, top_leaf_reads, self.shape.value_dim],
+                    ),
+                    &query.device(),
+                ),
+                ExactLeafReadDiagnostics {
+                    fraction_using_exact_read: if mask.iter().any(|value| *value) {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    selected_token_position_histogram: Vec::new(),
+                    average_attention_entropy_per_head: vec![0.0; head_count],
+                    average_top_token_probability_per_head: vec![1.0; head_count],
+                },
+            )
+        }
+    }
 
     struct FixtureModel {
         vocab_size: usize,
@@ -1110,6 +1371,72 @@ mod tests {
                 }
                 .try_init(device)
                 .unwrap(),
+                read_fusion: BaselineReadFusionConfig {
+                    root_count: 2,
+                    root_readout_dim: 4,
+                    routed_value_dim: 5,
+                    exact_read_value_dim: 6,
+                    fused_readout_dim: 8,
+                    initializer: Initializer::Uniform {
+                        min: -0.08,
+                        max: 0.08,
+                    },
+                }
+                .try_init(device)
+                .unwrap(),
+            },
+            device,
+        )
+        .unwrap()
+    }
+
+    fn structural_v2_model<B: Backend>(device: &B::Device) -> StructuralV2Model<B> {
+        FractalV2Model::new(
+            64,
+            8,
+            FractalV2Components {
+                local_trunk: BaselineLocalTrunkConfig::new(8, 2, 6, 4, 16)
+                    .try_init(device)
+                    .unwrap(),
+                leaf_summarizer: BaselineLeafSummarizerConfig {
+                    readout_dim: 4,
+                    leaf_size: 16,
+                    summary_dim: 6,
+                    key_dim: 4,
+                    value_dim: 5,
+                    token_cache_key_dim: 4,
+                    token_cache_value_dim: 6,
+                }
+                .try_init(device)
+                .unwrap(),
+                tree_merge_cell: BaselineTreeMergeCellConfig {
+                    summary_dim: 6,
+                    key_dim: 4,
+                    value_dim: 5,
+                    scale_embedding_dim: 4,
+                }
+                .try_init(device)
+                .unwrap(),
+                router: StructuralProbeRouter::new(FractalRouterHeadShape {
+                    query_dim: 4,
+                    key_dim: 4,
+                    head_count: 1,
+                    beam_width: 1,
+                    top_leaf_reads: 1,
+                    allow_early_stop: false,
+                }),
+                exact_read: StructuralProbeExactRead::new(
+                    ExactLeafReadShape {
+                        query_dim: 4,
+                        key_dim: 4,
+                        value_dim: 6,
+                        head_count: 1,
+                        top_leaf_reads: 1,
+                        leaf_size: 16,
+                    },
+                    1,
+                    1.0,
+                ),
                 read_fusion: BaselineReadFusionConfig {
                     root_count: 2,
                     root_readout_dim: 4,
@@ -1275,7 +1602,7 @@ mod tests {
     #[test]
     fn default_v2_synthetic_probe_suites_are_memory_separating_on_real_v2_path() {
         let device = <TestBackend as Backend>::Device::default();
-        let model = baseline_v2_model::<TestBackend>(&device);
+        let model = structural_v2_model::<TestBackend>(&device);
 
         for suite in default_v2_synthetic_probe_suites() {
             suite.validate_for_vocab(model.vocab_size()).unwrap();
@@ -1334,6 +1661,7 @@ mod tests {
                 );
 
                 let tree_only_step = tree_only.steps().last().unwrap();
+                let tree_only_route_spans = selected_route_spans(tree_only_step.routed());
                 assert!(
                     tree_only
                         .final_state()
@@ -1359,10 +1687,17 @@ mod tests {
                     sample.name
                 );
                 assert!(
-                    mask_values(tree_only_step.routed().selected_leaf_mask())
-                        .into_iter()
-                        .any(|selected| selected),
-                    "tree-only mode failed to route any sealed leaf for sample '{}'",
+                    tree_only_route_spans
+                        .iter()
+                        .any(|span| span_overlaps(span, sample.evidence_span)),
+                    "tree-only mode failed to route the evidence span {:?} for sample '{}'",
+                    sample.evidence_span,
+                    sample.name
+                );
+                assert!(
+                    tree_only_route_spans.len()
+                        < tree_only.final_state().sealed_leaves().shared_spans().len(),
+                    "tree-only mode degenerated into dense retrieval for sample '{}'",
                     sample.name
                 );
                 assert!(
@@ -1374,6 +1709,7 @@ mod tests {
                 );
 
                 let full_step = full.steps().last().unwrap();
+                let full_route_spans = selected_route_spans(full_step.routed());
                 assert!(
                     full.final_state()
                         .leaf_token_cache()
@@ -1385,19 +1721,24 @@ mod tests {
                     sample.name
                 );
                 assert!(
-                    mask_values(full_step.routed().selected_leaf_mask())
-                        .into_iter()
-                        .any(|selected| selected),
-                    "full mode failed to route any sealed leaf for sample '{}'",
+                    full_route_spans
+                        .iter()
+                        .any(|span| span_overlaps(span, sample.evidence_span)),
+                    "full mode failed to route the evidence span {:?} for sample '{}'",
+                    sample.evidence_span,
                     sample.name
                 );
-                assert!(
-                    mask_values(full_step.exact_read().selected_token_mask())
-                        .into_iter()
-                        .any(|selected| selected),
-                    "full mode failed to perform exact read for sample '{}'",
-                    sample.name
-                );
+                if matches!(sample.minimum_mode, SyntheticProbeMode::TreePlusExactRead) {
+                    assert!(
+                        selected_absolute_positions(full_step.exact_read())
+                            .into_iter()
+                            .any(|position| sample.evidence_span.start() <= position
+                                && position < sample.evidence_span.end()),
+                        "full mode exact read did not intersect the evidence span {:?} for sample '{}'",
+                        sample.evidence_span,
+                        sample.name
+                    );
+                }
             }
         }
     }
@@ -1433,7 +1774,42 @@ mod tests {
             .unwrap()
     }
 
+    fn selected_route_spans(output: &FractalRouteOutput<TestBackend>) -> Vec<TokenSpan> {
+        output
+            .traces()
+            .iter()
+            .flat_map(|trace| trace.batch_routes.iter())
+            .flat_map(|route| route.selected_leaf_spans.iter().copied())
+            .collect()
+    }
+
+    fn selected_absolute_positions(output: &ExactLeafReadOutput<TestBackend>) -> Vec<usize> {
+        let positions = output
+            .selected_token_absolute_positions()
+            .to_data()
+            .convert::<i64>()
+            .into_vec::<i64>()
+            .unwrap();
+        let mask = mask_values(output.selected_token_mask());
+
+        positions
+            .into_iter()
+            .zip(mask)
+            .filter_map(|(position, selected)| {
+                if selected {
+                    usize::try_from(position).ok()
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     fn span_covers(outer: &TokenSpan, inner: TokenSpan) -> bool {
         outer.start() <= inner.start() && outer.end() >= inner.end()
+    }
+
+    fn span_overlaps(left: &TokenSpan, right: TokenSpan) -> bool {
+        left.start() < right.end() && right.start() < left.end()
     }
 }

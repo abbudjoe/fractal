@@ -76,7 +76,7 @@ pub struct FractalRouteOutput<B: Backend> {
 }
 
 impl<B: Backend> FractalRouteOutput<B> {
-    pub(crate) fn from_parts(
+    pub fn from_parts(
         selected_leaf_indices: Tensor<B, 3, Int>,
         selected_leaf_mask: Tensor<B, 3, Bool>,
         selected_leaf_scores: Tensor<B, 3>,

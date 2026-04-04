@@ -31,7 +31,7 @@ pub struct LocalTrunkStepOutput<B: Backend> {
 }
 
 impl<B: Backend> LocalTrunkStepOutput<B> {
-    pub(crate) fn new(next_state: MultiRootState<B>, root_readouts: Tensor<B, 3>) -> Self {
+    pub fn new(next_state: MultiRootState<B>, root_readouts: Tensor<B, 3>) -> Self {
         Self {
             next_state,
             root_readouts,
