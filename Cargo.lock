@@ -1920,6 +1920,7 @@ dependencies = [
  "fractal-core",
  "libc",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

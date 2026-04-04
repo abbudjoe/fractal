@@ -2,6 +2,7 @@ pub mod v2_ablation;
 pub mod v2_benchmark;
 pub mod v2_fixture;
 pub mod v2_synthetic;
+pub mod v2_training;
 
 pub use v2_ablation::{
     required_v2_ablation_modes, run_required_v2_ablation_sweep, V2AblationCaseReport,
@@ -20,6 +21,16 @@ pub use v2_synthetic::{
     SyntheticProbeKind, SyntheticProbeMetrics, SyntheticProbeMode, SyntheticProbeModeReport,
     SyntheticProbeModel, SyntheticProbeReport, SyntheticProbeSample, SyntheticProbeSampleResult,
     SyntheticProbeSuite, SyntheticProbeSuiteReport,
+};
+pub use v2_training::{
+    baseline_v2_byte_level_smoke_model_config, default_v2_smoke_corpus_paths,
+    run_baseline_v2_smoke_train, run_v2_smoke_train_with_model, ByteLevelVocabularyContract,
+    V2SmokeCheckpointArtifacts, V2SmokeCorpusStats, V2SmokeEvalMetrics, V2SmokeTrainConfig,
+    V2SmokeTrainModel, V2SmokeTrainReport, V2SmokeTrainResult, V2SmokeTrainStepReport,
+    BYTE_LEVEL_PAD_TOKEN, BYTE_LEVEL_VOCAB_SIZE, DEFAULT_V2_SMOKE_BATCH_SIZE,
+    DEFAULT_V2_SMOKE_EVAL_BATCHES, DEFAULT_V2_SMOKE_EVAL_HOLDOUT_EVERY,
+    DEFAULT_V2_SMOKE_LEARNING_RATE, DEFAULT_V2_SMOKE_SEQ_LEN, DEFAULT_V2_SMOKE_TRAIN_STEPS,
+    DEFAULT_V2_SMOKE_WINDOW_STRIDE,
 };
 
 use fractal_core::{RankedSpeciesResult, SpeciesRawMetrics};
