@@ -174,6 +174,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn checkpoint_loader_supports_final_selection_from_relocated_report_directory() {
+        let root = unique_temp_dir("v2-checkpoint-loader-relocated");
+        let corpus_path = root.join("corpus.md");
+        fs::write(&corpus_path, "checkpoint relocation smoke corpus\n".repeat(32)).unwrap();
+        let output_dir = root.join("artifacts");
+        let mut config = V2SmokeTrainConfig::new(vec![corpus_path], output_dir.clone());
+        config.train_steps = 2;
+        config.eval_batches = 1;
+        config.eval_holdout_every = 2;
+
+        let train_device = Default::default();
+        let result = run_baseline_v2_smoke_train::<TrainBackend>(config, &train_device).unwrap();
+        let relocated_dir = root.join("relocated");
+        fs::create_dir_all(&relocated_dir).unwrap();
+
+        let relocated_report = relocated_dir.join("report.json");
+        let relocated_model = relocated_dir.join(
+            result
+                .report
+                .checkpoint
+                .final_model_path
+                .file_name()
+                .unwrap(),
+        );
+        fs::copy(&result.report.checkpoint.report_path, &relocated_report).unwrap();
+        fs::copy(&result.report.checkpoint.final_model_path, &relocated_model).unwrap();
+
+        let original_backup = result
+            .report
+            .checkpoint
+            .final_model_path
+            .with_extension("bin.bak");
+        fs::rename(&result.report.checkpoint.final_model_path, &original_backup).unwrap();
+
+        let device = Default::default();
+        let loaded = load_baseline_v2_checkpoint_model::<TestBackend>(
+            &relocated_report,
+            V2CheckpointSelection::Final,
+            &device,
+        )
+        .unwrap();
+
+        assert_eq!(loaded.selection, V2CheckpointSelection::Final);
+        assert_eq!(loaded.report.config.model, result.report.config.model);
+        assert_eq!(loaded.checkpoint_path, relocated_model);
+        assert_eq!(loaded.report_path, relocated_report);
+
+        let input_ids = Tensor::<TestBackend, 2, Int>::zeros([1, 4], &device);
+        let output = loaded.model.forward(input_ids).unwrap();
+        assert_eq!(
+            output.logits().dims(),
+            [1, 4, result.report.config.model.vocab_size]
+        );
+    }
+
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "{prefix}-{}",

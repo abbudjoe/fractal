@@ -41,7 +41,7 @@ struct CliArgs {
     suite: SuiteSelection,
     output: OutputFormat,
     checkpoint_report: Option<PathBuf>,
-    checkpoint_kind: V2CheckpointSelection,
+    checkpoint_kind_override: Option<V2CheckpointSelection>,
 }
 
 impl CliArgs {
@@ -49,7 +49,7 @@ impl CliArgs {
         let mut suite = SuiteSelection::All;
         let mut output = OutputFormat::Table;
         let mut checkpoint_report = None;
-        let mut checkpoint_kind = V2CheckpointSelection::Best;
+        let mut checkpoint_kind_override = None;
         let mut show_help = false;
         let mut iter = args.peekable();
 
@@ -77,7 +77,7 @@ impl CliArgs {
                     let value = iter
                         .next()
                         .ok_or_else(|| "--checkpoint-kind requires a value".to_owned())?;
-                    checkpoint_kind = parse_checkpoint_kind(&value)?;
+                    checkpoint_kind_override = Some(parse_checkpoint_kind(&value)?);
                 }
                 "--help" | "-h" => {
                     show_help = true;
@@ -91,12 +91,21 @@ impl CliArgs {
             std::process::exit(0);
         }
 
+        if checkpoint_report.is_none() && checkpoint_kind_override.is_some() {
+            return Err("--checkpoint-kind requires --checkpoint-report".to_owned());
+        }
+
         Ok(Self {
             suite,
             output,
             checkpoint_report,
-            checkpoint_kind,
+            checkpoint_kind_override,
         })
+    }
+
+    fn checkpoint_kind(&self) -> V2CheckpointSelection {
+        self.checkpoint_kind_override
+            .unwrap_or(V2CheckpointSelection::Best)
     }
 }
 
@@ -176,7 +185,7 @@ fn load_model(
         Some(report_path) => {
             let loaded = load_baseline_v2_checkpoint_model::<ProbeBackend>(
                 report_path,
-                args.checkpoint_kind,
+                args.checkpoint_kind(),
                 device,
             )
             .map_err(|error| format!("failed to load trained checkpoint model: {error}"))?;
@@ -313,7 +322,8 @@ mod tests {
         assert_eq!(args.suite, SuiteSelection::All);
         assert_eq!(args.output, OutputFormat::Table);
         assert_eq!(args.checkpoint_report, None);
-        assert_eq!(args.checkpoint_kind, V2CheckpointSelection::Best);
+        assert_eq!(args.checkpoint_kind_override, None);
+        assert_eq!(args.checkpoint_kind(), V2CheckpointSelection::Best);
     }
 
     #[test]
@@ -340,7 +350,20 @@ mod tests {
             args.checkpoint_report,
             Some(PathBuf::from("/tmp/report.json"))
         );
-        assert_eq!(args.checkpoint_kind, V2CheckpointSelection::Final);
+        assert_eq!(args.checkpoint_kind_override, Some(V2CheckpointSelection::Final));
+        assert_eq!(args.checkpoint_kind(), V2CheckpointSelection::Final);
+    }
+
+    #[test]
+    fn cli_rejects_checkpoint_kind_without_checkpoint_report() {
+        let error = CliArgs::parse(
+            ["--checkpoint-kind", "final"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("--checkpoint-kind requires --checkpoint-report"));
     }
 
     #[test]
