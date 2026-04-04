@@ -18,13 +18,6 @@ pub enum V2RootTopology {
 
 impl V2RootTopology {
     pub const ALL: [Self; 2] = [Self::SingleRoot, Self::MultiRoot];
-
-    pub const fn root_count(self) -> usize {
-        match self {
-            Self::SingleRoot => 1,
-            Self::MultiRoot => 2,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
@@ -83,9 +76,13 @@ pub fn run_required_v2_ablation_sweep<B: Backend>(
     let mut cases = Vec::with_capacity(V2RootTopology::ALL.len());
 
     for topology in V2RootTopology::ALL {
+        let root_count = match topology {
+            V2RootTopology::SingleRoot => 1,
+            V2RootTopology::MultiRoot => config.base_model.root_count,
+        };
         let case_config = config
             .base_model
-            .with_root_count_preserving_total_budget(topology.root_count());
+            .with_root_count_preserving_total_budget(root_count);
         let model = build_baseline_v2_synthetic_model::<B>(case_config, device)?;
         let synthetic = run_v2_synthetic_probe_suites(&model, suites, device)?;
         cases.push(V2AblationCaseReport {
