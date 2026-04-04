@@ -177,7 +177,7 @@ fn render_table(report: &V2BenchmarkReport) -> String {
         }
         let _ = writeln!(
             output,
-            "  {:<12} mean_ms={:>8.3} total_ms={:>8.3} tok/s={:>10.2} rss_delta_mb={:>8.2} sparsity={:>5.3} collapse={:>5.3} exact={:>5.3} distance={:>7.2} depth={} leaves={} agreement={:>5.3}",
+            "  {:<12} mean_ms={:>8.3} total_ms={:>8.3} tok/s={:>10.2} rss_delta_mb={:>8.2} sparsity={:>5.3} collapse={:>5.3} exact={:>5.3} distance={:>7.2} depth={} leaves={} agreement={:>5.3} dead_nodes={} leaf_bins={}",
             surface_label(entry.surface),
             entry.mean_wall_time_ms,
             entry.total_wall_time_ms,
@@ -190,6 +190,8 @@ fn render_table(report: &V2BenchmarkReport) -> String {
             entry.observability.tree_depth_reached,
             entry.observability.level0_leaf_count,
             entry.observability.head_agreement_rate,
+            entry.observability.has_dead_or_unused_tree_nodes,
+            entry.observability.selected_leaf_usage.len(),
         );
     }
 

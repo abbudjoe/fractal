@@ -4,7 +4,8 @@ pub mod v2_synthetic;
 
 pub use v2_benchmark::{
     run_baseline_v2_benchmark_suite, V2BenchmarkConfig, V2BenchmarkEntry, V2BenchmarkReport,
-    V2BenchmarkSurface, V2ObservabilitySnapshot, DEFAULT_V2_BENCHMARK_SEQUENCE_LENGTHS,
+    V2BenchmarkSurface, V2LeafUsageBin, V2ObservabilitySnapshot,
+    DEFAULT_V2_BENCHMARK_SEQUENCE_LENGTHS,
 };
 pub use v2_fixture::{
     build_baseline_v2_synthetic_model, BaselineV2SyntheticModel, BaselineV2SyntheticModelConfig,
