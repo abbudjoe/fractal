@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use burn::{
     module::Module,
     nn::{Embedding, EmbeddingConfig},
@@ -10,6 +12,11 @@ use crate::{
 };
 
 use super::{
+    auditor::{
+        summarize_head_contexts, CausalMemoryAuditPlan, CausalMemoryAuditReport,
+        CausalMemoryAuditSampleReport, CausalMemoryDeltaMetrics, CausalMemoryEvaluationContext,
+        CausalMemoryHeadContext, CausalMemoryIntervention, CausalMemoryInterventionResult,
+    },
     exact_read::{ExactLeafRead, ExactLeafReadShape},
     leaf::{LeafSummarizer, LeafSummarizerShape},
     local_trunk::{
@@ -393,6 +400,260 @@ where
         })
     }
 
+    pub fn audit_causal_memory(
+        &self,
+        input_ids: Tensor<B, 2, Int>,
+        target_ids: Tensor<B, 2, Int>,
+        plan: &CausalMemoryAuditPlan,
+    ) -> Result<CausalMemoryAuditReport, FractalError> {
+        let plan = plan.clone().validate()?;
+        let [batch_size, seq_len] = input_ids.dims();
+        ensure_nonzero("fractal_v2_audit.batch_size", batch_size)?;
+        ensure_nonzero("fractal_v2_audit.seq_len", seq_len)?;
+        ensure_match(
+            "fractal_v2_audit.target_batch_size",
+            target_ids.dims()[0],
+            batch_size,
+        )?;
+        ensure_match(
+            "fractal_v2_audit.target_seq_len",
+            target_ids.dims()[1],
+            seq_len,
+        )?;
+
+        let mut samples_by_position = BTreeMap::<usize, Vec<_>>::new();
+        for sample in plan.samples() {
+            if sample.batch_index >= batch_size {
+                return Err(FractalError::InvalidConfig(format!(
+                    "causal_memory_audit sample batch {} is out of bounds for batch size {}",
+                    sample.batch_index, batch_size
+                )));
+            }
+            if sample.position >= seq_len {
+                return Err(FractalError::InvalidConfig(format!(
+                    "causal_memory_audit sample position {} is out of bounds for sequence length {}",
+                    sample.position, seq_len
+                )));
+            }
+            samples_by_position
+                .entry(sample.position)
+                .or_default()
+                .push(sample.clone());
+        }
+
+        let shape = self.shape();
+        let device = input_ids.device();
+        let embeddings = self.embedding.forward(input_ids);
+        let target_data = target_ids
+            .to_data()
+            .convert::<i64>()
+            .into_vec::<i64>()
+            .map_err(invalid_state_from_data("fractal_v2_audit.target_ids"))?;
+        let mut roots =
+            MultiRootState::zeros_for_local_trunk(batch_size, shape.local_trunk, &device)?;
+        let mut state = FractalV2State::for_model_shape(
+            shape,
+            batch_size,
+            MergeCheckpointPolicy::FixedLeafSize {
+                tokens_per_leaf: self.leaf_size,
+            },
+            &device,
+        )?;
+        let mut sample_reports = Vec::new();
+
+        for position in 0..seq_len {
+            let token_embedding = embeddings
+                .clone()
+                .narrow(1, position, 1)
+                .reshape([batch_size, self.token_dim]);
+            let local_step = self.local_trunk.step(token_embedding, roots)?;
+            let root_readouts = local_step.root_readouts();
+            roots = local_step.into_next_state();
+            state.update_roots(roots.clone())?;
+            let _sealed_leaf = state.append_root_readouts_with_active_root_count(
+                root_readouts.clone(),
+                self.root_count,
+                &self.leaf_summarizer,
+                &self.tree_merge_cell,
+            )?;
+            let query = summarize_query_from_roots(
+                root_readouts.clone(),
+                self.root_count,
+                self.root_count,
+                self.root_readout_dim,
+            )?;
+            let query_position = position + 1;
+            let routed = self
+                .router
+                .route(query.clone(), query_position, state.tree())?;
+            let exact_read = self.exact_read.read(
+                query.clone(),
+                query_position,
+                &routed,
+                state.leaf_token_cache(),
+            )?;
+            let reference_logits = self.project_step_logits(
+                root_readouts.clone(),
+                routed.selected_leaf_values(),
+                routed.selected_leaf_scores(),
+                routed.selected_leaf_mask(),
+                exact_read.read_values(),
+                exact_read.selected_token_mask(),
+            )?;
+
+            let Some(samples) = samples_by_position.get(&position) else {
+                continue;
+            };
+
+            for sample in samples {
+                let target_token_id = target_token_at(
+                    &target_data,
+                    batch_size,
+                    seq_len,
+                    sample.batch_index,
+                    sample.position,
+                )?;
+                let reference_logits_row = logits_for_batch(
+                    reference_logits.clone(),
+                    sample.batch_index,
+                    self.vocab_size,
+                )?;
+                let reference_loss =
+                    negative_log_likelihood(&reference_logits_row, target_token_id)?;
+                let reference_target_logit =
+                    target_logit(&reference_logits_row, target_token_id, self.vocab_size)?;
+                let reference_head_contexts =
+                    head_contexts_for_route(&routed, sample.batch_index, query_position)?;
+                let reference_context = summarize_head_contexts(&reference_head_contexts);
+                let reference_metrics = AuditMetricReference {
+                    task_family: &sample.task_family,
+                    context: reference_context,
+                    head_contexts: &reference_head_contexts,
+                    reference_loss,
+                    reference_target_logit,
+                    reference_logits: &reference_logits_row,
+                    batch_index: sample.batch_index,
+                    target_token_id,
+                    vocab_size: self.vocab_size,
+                };
+                let mut interventions = Vec::new();
+
+                if plan.include_no_tree_read() {
+                    let logits = self.project_step_logits(
+                        root_readouts.clone(),
+                        Tensor::<B, 4>::zeros(routed.selected_leaf_values().dims(), &device),
+                        routed.selected_leaf_scores(),
+                        routed.selected_leaf_mask(),
+                        exact_read.read_values(),
+                        exact_read.selected_token_mask(),
+                    )?;
+                    interventions.push(intervention_result(
+                        CausalMemoryIntervention::NoTreeRead,
+                        reference_metrics,
+                        logits,
+                    )?);
+                }
+
+                if plan.include_no_exact_leaf_read() {
+                    let logits = self.project_step_logits(
+                        root_readouts.clone(),
+                        routed.selected_leaf_values(),
+                        routed.selected_leaf_scores(),
+                        routed.selected_leaf_mask(),
+                        Tensor::<B, 4>::zeros(exact_read.read_values().dims(), &device),
+                        exact_read.selected_token_mask(),
+                    )?;
+                    interventions.push(intervention_result(
+                        CausalMemoryIntervention::NoExactLeafRead,
+                        reference_metrics,
+                        logits,
+                    )?);
+                }
+
+                if plan.include_next_best_span_substitution() {
+                    match next_best_route_for_batch(
+                        &routed,
+                        state.tree(),
+                        sample.batch_index,
+                        query_position,
+                    )? {
+                        Some(next_best) => {
+                            let exact = self.exact_read.read(
+                                query.clone(),
+                                query_position,
+                                &next_best,
+                                state.leaf_token_cache(),
+                            )?;
+                            let next_best_head_contexts = head_contexts_for_route(
+                                &next_best,
+                                sample.batch_index,
+                                query_position,
+                            )?;
+                            let logits = self.project_step_logits(
+                                root_readouts.clone(),
+                                next_best.selected_leaf_values(),
+                                next_best.selected_leaf_scores(),
+                                next_best.selected_leaf_mask(),
+                                exact.read_values(),
+                                exact.selected_token_mask(),
+                            )?;
+                            interventions.push(intervention_result(
+                                CausalMemoryIntervention::NextBestSpanSubstitution,
+                                AuditMetricReference {
+                                    context: summarize_head_contexts(&next_best_head_contexts),
+                                    head_contexts: &next_best_head_contexts,
+                                    ..reference_metrics
+                                },
+                                logits,
+                            )?);
+                        }
+                        None => interventions.push(CausalMemoryInterventionResult {
+                            intervention: CausalMemoryIntervention::NextBestSpanSubstitution,
+                            applied: false,
+                            context: None,
+                            head_contexts: Vec::new(),
+                            metrics: None,
+                        }),
+                    }
+                }
+
+                if plan.include_root_drop() {
+                    for root_index in 0..self.root_count {
+                        let logits = self.project_step_logits(
+                            zero_root_readout_for_batch(
+                                root_readouts.clone(),
+                                sample.batch_index,
+                                root_index,
+                            )?,
+                            routed.selected_leaf_values(),
+                            routed.selected_leaf_scores(),
+                            routed.selected_leaf_mask(),
+                            exact_read.read_values(),
+                            exact_read.selected_token_mask(),
+                        )?;
+                        interventions.push(intervention_result(
+                            CausalMemoryIntervention::RootDrop { root_index },
+                            reference_metrics,
+                            logits,
+                        )?);
+                    }
+                }
+
+                sample_reports.push(CausalMemoryAuditSampleReport {
+                    sample: sample.clone(),
+                    reference_context,
+                    reference_head_contexts,
+                    target_token_id,
+                    reference_loss,
+                    reference_target_logit,
+                    interventions,
+                });
+            }
+        }
+
+        Ok(CausalMemoryAuditReport::from_sample_reports(sample_reports))
+    }
+
     fn forward_from_retrieval_trace(
         &self,
         trace: FractalV2RetrievalTrace<B>,
@@ -433,6 +694,37 @@ where
             logits,
             final_state,
         })
+    }
+
+    fn project_step_logits(
+        &self,
+        root_readouts: Tensor<B, 3>,
+        routed_values: Tensor<B, 4>,
+        routed_scores: Tensor<B, 3>,
+        routed_mask: Tensor<B, 3, burn::tensor::Bool>,
+        exact_read_values: Tensor<B, 4>,
+        exact_read_mask: Tensor<B, 3, burn::tensor::Bool>,
+    ) -> Result<Tensor<B, 2>, FractalError> {
+        let [batch_size, _, _] = root_readouts.dims();
+        let fusion_input = ReadFusionInput::new(
+            root_readouts,
+            routed_values,
+            routed_scores,
+            routed_mask,
+            exact_read_values,
+            exact_read_mask,
+        )?;
+        let fusion = self
+            .read_fusion
+            .fuse(&fusion_input, ReadFusionAblation::full())?;
+        Ok(self
+            .output
+            .forward(
+                fusion
+                    .fused_readout()
+                    .reshape([batch_size, 1, self.fused_readout_dim]),
+            )
+            .reshape([batch_size, self.vocab_size]))
     }
 
     pub fn shape(&self) -> FractalV2ModelShape {
@@ -513,6 +805,521 @@ fn summarize_query_from_roots<B: Backend>(
         .sum_dim(1)
         .mul_scalar(1.0 / active_root_count as f64)
         .reshape([batch_size, root_readout_dim]))
+}
+
+fn target_token_at(
+    target_data: &[i64],
+    batch_size: usize,
+    seq_len: usize,
+    batch_index: usize,
+    position: usize,
+) -> Result<i64, FractalError> {
+    if batch_index >= batch_size || position >= seq_len {
+        return Err(FractalError::InvalidState(format!(
+            "target lookup [{batch_index}, {position}] is out of bounds for [{batch_size}, {seq_len}]"
+        )));
+    }
+    Ok(target_data[batch_index * seq_len + position])
+}
+
+fn logits_for_batch<B: Backend>(
+    logits: Tensor<B, 2>,
+    batch_index: usize,
+    vocab_size: usize,
+) -> Result<Vec<f32>, FractalError> {
+    let [batch_size, actual_vocab_size] = logits.dims();
+    ensure_match("audit_logits.vocab_size", actual_vocab_size, vocab_size)?;
+    if batch_index >= batch_size {
+        return Err(FractalError::InvalidState(format!(
+            "audit_logits batch {batch_index} is out of bounds for batch size {batch_size}"
+        )));
+    }
+    logits
+        .slice([batch_index..batch_index + 1, 0..vocab_size])
+        .reshape([vocab_size])
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .map_err(invalid_state_from_data("audit_logits"))
+}
+
+fn target_logit(
+    logits: &[f32],
+    target_token_id: i64,
+    vocab_size: usize,
+) -> Result<f32, FractalError> {
+    let target_index = usize::try_from(target_token_id).map_err(|_| {
+        FractalError::InvalidConfig(format!(
+            "target token id {target_token_id} must be non-negative"
+        ))
+    })?;
+    if target_index >= vocab_size {
+        return Err(FractalError::InvalidConfig(format!(
+            "target token id {target_token_id} is out of bounds for vocab size {vocab_size}"
+        )));
+    }
+    Ok(logits[target_index])
+}
+
+fn negative_log_likelihood(logits: &[f32], target_token_id: i64) -> Result<f32, FractalError> {
+    let target_index = usize::try_from(target_token_id).map_err(|_| {
+        FractalError::InvalidConfig(format!(
+            "target token id {target_token_id} must be non-negative"
+        ))
+    })?;
+    if target_index >= logits.len() {
+        return Err(FractalError::InvalidConfig(format!(
+            "target token id {target_token_id} is out of bounds for {} logits",
+            logits.len()
+        )));
+    }
+
+    let max_logit = logits
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, |acc, value| acc.max(value));
+    let log_sum_exp = logits
+        .iter()
+        .map(|value| (*value - max_logit).exp())
+        .sum::<f32>()
+        .ln()
+        + max_logit;
+
+    Ok(log_sum_exp - logits[target_index])
+}
+
+fn kl_divergence(reference_logits: &[f32], perturbed_logits: &[f32]) -> Result<f32, FractalError> {
+    if reference_logits.len() != perturbed_logits.len() {
+        return Err(FractalError::InvalidState(format!(
+            "cannot compare KL divergence for mismatched logit widths: {} vs {}",
+            reference_logits.len(),
+            perturbed_logits.len()
+        )));
+    }
+    let reference_probs = softmax_vec(reference_logits);
+    let perturbed_probs = softmax_vec(perturbed_logits);
+
+    Ok(reference_probs
+        .iter()
+        .zip(perturbed_probs.iter())
+        .map(|(reference, perturbed)| {
+            let reference = (*reference).max(1.0e-12);
+            let perturbed = (*perturbed).max(1.0e-12);
+            reference * (reference.ln() - perturbed.ln())
+        })
+        .sum())
+}
+
+fn softmax_vec(logits: &[f32]) -> Vec<f32> {
+    let max_logit = logits
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, |acc, value| acc.max(value));
+    let exp_values = logits
+        .iter()
+        .map(|value| (*value - max_logit).exp())
+        .collect::<Vec<_>>();
+    let denominator = exp_values.iter().sum::<f32>().max(1.0e-12);
+    exp_values
+        .into_iter()
+        .map(|value| value / denominator)
+        .collect()
+}
+
+fn head_contexts_for_route<B: Backend>(
+    routed: &crate::v2::FractalRouteOutput<B>,
+    batch_index: usize,
+    query_position: usize,
+) -> Result<Vec<CausalMemoryHeadContext>, FractalError> {
+    let mut head_contexts = Vec::with_capacity(routed.traces().len());
+
+    for (head_index, head_trace) in routed.traces().iter().enumerate() {
+        let batch_route = head_trace.batch_routes.get(batch_index).ok_or_else(|| {
+            FractalError::InvalidState(format!(
+                "route output batch {} is out of bounds for {} batch routes",
+                batch_index,
+                head_trace.batch_routes.len()
+            ))
+        })?;
+        head_contexts.push(CausalMemoryHeadContext {
+            head_index,
+            routing_depth: batch_route.steps.len(),
+            span_distances: batch_route
+                .selected_leaf_spans
+                .iter()
+                .copied()
+                .map(|span| selected_span_distance(query_position, span))
+                .collect::<Result<Vec<_>, _>>()?,
+            selected_leaf_indices: batch_route.selected_leaf_indices.clone(),
+        });
+    }
+
+    Ok(head_contexts)
+}
+
+fn selected_span_distance(
+    query_position: usize,
+    span: crate::v2::TokenSpan,
+) -> Result<usize, FractalError> {
+    if span.end() > query_position {
+        return Err(FractalError::InvalidState(format!(
+            "selected span [{}, {}) ends after query position {}",
+            span.start(),
+            span.end(),
+            query_position
+        )));
+    }
+
+    Ok(query_position - span.end())
+}
+
+#[derive(Clone, Copy)]
+struct AuditMetricReference<'a> {
+    task_family: &'a crate::v2::CausalMemoryTaskFamily,
+    context: CausalMemoryEvaluationContext,
+    head_contexts: &'a [CausalMemoryHeadContext],
+    reference_loss: f32,
+    reference_target_logit: f32,
+    reference_logits: &'a [f32],
+    batch_index: usize,
+    target_token_id: i64,
+    vocab_size: usize,
+}
+
+fn intervention_result<B: Backend>(
+    intervention: CausalMemoryIntervention,
+    reference: AuditMetricReference<'_>,
+    perturbed_logits: Tensor<B, 2>,
+) -> Result<CausalMemoryInterventionResult, FractalError> {
+    let perturbed_logits = logits_for_batch(
+        perturbed_logits,
+        reference.batch_index,
+        reference.vocab_size,
+    )?;
+    let perturbed_loss = negative_log_likelihood(&perturbed_logits, reference.target_token_id)?;
+    let perturbed_target_logit = target_logit(
+        &perturbed_logits,
+        reference.target_token_id,
+        reference.vocab_size,
+    )?;
+    let retrieval_accuracy_delta = retrieval_accuracy_delta(
+        reference.task_family,
+        reference.reference_logits,
+        &perturbed_logits,
+        reference.target_token_id,
+        reference.vocab_size,
+    )?;
+
+    Ok(CausalMemoryInterventionResult {
+        intervention,
+        applied: true,
+        context: Some(reference.context),
+        head_contexts: reference.head_contexts.to_vec(),
+        metrics: Some(CausalMemoryDeltaMetrics {
+            loss_delta: perturbed_loss - reference.reference_loss,
+            target_logit_delta: reference.reference_target_logit - perturbed_target_logit,
+            kl_divergence: kl_divergence(reference.reference_logits, &perturbed_logits)?,
+            retrieval_accuracy_delta,
+            perplexity_delta: perturbed_loss.exp() - reference.reference_loss.exp(),
+        }),
+    })
+}
+
+fn retrieval_accuracy_delta(
+    task_family: &crate::v2::CausalMemoryTaskFamily,
+    reference_logits: &[f32],
+    perturbed_logits: &[f32],
+    target_token_id: i64,
+    vocab_size: usize,
+) -> Result<Option<f32>, FractalError> {
+    match task_family {
+        crate::v2::CausalMemoryTaskFamily::OrdinaryLm => Ok(None),
+        crate::v2::CausalMemoryTaskFamily::Copy
+        | crate::v2::CausalMemoryTaskFamily::AssociativeRecall
+        | crate::v2::CausalMemoryTaskFamily::Induction
+        | crate::v2::CausalMemoryTaskFamily::NoisyRetrieval
+        | crate::v2::CausalMemoryTaskFamily::Custom(_) => Ok(Some(
+            target_prediction_accuracy(reference_logits, target_token_id, vocab_size)?
+                - target_prediction_accuracy(perturbed_logits, target_token_id, vocab_size)?,
+        )),
+    }
+}
+
+fn target_prediction_accuracy(
+    logits: &[f32],
+    target_token_id: i64,
+    vocab_size: usize,
+) -> Result<f32, FractalError> {
+    Ok(
+        if predicted_token_id(logits, vocab_size)? == target_token_id {
+            1.0
+        } else {
+            0.0
+        },
+    )
+}
+
+fn predicted_token_id(logits: &[f32], vocab_size: usize) -> Result<i64, FractalError> {
+    ensure_match("predicted_token_id.vocab_size", logits.len(), vocab_size)?;
+    let (predicted_index, _) = logits
+        .iter()
+        .copied()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.total_cmp(right))
+        .ok_or_else(|| {
+            FractalError::InvalidState("cannot predict from empty logits".to_string())
+        })?;
+
+    Ok(predicted_index as i64)
+}
+
+fn zero_root_readout_for_batch<B: Backend>(
+    root_readouts: Tensor<B, 3>,
+    batch_index: usize,
+    root_index: usize,
+) -> Result<Tensor<B, 3>, FractalError> {
+    let [batch_size, root_count, root_readout_dim] = root_readouts.dims();
+    if batch_index >= batch_size || root_index >= root_count {
+        return Err(FractalError::InvalidState(format!(
+            "cannot zero root readout for batch {} root {} in [{}, {}, {}]",
+            batch_index, root_index, batch_size, root_count, root_readout_dim
+        )));
+    }
+    let mut values = root_readouts
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .map_err(invalid_state_from_data("root_readouts"))?;
+    for dim_index in 0..root_readout_dim {
+        let flat_index = (batch_index * root_count + root_index) * root_readout_dim + dim_index;
+        values[flat_index] = 0.0;
+    }
+
+    Ok(Tensor::<B, 3>::from_data(
+        burn::tensor::TensorData::new(values, [batch_size, root_count, root_readout_dim]),
+        &root_readouts.device(),
+    ))
+}
+
+fn next_best_route_for_batch<B: Backend>(
+    routed: &crate::v2::FractalRouteOutput<B>,
+    tree: &crate::v2::TreeSummaryState<B>,
+    batch_index: usize,
+    query_position: usize,
+) -> Result<Option<crate::v2::FractalRouteOutput<B>>, FractalError> {
+    let selected_leaf_indices = routed.selected_leaf_indices();
+    let selected_leaf_mask = routed.selected_leaf_mask();
+    let selected_leaf_scores = routed.selected_leaf_scores();
+    let selected_leaf_values = routed.selected_leaf_values();
+    let [batch_size, head_count, top_leaf_reads] = selected_leaf_indices.dims();
+    let [value_batch_size, value_head_count, value_top_leaf_reads, value_dim] =
+        selected_leaf_values.dims();
+    ensure_match("next_best.value_batch_size", value_batch_size, batch_size)?;
+    ensure_match("next_best.value_head_count", value_head_count, head_count)?;
+    ensure_match(
+        "next_best.value_top_leaf_reads",
+        value_top_leaf_reads,
+        top_leaf_reads,
+    )?;
+    if batch_index >= batch_size || top_leaf_reads < 2 {
+        return Ok(None);
+    }
+
+    let mut index_data = selected_leaf_indices
+        .to_data()
+        .convert::<i64>()
+        .into_vec::<i64>()
+        .map_err(invalid_state_from_data("next_best.selected_leaf_indices"))?;
+    let mut mask_data = selected_leaf_mask
+        .to_data()
+        .convert::<bool>()
+        .into_vec::<bool>()
+        .map_err(invalid_state_from_data("next_best.selected_leaf_mask"))?;
+    let mut score_data = selected_leaf_scores
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .map_err(invalid_state_from_data("next_best.selected_leaf_scores"))?;
+    let mut value_data = selected_leaf_values
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .map_err(invalid_state_from_data("next_best.selected_leaf_values"))?;
+    let mut traces = routed.traces().to_vec();
+    let diagnostics = routed.diagnostics().clone();
+
+    for head_index in 0..head_count {
+        let primary_flat =
+            selection_flat_index(batch_index, head_index, 0, head_count, top_leaf_reads);
+        let batch_route = traces
+            .get_mut(head_index)
+            .and_then(|trace| trace.batch_routes.get_mut(batch_index))
+            .ok_or_else(|| {
+                FractalError::InvalidState(format!(
+                    "missing route trace for head {} batch {} while building next-best route",
+                    head_index, batch_index
+                ))
+            })?;
+        let final_step = batch_route.steps.last().ok_or_else(|| {
+            FractalError::InvalidState(format!(
+                "missing final routing step for head {} batch {} while building next-best route",
+                head_index, batch_index
+            ))
+        })?;
+        if final_step.level != 0 {
+            return Err(FractalError::InvalidState(
+                "next-best substitution requires the final routing step to target leaf nodes"
+                    .to_string(),
+            ));
+        }
+        let selected_set = batch_route
+            .selected_leaf_indices
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut alternate = None;
+        for candidate_slot in top_scored_candidate_slots(&final_step.considered_candidate_scores) {
+            let leaf_index = final_step.considered_candidate_indices[candidate_slot];
+            if selected_set.contains(&leaf_index) {
+                continue;
+            }
+            let span = final_step.considered_candidate_spans[candidate_slot];
+            if span.end() > query_position {
+                return Err(FractalError::InvalidState(format!(
+                    "next-best leaf span [{}, {}) ends after query position {}",
+                    span.start(),
+                    span.end(),
+                    query_position
+                )));
+            }
+            alternate = Some((
+                leaf_index,
+                final_step.considered_candidate_scores[candidate_slot],
+                span,
+            ));
+            break;
+        }
+        let Some((next_index, _next_score, next_span)) = alternate else {
+            return Ok(None);
+        };
+        index_data[primary_flat] = next_index as i64;
+        mask_data[primary_flat] = true;
+        let next_value = tree
+            .level(0)
+            .ok_or_else(|| {
+                FractalError::InvalidState(
+                    "next-best substitution requires tree level 0 to be present".to_string(),
+                )
+            })?
+            .values()
+            .slice([
+                batch_index..batch_index + 1,
+                next_index..next_index + 1,
+                0..value_dim,
+            ])
+            .reshape([value_dim])
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .map_err(invalid_state_from_data("next_best.selected_leaf_value"))?;
+        for (dim_index, value) in next_value.iter().copied().enumerate().take(value_dim) {
+            let primary_value_flat = ((((batch_index * head_count) + head_index) * top_leaf_reads)
+                * value_dim)
+                + dim_index;
+            value_data[primary_value_flat] = value;
+        }
+        batch_route.selected_leaf_indices[0] = next_index;
+        batch_route.selected_leaf_spans[0] = next_span;
+        let active_slot_count = batch_route.selected_leaf_indices.len();
+        let mut raw_selected_scores = Vec::with_capacity(active_slot_count);
+        for slot in 0..active_slot_count {
+            let leaf_index = if slot == 0 {
+                next_index
+            } else {
+                batch_route.selected_leaf_indices[slot]
+            };
+            raw_selected_scores.push(raw_score_for_considered_leaf(final_step, leaf_index)?);
+        }
+        let normalized_selected_scores = softmax_vec(&raw_selected_scores);
+        for (slot, score) in normalized_selected_scores.iter().copied().enumerate() {
+            let flat_index =
+                selection_flat_index(batch_index, head_index, slot, head_count, top_leaf_reads);
+            score_data[flat_index] = score;
+            batch_route.selected_leaf_scores[slot] = score;
+        }
+        for slot in active_slot_count..top_leaf_reads {
+            let flat_index =
+                selection_flat_index(batch_index, head_index, slot, head_count, top_leaf_reads);
+            score_data[flat_index] = 0.0;
+        }
+    }
+
+    Ok(Some(crate::v2::FractalRouteOutput::from_parts(
+        Tensor::<B, 3, Int>::from_data(
+            burn::tensor::TensorData::new(index_data, [batch_size, head_count, top_leaf_reads]),
+            &selected_leaf_indices.device(),
+        ),
+        Tensor::<B, 3, burn::tensor::Bool>::from_data(
+            burn::tensor::TensorData::new(mask_data, [batch_size, head_count, top_leaf_reads]),
+            &selected_leaf_mask.device(),
+        ),
+        Tensor::<B, 3>::from_data(
+            burn::tensor::TensorData::new(score_data, [batch_size, head_count, top_leaf_reads]),
+            &selected_leaf_scores.device(),
+        ),
+        Tensor::<B, 4>::from_data(
+            burn::tensor::TensorData::new(
+                value_data,
+                [batch_size, head_count, top_leaf_reads, value_dim],
+            ),
+            &selected_leaf_values.device(),
+        ),
+        traces,
+        diagnostics,
+    )?))
+}
+
+fn top_scored_candidate_slots(scores: &[f32]) -> Vec<usize> {
+    let mut slots = scores.iter().copied().enumerate().collect::<Vec<_>>();
+    slots.sort_by(|(_, left), (_, right)| right.total_cmp(left));
+    slots.into_iter().map(|(index, _)| index).collect()
+}
+
+fn raw_score_for_considered_leaf(
+    final_step: &crate::v2::BatchRouteStep,
+    leaf_index: usize,
+) -> Result<f32, FractalError> {
+    final_step
+        .considered_candidate_indices
+        .iter()
+        .position(|candidate| *candidate == leaf_index)
+        .map(|slot| final_step.considered_candidate_scores[slot])
+        .ok_or_else(|| {
+            FractalError::InvalidState(format!(
+                "leaf {} was not present in the final considered candidate set",
+                leaf_index
+            ))
+        })
+}
+
+fn selection_flat_index(
+    batch_index: usize,
+    head_index: usize,
+    slot: usize,
+    head_count: usize,
+    top_leaf_reads: usize,
+) -> usize {
+    ((batch_index * head_count + head_index) * top_leaf_reads) + slot
+}
+
+fn invalid_state_from_data(
+    surface: &'static str,
+) -> impl Fn(burn::tensor::DataError) -> FractalError + Copy {
+    move |error| {
+        FractalError::InvalidState(format!(
+            "{surface} could not be inspected through tensor data: {error}"
+        ))
+    }
 }
 
 impl<B, LT> FractalV2LocalBaselineModel<B, LT>
@@ -2145,6 +2952,351 @@ mod tests {
             output.logits().to_data().convert::<f32>(),
             one_root.logits().to_data().convert::<f32>()
         );
+    }
+
+    fn repeated_target_ids<B: Backend>(
+        token_id: i64,
+        shape: [usize; 2],
+        device: &B::Device,
+    ) -> Tensor<B, 2, Int> {
+        Tensor::<B, 2, Int>::from_data(
+            TensorData::new(vec![token_id; shape[0] * shape[1]], shape),
+            device,
+        )
+    }
+
+    fn intervention_result_for(
+        report: &CausalMemoryAuditSampleReport,
+        intervention: CausalMemoryIntervention,
+    ) -> &CausalMemoryInterventionResult {
+        report
+            .interventions
+            .iter()
+            .find(|result| result.intervention == intervention)
+            .expect("missing intervention result")
+    }
+
+    #[test]
+    fn fractal_v2_causal_memory_audit_reports_measurable_utilities() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = baseline_v2_model::<TestBackend>(&device);
+        let input_ids = token_ids::<TestBackend>(
+            &(1..=64)
+                .map(|value| (value % 63 + 1) as i64)
+                .collect::<Vec<_>>(),
+            [1, 64],
+            &device,
+        );
+        let target_ids = repeated_target_ids::<TestBackend>(7, [1, 64], &device);
+        let plan = CausalMemoryAuditPlan::all(vec![crate::v2::CausalMemoryAuditSample {
+            batch_index: 0,
+            position: 63,
+            task_family: crate::v2::CausalMemoryTaskFamily::OrdinaryLm,
+        }])
+        .unwrap();
+
+        let report = model
+            .audit_causal_memory(input_ids, target_ids, &plan)
+            .unwrap();
+
+        assert_eq!(report.sample_reports.len(), 1);
+        assert!(report.tree_retrieval_utility.is_some());
+        assert!(report.exact_leaf_read_utility.is_some());
+        assert_eq!(report.utility_by_root.len(), 2);
+        let sample = &report.sample_reports[0];
+        let no_tree = intervention_result_for(sample, CausalMemoryIntervention::NoTreeRead);
+        let no_exact = intervention_result_for(sample, CausalMemoryIntervention::NoExactLeafRead);
+        let next_best =
+            intervention_result_for(sample, CausalMemoryIntervention::NextBestSpanSubstitution);
+        let root_drops = sample
+            .interventions
+            .iter()
+            .filter(|result| {
+                matches!(
+                    result.intervention,
+                    CausalMemoryIntervention::RootDrop { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(no_tree.applied);
+        assert!(no_exact.applied);
+        assert!(next_best.applied);
+        assert_eq!(root_drops.len(), 2);
+        assert_eq!(
+            next_best.context.unwrap().routing_depth,
+            sample.reference_context.routing_depth
+        );
+        assert!(no_tree.metrics.unwrap().kl_divergence.is_finite());
+        assert!(no_exact.metrics.unwrap().kl_divergence.is_finite());
+        assert!(next_best.metrics.unwrap().kl_divergence.is_finite());
+    }
+
+    #[test]
+    fn fractal_v2_causal_memory_audit_tracks_all_selected_slots_per_head() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = baseline_v2_model::<TestBackend>(&device);
+        let input_ids = token_ids::<TestBackend>(
+            &(1..=64)
+                .map(|value| (value % 63 + 1) as i64)
+                .collect::<Vec<_>>(),
+            [1, 64],
+            &device,
+        );
+        let target_ids = repeated_target_ids::<TestBackend>(7, [1, 64], &device);
+        let plan = CausalMemoryAuditPlan::all(vec![crate::v2::CausalMemoryAuditSample {
+            batch_index: 0,
+            position: 63,
+            task_family: crate::v2::CausalMemoryTaskFamily::OrdinaryLm,
+        }])
+        .unwrap();
+
+        let report = model
+            .audit_causal_memory(input_ids, target_ids, &plan)
+            .unwrap();
+        let sample = &report.sample_reports[0];
+
+        assert_eq!(sample.reference_head_contexts.len(), 2);
+        assert!(sample
+            .reference_head_contexts
+            .iter()
+            .all(|context| context.selected_leaf_indices.len() == 2));
+        assert!(sample
+            .reference_head_contexts
+            .iter()
+            .all(|context| context.span_distances.len() == 2));
+        assert!(report.utility_by_selected_leaf.len() >= 2);
+        assert!(report.utility_by_span_distance.len() >= 2);
+    }
+
+    #[test]
+    fn fractal_v2_next_best_route_renormalizes_selected_scores() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = baseline_v2_model::<TestBackend>(&device);
+        let input_ids = token_ids::<TestBackend>(
+            &(1..=64)
+                .map(|value| (value % 63 + 1) as i64)
+                .collect::<Vec<_>>(),
+            [1, 64],
+            &device,
+        );
+
+        let trace = model.forward_retrieval_trace(input_ids).unwrap();
+        let final_step = trace.steps().last().unwrap();
+        let next_best =
+            next_best_route_for_batch(final_step.routed(), trace.final_state().tree(), 0, 64)
+                .unwrap()
+                .expect("expected an unselected next-best leaf on the final step");
+        let next_best_scores = next_best
+            .selected_leaf_scores()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .unwrap();
+        let next_best_indices = next_best
+            .selected_leaf_indices()
+            .to_data()
+            .convert::<i64>()
+            .into_vec::<i64>()
+            .unwrap();
+
+        for head_index in 0..2 {
+            let batch_route = &next_best.traces()[head_index].batch_routes[0];
+            let final_route_step = batch_route.steps.last().unwrap();
+            let selected_raw_scores = batch_route
+                .selected_leaf_indices
+                .iter()
+                .map(|leaf_index| raw_score_for_considered_leaf(final_route_step, *leaf_index))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let expected = softmax_vec(&selected_raw_scores);
+            let score_base = head_index * 2;
+
+            assert!(
+                (next_best_scores[score_base] + next_best_scores[score_base + 1] - 1.0).abs()
+                    < 1.0e-5
+            );
+            assert_eq!(
+                next_best_indices[score_base] as usize,
+                batch_route.selected_leaf_indices[0]
+            );
+            assert_eq!(
+                next_best_indices[score_base + 1] as usize,
+                batch_route.selected_leaf_indices[1]
+            );
+            assert!((next_best_scores[score_base] - expected[0]).abs() < 1.0e-5);
+            assert!((next_best_scores[score_base + 1] - expected[1]).abs() < 1.0e-5);
+        }
+    }
+
+    #[test]
+    fn fractal_v2_causal_memory_audit_reports_retrieval_accuracy_for_retrieval_tasks() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = baseline_v2_model::<TestBackend>(&device);
+        let input_ids = token_ids::<TestBackend>(
+            &(1..=64)
+                .map(|value| (value % 63 + 1) as i64)
+                .collect::<Vec<_>>(),
+            [1, 64],
+            &device,
+        );
+        let target_ids = repeated_target_ids::<TestBackend>(7, [1, 64], &device);
+        let plan = CausalMemoryAuditPlan::all(vec![crate::v2::CausalMemoryAuditSample {
+            batch_index: 0,
+            position: 63,
+            task_family: crate::v2::CausalMemoryTaskFamily::Copy,
+        }])
+        .unwrap();
+
+        let report = model
+            .audit_causal_memory(input_ids, target_ids, &plan)
+            .unwrap();
+
+        assert!(report.sample_reports[0]
+            .interventions
+            .iter()
+            .filter(|result| result.applied)
+            .all(|result| result
+                .metrics
+                .and_then(|metrics| metrics.retrieval_accuracy_delta)
+                .is_some()));
+        assert_eq!(report.utility_by_task_family.len(), 1);
+        assert!(report.utility_by_task_family[0]
+            .stats
+            .average_retrieval_accuracy_delta
+            .is_some());
+    }
+
+    #[test]
+    fn fractal_v2_causal_memory_audit_no_tree_matches_manual_final_step_ablation() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = baseline_v2_model::<TestBackend>(&device);
+        let input_ids = token_ids::<TestBackend>(
+            &(1..=32)
+                .map(|value| (value % 63 + 1) as i64)
+                .collect::<Vec<_>>(),
+            [1, 32],
+            &device,
+        );
+        let target_ids = repeated_target_ids::<TestBackend>(5, [1, 32], &device);
+        let plan = CausalMemoryAuditPlan::all(vec![crate::v2::CausalMemoryAuditSample {
+            batch_index: 0,
+            position: 31,
+            task_family: crate::v2::CausalMemoryTaskFamily::OrdinaryLm,
+        }])
+        .unwrap();
+
+        let audit = model
+            .audit_causal_memory(input_ids.clone(), target_ids.clone(), &plan)
+            .unwrap();
+        let full = model.forward(input_ids.clone()).unwrap();
+        let no_tree = model
+            .forward_with_ablation(input_ids, ReadFusionAblation::without_routed_values())
+            .unwrap();
+        let sample = &audit.sample_reports[0];
+        let result = intervention_result_for(sample, CausalMemoryIntervention::NoTreeRead);
+        let target = 5i64;
+        let full_logits = full
+            .logits()
+            .slice([0..1, 31..32, 0..64])
+            .reshape([64])
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .unwrap();
+        let no_tree_logits = no_tree
+            .logits()
+            .slice([0..1, 31..32, 0..64])
+            .reshape([64])
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .unwrap();
+        let expected_loss_delta = negative_log_likelihood(&no_tree_logits, target).unwrap()
+            - negative_log_likelihood(&full_logits, target).unwrap();
+        let expected_target_logit_delta = target_logit(&full_logits, target, 64).unwrap()
+            - target_logit(&no_tree_logits, target, 64).unwrap();
+
+        assert!((result.metrics.unwrap().loss_delta - expected_loss_delta).abs() < 1.0e-5);
+        assert!(
+            (result.metrics.unwrap().target_logit_delta - expected_target_logit_delta).abs()
+                < 1.0e-5
+        );
+    }
+
+    #[test]
+    fn fractal_v2_causal_memory_audit_no_exact_matches_manual_final_step_ablation() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = baseline_v2_model::<TestBackend>(&device);
+        let input_ids = token_ids::<TestBackend>(
+            &(1..=32)
+                .map(|value| (value % 63 + 1) as i64)
+                .collect::<Vec<_>>(),
+            [1, 32],
+            &device,
+        );
+        let target_ids = repeated_target_ids::<TestBackend>(11, [1, 32], &device);
+        let plan = CausalMemoryAuditPlan::all(vec![crate::v2::CausalMemoryAuditSample {
+            batch_index: 0,
+            position: 31,
+            task_family: crate::v2::CausalMemoryTaskFamily::OrdinaryLm,
+        }])
+        .unwrap();
+
+        let audit = model
+            .audit_causal_memory(input_ids.clone(), target_ids.clone(), &plan)
+            .unwrap();
+        let full = model.forward(input_ids.clone()).unwrap();
+        let no_exact = model
+            .forward_with_ablation(input_ids, ReadFusionAblation::without_exact_read_values())
+            .unwrap();
+        let sample = &audit.sample_reports[0];
+        let result = intervention_result_for(sample, CausalMemoryIntervention::NoExactLeafRead);
+        let target = 11i64;
+        let full_logits = full
+            .logits()
+            .slice([0..1, 31..32, 0..64])
+            .reshape([64])
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .unwrap();
+        let no_exact_logits = no_exact
+            .logits()
+            .slice([0..1, 31..32, 0..64])
+            .reshape([64])
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .unwrap();
+        let expected_loss_delta = negative_log_likelihood(&no_exact_logits, target).unwrap()
+            - negative_log_likelihood(&full_logits, target).unwrap();
+        let expected_target_logit_delta = target_logit(&full_logits, target, 64).unwrap()
+            - target_logit(&no_exact_logits, target, 64).unwrap();
+
+        assert!((result.metrics.unwrap().loss_delta - expected_loss_delta).abs() < 1.0e-5);
+        assert!(
+            (result.metrics.unwrap().target_logit_delta - expected_target_logit_delta).abs()
+                < 1.0e-5
+        );
+    }
+
+    #[test]
+    fn zero_root_readout_for_batch_only_zeroes_the_selected_root() {
+        let device = <TestBackend as Backend>::Device::default();
+        let root_readouts = Tensor::<TestBackend, 3>::from_data(
+            TensorData::new(
+                (0..8).map(|value| value as f32).collect::<Vec<_>>(),
+                [1, 2, 4],
+            ),
+            &device,
+        );
+
+        let zeroed = zero_root_readout_for_batch(root_readouts, 0, 1).unwrap();
+        let values = zeroed.to_data().convert::<f32>().into_vec::<f32>().unwrap();
+
+        assert_eq!(&values[0..4], &[0.0, 1.0, 2.0, 3.0]);
+        assert_eq!(&values[4..8], &[0.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]

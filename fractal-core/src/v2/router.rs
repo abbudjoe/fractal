@@ -37,6 +37,7 @@ pub struct BatchRouteStep {
     pub level: usize,
     pub considered_candidate_indices: Vec<usize>,
     pub considered_candidate_spans: Vec<TokenSpan>,
+    pub considered_candidate_scores: Vec<f32>,
     pub surviving_candidate_indices: Vec<usize>,
     pub surviving_candidate_spans: Vec<TokenSpan>,
     pub surviving_candidate_scores: Vec<f32>,
@@ -478,6 +479,12 @@ fn route_single_batch<B: Backend>(
         };
         let scored =
             score_candidates_for_batch(tree, head_query.clone(), &considered, batch_index)?;
+        let considered_scores = scored
+            .clone()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .map_err(invalid_state_from_data("router considered scores"))?;
         let selected = select_top_candidates(scored, &considered, keep)?;
         entropy_sum += entropy(&selected.surviving_scores);
         entropy_count += 1;
@@ -486,6 +493,7 @@ fn route_single_batch<B: Backend>(
             level: active[0].level(),
             considered_candidate_indices: considered.iter().map(|node| node.index()).collect(),
             considered_candidate_spans: considered.iter().map(|node| node.shared_span()).collect(),
+            considered_candidate_scores: considered_scores,
             surviving_candidate_indices: active.iter().map(|node| node.index()).collect(),
             surviving_candidate_spans: active.iter().map(|node| node.shared_span()).collect(),
             surviving_candidate_scores: selected.surviving_scores,
