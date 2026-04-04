@@ -203,9 +203,19 @@ pub struct SyntheticProbeSuite {
 }
 
 impl SyntheticProbeSuite {
-    pub fn validate_for_vocab(&self, vocab_size: usize) -> Result<(), FractalError> {
+    pub fn validate_for_model(
+        &self,
+        vocab_size: usize,
+        leaf_size: usize,
+    ) -> Result<(), FractalError> {
         ensure_vocab_capacity(vocab_size)?;
         ensure_nonzero("synthetic_probe_suite.leaf_size", self.leaf_size, "")?;
+        if self.leaf_size != leaf_size {
+            return Err(FractalError::InvalidConfig(format!(
+                "synthetic_probe_suite '{:?}' leaf_size {} must match model leaf_size {}",
+                self.kind, self.leaf_size, leaf_size
+            )));
+        }
         if self.samples.is_empty() {
             return Err(FractalError::InvalidConfig(format!(
                 "synthetic_probe_suite '{:?}' must contain at least one sample",
@@ -272,6 +282,7 @@ pub trait SyntheticProbeModel {
     type Device;
 
     fn vocab_size(&self) -> usize;
+    fn leaf_size(&self) -> usize;
 
     fn logits_for_sample(
         &self,
@@ -297,13 +308,17 @@ where
         self.shape().vocab_size
     }
 
+    fn leaf_size(&self) -> usize {
+        self.shape().local_trunk.leaf_size
+    }
+
     fn logits_for_sample(
         &self,
         sample: &SyntheticProbeSample,
         mode: SyntheticProbeMode,
         device: &Self::Device,
     ) -> Result<Vec<f32>, FractalError> {
-        sample.validate_for_vocab(self.vocab_size(), self.shape().local_trunk.leaf_size)?;
+        sample.validate_for_vocab(self.vocab_size(), self.leaf_size())?;
 
         let input_ids = Tensor::<B, 2, Int>::from_data(
             TensorData::new(sample.input_ids.clone(), [1, sample.input_ids.len()]),
@@ -341,7 +356,7 @@ pub fn run_v2_synthetic_probe_suite<M: SyntheticProbeModel>(
     suite: &SyntheticProbeSuite,
     device: &M::Device,
 ) -> Result<SyntheticProbeSuiteReport, FractalError> {
-    suite.validate_for_vocab(model.vocab_size())?;
+    suite.validate_for_model(model.vocab_size(), model.leaf_size())?;
 
     let mut mode_reports = Vec::with_capacity(SyntheticProbeMode::ALL.len());
     for mode in SyntheticProbeMode::ALL {
@@ -1287,6 +1302,10 @@ mod tests {
             self.vocab_size
         }
 
+        fn leaf_size(&self) -> usize {
+            self.leaf_size
+        }
+
         fn logits_for_sample(
             &self,
             sample: &SyntheticProbeSample,
@@ -1474,7 +1493,7 @@ mod tests {
         assert!(suites.iter().all(|suite| suite.samples.len() >= 2));
         assert!(suites.iter().all(|suite| suite.leaf_size == 16));
         for suite in &suites {
-            suite.validate_for_vocab(64).unwrap();
+            suite.validate_for_model(64, 16).unwrap();
             assert!(suite
                 .samples
                 .iter()
@@ -1516,7 +1535,7 @@ mod tests {
             .unwrap()],
         };
 
-        let error = suite.validate_for_vocab(64).unwrap_err();
+        let error = suite.validate_for_model(64, 16).unwrap_err();
 
         assert!(matches!(
             error,
@@ -1605,7 +1624,9 @@ mod tests {
         let model = structural_v2_model::<TestBackend>(&device);
 
         for suite in default_v2_synthetic_probe_suites() {
-            suite.validate_for_vocab(model.vocab_size()).unwrap();
+            suite
+                .validate_for_model(model.vocab_size(), model.leaf_size())
+                .unwrap();
             for sample in &suite.samples {
                 let input_ids = Tensor::<TestBackend, 2, Int>::from_data(
                     TensorData::new(sample.input_ids.clone(), [1, sample.input_ids.len()]),
@@ -1661,7 +1682,15 @@ mod tests {
                 );
 
                 let tree_only_step = tree_only.steps().last().unwrap();
-                let tree_only_route_spans = selected_route_spans(tree_only_step.routed());
+                let tree_only_route_spans = selected_route_spans(
+                    tree_only_step.routed(),
+                    tree_only
+                        .final_state()
+                        .tree()
+                        .level(0)
+                        .unwrap()
+                        .shared_spans(),
+                );
                 assert!(
                     tree_only
                         .final_state()
@@ -1709,7 +1738,10 @@ mod tests {
                 );
 
                 let full_step = full.steps().last().unwrap();
-                let full_route_spans = selected_route_spans(full_step.routed());
+                let full_route_spans = selected_route_spans(
+                    full_step.routed(),
+                    full.final_state().tree().level(0).unwrap().shared_spans(),
+                );
                 assert!(
                     full.final_state()
                         .leaf_token_cache()
@@ -1774,12 +1806,29 @@ mod tests {
             .unwrap()
     }
 
-    fn selected_route_spans(output: &FractalRouteOutput<TestBackend>) -> Vec<TokenSpan> {
-        output
-            .traces()
-            .iter()
-            .flat_map(|trace| trace.batch_routes.iter())
-            .flat_map(|route| route.selected_leaf_spans.iter().copied())
+    fn selected_route_spans(
+        output: &FractalRouteOutput<TestBackend>,
+        level_zero_spans: &[TokenSpan],
+    ) -> Vec<TokenSpan> {
+        let indices = output
+            .selected_leaf_indices()
+            .to_data()
+            .convert::<i64>()
+            .into_vec::<i64>()
+            .unwrap();
+        let mask = mask_values(output.selected_leaf_mask());
+
+        indices
+            .into_iter()
+            .zip(mask)
+            .filter_map(|(index, selected)| {
+                if !selected {
+                    return None;
+                }
+                usize::try_from(index)
+                    .ok()
+                    .and_then(|leaf_index| level_zero_spans.get(leaf_index).copied())
+            })
             .collect()
     }
 

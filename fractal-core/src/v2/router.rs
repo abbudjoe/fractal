@@ -130,6 +130,97 @@ impl<B: Backend> FractalRouteOutput<B> {
             diagnostics.candidate_entropy_per_head.len(),
             head_count,
         )?;
+        let selected_leaf_index_data = selected_leaf_indices
+            .clone()
+            .to_data()
+            .convert::<i64>()
+            .into_vec::<i64>()
+            .map_err(|error| {
+                FractalError::InvalidState(format!(
+                    "route_output selected_leaf_indices data conversion failed: {error}"
+                ))
+            })?;
+        let selected_leaf_mask_data = selected_leaf_mask
+            .clone()
+            .to_data()
+            .convert::<bool>()
+            .into_vec::<bool>()
+            .map_err(|error| {
+                FractalError::InvalidState(format!(
+                    "route_output selected_leaf_mask data conversion failed: {error}"
+                ))
+            })?;
+        let selected_leaf_score_data = selected_leaf_scores
+            .clone()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .map_err(|error| {
+                FractalError::InvalidState(format!(
+                    "route_output selected_leaf_scores data conversion failed: {error}"
+                ))
+            })?;
+        for (head_index, head_trace) in traces.iter().enumerate() {
+            for (batch_index, batch_route) in head_trace.batch_routes.iter().enumerate() {
+                let mut tensor_selected_indices = Vec::new();
+                let mut tensor_selected_scores = Vec::new();
+                for slot in 0..top_leaf_reads {
+                    let flat_index =
+                        ((batch_index * head_count + head_index) * top_leaf_reads) + slot;
+                    if selected_leaf_mask_data[flat_index] {
+                        tensor_selected_indices.push(
+                            usize::try_from(selected_leaf_index_data[flat_index]).map_err(|_| {
+                                FractalError::InvalidConfig(format!(
+                                    "route_output selected_leaf_indices[{batch_index}][{head_index}][{slot}] must be non-negative when selected"
+                                ))
+                            })?,
+                        );
+                        tensor_selected_scores.push(selected_leaf_score_data[flat_index]);
+                    }
+                }
+                ensure_match(
+                    "route_output.trace_selected_leaf_count",
+                    batch_route.selected_leaf_indices.len(),
+                    tensor_selected_indices.len(),
+                )?;
+                ensure_match(
+                    "route_output.trace_selected_leaf_span_count",
+                    batch_route.selected_leaf_spans.len(),
+                    tensor_selected_indices.len(),
+                )?;
+                ensure_match(
+                    "route_output.trace_selected_leaf_score_count",
+                    batch_route.selected_leaf_scores.len(),
+                    tensor_selected_indices.len(),
+                )?;
+                for (selection_index, (trace_index, tensor_index)) in batch_route
+                    .selected_leaf_indices
+                    .iter()
+                    .zip(tensor_selected_indices.iter())
+                    .enumerate()
+                {
+                    ensure_match(
+                        &format!(
+                            "route_output.trace_selected_leaf_indices[{batch_index}][{head_index}][{selection_index}]"
+                        ),
+                        *trace_index,
+                        *tensor_index,
+                    )?;
+                }
+                for (selection_index, (trace_score, tensor_score)) in batch_route
+                    .selected_leaf_scores
+                    .iter()
+                    .zip(tensor_selected_scores.iter())
+                    .enumerate()
+                {
+                    if (*trace_score - *tensor_score).abs() > 1.0e-5 {
+                        return Err(FractalError::InvalidConfig(format!(
+                            "route_output.trace_selected_leaf_scores[{batch_index}][{head_index}][{selection_index}] expected {tensor_score}, got {trace_score}"
+                        )));
+                    }
+                }
+            }
+        }
 
         Ok(Self {
             selected_leaf_indices,
