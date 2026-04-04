@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use fractal_core::{
     error::FractalError, BatchHeadRoute, ExactLeafRead, FractalRouteOutput, FractalRouterHead,
-    FractalRoutingDiagnostics, FractalV2MemoryMode, FractalV2Model, HeadRouteTrace, LeafSummarizer,
-    LocalTrunk, ReadFusion, TokenSpan, TreeMergeCell,
+    FractalRoutingDiagnostics, FractalV2MemoryMode, FractalV2Model, FractalV2ProjectionBreakdown,
+    HeadRouteTrace, LeafSummarizer, LocalTrunk, ReadFusion, TokenSpan, TreeMergeCell,
 };
 
 use crate::{
@@ -357,6 +357,57 @@ pub struct SyntheticProbeReport {
     pub suites: Vec<SyntheticProbeSuiteReport>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SyntheticProbeProjectionSampleResult {
+    pub sample_name: String,
+    pub predicted_token_id: i64,
+    pub target_token_id: i64,
+    pub correct: bool,
+    pub fused_target_logit: f32,
+    pub loss: f32,
+    pub bias_target_logit: f32,
+    pub root_delta_target_logit: f32,
+    pub routed_delta_target_logit: f32,
+    pub exact_read_delta_target_logit: f32,
+    pub root_summary_l2: f32,
+    pub routed_summary_l2: f32,
+    pub exact_read_summary_l2: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct SyntheticProbeProjectionMetrics {
+    pub accuracy: f32,
+    pub mean_loss: f32,
+    pub mean_fused_target_logit: f32,
+    pub mean_bias_target_logit: f32,
+    pub mean_root_delta_target_logit: f32,
+    pub mean_routed_delta_target_logit: f32,
+    pub mean_exact_read_delta_target_logit: f32,
+    pub mean_memory_delta_target_logit: f32,
+    pub mean_root_summary_l2: f32,
+    pub mean_routed_summary_l2: f32,
+    pub mean_exact_read_summary_l2: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SyntheticProbeProjectionModeReport {
+    pub mode: SyntheticProbeMode,
+    pub metrics: SyntheticProbeProjectionMetrics,
+    pub sample_results: Vec<SyntheticProbeProjectionSampleResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SyntheticProbeProjectionSuiteReport {
+    pub kind: SyntheticProbeKind,
+    pub sample_count: usize,
+    pub mode_reports: Vec<SyntheticProbeProjectionModeReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SyntheticProbeProjectionReport {
+    pub suites: Vec<SyntheticProbeProjectionSuiteReport>,
+}
+
 pub fn baseline_v2_synthetic_model<B: Backend>(
     device: &B::Device,
 ) -> Result<BaselineV2SyntheticModel<B>, FractalError> {
@@ -409,14 +460,9 @@ where
             TensorData::new(sample.input_ids.clone(), [1, sample.input_ids.len()]),
             device,
         );
-        let logits = match mode.memory_mode() {
-            Some(memory_mode) => self
-                .forward_with_memory_mode(input_ids, memory_mode)?
-                .logits()
-                .narrow(1, sample.target_position, 1)
-                .reshape([self.vocab_size()]),
-            None => oracle_logits_for_sample(self, sample, mode, input_ids)?,
-        };
+        let logits = projection_breakdown_for_sample(self, sample, mode, input_ids)?
+            .fused_logits()
+            .reshape([self.vocab_size()]);
 
         logits
             .to_data()
@@ -426,12 +472,12 @@ where
     }
 }
 
-fn oracle_logits_for_sample<B, LT, LS, TM, RH, ER, RF>(
+fn projection_breakdown_for_sample<B, LT, LS, TM, RH, ER, RF>(
     model: &FractalV2Model<B, LT, LS, TM, RH, ER, RF>,
     sample: &SyntheticProbeSample,
     mode: SyntheticProbeMode,
     input_ids: Tensor<B, 2, Int>,
-) -> Result<Tensor<B, 1>, FractalError>
+) -> Result<FractalV2ProjectionBreakdown<B>, FractalError>
 where
     B: Backend,
     LT: LocalTrunk<B> + Module<B>,
@@ -441,21 +487,23 @@ where
     ER: ExactLeafRead<B> + Module<B>,
     RF: ReadFusion<B> + Module<B>,
 {
-    let memory_mode = match mode {
-        SyntheticProbeMode::OracleTreeOnly => FractalV2MemoryMode::TreeOnly,
-        SyntheticProbeMode::OracleTreePlusExactRead
-        | SyntheticProbeMode::OracleTreePlusOracleExactRead => {
-            FractalV2MemoryMode::TreePlusExactRead
-        }
-        _ => {
-            return Err(FractalError::InvalidConfig(format!(
-                "synthetic_probe oracle logits require an oracle mode, got {:?}",
-                mode
-            )))
-        }
+    let memory_mode = match mode.memory_mode() {
+        Some(memory_mode) => memory_mode,
+        None => match mode {
+            SyntheticProbeMode::OracleTreeOnly => FractalV2MemoryMode::TreeOnly,
+            SyntheticProbeMode::OracleTreePlusExactRead
+            | SyntheticProbeMode::OracleTreePlusOracleExactRead => {
+                FractalV2MemoryMode::TreePlusExactRead
+            }
+            _ => {
+                return Err(FractalError::InvalidConfig(format!(
+                    "synthetic_probe projection breakdown requires a concrete or oracle memory mode, got {:?}",
+                    mode
+                )))
+            }
+        },
     };
-    let trace =
-        model.forward_retrieval_trace_with_memory_mode(input_ids, FractalV2MemoryMode::TreeOnly)?;
+    let trace = model.forward_retrieval_trace_with_memory_mode(input_ids, memory_mode)?;
     let step = trace.steps().get(sample.target_position).ok_or_else(|| {
         FractalError::InvalidState(format!(
             "synthetic_probe target position {} is out of bounds for {} retrieval steps",
@@ -463,6 +511,14 @@ where
             trace.steps().len()
         ))
     })?;
+    if mode.memory_mode().is_some() {
+        return model.project_retrieval_step_projection_breakdown_with_memory_mode(
+            step.root_readouts(),
+            step.routed(),
+            step.exact_read(),
+            memory_mode,
+        );
+    }
     let query_position = sample.target_position.checked_add(1).ok_or_else(|| {
         FractalError::InvalidState("synthetic_probe query position overflowed".to_string())
     })?;
@@ -492,14 +548,12 @@ where
             trace.final_state().leaf_token_cache(),
         )?,
     };
-    let logits = model.project_retrieval_step_logits_with_memory_mode(
+    model.project_retrieval_step_projection_breakdown_with_memory_mode(
         root_readouts,
         &oracle_routed,
         &oracle_exact,
         memory_mode,
-    )?;
-
-    Ok(logits.reshape([model.shape().vocab_size]))
+    )
 }
 
 fn oracle_route_output<B: Backend>(
@@ -851,6 +905,82 @@ pub fn run_v2_synthetic_probe_suite_with_modes<M: SyntheticProbeModel>(
     })
 }
 
+pub fn run_v2_synthetic_projection_diagnostic_suites_with_modes<B, LT, LS, TM, RH, ER, RF>(
+    model: &FractalV2Model<B, LT, LS, TM, RH, ER, RF>,
+    suites: &[SyntheticProbeSuite],
+    modes: &[SyntheticProbeMode],
+    device: &B::Device,
+) -> Result<SyntheticProbeProjectionReport, FractalError>
+where
+    B: Backend,
+    LT: LocalTrunk<B> + Module<B>,
+    LS: LeafSummarizer<B> + Module<B>,
+    TM: TreeMergeCell<B> + Module<B>,
+    RH: FractalRouterHead<B> + Module<B>,
+    ER: ExactLeafRead<B> + Module<B>,
+    RF: ReadFusion<B> + Module<B>,
+{
+    let mut reports = Vec::with_capacity(suites.len());
+    for suite in suites {
+        reports.push(run_v2_synthetic_projection_diagnostic_suite_with_modes(
+            model, suite, modes, device,
+        )?);
+    }
+
+    Ok(SyntheticProbeProjectionReport { suites: reports })
+}
+
+pub fn run_v2_synthetic_projection_diagnostic_suite_with_modes<B, LT, LS, TM, RH, ER, RF>(
+    model: &FractalV2Model<B, LT, LS, TM, RH, ER, RF>,
+    suite: &SyntheticProbeSuite,
+    modes: &[SyntheticProbeMode],
+    device: &B::Device,
+) -> Result<SyntheticProbeProjectionSuiteReport, FractalError>
+where
+    B: Backend,
+    LT: LocalTrunk<B> + Module<B>,
+    LS: LeafSummarizer<B> + Module<B>,
+    TM: TreeMergeCell<B> + Module<B>,
+    RH: FractalRouterHead<B> + Module<B>,
+    ER: ExactLeafRead<B> + Module<B>,
+    RF: ReadFusion<B> + Module<B>,
+{
+    suite.validate_for_model(model.vocab_size(), model.leaf_size())?;
+    if modes.is_empty() {
+        return Err(FractalError::InvalidConfig(
+            "synthetic_probe_projection.modes must not be empty".to_string(),
+        ));
+    }
+
+    let mut mode_reports = Vec::with_capacity(modes.len());
+    for &mode in modes {
+        let mut sample_results = Vec::with_capacity(suite.samples.len());
+        for sample in &suite.samples {
+            let input_ids = Tensor::<B, 2, Int>::from_data(
+                TensorData::new(sample.input_ids.clone(), [1, sample.input_ids.len()]),
+                device,
+            );
+            let breakdown = projection_breakdown_for_sample(model, sample, mode, input_ids)?;
+            sample_results.push(score_projection_probe_sample(
+                sample,
+                &breakdown,
+                model.vocab_size(),
+            )?);
+        }
+        mode_reports.push(SyntheticProbeProjectionModeReport {
+            mode,
+            metrics: aggregate_projection_metrics(&sample_results),
+            sample_results,
+        });
+    }
+
+    Ok(SyntheticProbeProjectionSuiteReport {
+        kind: suite.kind,
+        sample_count: suite.samples.len(),
+        mode_reports,
+    })
+}
+
 pub fn default_v2_synthetic_probe_suites() -> Vec<SyntheticProbeSuite> {
     vec![
         copy_probe_suite(),
@@ -863,6 +993,83 @@ pub fn default_v2_synthetic_probe_suites() -> Vec<SyntheticProbeSuite> {
 
 fn span_covers(outer: &TokenSpan, inner: TokenSpan) -> bool {
     outer.start() <= inner.start() && outer.end() >= inner.end()
+}
+
+fn score_projection_probe_sample<B: Backend>(
+    sample: &SyntheticProbeSample,
+    breakdown: &FractalV2ProjectionBreakdown<B>,
+    vocab_size: usize,
+) -> Result<SyntheticProbeProjectionSampleResult, FractalError> {
+    let fused_logits = tensor_row_f32(
+        breakdown.fused_logits(),
+        vocab_size,
+        "synthetic_probe_projection.fused_logits",
+    )?;
+    let bias_logits = tensor_row_f32(
+        breakdown.bias_logits(),
+        vocab_size,
+        "synthetic_probe_projection.bias_logits",
+    )?;
+    let root_delta_logits = tensor_row_f32(
+        breakdown.root_delta_logits(),
+        vocab_size,
+        "synthetic_probe_projection.root_delta_logits",
+    )?;
+    let routed_delta_logits = tensor_row_f32(
+        breakdown.routed_delta_logits(),
+        vocab_size,
+        "synthetic_probe_projection.routed_delta_logits",
+    )?;
+    let exact_read_delta_logits = tensor_row_f32(
+        breakdown.exact_read_delta_logits(),
+        vocab_size,
+        "synthetic_probe_projection.exact_read_delta_logits",
+    )?;
+    let root_summary = tensor_row_f32(
+        breakdown.fusion().root_summary(),
+        breakdown.fusion().root_summary().dims()[1],
+        "synthetic_probe_projection.root_summary",
+    )?;
+    let routed_summary = tensor_row_f32(
+        breakdown.fusion().routed_summary(),
+        breakdown.fusion().routed_summary().dims()[1],
+        "synthetic_probe_projection.routed_summary",
+    )?;
+    let exact_read_summary = tensor_row_f32(
+        breakdown.fusion().exact_read_summary(),
+        breakdown.fusion().exact_read_summary().dims()[1],
+        "synthetic_probe_projection.exact_read_summary",
+    )?;
+
+    let predicted_token_id = predicted_token_id(&fused_logits)?;
+    let target_index = usize::try_from(sample.target_token_id).map_err(|_| {
+        FractalError::InvalidConfig(format!(
+            "synthetic_probe target token id {} cannot be converted to usize",
+            sample.target_token_id
+        ))
+    })?;
+    let fused_target_logit = *fused_logits.get(target_index).ok_or_else(|| {
+        FractalError::InvalidConfig(format!(
+            "synthetic_probe target token {} is outside vocab size {}",
+            sample.target_token_id, vocab_size
+        ))
+    })?;
+
+    Ok(SyntheticProbeProjectionSampleResult {
+        sample_name: sample.name.clone(),
+        predicted_token_id,
+        target_token_id: sample.target_token_id,
+        correct: predicted_token_id == sample.target_token_id,
+        fused_target_logit,
+        loss: negative_log_likelihood(&fused_logits, sample.target_token_id)?,
+        bias_target_logit: bias_logits[target_index],
+        root_delta_target_logit: root_delta_logits[target_index],
+        routed_delta_target_logit: routed_delta_logits[target_index],
+        exact_read_delta_target_logit: exact_read_delta_logits[target_index],
+        root_summary_l2: l2_norm(&root_summary),
+        routed_summary_l2: l2_norm(&routed_summary),
+        exact_read_summary_l2: l2_norm(&exact_read_summary),
+    })
 }
 
 fn score_probe_sample(
@@ -913,6 +1120,83 @@ fn aggregate_probe_metrics(sample_results: &[SyntheticProbeSampleResult]) -> Syn
         mean_target_logit: target_logit_sum / sample_count,
         mean_loss: loss_sum / sample_count,
     }
+}
+
+fn aggregate_projection_metrics(
+    sample_results: &[SyntheticProbeProjectionSampleResult],
+) -> SyntheticProbeProjectionMetrics {
+    let sample_count = sample_results.len().max(1) as f32;
+    let (
+        correct_count,
+        loss_sum,
+        fused_target_logit_sum,
+        bias_target_logit_sum,
+        root_delta_target_logit_sum,
+        routed_delta_target_logit_sum,
+        exact_read_delta_target_logit_sum,
+        root_summary_l2_sum,
+        routed_summary_l2_sum,
+        exact_read_summary_l2_sum,
+    ) = sample_results.iter().fold(
+        (
+            0usize, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32,
+        ),
+        |acc, result| {
+            (
+                acc.0 + usize::from(result.correct),
+                acc.1 + result.loss,
+                acc.2 + result.fused_target_logit,
+                acc.3 + result.bias_target_logit,
+                acc.4 + result.root_delta_target_logit,
+                acc.5 + result.routed_delta_target_logit,
+                acc.6 + result.exact_read_delta_target_logit,
+                acc.7 + result.root_summary_l2,
+                acc.8 + result.routed_summary_l2,
+                acc.9 + result.exact_read_summary_l2,
+            )
+        },
+    );
+
+    let mean_routed_delta_target_logit = routed_delta_target_logit_sum / sample_count;
+    let mean_exact_read_delta_target_logit = exact_read_delta_target_logit_sum / sample_count;
+
+    SyntheticProbeProjectionMetrics {
+        accuracy: correct_count as f32 / sample_count,
+        mean_loss: loss_sum / sample_count,
+        mean_fused_target_logit: fused_target_logit_sum / sample_count,
+        mean_bias_target_logit: bias_target_logit_sum / sample_count,
+        mean_root_delta_target_logit: root_delta_target_logit_sum / sample_count,
+        mean_routed_delta_target_logit,
+        mean_exact_read_delta_target_logit,
+        mean_memory_delta_target_logit: mean_routed_delta_target_logit
+            + mean_exact_read_delta_target_logit,
+        mean_root_summary_l2: root_summary_l2_sum / sample_count,
+        mean_routed_summary_l2: routed_summary_l2_sum / sample_count,
+        mean_exact_read_summary_l2: exact_read_summary_l2_sum / sample_count,
+    }
+}
+
+fn tensor_row_f32<B: Backend>(
+    tensor: Tensor<B, 2>,
+    expected_width: usize,
+    label: &str,
+) -> Result<Vec<f32>, FractalError> {
+    let [batch_size, width] = tensor.dims();
+    ensure_match(&format!("{label}.batch_size"), batch_size, 1)?;
+    ensure_match(&format!("{label}.width"), width, expected_width)?;
+
+    tensor
+        .reshape([expected_width])
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .map_err(|error| {
+            FractalError::InvalidState(format!("{label} data conversion failed: {error}"))
+        })
+}
+
+fn l2_norm(values: &[f32]) -> f32 {
+    values.iter().map(|value| value * value).sum::<f32>().sqrt()
 }
 
 fn negative_log_likelihood(logits: &[f32], target_token_id: i64) -> Result<f32, FractalError> {
@@ -2335,6 +2619,65 @@ mod tests {
                 .accuracy,
             1.0
         );
+    }
+
+    #[test]
+    fn projection_diagnostic_report_tracks_memory_lane_norms_on_real_v2_path() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = structural_v2_model::<TestBackend>(&device);
+        let suite = noisy_retrieval_probe_suite();
+        let report = run_v2_synthetic_projection_diagnostic_suite_with_modes(
+            &model,
+            &suite,
+            &[
+                SyntheticProbeMode::NoMemory,
+                SyntheticProbeMode::OracleTreeOnly,
+                SyntheticProbeMode::OracleTreePlusExactRead,
+            ],
+            &device,
+        )
+        .unwrap();
+
+        let no_memory = report
+            .mode_reports
+            .iter()
+            .find(|mode| mode.mode == SyntheticProbeMode::NoMemory)
+            .unwrap();
+        let oracle_tree_only = report
+            .mode_reports
+            .iter()
+            .find(|mode| mode.mode == SyntheticProbeMode::OracleTreeOnly)
+            .unwrap();
+        let oracle_full = report
+            .mode_reports
+            .iter()
+            .find(|mode| mode.mode == SyntheticProbeMode::OracleTreePlusExactRead)
+            .unwrap();
+
+        assert_eq!(no_memory.metrics.mean_routed_summary_l2, 0.0);
+        assert_eq!(no_memory.metrics.mean_exact_read_summary_l2, 0.0);
+        assert!(oracle_tree_only.metrics.mean_routed_summary_l2 > 0.0);
+        assert_eq!(oracle_tree_only.metrics.mean_exact_read_summary_l2, 0.0);
+        assert!(oracle_full.metrics.mean_exact_read_summary_l2 > 0.0);
+    }
+
+    #[test]
+    fn projection_diagnostic_fixture_reports_oracle_exact_mode() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = structural_v2_model::<TestBackend>(&device);
+        let suite = copy_probe_suite();
+        let report = run_v2_synthetic_projection_diagnostic_suite_with_modes(
+            &model,
+            &suite,
+            &[SyntheticProbeMode::OracleTreePlusOracleExactRead],
+            &device,
+        )
+        .unwrap();
+
+        assert_eq!(report.mode_reports.len(), 1);
+        let metrics = &report.mode_reports[0].metrics;
+        assert!(metrics.mean_exact_read_summary_l2.is_finite());
+        assert!(metrics.mean_memory_delta_target_logit.is_finite());
     }
 
     #[test]
