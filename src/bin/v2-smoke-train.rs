@@ -6,10 +6,14 @@ use std::{
 
 use fractal_core::CpuTrainBackend;
 use fractal_eval_private::{
-    default_v2_smoke_corpus_paths, run_baseline_v2_smoke_train, V2SmokeCheckpointKind,
-    V2SmokeTrainConfig,
+    append_v2_results_ledger_entry, default_v2_smoke_corpus_paths,
+    resolve_requested_v2_results_ledger_path, run_baseline_v2_smoke_train, V2ResultsLedgerEntry,
+    V2SmokeCheckpointKind, V2SmokeTrainConfig,
 };
 use serde::Serialize;
+
+const SMOKE_MODEL_LABEL: &str = "baseline_v2_byte_level_smoke_cpu_candle";
+const SMOKE_NOTE: &str = "small byte-level v2 smoke training run on real local text";
 
 fn main() {
     if let Err(error) = run() {
@@ -47,6 +51,12 @@ fn run() -> Result<(), String> {
     let result = run_baseline_v2_smoke_train::<CpuTrainBackend>(config, &device)
         .map_err(|error| format!("failed to run v2 smoke training: {error}"))?;
     let rendered = render_report(&result.report, args.output)?;
+    maybe_append_ledger_entry(
+        resolve_requested_v2_results_ledger_path(&repo_root, args.ledger_path.as_deref())
+            .map_err(|error| format!("failed to resolve v2 results ledger path: {error}"))?,
+        &result.report,
+        args.run_label.as_deref(),
+    )?;
     print!("{rendered}");
     Ok(())
 }
@@ -63,6 +73,8 @@ struct CliArgs {
     eval_holdout_every: usize,
     learning_rate: f64,
     leaf_size: Option<usize>,
+    ledger_path: Option<String>,
+    run_label: Option<String>,
     output: OutputFormat,
 }
 
@@ -78,6 +90,8 @@ impl CliArgs {
         let mut eval_holdout_every = fractal_eval_private::DEFAULT_V2_SMOKE_EVAL_HOLDOUT_EVERY;
         let mut learning_rate = fractal_eval_private::DEFAULT_V2_SMOKE_LEARNING_RATE;
         let mut leaf_size = None;
+        let mut ledger_path = None;
+        let mut run_label = None;
         let mut output = OutputFormat::Table;
         let mut show_help = false;
         let mut iter = args.peekable();
@@ -153,6 +167,18 @@ impl CliArgs {
                         "--leaf-size",
                     )?);
                 }
+                "--ledger-path" => {
+                    ledger_path = Some(
+                        iter.next()
+                            .ok_or_else(|| "--ledger-path requires a value".to_owned())?,
+                    );
+                }
+                "--run-label" => {
+                    run_label = Some(
+                        iter.next()
+                            .ok_or_else(|| "--run-label requires a value".to_owned())?,
+                    );
+                }
                 "--output" => {
                     output = OutputFormat::parse(
                         &iter
@@ -181,6 +207,8 @@ impl CliArgs {
             eval_holdout_every,
             learning_rate,
             leaf_size,
+            ledger_path,
+            run_label,
             output,
         })
     }
@@ -209,6 +237,25 @@ struct RenderedReport<'a> {
     report: &'a fractal_eval_private::V2SmokeTrainReport,
 }
 
+fn maybe_append_ledger_entry(
+    ledger_path: Option<PathBuf>,
+    report: &fractal_eval_private::V2SmokeTrainReport,
+    run_label: Option<&str>,
+) -> Result<(), String> {
+    let Some(ledger_path) = ledger_path else {
+        return Ok(());
+    };
+    let entry = V2ResultsLedgerEntry::smoke_train(
+        SMOKE_MODEL_LABEL,
+        SMOKE_NOTE,
+        report,
+        run_label.map(str::to_owned),
+    )
+    .map_err(|error| format!("failed to build v2 results ledger entry: {error}"))?;
+    append_v2_results_ledger_entry(&ledger_path, &entry)
+        .map_err(|error| format!("failed to append v2 results ledger entry: {error}"))
+}
+
 fn render_report(
     report: &fractal_eval_private::V2SmokeTrainReport,
     output: OutputFormat,
@@ -216,8 +263,8 @@ fn render_report(
     match output {
         OutputFormat::Table => Ok(render_table(report)),
         OutputFormat::Json => serde_json::to_string_pretty(&RenderedReport {
-            model: "baseline_v2_byte_level_smoke_cpu_candle",
-            note: "small byte-level v2 smoke training run on real local text",
+            model: SMOKE_MODEL_LABEL,
+            note: SMOKE_NOTE,
             report,
         })
         .map_err(|error| format!("failed to serialize json report: {error}")),
@@ -319,7 +366,7 @@ fn usage() -> String {
     let mut output = String::new();
     let _ = writeln!(
         output,
-        "Usage: cargo run --bin v2-smoke-train -- [--corpus-path <path>]... [--output-dir <path>] [--seq-len <usize>] [--window-stride <usize>] [--batch-size <usize>] [--steps <usize>] [--eval-batches <usize>] [--eval-holdout-every <usize>] [--learning-rate <float>] [--leaf-size <usize>] [--output <table|json>]"
+        "Usage: cargo run --bin v2-smoke-train -- [--corpus-path <path>]... [--output-dir <path>] [--seq-len <usize>] [--window-stride <usize>] [--batch-size <usize>] [--steps <usize>] [--eval-batches <usize>] [--eval-holdout-every <usize>] [--learning-rate <float>] [--leaf-size <usize>] [--ledger-path <default|path>] [--run-label <label>] [--output <table|json>]"
     );
     let _ = writeln!(
         output,
@@ -370,6 +417,10 @@ mod tests {
                 "json",
                 "--leaf-size",
                 "32",
+                "--ledger-path",
+                "default",
+                "--run-label",
+                "smoke-baseline",
             ]
             .into_iter()
             .map(str::to_owned),
@@ -380,6 +431,8 @@ mod tests {
         assert_eq!(args.batch_size, 2);
         assert_eq!(args.steps, 4);
         assert_eq!(args.leaf_size, Some(32));
+        assert_eq!(args.ledger_path.as_deref(), Some("default"));
+        assert_eq!(args.run_label.as_deref(), Some("smoke-baseline"));
         assert_eq!(args.output, OutputFormat::Json);
     }
 }

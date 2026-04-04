@@ -2,11 +2,16 @@ use std::fmt::Write as _;
 
 use burn::backend::Candle;
 use fractal_eval_private::{
-    default_v2_synthetic_probe_suites, run_required_v2_ablation_sweep, SyntheticProbeKind,
-    SyntheticProbeMode, SyntheticProbeSuite, V2AblationConfig, V2AblationReport, V2RootTopology,
+    append_v2_results_ledger_entry, default_v2_synthetic_probe_suites,
+    resolve_requested_v2_results_ledger_path, run_required_v2_ablation_sweep, SyntheticProbeKind,
+    SyntheticProbeMode, SyntheticProbeSuite, V2AblationConfig, V2AblationReport,
+    V2ResultsLedgerEntry, V2RootTopology,
 };
+use std::path::PathBuf;
 
 type AblationBackend = Candle<f32, i64>;
+
+const ABLATION_MODEL_LABEL: &str = "baseline_v2_required_ablation_cpu_candle";
 
 fn main() {
     if let Err(error) = run() {
@@ -26,6 +31,15 @@ fn run() -> Result<(), String> {
     )
     .map_err(|error| format!("failed to run v2 ablation sweep: {error}"))?;
     let rendered = render_report(&report, args.output)?;
+    maybe_append_ledger_entry(
+        resolve_requested_v2_results_ledger_path(
+            env!("CARGO_MANIFEST_DIR"),
+            args.ledger_path.as_deref(),
+        )
+        .map_err(|error| format!("failed to resolve v2 results ledger path: {error}"))?,
+        &report,
+        args.run_label.as_deref(),
+    )?;
     print!("{rendered}");
     Ok(())
 }
@@ -33,12 +47,16 @@ fn run() -> Result<(), String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliArgs {
     suite: SuiteSelection,
+    ledger_path: Option<String>,
+    run_label: Option<String>,
     output: OutputFormat,
 }
 
 impl CliArgs {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut suite = SuiteSelection::All;
+        let mut ledger_path = None;
+        let mut run_label = None;
         let mut output = OutputFormat::Table;
         let mut show_help = false;
         let mut iter = args.peekable();
@@ -57,6 +75,18 @@ impl CliArgs {
                         .ok_or_else(|| "--output requires a value".to_owned())?;
                     output = OutputFormat::parse(&value)?;
                 }
+                "--ledger-path" => {
+                    ledger_path = Some(
+                        iter.next()
+                            .ok_or_else(|| "--ledger-path requires a value".to_owned())?,
+                    );
+                }
+                "--run-label" => {
+                    run_label = Some(
+                        iter.next()
+                            .ok_or_else(|| "--run-label requires a value".to_owned())?,
+                    );
+                }
                 "--help" | "-h" => {
                     show_help = true;
                 }
@@ -69,7 +99,12 @@ impl CliArgs {
             std::process::exit(0);
         }
 
-        Ok(Self { suite, output })
+        Ok(Self {
+            suite,
+            ledger_path,
+            run_label,
+            output,
+        })
     }
 }
 
@@ -119,7 +154,7 @@ fn usage() -> String {
     let mut output = String::new();
     let _ = writeln!(
         output,
-        "Usage: cargo run --bin v2-ablation-sweep -- [--suite <all|copy|associative-recall|induction|noisy-retrieval|far-token-comparison>] [--output <table|json>]"
+        "Usage: cargo run --bin v2-ablation-sweep -- [--suite <all|copy|associative-recall|induction|noisy-retrieval|far-token-comparison>] [--ledger-path <default|path>] [--run-label <label>] [--output <table|json>]"
     );
     let _ = writeln!(output, "Defaults: --suite all --output table");
     output
@@ -187,6 +222,25 @@ fn render_table(report: &V2AblationReport) -> String {
     output
 }
 
+fn maybe_append_ledger_entry(
+    ledger_path: Option<PathBuf>,
+    report: &V2AblationReport,
+    run_label: Option<&str>,
+) -> Result<(), String> {
+    let Some(ledger_path) = ledger_path else {
+        return Ok(());
+    };
+    let entry = V2ResultsLedgerEntry::ablation_sweep(
+        ABLATION_MODEL_LABEL,
+        report.note.as_str(),
+        report,
+        run_label.map(str::to_owned),
+    )
+    .map_err(|error| format!("failed to build v2 results ledger entry: {error}"))?;
+    append_v2_results_ledger_entry(&ledger_path, &entry)
+        .map_err(|error| format!("failed to append v2 results ledger entry: {error}"))
+}
+
 fn topology_label(topology: V2RootTopology) -> &'static str {
     match topology {
         V2RootTopology::SingleRoot => "single_root",
@@ -222,19 +276,32 @@ mod tests {
         let args = CliArgs::parse(std::iter::empty()).unwrap();
 
         assert_eq!(args.suite, SuiteSelection::All);
+        assert_eq!(args.ledger_path, None);
+        assert_eq!(args.run_label, None);
         assert_eq!(args.output, OutputFormat::Table);
     }
 
     #[test]
     fn cli_parses_specific_suite_and_json_output() {
         let args = CliArgs::parse(
-            ["--suite", "copy", "--output", "json"]
-                .into_iter()
-                .map(str::to_owned),
+            [
+                "--suite",
+                "copy",
+                "--ledger-path",
+                "default",
+                "--run-label",
+                "ablation-sweep",
+                "--output",
+                "json",
+            ]
+            .into_iter()
+            .map(str::to_owned),
         )
         .unwrap();
 
         assert_eq!(args.suite, SuiteSelection::Kind(SyntheticProbeKind::Copy));
+        assert_eq!(args.ledger_path.as_deref(), Some("default"));
+        assert_eq!(args.run_label.as_deref(), Some("ablation-sweep"));
         assert_eq!(args.output, OutputFormat::Json);
     }
 }

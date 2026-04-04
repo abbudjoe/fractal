@@ -2,6 +2,7 @@ pub mod v2_ablation;
 pub mod v2_benchmark;
 pub mod v2_checkpoint;
 pub mod v2_fixture;
+pub mod v2_ledger;
 pub mod v2_synthetic;
 pub mod v2_training;
 
@@ -20,6 +21,11 @@ pub use v2_checkpoint::{
 };
 pub use v2_fixture::{
     build_baseline_v2_synthetic_model, BaselineV2SyntheticModel, BaselineV2SyntheticModelConfig,
+};
+pub use v2_ledger::{
+    append_v2_results_ledger_entry, default_v2_results_ledger_path, read_v2_results_ledger,
+    resolve_requested_v2_results_ledger_path, V2ResultsLedgerEntry, V2ResultsLedgerKind,
+    DEFAULT_V2_RESULTS_LEDGER_PATH,
 };
 pub use v2_synthetic::{
     default_v2_synthetic_probe_suites, run_v2_synthetic_probe_suite, run_v2_synthetic_probe_suites,

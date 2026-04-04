@@ -2,10 +2,11 @@ use std::fmt::Write as _;
 
 use burn::backend::Candle;
 use fractal_eval_private::{
-    build_baseline_v2_synthetic_model, default_v2_synthetic_probe_suites,
-    load_baseline_v2_checkpoint_model, run_v2_synthetic_probe_suites,
+    append_v2_results_ledger_entry, build_baseline_v2_synthetic_model,
+    default_v2_synthetic_probe_suites, load_baseline_v2_checkpoint_model,
+    resolve_requested_v2_results_ledger_path, run_v2_synthetic_probe_suites,
     BaselineV2SyntheticModelConfig, SyntheticProbeKind, SyntheticProbeReport, SyntheticProbeSuite,
-    V2CheckpointSelection,
+    V2CheckpointSelection, V2ResultsLedgerEntry,
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -32,6 +33,17 @@ fn run() -> Result<(), String> {
         &loaded_model.model_label,
         &loaded_model.note,
     )?;
+    maybe_append_ledger_entry(
+        resolve_requested_v2_results_ledger_path(
+            env!("CARGO_MANIFEST_DIR"),
+            args.ledger_path.as_deref(),
+        )
+        .map_err(|error| format!("failed to resolve v2 results ledger path: {error}"))?,
+        &report,
+        &loaded_model.model_label,
+        &loaded_model.note,
+        args.run_label.as_deref(),
+    )?;
     print!("{rendered}");
     Ok(())
 }
@@ -42,6 +54,8 @@ struct CliArgs {
     output: OutputFormat,
     checkpoint_report: Option<PathBuf>,
     checkpoint_kind_override: Option<V2CheckpointSelection>,
+    ledger_path: Option<String>,
+    run_label: Option<String>,
 }
 
 impl CliArgs {
@@ -50,6 +64,8 @@ impl CliArgs {
         let mut output = OutputFormat::Table;
         let mut checkpoint_report = None;
         let mut checkpoint_kind_override = None;
+        let mut ledger_path = None;
+        let mut run_label = None;
         let mut show_help = false;
         let mut iter = args.peekable();
 
@@ -79,6 +95,18 @@ impl CliArgs {
                         .ok_or_else(|| "--checkpoint-kind requires a value".to_owned())?;
                     checkpoint_kind_override = Some(parse_checkpoint_kind(&value)?);
                 }
+                "--ledger-path" => {
+                    ledger_path = Some(
+                        iter.next()
+                            .ok_or_else(|| "--ledger-path requires a value".to_owned())?,
+                    );
+                }
+                "--run-label" => {
+                    run_label = Some(
+                        iter.next()
+                            .ok_or_else(|| "--run-label requires a value".to_owned())?,
+                    );
+                }
                 "--help" | "-h" => {
                     show_help = true;
                 }
@@ -100,6 +128,8 @@ impl CliArgs {
             output,
             checkpoint_report,
             checkpoint_kind_override,
+            ledger_path,
+            run_label,
         })
     }
 
@@ -162,7 +192,7 @@ fn usage() -> String {
     let mut output = String::new();
     let _ = writeln!(
         output,
-        "Usage: cargo run --bin v2-synthetic-probe -- [--suite <all|copy|associative-recall|induction|noisy-retrieval|far-token-comparison>] [--output <table|json>] [--checkpoint-report <report.json>] [--checkpoint-kind <best|final>]"
+        "Usage: cargo run --bin v2-synthetic-probe -- [--suite <all|copy|associative-recall|induction|noisy-retrieval|far-token-comparison>] [--output <table|json>] [--checkpoint-report <report.json>] [--checkpoint-kind <best|final>] [--ledger-path <default|path>] [--run-label <label>]"
     );
     let _ = writeln!(
         output,
@@ -279,6 +309,27 @@ fn render_table(report: &SyntheticProbeReport, model_label: &str, note: &str) ->
     output
 }
 
+fn maybe_append_ledger_entry(
+    ledger_path: Option<PathBuf>,
+    report: &SyntheticProbeReport,
+    model_label: &str,
+    note: &str,
+    run_label: Option<&str>,
+) -> Result<(), String> {
+    let Some(ledger_path) = ledger_path else {
+        return Ok(());
+    };
+    let entry = V2ResultsLedgerEntry::synthetic_probe(
+        model_label,
+        note,
+        report,
+        run_label.map(str::to_owned),
+    )
+    .map_err(|error| format!("failed to build v2 results ledger entry: {error}"))?;
+    append_v2_results_ledger_entry(&ledger_path, &entry)
+        .map_err(|error| format!("failed to append v2 results ledger entry: {error}"))
+}
+
 fn parse_checkpoint_kind(value: &str) -> Result<V2CheckpointSelection, String> {
     match value {
         "best" => Ok(V2CheckpointSelection::Best),
@@ -323,6 +374,8 @@ mod tests {
         assert_eq!(args.output, OutputFormat::Table);
         assert_eq!(args.checkpoint_report, None);
         assert_eq!(args.checkpoint_kind_override, None);
+        assert_eq!(args.ledger_path, None);
+        assert_eq!(args.run_label, None);
         assert_eq!(args.checkpoint_kind(), V2CheckpointSelection::Best);
     }
 
@@ -338,6 +391,10 @@ mod tests {
                 "/tmp/report.json",
                 "--checkpoint-kind",
                 "final",
+                "--ledger-path",
+                "default",
+                "--run-label",
+                "learned-probe",
             ]
             .into_iter()
             .map(str::to_owned),
@@ -350,7 +407,12 @@ mod tests {
             args.checkpoint_report,
             Some(PathBuf::from("/tmp/report.json"))
         );
-        assert_eq!(args.checkpoint_kind_override, Some(V2CheckpointSelection::Final));
+        assert_eq!(
+            args.checkpoint_kind_override,
+            Some(V2CheckpointSelection::Final)
+        );
+        assert_eq!(args.ledger_path.as_deref(), Some("default"));
+        assert_eq!(args.run_label.as_deref(), Some("learned-probe"));
         assert_eq!(args.checkpoint_kind(), V2CheckpointSelection::Final);
     }
 

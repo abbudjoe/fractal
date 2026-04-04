@@ -2,9 +2,10 @@ use std::fmt::Write as _;
 
 use burn::backend::Candle;
 use fractal_eval_private::{
-    load_baseline_v2_checkpoint_model, run_baseline_v2_benchmark_suite,
+    append_v2_results_ledger_entry, load_baseline_v2_checkpoint_model,
+    resolve_requested_v2_results_ledger_path, run_baseline_v2_benchmark_suite,
     run_v2_benchmark_suite_for_model, V2BenchmarkConfig, V2BenchmarkReport, V2BenchmarkSurface,
-    V2CheckpointSelection, DEFAULT_V2_BENCHMARK_SEQUENCE_LENGTHS,
+    V2CheckpointSelection, V2ResultsLedgerEntry, DEFAULT_V2_BENCHMARK_SEQUENCE_LENGTHS,
 };
 use std::path::PathBuf;
 
@@ -22,6 +23,15 @@ fn run() -> Result<(), String> {
     let device = <BenchmarkBackend as burn::tensor::backend::Backend>::Device::default();
     let report = run_benchmark(&args, &device)?;
     let rendered = render_report(&report, args.output)?;
+    maybe_append_ledger_entry(
+        resolve_requested_v2_results_ledger_path(
+            env!("CARGO_MANIFEST_DIR"),
+            args.ledger_path.as_deref(),
+        )
+        .map_err(|error| format!("failed to resolve v2 results ledger path: {error}"))?,
+        &report,
+        args.run_label.as_deref(),
+    )?;
     print!("{rendered}");
     Ok(())
 }
@@ -35,6 +45,8 @@ struct CliArgs {
     output: OutputFormat,
     checkpoint_report: Option<PathBuf>,
     checkpoint_kind_override: Option<V2CheckpointSelection>,
+    ledger_path: Option<String>,
+    run_label: Option<String>,
 }
 
 impl CliArgs {
@@ -46,6 +58,8 @@ impl CliArgs {
         let mut output = OutputFormat::Table;
         let mut checkpoint_report = None;
         let mut checkpoint_kind_override = None;
+        let mut ledger_path = None;
+        let mut run_label = None;
         let mut show_help = false;
         let mut iter = args.peekable();
 
@@ -93,6 +107,18 @@ impl CliArgs {
                         .ok_or_else(|| "--checkpoint-kind requires a value".to_owned())?;
                     checkpoint_kind_override = Some(parse_checkpoint_kind(&value)?);
                 }
+                "--ledger-path" => {
+                    ledger_path = Some(
+                        iter.next()
+                            .ok_or_else(|| "--ledger-path requires a value".to_owned())?,
+                    );
+                }
+                "--run-label" => {
+                    run_label = Some(
+                        iter.next()
+                            .ok_or_else(|| "--run-label requires a value".to_owned())?,
+                    );
+                }
                 "--help" | "-h" => {
                     show_help = true;
                 }
@@ -117,6 +143,8 @@ impl CliArgs {
             output,
             checkpoint_report,
             checkpoint_kind_override,
+            ledger_path,
+            run_label,
         })
     }
 
@@ -175,7 +203,7 @@ fn usage() -> String {
     let mut output = String::new();
     let _ = writeln!(
         output,
-        "Usage: cargo run --bin v2-benchmark-suite -- [--lengths <n1,n2,...>] [--leaf-size <n>] [--iterations <n>] [--warmup <n>] [--output <table|json>] [--checkpoint-report <report.json>] [--checkpoint-kind <best|final>]"
+        "Usage: cargo run --bin v2-benchmark-suite -- [--lengths <n1,n2,...>] [--leaf-size <n>] [--iterations <n>] [--warmup <n>] [--output <table|json>] [--checkpoint-report <report.json>] [--checkpoint-kind <best|final>] [--ledger-path <default|path>] [--run-label <label>]"
     );
     let _ = writeln!(
         output,
@@ -288,6 +316,20 @@ fn render_table(report: &V2BenchmarkReport) -> String {
     output
 }
 
+fn maybe_append_ledger_entry(
+    ledger_path: Option<PathBuf>,
+    report: &V2BenchmarkReport,
+    run_label: Option<&str>,
+) -> Result<(), String> {
+    let Some(ledger_path) = ledger_path else {
+        return Ok(());
+    };
+    let entry = V2ResultsLedgerEntry::benchmark(report, run_label.map(str::to_owned))
+        .map_err(|error| format!("failed to build v2 results ledger entry: {error}"))?;
+    append_v2_results_ledger_entry(&ledger_path, &entry)
+        .map_err(|error| format!("failed to append v2 results ledger entry: {error}"))
+}
+
 fn surface_label(surface: V2BenchmarkSurface) -> &'static str {
     match surface {
         V2BenchmarkSurface::TokenAppend => "token_append",
@@ -317,6 +359,8 @@ mod tests {
         assert_eq!(args.output, OutputFormat::Table);
         assert_eq!(args.checkpoint_report, None);
         assert_eq!(args.checkpoint_kind_override, None);
+        assert_eq!(args.ledger_path, None);
+        assert_eq!(args.run_label, None);
         assert_eq!(args.checkpoint_kind(), V2CheckpointSelection::Best);
     }
 
@@ -334,6 +378,10 @@ mod tests {
                 "2",
                 "--output",
                 "json",
+                "--ledger-path",
+                "default",
+                "--run-label",
+                "leaf-size-sweep",
             ]
             .into_iter()
             .map(str::to_owned),
@@ -344,6 +392,8 @@ mod tests {
         assert_eq!(args.leaf_size_override, Some(32));
         assert_eq!(args.iterations, 5);
         assert_eq!(args.warmup_iterations, 2);
+        assert_eq!(args.ledger_path.as_deref(), Some("default"));
+        assert_eq!(args.run_label.as_deref(), Some("leaf-size-sweep"));
         assert_eq!(args.output, OutputFormat::Json);
     }
 
@@ -355,6 +405,10 @@ mod tests {
                 "/tmp/report.json",
                 "--checkpoint-kind",
                 "final",
+                "--ledger-path",
+                "/tmp/ledger.jsonl",
+                "--run-label",
+                "trained-benchmark",
             ]
             .into_iter()
             .map(str::to_owned),
@@ -365,7 +419,12 @@ mod tests {
             args.checkpoint_report,
             Some(PathBuf::from("/tmp/report.json"))
         );
-        assert_eq!(args.checkpoint_kind_override, Some(V2CheckpointSelection::Final));
+        assert_eq!(
+            args.checkpoint_kind_override,
+            Some(V2CheckpointSelection::Final)
+        );
+        assert_eq!(args.ledger_path.as_deref(), Some("/tmp/ledger.jsonl"));
+        assert_eq!(args.run_label.as_deref(), Some("trained-benchmark"));
         assert_eq!(args.checkpoint_kind(), V2CheckpointSelection::Final);
     }
 
@@ -391,6 +450,8 @@ mod tests {
             output: OutputFormat::Table,
             checkpoint_report: Some(PathBuf::from("/tmp/report.json")),
             checkpoint_kind_override: None,
+            ledger_path: None,
+            run_label: None,
         };
 
         let error = run_benchmark(&args, &Default::default()).unwrap_err();
