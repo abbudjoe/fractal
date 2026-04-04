@@ -68,9 +68,8 @@ Add a tiny exact-attention rescue block near the top of the stack.
 At each token step:
 
 1. the existing local trunk processes the recent sequence
-2. the existing tree router proposes top-`k` distant candidate leaves
-3. the model gathers raw token-level hidden states or token K/Vs from those
-   routed leaves
+2. the existing tree router proposes the top `8` distant sealed spans
+3. the model gathers raw token-state snapshots from those routed spans
 4. the active hidden state runs exact causal attention over:
    * a local recent window
    * the gathered remote tokens
@@ -98,16 +97,29 @@ This must stay deliberately small.
 * top-of-stack placement only
 * local attention window only, not dense global attention
 * routed remote token gathering only from sealed leaves
+* top `8` remote spans only
 * no side-memory bank
 * no learned early stop
 * no merge-policy changes
+* no other long-range integration path during the experiment
+* begin with a frozen-backbone control where only the rescue block and its
+  projections are trainable
 
 ### Suggested starting values
 
 * local window: `256`
-* remote routed leaves: `4`
-* remote tokens per leaf: all tokens in the selected leaf for the first test
+* remote routed spans: `8`
+* leaf size: `16`
+* remote tokens per span: all `16` tokens in the sealed span for the first test
 * sink tokens: `0` initially
+* fixed total exact-attention token budget: `384`
+
+Matched controls:
+
+* local-only baseline: `384` local tokens
+* rescue run: `256` local tokens + `128` remote tokens
+
+Do not let the rescue variant silently win by seeing more exact tokens overall.
 
 Keep the proving version as small as possible.
 
@@ -118,11 +130,28 @@ Keep the proving version as small as possible.
 The rescue block must operate on **raw token-level representations**, not leaf
 summaries.
 
+For this pre-validation, the stored remote representation is exactly:
+
+* the sealed-time token-state snapshot taken at the output of the existing
+  local trunk
+* before any rescue-attention block
+* with one stored row per token and explicit absolute positions
+
+The rescue block itself owns the projection from these raw token states into
+query/key/value space for exact attention.
+
 That means:
 
-* router selects candidate leaves
-* runtime gathers token-level hidden states or token K/Vs from those leaves
-* exact attention consumes those token-level representations directly
+* router selects candidate spans
+* runtime gathers sealed-time raw token states from those spans
+* exact attention consumes those gathered token states directly after the rescue
+  block projects them into K/Vs
+
+Do **not** use:
+
+* precomputed memory-only projections
+* v2-style exact-read output vectors
+* blended leaf summaries as a substitute for gathered token states
 
 Do **not** repeat the v2 mistake of collapsing retrieved evidence into a
 summary-like side-channel before exact interaction happens.
@@ -131,10 +160,30 @@ This contract must be visible in code.
 
 ---
 
+## Causality and masking contract
+
+The rescue block must obey all of these rules:
+
+* routed remote spans may come only from sealed spans whose end position is
+  strictly less than the current query position
+* local-window tokens use the normal causal mask over absolute positions
+* gathered remote tokens are concatenated into the attention context only if
+  their absolute positions are strictly earlier than the current query position
+* no live unsealed remote tokens may appear in the gathered set
+* the concatenated local + remote attention mask must be constructed from
+  absolute token positions, not from array order alone
+
+Sealed leaf status is necessary but not sufficient.
+The rescue block must still enforce causal visibility explicitly.
+
+---
+
 ## Recommended implementation seam
 
-Add a small new module family under the future hybrid line or as a narrow
-pre-validation surface:
+Implement the pre-validation directly under the future hybrid line.
+Do **not** create a second experimental control plane elsewhere.
+
+Use:
 
 * `fractal-core/src/hybrid/rescue_attention.rs`
 * `fractal-core/src/hybrid/retrieval_gather.rs`
@@ -145,12 +194,10 @@ Suggested type ownership:
 * `RescueAttentionConfig`
   - owns local-window size, routed-leaf count, and sink-token count
 * `GatheredRetrievalContext`
-  - owns gathered token-level remote K/Vs and span metadata
+  - owns gathered raw token states, span metadata, absolute positions, and
+    candidate-recall diagnostics
 * `RescueAttentionBlock`
   - owns exact attention over `local window + remote gathered tokens`
-
-If this is prototyped first inside an experiment module, preserve these
-ownership boundaries so the behavior can be promoted cleanly.
 
 ---
 
@@ -161,10 +208,10 @@ At token step `t`:
 1. compute the current hidden state from the existing local path
 2. build the local recent window keys and values
 3. route over sealed leaves
-4. gather token-level remote K/Vs from the selected leaves
+4. gather raw token states from the selected sealed spans
 5. concatenate:
-   * local-window K/Vs
-   * remote gathered K/Vs
+   * local-window K/Vs projected from live local states
+   * remote gathered K/Vs projected from gathered raw token states
    * optional sink K/Vs
 6. run exact causal attention from the active token representation
 7. write the updated hidden state back into the residual stream
@@ -178,18 +225,26 @@ This is a real exact-attention step, not a soft diagnostic reweighting trick.
 
 Run these in order and record all of them in the ledger.
 
-1. local-only exact attention
+1. local-only exact attention with matched total token budget
 2. local + routed remote attention
 3. local + oracle remote attention
 4. local + oracle remote + oracle exact-token subset
-
-Optional but useful:
-
 5. local + routed remote attention, no tree summaries anywhere else
 6. local + routed remote attention, no warm recurrent contribution
+7. frozen-backbone run where only the rescue block and its projections train
+8. unfrozen follow-up run only if step `7` shows oracle usefulness
 
 These are not optional storytelling tools.
 They are the point of the pre-validation.
+
+Oracle exact-token subset means:
+
+* all tokens whose absolute positions fall inside the labeled evidence span
+* capped at the same remote token budget as the learned run
+* if the evidence span is longer than the budget, keep the earliest contiguous
+  prefix that fits
+
+That rule must stay fixed across tasks and runs.
 
 ---
 
@@ -198,12 +253,14 @@ They are the point of the pre-validation.
 Track the following for the rescue block:
 
 * probe accuracy on:
+  * `MQAR`
   * copy
-  * associative recall
-  * noisy retrieval
-  * far-token comparison
+  * induction
+  * retrieval-heavy probes
 * target token rank
 * target logit lift relative to local-only baseline
+* evidence-span recall in routed candidate spans
+* evidence-token recall in the gathered remote token set
 * local vs remote attention mass
 * attention mass on ground-truth evidence span
 * routed span distance
@@ -219,6 +276,12 @@ For oracle runs, track separately:
 If we cannot see whether remote exact attention actually touched the evidence,
 the test is under-instrumented.
 
+A failed learned run must let us distinguish:
+
+* router miss
+* gather miss
+* attention miss
+
 ---
 
 ## Success criteria
@@ -227,15 +290,25 @@ The pre-validation is successful if **both** of these become true:
 
 ### Behavioral success
 
-* copy and retrieval probes improve materially over local-only baseline
-* oracle remote attention improves sharply
-* learned routed remote attention closes a meaningful fraction of that gap
+* on the held-out `MQAR + copy + induction + retrieval-heavy` suite, oracle
+  remote attention improves mean target rank by at least `25%` relative to the
+  matched local-only control
+* on that same suite, oracle remote attention improves aggregate probe accuracy
+  by at least `0.10` absolute over the matched local-only control
+* learned routed remote attention recovers at least `33%` of the oracle
+  target-rank gain
+* learned routed remote attention improves aggregate probe accuracy by at least
+  `0.05` absolute over the matched local-only control
 
 ### Mechanistic success
 
-* remote attention becomes sharp on evidence tokens
-* attention mass over the evidence span is interpretable
-* target token rank rises substantially when oracle remote evidence is present
+* evidence-token recall in the gathered set is reported for every run
+* under oracle remote attention, mean attention mass on evidence tokens is at
+  least `0.50`
+* under learned routed remote attention, mean attention mass on evidence tokens
+  is greater than mean attention mass on non-evidence remote tokens
+* when evidence-token recall is true, target rank improves over local-only by
+  at least `8` positions on average
 
 The best case is:
 
@@ -251,8 +324,10 @@ That would strongly support the hybrid direction.
 
 The pre-validation fails if any of these remain true after a fair run:
 
-* oracle remote exact attention barely improves probe accuracy
-* oracle remote exact attention does not materially improve target rank
+* oracle remote exact attention improves aggregate probe accuracy by less than
+  `0.10` absolute over the matched local-only control
+* oracle remote exact attention improves mean target rank by less than `25%`
+  over the matched local-only control
 * attention over gathered tokens stays diffuse or irrelevant
 * gathered remote exact interaction is active but not helpful
 
@@ -281,6 +356,15 @@ This pre-validation is **not**:
 * a rescue attempt with hidden knobs
 
 It is one clean test of one specific missing primitive.
+
+The task surface for this pre-validation is limited to:
+
+* `MQAR`
+* `copy`
+* `induction`
+* retrieval-heavy probes
+
+Do not broaden the task mix until this gate is resolved.
 
 ---
 

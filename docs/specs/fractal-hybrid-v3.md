@@ -92,9 +92,21 @@ Responsibilities:
 
 Recommended form:
 
-* transformer or latent-attention-style blocks
-* local or sliding-window causal self-attention
-* optional retrieved-memory cross-attention
+* transformer-style local-window causal self-attention blocks
+* a separate retrieved-memory cross-attention block
+* no latent-attention variant in phase 1
+
+Phase-1 control-plane defaults:
+
+* hot attention blocks: `2`
+* placement: top quarter of the stack
+* local window size: `256`
+* remote token budget: `128`
+* retrieval cross-attention placement: a separate block immediately after the
+  highest hot-attention block
+
+These values stay fixed for the first proving matrix.
+Changing them is a later ablation, not a phase-1 freedom.
 
 This is the path that should remain closest to transformer behavior.
 
@@ -123,7 +135,8 @@ This is the long-range storage path.
 Responsibilities:
 
 * keep sealed span summaries
-* keep exact token K/V snapshots for selected leaves
+* keep sealed-time raw token-state snapshots from one explicit backbone
+  boundary
 * expose sparse long-range retrieval over old context
 
 Recommended form:
@@ -131,7 +144,16 @@ Recommended form:
 * fixed-size sealed leaves
 * regular dyadic tree over leaf summaries
 * sparse router over sealed nodes
-* exact leaf reads only for selected leaves
+* references from routed spans to raw token-state blocks
+
+For phase 1, the stored token-level representation is exactly:
+
+* the token-state snapshot at the output of the warm/local backbone path
+* before any retrieval cross-attention block
+* with absolute positions preserved per token
+
+The cold-memory tier does **not** store an alternate semantic projection as the
+source of truth for exact interaction.
 
 This keeps the best part of the v2 memory thesis, but demotes it from
 "replacement backbone" to "retrieval sidecar."
@@ -147,8 +169,10 @@ That is not the right contract for exact evidence.
 
 In v3:
 
-* retrieved summaries and exact leaf reads should be converted into a small
-  **retrieval attention context**
+* routed spans provide coarse summaries, span metadata, confidence scores, and
+  references to raw stored token states
+* exact interaction happens over gathered raw token states, not over v2-style
+  exact-read output vectors
 * the active token representation should attend to that context
 * the output head should read from the updated hidden state, not from a
   directly fused memory delta
@@ -159,6 +183,8 @@ This means:
 * not by acting like a side-channel vote at the output
 
 That is the single most important architectural correction.
+
+Direct read-fusion-to-logits is prohibited in v3.
 
 ---
 
@@ -173,7 +199,7 @@ The first serious hybrid should stay narrow.
 * sealed leaves of size `16`
 * regular dyadic tree over sealed leaves
 * sparse routing over sealed memory
-* exact reads from selected leaves
+* gathered raw token states from the top `8` routed sealed spans
 * retrieval cross-attention adapter into the hot path
 * existing tokenizer and LM head surfaces
 * existing synthetic probes, auditor, benchmark, and ledger surfaces
@@ -254,7 +280,7 @@ Suggested module boundary:
 * `fractal-core/src/hybrid/state.rs`
 * `fractal-core/src/hybrid/memory_tree.rs`
 * `fractal-core/src/hybrid/router.rs`
-* `fractal-core/src/hybrid/exact_read.rs`
+* `fractal-core/src/hybrid/retrieval_gather.rs`
 * `fractal-core/src/hybrid/retrieval_adapter.rs`
 * `fractal-core/src/hybrid/auditor.rs`
 
@@ -267,19 +293,21 @@ Suggested ownership:
 * `HybridState`
   - owns recurrent state, hot-cache handles, and memory-tree handles
 * `MemoryTree`
-  - owns sealed leaves, summaries, and exact token K/V storage
+  - owns sealed leaves, summaries, and stored raw token-state blocks
 * `MemoryRouter`
   - owns sparse selection over sealed memory
-* `ExactLeafRead`
-  - owns token-level retrieval within routed leaves
+* `RetrievalGather`
+  - owns gathering raw remote token states from routed spans with absolute
+    positions and span identity preserved
 * `RetrievalAdapter`
-  - converts retrieved memory into cross-attention-ready context
+  - projects gathered raw token states and summaries into
+    cross-attention-ready K/Vs
 * `HybridAuditor`
   - owns causal interventions over hot/warm/cold paths
 
-The key new surface is `RetrievalAdapter`.
-That is where retrieved memory becomes something the hot attention path can
-actually use.
+The key new surfaces are `RetrievalGather` and `RetrievalAdapter`.
+The first preserves the raw remote evidence contract.
+The second makes that evidence usable by the hot attention path.
 
 ---
 
@@ -293,12 +321,13 @@ At step `t`:
 4. append current hidden state to the live leaf
 5. if a leaf seals:
    * summarize it
-   * snapshot exact token K/Vs
+   * snapshot raw token states at the named backbone boundary
    * update the dyadic memory tree
 6. form a retrieval query from the active hidden state and warm state
 7. route over sealed tree nodes
-8. perform exact read inside selected leaves
-9. convert retrieved summaries and token reads into retrieval-attention K/Vs
+8. gather raw token states from the top `8` routed spans
+9. convert retrieved summaries and gathered token states into
+   retrieval-attention K/Vs
 10. run a small retrieval cross-attention step against the active hidden state
 11. project the updated hidden state through the LM head
 
@@ -309,23 +338,25 @@ attention update, not an additive logit-side fusion.
 
 ## First proving ablations
 
-These ablations should be run at equal total hidden size and as close to equal
-parameter budget as practical.
+These ablations should be run at equal total hidden size, under the fixed
+phase-1 control plane above, and as close to equal parameter budget as
+practical.
 
 ### Backbone ablations
 
 1. hot attention only
 2. hot attention + warm recurrent path
 3. hot attention + cold tree summaries
-4. hot attention + cold tree summaries + exact leaf read
+4. hot attention + cold tree summaries + gathered remote token states
 5. hot attention + warm recurrent path + cold tree summaries
-6. hot attention + warm recurrent path + cold tree summaries + exact leaf read
+6. hot attention + warm recurrent path + cold tree summaries + gathered remote
+   token states
 
 ### Integration ablations
 
 7. retrieval disabled
 8. retrieval summaries only
-9. retrieval exact read enabled
+9. retrieval gathered raw token states enabled
 10. retrieval cross-attention disabled but routing still logged
 11. retrieval cross-attention enabled with oracle leaf
 12. retrieval cross-attention enabled with oracle leaf + oracle exact token
@@ -333,7 +364,8 @@ parameter budget as practical.
 ### Warm-path ablations
 
 13. single-root warm path
-14. multi-root warm path
+14. multi-root warm path in phase 2 only, after the single-root hybrid proves
+    useful
 
 Do not skip the single-root control this time.
 
@@ -349,7 +381,8 @@ The hybrid implementation is incomplete without:
 * routing depth histogram
 * candidate entropy per head
 * selected-span distance histogram
-* exact-read usage rate
+* gathered-evidence leaf recall
+* gathered-evidence token recall
 * retrieval cross-attention usage and norm
 * root collapse or similarity if multi-root is enabled
 * dead-tree or unused-node behavior
@@ -373,13 +406,13 @@ The quantization goal should be staged, not ideological.
 * warm recurrent path
 * tree summaries
 * sealed leaf metadata
-* older cold-memory snapshots
+* older cold-memory token-state snapshots
 
 ### Likely more precision-sensitive
 
 * hot attention projections
 * retrieval cross-attention
-* exact token K/Vs used for the live retrieval step
+* rescue-block projections from gathered token states into live K/Vs
 * LM head projection
 
 That suggests a practical roadmap:
@@ -404,12 +437,16 @@ The first serious hybrid exists only when all of these are true:
   behavior
 * cold tree memory improves long-range retrieval tasks over the hot-only
   baseline
-* exact leaf read improves copy or pinpoint retrieval when enabled
+* gathered remote token-state retrieval improves copy or pinpoint retrieval
+  when enabled
 * oracle retrieval improves output materially
 * retrieval cross-attention beats routing-only logging
-* single-root and multi-root comparisons are explicit
 * benchmark and ledger outputs capture the full learned ablation matrix
 * quantization experiments preserve the same evaluation surfaces
+
+For the first serious hybrid, single-root proof is sufficient.
+Multi-root comparison is a phase-2 ablation only after the single-root hybrid
+is already useful.
 
 If the memory system is active but does not improve the hot token predictor,
 the work is still infrastructure, not a successful hybrid.
@@ -424,6 +461,7 @@ Do not do any of these to rescue weak early results:
 * add side-memory bank policy before the hybrid proves useful
 * pile on more roots before single-root is understood
 * hide retrieval in opaque fusion heuristics again
+* reintroduce direct read-fusion-to-logits as a primary memory path
 * change benchmark or probe tasks to make the result look better
 
 If the minimal hybrid fails, it should fail clearly.
