@@ -2,32 +2,29 @@ use std::fmt::Write as _;
 
 use burn::backend::Candle;
 use fractal_eval_private::{
-    build_baseline_v2_synthetic_model, default_v2_synthetic_probe_suites,
-    run_v2_synthetic_probe_suites, BaselineV2SyntheticModelConfig, SyntheticProbeKind,
-    SyntheticProbeReport, SyntheticProbeSuite,
+    default_v2_synthetic_probe_suites, run_required_v2_ablation_sweep, SyntheticProbeKind,
+    SyntheticProbeMode, SyntheticProbeSuite, V2AblationConfig, V2AblationReport, V2RootTopology,
 };
-use serde::Serialize;
 
-type ProbeBackend = Candle<f32, i64>;
+type AblationBackend = Candle<f32, i64>;
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("v2-synthetic-probe: {error}");
+        eprintln!("v2-ablation-sweep: {error}");
         std::process::exit(1);
     }
 }
 
 fn run() -> Result<(), String> {
     let args = CliArgs::parse(std::env::args().skip(1))?;
-    let device = <ProbeBackend as burn::tensor::backend::Backend>::Device::default();
-    let model = build_baseline_v2_synthetic_model::<ProbeBackend>(
-        BaselineV2SyntheticModelConfig::default(),
+    let device = <AblationBackend as burn::tensor::backend::Backend>::Device::default();
+    let suites = filter_suites(default_v2_synthetic_probe_suites(), args.suite)?;
+    let report = run_required_v2_ablation_sweep::<AblationBackend>(
+        V2AblationConfig::default(),
+        &suites,
         &device,
     )
-    .map_err(|error| format!("failed to build baseline v2 model: {error}"))?;
-    let suites = filter_suites(default_v2_synthetic_probe_suites(), args.suite)?;
-    let report = run_v2_synthetic_probe_suites(&model, &suites, &device)
-        .map_err(|error| format!("failed to run v2 synthetic probes: {error}"))?;
+    .map_err(|error| format!("failed to run v2 ablation sweep: {error}"))?;
     let rendered = render_report(&report, args.output)?;
     print!("{rendered}");
     Ok(())
@@ -118,18 +115,11 @@ impl OutputFormat {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct RenderedReport<'a> {
-    model: &'static str,
-    note: &'static str,
-    report: &'a SyntheticProbeReport,
-}
-
 fn usage() -> String {
     let mut output = String::new();
     let _ = writeln!(
         output,
-        "Usage: cargo run --bin v2-synthetic-probe -- [--suite <all|copy|associative-recall|induction|noisy-retrieval|far-token-comparison>] [--output <table|json>]"
+        "Usage: cargo run --bin v2-ablation-sweep -- [--suite <all|copy|associative-recall|induction|noisy-retrieval|far-token-comparison>] [--output <table|json>]"
     );
     let _ = writeln!(output, "Defaults: --suite all --output table");
     output
@@ -153,49 +143,55 @@ fn filter_suites(
     Ok(filtered)
 }
 
-fn render_report(report: &SyntheticProbeReport, output: OutputFormat) -> Result<String, String> {
+fn render_report(report: &V2AblationReport, output: OutputFormat) -> Result<String, String> {
     match output {
         OutputFormat::Table => Ok(render_table(report)),
-        OutputFormat::Json => serde_json::to_string_pretty(&RenderedReport {
-            model: "baseline_v2_random_init_cpu_candle",
-            note: "untrained random baseline; use for live execution sanity checks, not architecture quality claims",
-            report,
-        })
-        .map_err(|error| format!("failed to serialize json report: {error}")),
+        OutputFormat::Json => serde_json::to_string_pretty(report)
+            .map_err(|error| format!("failed to serialize json report: {error}")),
     }
 }
 
-fn render_table(report: &SyntheticProbeReport) -> String {
+fn render_table(report: &V2AblationReport) -> String {
     let mut output = String::new();
-    let _ = writeln!(output, "V2 Synthetic Probe Live Run");
-    let _ = writeln!(output, "model: baseline_v2 (random init, CPU Candle)");
-    let _ = writeln!(
-        output,
-        "note: this is an untrained live execution run, so accuracy is expected to be noisy"
-    );
+    let _ = writeln!(output, "V2 Required Ablation Sweep");
+    let _ = writeln!(output, "note: {}", report.note);
 
-    for suite in &report.suites {
+    for case in &report.cases {
         let _ = writeln!(output);
         let _ = writeln!(
             output,
-            "{} (samples={})",
-            suite_label(suite.kind),
-            suite.sample_count
+            "{} roots={} state_budget={} readout_budget={} per_root_state={} per_root_readout={}",
+            topology_label(case.topology),
+            case.model_config.root_count,
+            case.model_config.total_root_state_dim,
+            case.model_config.total_root_readout_dim,
+            case.model_config.root_state_dim(),
+            case.model_config.root_readout_dim(),
         );
-        for mode_report in &suite.mode_reports {
-            let metrics = mode_report.metrics;
-            let _ = writeln!(
-                output,
-                "  {:<18} accuracy={:.3} target_logit={:.3} loss={:.3}",
-                mode_label(mode_report.mode),
-                metrics.accuracy,
-                metrics.mean_target_logit,
-                metrics.mean_loss
-            );
+        for suite in &case.synthetic.suites {
+            let _ = writeln!(output, "  {}", suite_label(suite.kind));
+            for mode_report in &suite.mode_reports {
+                let metrics = mode_report.metrics;
+                let _ = writeln!(
+                    output,
+                    "    {:<18} accuracy={:.3} target_logit={:.3} loss={:.3}",
+                    mode_label(mode_report.mode),
+                    metrics.accuracy,
+                    metrics.mean_target_logit,
+                    metrics.mean_loss
+                );
+            }
         }
     }
 
     output
+}
+
+fn topology_label(topology: V2RootTopology) -> &'static str {
+    match topology {
+        V2RootTopology::SingleRoot => "single_root",
+        V2RootTopology::MultiRoot => "multi_root",
+    }
 }
 
 fn suite_label(kind: SyntheticProbeKind) -> &'static str {
@@ -208,21 +204,18 @@ fn suite_label(kind: SyntheticProbeKind) -> &'static str {
     }
 }
 
-fn mode_label(mode: fractal_eval_private::SyntheticProbeMode) -> &'static str {
+fn mode_label(mode: SyntheticProbeMode) -> &'static str {
     match mode {
-        fractal_eval_private::SyntheticProbeMode::NoMemory => "NoMemory",
-        fractal_eval_private::SyntheticProbeMode::SummariesOnly => "SummariesOnly",
-        fractal_eval_private::SyntheticProbeMode::TreeOnly => "TreeOnly",
-        fractal_eval_private::SyntheticProbeMode::TreePlusExactRead => "TreePlusExactRead",
+        SyntheticProbeMode::NoMemory => "NoMemory",
+        SyntheticProbeMode::SummariesOnly => "SummariesOnly",
+        SyntheticProbeMode::TreeOnly => "TreeOnly",
+        SyntheticProbeMode::TreePlusExactRead => "TreePlusExactRead",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fractal_eval_private::{
-        SyntheticProbeMetrics, SyntheticProbeMode, SyntheticProbeModeReport,
-    };
 
     #[test]
     fn cli_defaults_to_all_suites_and_table_output() {
@@ -243,41 +236,5 @@ mod tests {
 
         assert_eq!(args.suite, SuiteSelection::Kind(SyntheticProbeKind::Copy));
         assert_eq!(args.output, OutputFormat::Json);
-    }
-
-    #[test]
-    fn filter_suites_keeps_only_requested_kind() {
-        let suites = filter_suites(
-            default_v2_synthetic_probe_suites(),
-            SuiteSelection::Kind(SyntheticProbeKind::Induction),
-        )
-        .unwrap();
-
-        assert_eq!(suites.len(), 1);
-        assert_eq!(suites[0].kind, SyntheticProbeKind::Induction);
-    }
-
-    #[test]
-    fn json_output_serializes_report_metadata_and_suite_kind() {
-        let report = SyntheticProbeReport {
-            suites: vec![fractal_eval_private::SyntheticProbeSuiteReport {
-                kind: SyntheticProbeKind::Copy,
-                sample_count: 1,
-                mode_reports: vec![SyntheticProbeModeReport {
-                    mode: SyntheticProbeMode::NoMemory,
-                    metrics: SyntheticProbeMetrics {
-                        accuracy: 0.0,
-                        mean_target_logit: 0.0,
-                        mean_loss: 1.0,
-                    },
-                    sample_results: Vec::new(),
-                }],
-            }],
-        };
-
-        let rendered = render_report(&report, OutputFormat::Json).unwrap();
-
-        assert!(rendered.contains("\"model\": \"baseline_v2_random_init_cpu_candle\""));
-        assert!(rendered.contains("\"kind\": \"copy\""));
     }
 }

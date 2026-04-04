@@ -37,16 +37,23 @@ pub enum SyntheticProbeKind {
 #[serde(rename_all = "snake_case")]
 pub enum SyntheticProbeMode {
     NoMemory,
+    SummariesOnly,
     TreeOnly,
     TreePlusExactRead,
 }
 
 impl SyntheticProbeMode {
-    pub const ALL: [Self; 3] = [Self::NoMemory, Self::TreeOnly, Self::TreePlusExactRead];
+    pub const ALL: [Self; 4] = [
+        Self::NoMemory,
+        Self::SummariesOnly,
+        Self::TreeOnly,
+        Self::TreePlusExactRead,
+    ];
 
     pub fn memory_mode(self) -> FractalV2MemoryMode {
         match self {
             Self::NoMemory => FractalV2MemoryMode::NoMemory,
+            Self::SummariesOnly => FractalV2MemoryMode::SummariesOnly,
             Self::TreeOnly => FractalV2MemoryMode::TreeOnly,
             Self::TreePlusExactRead => FractalV2MemoryMode::TreePlusExactRead,
         }
@@ -59,8 +66,9 @@ impl SyntheticProbeMode {
     fn rank(self) -> usize {
         match self {
             Self::NoMemory => 0,
-            Self::TreeOnly => 1,
-            Self::TreePlusExactRead => 2,
+            Self::SummariesOnly => 1,
+            Self::TreeOnly => 2,
+            Self::TreePlusExactRead => 3,
         }
     }
 }

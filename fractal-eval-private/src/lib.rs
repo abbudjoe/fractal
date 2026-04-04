@@ -1,7 +1,12 @@
+pub mod v2_ablation;
 pub mod v2_benchmark;
 pub mod v2_fixture;
 pub mod v2_synthetic;
 
+pub use v2_ablation::{
+    required_v2_ablation_modes, run_required_v2_ablation_sweep, V2AblationCaseReport,
+    V2AblationConfig, V2AblationReport, V2RootTopology,
+};
 pub use v2_benchmark::{
     run_baseline_v2_benchmark_suite, V2BenchmarkConfig, V2BenchmarkEntry, V2BenchmarkReport,
     V2BenchmarkSurface, V2LeafUsageBin, V2ObservabilitySnapshot,

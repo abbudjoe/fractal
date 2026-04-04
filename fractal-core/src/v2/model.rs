@@ -49,6 +49,7 @@ impl FractalV2ModelShape {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FractalV2MemoryMode {
     NoMemory,
+    SummariesOnly,
     TreeOnly,
     TreePlusExactRead,
 }
@@ -59,7 +60,7 @@ impl FractalV2MemoryMode {
     }
 
     fn include_tree_routing(self) -> bool {
-        !matches!(self, Self::NoMemory)
+        matches!(self, Self::TreeOnly | Self::TreePlusExactRead)
     }
 
     fn include_exact_read(self) -> bool {
@@ -69,6 +70,7 @@ impl FractalV2MemoryMode {
     fn read_fusion_ablation(self) -> ReadFusionAblation {
         match self {
             Self::NoMemory => ReadFusionAblation::without_memory_reads(),
+            Self::SummariesOnly => ReadFusionAblation::without_memory_reads(),
             Self::TreeOnly => ReadFusionAblation::without_exact_read_values(),
             Self::TreePlusExactRead => ReadFusionAblation::full(),
         }
@@ -3087,6 +3089,57 @@ mod tests {
             .unwrap()
             .iter()
             .any(|value| *value));
+        assert!(final_step
+            .exact_read()
+            .selected_token_mask()
+            .to_data()
+            .convert::<bool>()
+            .into_vec::<bool>()
+            .unwrap()
+            .iter()
+            .all(|value| !*value));
+    }
+
+    #[test]
+    fn fractal_v2_memory_mode_summaries_only_builds_tree_without_routing() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = baseline_v2_model::<TestBackend>(&device);
+        let input_ids = token_ids::<TestBackend>(
+            &(1..=32)
+                .map(|value| (value % 63 + 1) as i64)
+                .collect::<Vec<_>>(),
+            [1, 32],
+            &device,
+        );
+
+        let trace = model
+            .forward_retrieval_trace_with_memory_mode(input_ids, FractalV2MemoryMode::SummariesOnly)
+            .unwrap();
+        let final_step = trace.steps().last().unwrap();
+
+        assert_eq!(
+            trace.final_state().leaf_token_cache().shared_spans(),
+            &[
+                crate::v2::TokenSpan::new(0, 16).unwrap(),
+                crate::v2::TokenSpan::new(16, 32).unwrap(),
+            ]
+        );
+        assert_eq!(
+            trace.final_state().tree().level(0).unwrap().shared_spans(),
+            &[
+                crate::v2::TokenSpan::new(0, 16).unwrap(),
+                crate::v2::TokenSpan::new(16, 32).unwrap(),
+            ]
+        );
+        assert!(final_step
+            .routed()
+            .selected_leaf_mask()
+            .to_data()
+            .convert::<bool>()
+            .into_vec::<bool>()
+            .unwrap()
+            .iter()
+            .all(|value| !*value));
         assert!(final_step
             .exact_read()
             .selected_token_mask()
