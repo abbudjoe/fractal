@@ -559,12 +559,7 @@ where
     M: Module<B> + Clone + AutodiffModule<B>,
     <M as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend>,
 {
-    fs::create_dir_all(&config.output_dir).map_err(|error| {
-        FractalError::InvalidState(format!(
-            "failed to create v2 smoke output directory {}: {error}",
-            config.output_dir.display()
-        ))
-    })?;
+    ensure_empty_output_dir(&config.output_dir)?;
 
     let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
     let model_stem = config.output_dir.join("model");
@@ -584,6 +579,38 @@ where
         optimizer_path: resolve_written_artifact(&config.output_dir, "optimizer")?,
         report_path: config.output_dir.join("report.json"),
     })
+}
+
+fn ensure_empty_output_dir(path: &Path) -> Result<(), FractalError> {
+    if path.exists() {
+        let mut entries = fs::read_dir(path).map_err(|error| {
+            FractalError::InvalidState(format!(
+                "failed to inspect v2 smoke output directory {}: {error}",
+                path.display()
+            ))
+        })?;
+        if entries.next().transpose().map_err(|error| {
+            FractalError::InvalidState(format!(
+                "failed to inspect v2 smoke output directory {}: {error}",
+                path.display()
+            ))
+        })?.is_some()
+        {
+            return Err(FractalError::InvalidConfig(format!(
+                "v2 smoke output directory {} must be empty when provided explicitly",
+                path.display()
+            )));
+        }
+    } else {
+        fs::create_dir_all(path).map_err(|error| {
+            FractalError::InvalidState(format!(
+                "failed to create v2 smoke output directory {}: {error}",
+                path.display()
+            ))
+        })?;
+    }
+
+    Ok(())
 }
 
 fn write_report(report: &V2SmokeTrainReport) -> Result<(), FractalError> {
@@ -718,6 +745,41 @@ mod tests {
         assert!(result.report.checkpoint.model_path.exists());
         assert!(result.report.checkpoint.optimizer_path.exists());
         assert!(result.report.checkpoint.report_path.exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn smoke_train_rejects_non_empty_output_directory() {
+        let root = unique_temp_dir("v2-smoke-train-nonempty");
+        fs::create_dir_all(&root).unwrap();
+        let corpus = root.join("corpus.md");
+        fs::write(&corpus, "fractal v2 output dirs should be explicit.\n".repeat(12)).unwrap();
+        let output_dir = root.join("out");
+        fs::create_dir_all(&output_dir).unwrap();
+        fs::write(output_dir.join("stale.txt"), "stale").unwrap();
+        let config = V2SmokeTrainConfig {
+            corpus_paths: vec![corpus],
+            output_dir: output_dir.clone(),
+            model: baseline_v2_byte_level_smoke_model_config(),
+            seq_len: 16,
+            window_stride: 16,
+            batch_size: 2,
+            train_steps: 1,
+            eval_batches: 1,
+            eval_holdout_every: 3,
+            learning_rate: 1e-3,
+            vocabulary: ByteLevelVocabularyContract::default(),
+        };
+
+        let device = <TestBackend as Backend>::Device::default();
+        let error = run_baseline_v2_smoke_train::<TestBackend>(config, &device).unwrap_err();
+
+        assert!(matches!(
+            error,
+            FractalError::InvalidConfig(message)
+            if message.contains("must be empty")
+        ));
 
         fs::remove_dir_all(root).unwrap();
     }
