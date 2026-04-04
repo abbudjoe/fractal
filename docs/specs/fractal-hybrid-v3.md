@@ -191,6 +191,11 @@ The first serious hybrid should stay narrow.
 The first goal is **not** maximum cleverness.
 It is to prove that hybrid retrieval can improve the real token predictor.
 
+Before full scaffolding starts, run the narrower pre-validation in
+[`hybrid-exact-attention-rescue-prevalidation.md`](./hybrid-exact-attention-rescue-prevalidation.md).
+That experiment is the gate between the failed tree-only replacement line and
+the full hybrid build.
+
 ---
 
 ## Keep, Reuse, Retire
