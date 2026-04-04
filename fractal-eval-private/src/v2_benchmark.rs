@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, hint::black_box, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    hint::black_box,
+    time::Instant,
+};
 
 use burn::tensor::{backend::Backend, Int, Tensor, TensorData};
 use serde::Serialize;
@@ -78,6 +82,12 @@ impl Default for V2BenchmarkConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct V2LeafUsageBin {
+    pub leaf_index: usize,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct V2ObservabilitySnapshot {
     pub routing_sparsity: f32,
     pub root_collapse_mean_pairwise_cosine_similarity: f32,
@@ -86,6 +96,8 @@ pub struct V2ObservabilitySnapshot {
     pub tree_depth_reached: usize,
     pub level0_leaf_count: usize,
     pub head_agreement_rate: f32,
+    pub has_dead_or_unused_tree_nodes: bool,
+    pub selected_leaf_usage: Vec<V2LeafUsageBin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -135,8 +147,8 @@ pub fn run_baseline_v2_benchmark_suite<B: Backend>(
     }
 
     Ok(V2BenchmarkReport {
-        model: "baseline_v2_random_init_cpu_candle".to_string(),
-        note: "process RSS metrics are sampled from getrusage(RUSAGE_SELF); they are useful for trend detection, not precise kernel-level attribution".to_string(),
+        model: "baseline_v2_random_init".to_string(),
+        note: "process RSS metrics are sampled from getrusage(RUSAGE_SELF) after warmup; they are useful for trend detection, not precise kernel-level attribution".to_string(),
         config,
         entries,
     })
@@ -247,12 +259,11 @@ where
     Prep: FnMut() -> Result<Prepared, FractalError>,
     Run: FnMut(Prepared) -> Result<Output, FractalError>,
 {
-    let baseline_rss = process_peak_rss_bytes();
-
     for _ in 0..warmup_iterations {
         black_box(run(prepare()?)?);
     }
 
+    let baseline_rss = process_peak_rss_bytes();
     let mut total_ms = 0.0f64;
     let mut peak_rss_bytes = baseline_rss;
     for _ in 0..iterations {
@@ -441,6 +452,7 @@ fn observe_sequence<B: Backend>(
     let mut retrieval_distance_total = 0usize;
     let mut retrieval_distance_count = 0usize;
     let mut head_agreement_sum = 0.0f32;
+    let mut selected_leaf_usage = BTreeMap::<usize, usize>::new();
 
     for step in trace.steps() {
         if step.sealed_leaf().is_some() {
@@ -450,6 +462,7 @@ fn observe_sequence<B: Backend>(
         let route_diag = step.routed().diagnostics();
         head_agreement_sum += route_diag.head_agreement_rate;
         let selected_leaf_count = selected_leaf_count(step.routed())?;
+        accumulate_selected_leaf_usage(step.routed(), &mut selected_leaf_usage)?;
         if sealed_leaf_count > 0 {
             let density = selected_leaf_count as f32 / sealed_leaf_count as f32;
             routing_sparsity_sum += 1.0 - density.min(1.0);
@@ -481,6 +494,11 @@ fn observe_sequence<B: Backend>(
         tree_depth_reached: tree_diag.tree_depth_reached,
         level0_leaf_count: trace.final_state().sealed_leaves().shared_spans().len(),
         head_agreement_rate: head_agreement_sum / step_count,
+        has_dead_or_unused_tree_nodes: tree_diag.has_dead_or_unused_nodes,
+        selected_leaf_usage: selected_leaf_usage
+            .into_iter()
+            .map(|(leaf_index, count)| V2LeafUsageBin { leaf_index, count })
+            .collect(),
     })
 }
 
@@ -703,6 +721,32 @@ fn histogram_weighted_total(histogram: &[RoutingHistogramBin]) -> (usize, usize)
         .fold((0usize, 0usize), |(total, count), bin| {
             (total + bin.value * bin.count, count + bin.count)
         })
+}
+
+fn accumulate_selected_leaf_usage<B: Backend>(
+    routed: &fractal_core::FractalRouteOutput<B>,
+    selected_leaf_usage: &mut BTreeMap<usize, usize>,
+) -> Result<(), FractalError> {
+    let indices = routed
+        .selected_leaf_indices()
+        .to_data()
+        .convert::<i64>()
+        .into_vec::<i64>()
+        .map_err(invalid_state_from_data("benchmark.selected_leaf_indices"))?;
+    let mask = routed
+        .selected_leaf_mask()
+        .to_data()
+        .convert::<bool>()
+        .into_vec::<bool>()
+        .map_err(invalid_state_from_data("benchmark.selected_leaf_mask"))?;
+
+    for (index, selected) in indices.into_iter().zip(mask.into_iter()) {
+        if selected && index >= 0 {
+            *selected_leaf_usage.entry(index as usize).or_default() += 1;
+        }
+    }
+
+    Ok(())
 }
 
 fn invalid_state_from_data(
