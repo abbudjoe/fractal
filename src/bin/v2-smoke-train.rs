@@ -43,6 +43,11 @@ fn run() -> Result<(), String> {
     config.eval_batches = args.eval_batches;
     config.eval_holdout_every = args.eval_holdout_every;
     config.learning_rate = args.learning_rate;
+    if let Some(root_count) = args.root_count {
+        config.model = config
+            .model
+            .with_root_count_preserving_total_budget(root_count);
+    }
     if let Some(leaf_size) = args.leaf_size {
         config.model = config.model.with_leaf_size(leaf_size);
     }
@@ -72,6 +77,7 @@ struct CliArgs {
     eval_batches: usize,
     eval_holdout_every: usize,
     learning_rate: f64,
+    root_count: Option<usize>,
     leaf_size: Option<usize>,
     ledger_path: Option<String>,
     run_label: Option<String>,
@@ -89,6 +95,7 @@ impl CliArgs {
         let mut eval_batches = fractal_eval_private::DEFAULT_V2_SMOKE_EVAL_BATCHES;
         let mut eval_holdout_every = fractal_eval_private::DEFAULT_V2_SMOKE_EVAL_HOLDOUT_EVERY;
         let mut learning_rate = fractal_eval_private::DEFAULT_V2_SMOKE_LEARNING_RATE;
+        let mut root_count = None;
         let mut leaf_size = None;
         let mut ledger_path = None;
         let mut run_label = None;
@@ -160,6 +167,13 @@ impl CliArgs {
                         format!("invalid --learning-rate value '{value}': {error}")
                     })?;
                 }
+                "--root-count" => {
+                    root_count = Some(parse_positive_usize(
+                        iter.next()
+                            .ok_or_else(|| "--root-count requires a value".to_owned())?,
+                        "--root-count",
+                    )?);
+                }
                 "--leaf-size" => {
                     leaf_size = Some(parse_positive_usize(
                         iter.next()
@@ -206,6 +220,7 @@ impl CliArgs {
             eval_batches,
             eval_holdout_every,
             learning_rate,
+            root_count,
             leaf_size,
             ledger_path,
             run_label,
@@ -298,6 +313,15 @@ fn render_table(report: &fractal_eval_private::V2SmokeTrainReport) -> String {
     );
     let _ = writeln!(
         output,
+        "model_contract: root_count={} total_root_state_dim={} total_root_readout_dim={} per_root_state_dim={} per_root_readout_dim={}",
+        report.config.model.root_count,
+        report.config.model.total_root_state_dim,
+        report.config.model.total_root_readout_dim,
+        report.config.model.root_state_dim(),
+        report.config.model.root_readout_dim()
+    );
+    let _ = writeln!(
+        output,
         "initial_eval: loss={:.4} ppl={:.4} batches={}",
         report.initial_eval.mean_loss,
         report.initial_eval.perplexity,
@@ -366,7 +390,7 @@ fn usage() -> String {
     let mut output = String::new();
     let _ = writeln!(
         output,
-        "Usage: cargo run --bin v2-smoke-train -- [--corpus-path <path>]... [--output-dir <path>] [--seq-len <usize>] [--window-stride <usize>] [--batch-size <usize>] [--steps <usize>] [--eval-batches <usize>] [--eval-holdout-every <usize>] [--learning-rate <float>] [--leaf-size <usize>] [--ledger-path <default|path>] [--run-label <label>] [--output <table|json>]"
+        "Usage: cargo run --bin v2-smoke-train -- [--corpus-path <path>]... [--output-dir <path>] [--seq-len <usize>] [--window-stride <usize>] [--batch-size <usize>] [--steps <usize>] [--eval-batches <usize>] [--eval-holdout-every <usize>] [--learning-rate <float>] [--root-count <usize>] [--leaf-size <usize>] [--ledger-path <default|path>] [--run-label <label>] [--output <table|json>]"
     );
     let _ = writeln!(
         output,
@@ -413,6 +437,8 @@ mod tests {
                 "2",
                 "--steps",
                 "4",
+                "--root-count",
+                "1",
                 "--output",
                 "json",
                 "--leaf-size",
@@ -430,6 +456,7 @@ mod tests {
         assert_eq!(args.seq_len, 32);
         assert_eq!(args.batch_size, 2);
         assert_eq!(args.steps, 4);
+        assert_eq!(args.root_count, Some(1));
         assert_eq!(args.leaf_size, Some(32));
         assert_eq!(args.ledger_path.as_deref(), Some("default"));
         assert_eq!(args.run_label.as_deref(), Some("smoke-baseline"));
