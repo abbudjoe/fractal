@@ -612,8 +612,16 @@ where
                     negative_log_likelihood(&reference_logits_row, target_token_id)?;
                 let reference_target_logit =
                     target_logit(&reference_logits_row, target_token_id, self.vocab_size)?;
-                let reference_head_contexts =
-                    head_contexts_for_route(&routed, sample.batch_index, query_position)?;
+                let reference_head_contexts = head_contexts_for_route(
+                    &routed,
+                    sample.batch_index,
+                    query_position,
+                    state
+                        .tree()
+                        .level(0)
+                        .map(|level| level.shared_spans())
+                        .unwrap_or(&[]),
+                )?;
                 let reference_context = summarize_head_contexts(&reference_head_contexts);
                 let reference_metrics = AuditMetricReference {
                     task_family: &sample.task_family,
@@ -678,6 +686,11 @@ where
                                 &next_best,
                                 sample.batch_index,
                                 query_position,
+                                state
+                                    .tree()
+                                    .level(0)
+                                    .map(|level| level.shared_spans())
+                                    .unwrap_or(&[]),
                             )?;
                             let logits = self.project_step_logits(
                                 root_readouts.clone(),
@@ -1020,8 +1033,36 @@ fn head_contexts_for_route<B: Backend>(
     routed: &crate::v2::FractalRouteOutput<B>,
     batch_index: usize,
     query_position: usize,
+    level_zero_spans: &[crate::v2::TokenSpan],
 ) -> Result<Vec<CausalMemoryHeadContext>, FractalError> {
     let mut head_contexts = Vec::with_capacity(routed.traces().len());
+    let selected_leaf_indices = routed
+        .selected_leaf_indices()
+        .to_data()
+        .convert::<i64>()
+        .into_vec::<i64>()
+        .map_err(|error| {
+            FractalError::InvalidState(format!(
+                "route output selected_leaf_indices data conversion failed: {error}"
+            ))
+        })?;
+    let selected_leaf_mask = routed
+        .selected_leaf_mask()
+        .to_data()
+        .convert::<bool>()
+        .into_vec::<bool>()
+        .map_err(|error| {
+            FractalError::InvalidState(format!(
+                "route output selected_leaf_mask data conversion failed: {error}"
+            ))
+        })?;
+    let [batch_size, head_count, top_leaf_reads] = routed.selected_leaf_indices().dims();
+    if batch_index >= batch_size {
+        return Err(FractalError::InvalidState(format!(
+            "route output batch {} is out of bounds for batch size {}",
+            batch_index, batch_size
+        )));
+    }
 
     for (head_index, head_trace) in routed.traces().iter().enumerate() {
         let batch_route = head_trace.batch_routes.get(batch_index).ok_or_else(|| {
@@ -1031,16 +1072,33 @@ fn head_contexts_for_route<B: Backend>(
                 head_trace.batch_routes.len()
             ))
         })?;
+        let mut runtime_selected_leaf_indices = Vec::new();
+        let mut runtime_span_distances = Vec::new();
+        for slot in 0..top_leaf_reads {
+            let flat_index = ((batch_index * head_count + head_index) * top_leaf_reads) + slot;
+            if !selected_leaf_mask[flat_index] {
+                continue;
+            }
+            let leaf_index = usize::try_from(selected_leaf_indices[flat_index]).map_err(|_| {
+                FractalError::InvalidState(format!(
+                    "route output selected_leaf_indices[{batch_index}][{head_index}][{slot}] must be non-negative when selected"
+                ))
+            })?;
+            let span = *level_zero_spans.get(leaf_index).ok_or_else(|| {
+                FractalError::InvalidState(format!(
+                    "route output selected_leaf_indices[{batch_index}][{head_index}][{slot}]={} is out of bounds for {} level-0 spans",
+                    leaf_index,
+                    level_zero_spans.len()
+                ))
+            })?;
+            runtime_selected_leaf_indices.push(leaf_index);
+            runtime_span_distances.push(selected_span_distance(query_position, span)?);
+        }
         head_contexts.push(CausalMemoryHeadContext {
             head_index,
             routing_depth: batch_route.steps.len(),
-            span_distances: batch_route
-                .selected_leaf_spans
-                .iter()
-                .copied()
-                .map(|span| selected_span_distance(query_position, span))
-                .collect::<Result<Vec<_>, _>>()?,
-            selected_leaf_indices: batch_route.selected_leaf_indices.clone(),
+            span_distances: runtime_span_distances,
+            selected_leaf_indices: runtime_selected_leaf_indices,
         });
     }
 
