@@ -2,13 +2,18 @@ use burn::{
     module::Module,
     tensor::{backend::Backend, Int, Tensor, TensorData},
 };
+use serde::Serialize;
 
 use fractal_core::{
     error::FractalError, ExactLeafRead, FractalRouterHead, FractalV2MemoryMode, FractalV2Model,
     LeafSummarizer, LocalTrunk, ReadFusion, TokenSpan, TreeMergeCell,
 };
 
-const MIN_V2_PROBE_VOCAB_SIZE: usize = 64;
+use crate::{
+    build_baseline_v2_synthetic_model, BaselineV2SyntheticModel, BaselineV2SyntheticModelConfig,
+};
+
+pub const MIN_V2_PROBE_VOCAB_SIZE: usize = 64;
 const COPY_SENTINEL: i64 = 1;
 const ASSOC_SENTINEL: i64 = 2;
 const INDUCTION_SENTINEL: i64 = 3;
@@ -18,7 +23,8 @@ const QUERY_SENTINEL: i64 = 6;
 const LESS_THAN_TOKEN: i64 = 60;
 const EQUAL_TOKEN: i64 = 61;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SyntheticProbeKind {
     Copy,
     AssociativeRecall,
@@ -27,7 +33,8 @@ pub enum SyntheticProbeKind {
     FarTokenComparison,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SyntheticProbeMode {
     NoMemory,
     TreeOnly,
@@ -58,7 +65,7 @@ impl SyntheticProbeMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SyntheticProbeSample {
     pub kind: SyntheticProbeKind,
     pub name: String,
@@ -195,7 +202,7 @@ impl SyntheticProbeSample {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SyntheticProbeSuite {
     pub kind: SyntheticProbeKind,
     pub leaf_size: usize,
@@ -236,7 +243,7 @@ impl SyntheticProbeSuite {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SyntheticProbeSampleResult {
     pub sample_name: String,
     pub predicted_token_id: i64,
@@ -246,21 +253,21 @@ pub struct SyntheticProbeSampleResult {
     pub loss: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct SyntheticProbeMetrics {
     pub accuracy: f32,
     pub mean_target_logit: f32,
     pub mean_loss: f32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SyntheticProbeModeReport {
     pub mode: SyntheticProbeMode,
     pub metrics: SyntheticProbeMetrics,
     pub sample_results: Vec<SyntheticProbeSampleResult>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SyntheticProbeSuiteReport {
     pub kind: SyntheticProbeKind,
     pub sample_count: usize,
@@ -273,9 +280,15 @@ impl SyntheticProbeSuiteReport {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SyntheticProbeReport {
     pub suites: Vec<SyntheticProbeSuiteReport>,
+}
+
+pub fn baseline_v2_synthetic_model<B: Backend>(
+    device: &B::Device,
+) -> Result<BaselineV2SyntheticModel<B>, FractalError> {
+    build_baseline_v2_synthetic_model(BaselineV2SyntheticModelConfig::default(), device)
 }
 
 pub trait SyntheticProbeModel {
@@ -1021,22 +1034,13 @@ mod tests {
     };
     use fractal_core::{
         v2::{BaselineReadFusion, BaselineReadFusionConfig},
-        BaselineExactLeafReadConfig, BaselineFractalRouterHeadConfig, BaselineLeafSummarizerConfig,
-        BaselineLocalTrunkConfig, BaselineTreeMergeCellConfig, BatchHeadRoute,
-        ExactLeafReadDiagnostics, ExactLeafReadOutput, ExactLeafReadShape, FractalRouteOutput,
-        FractalRouterHeadShape, FractalRoutingDiagnostics, FractalV2Components, HeadRouteTrace,
+        BaselineLeafSummarizerConfig, BaselineLocalTrunkConfig, BaselineTreeMergeCellConfig,
+        BatchHeadRoute, ExactLeafReadDiagnostics, ExactLeafReadOutput, ExactLeafReadShape,
+        FractalRouteOutput, FractalRouterHeadShape, FractalRoutingDiagnostics, FractalV2Components,
+        HeadRouteTrace,
     };
 
     type TestBackend = Candle<f32, i64>;
-    type BaselineV2Model<B> = FractalV2Model<
-        B,
-        fractal_core::BaselineLocalTrunk<B>,
-        fractal_core::BaselineLeafSummarizer<B>,
-        fractal_core::BaselineTreeMergeCell<B>,
-        fractal_core::BaselineFractalRouterHead<B>,
-        fractal_core::BaselineExactLeafRead<B>,
-        BaselineReadFusion<B>,
-    >;
     type StructuralV2Model<B> = FractalV2Model<
         B,
         fractal_core::BaselineLocalTrunk<B>,
@@ -1333,80 +1337,6 @@ mod tests {
         } else {
             target + 1
         }
-    }
-
-    fn baseline_v2_model<B: Backend>(device: &B::Device) -> BaselineV2Model<B> {
-        FractalV2Model::new(
-            64,
-            8,
-            FractalV2Components {
-                local_trunk: BaselineLocalTrunkConfig::new(8, 2, 6, 4, 16)
-                    .try_init(device)
-                    .unwrap(),
-                leaf_summarizer: BaselineLeafSummarizerConfig {
-                    readout_dim: 4,
-                    leaf_size: 16,
-                    summary_dim: 6,
-                    key_dim: 4,
-                    value_dim: 5,
-                    token_cache_key_dim: 4,
-                    token_cache_value_dim: 6,
-                }
-                .try_init(device)
-                .unwrap(),
-                tree_merge_cell: BaselineTreeMergeCellConfig {
-                    summary_dim: 6,
-                    key_dim: 4,
-                    value_dim: 5,
-                    scale_embedding_dim: 4,
-                }
-                .try_init(device)
-                .unwrap(),
-                router: BaselineFractalRouterHeadConfig {
-                    query_dim: 4,
-                    key_dim: 4,
-                    head_count: 2,
-                    beam_width: 2,
-                    top_leaf_reads: 2,
-                    allow_early_stop: false,
-                    initializer: Initializer::Uniform {
-                        min: -0.08,
-                        max: 0.08,
-                    },
-                }
-                .try_init(device)
-                .unwrap(),
-                exact_read: BaselineExactLeafReadConfig {
-                    query_dim: 4,
-                    key_dim: 4,
-                    value_dim: 6,
-                    head_count: 2,
-                    top_leaf_reads: 2,
-                    leaf_size: 16,
-                    initializer: Initializer::Uniform {
-                        min: -0.08,
-                        max: 0.08,
-                    },
-                }
-                .try_init(device)
-                .unwrap(),
-                read_fusion: BaselineReadFusionConfig {
-                    root_count: 2,
-                    root_readout_dim: 4,
-                    routed_value_dim: 5,
-                    exact_read_value_dim: 6,
-                    fused_readout_dim: 8,
-                    initializer: Initializer::Uniform {
-                        min: -0.08,
-                        max: 0.08,
-                    },
-                }
-                .try_init(device)
-                .unwrap(),
-            },
-            device,
-        )
-        .unwrap()
     }
 
     fn structural_v2_model<B: Backend>(device: &B::Device) -> StructuralV2Model<B> {
@@ -1778,7 +1708,7 @@ mod tests {
     #[test]
     fn synthetic_probe_harness_runs_against_baseline_v2_model() {
         let device = <TestBackend as Backend>::Device::default();
-        let model = baseline_v2_model::<TestBackend>(&device);
+        let model = baseline_v2_synthetic_model::<TestBackend>(&device).unwrap();
         let report =
             run_v2_synthetic_probe_suites(&model, &default_v2_synthetic_probe_suites(), &device)
                 .unwrap();

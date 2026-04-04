@@ -1,5 +1,9 @@
+pub mod v2_fixture;
 pub mod v2_synthetic;
 
+pub use v2_fixture::{
+    build_baseline_v2_synthetic_model, BaselineV2SyntheticModel, BaselineV2SyntheticModelConfig,
+};
 pub use v2_synthetic::{
     default_v2_synthetic_probe_suites, run_v2_synthetic_probe_suite, run_v2_synthetic_probe_suites,
     SyntheticProbeKind, SyntheticProbeMetrics, SyntheticProbeMode, SyntheticProbeModeReport,

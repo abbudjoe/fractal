@@ -1918,6 +1918,7 @@ version = "0.1.0"
 dependencies = [
  "burn",
  "fractal-core",
+ "serde",
 ]
 
 [[package]]
