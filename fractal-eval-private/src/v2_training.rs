@@ -304,23 +304,24 @@ where
     }
 
     let final_eval = evaluate_model(&model, &criterion, &eval_batches, config.eval_batches)?;
-    let (best_eval, best_checkpoint_kind, best_model) =
+    let (best_eval, best_checkpoint_kind, best_model, best_optimizer) =
         if final_eval.mean_loss <= initial_eval.mean_loss {
-            (final_eval.clone(), V2SmokeCheckpointKind::FinalEval, None)
+            (
+                final_eval.clone(),
+                V2SmokeCheckpointKind::FinalEval,
+                None,
+                None,
+            )
         } else {
             (
                 initial_eval.clone(),
                 V2SmokeCheckpointKind::InitialEval,
                 Some(&initial_model),
+                Some(&initial_optimizer),
             )
         };
-    let checkpoint = persist_smoke_train_artifacts(
-        &model,
-        best_model,
-        &optimizer,
-        Some(&initial_optimizer),
-        &config,
-    )?;
+    let checkpoint =
+        persist_smoke_train_artifacts(&model, best_model, &optimizer, best_optimizer, &config)?;
     let corpus_paths = corpus.paths;
     let total_sequences = train_batches
         .iter()
@@ -801,6 +802,14 @@ mod tests {
         assert!(result.report.checkpoint.final_optimizer_path.exists());
         assert!(result.report.checkpoint.best_optimizer_path.exists());
         assert!(result.report.checkpoint.report_path.exists());
+        assert_eq!(
+            result.report.checkpoint.best_model_path,
+            result.report.checkpoint.final_model_path
+        );
+        assert_eq!(
+            result.report.checkpoint.best_optimizer_path,
+            result.report.checkpoint.final_optimizer_path
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
