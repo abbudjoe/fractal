@@ -321,7 +321,7 @@ fn default_output_dir(repo_root: &Path) -> PathBuf {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
+        .as_nanos();
     repo_root
         .join("artifacts")
         .join("v2-smoke-train")
