@@ -9,6 +9,8 @@ use fractal_core::{
     BaselineTreeMergeCellConfig, FractalV2Components, FractalV2Model,
 };
 
+use crate::v2_synthetic::MIN_V2_PROBE_VOCAB_SIZE;
+
 pub type BaselineV2SyntheticModel<B> = FractalV2Model<
     B,
     BaselineLocalTrunk<B>,
@@ -44,6 +46,13 @@ pub fn build_baseline_v2_synthetic_model<B: Backend>(
     config: BaselineV2SyntheticModelConfig,
     device: &B::Device,
 ) -> Result<BaselineV2SyntheticModel<B>, FractalError> {
+    if config.vocab_size < MIN_V2_PROBE_VOCAB_SIZE {
+        return Err(FractalError::InvalidConfig(format!(
+            "baseline_v2_synthetic_model.vocab_size must be at least {}, got {}",
+            MIN_V2_PROBE_VOCAB_SIZE, config.vocab_size
+        )));
+    }
+
     FractalV2Model::new(
         config.vocab_size,
         config.token_dim,
@@ -133,5 +142,21 @@ mod tests {
                 .validate_for_model(model.vocab_size(), model.leaf_size())
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn baseline_v2_fixture_rejects_vocab_below_probe_minimum() {
+        let device = Default::default();
+        let error = build_baseline_v2_synthetic_model::<TestBackend>(
+            BaselineV2SyntheticModelConfig::new(MIN_V2_PROBE_VOCAB_SIZE - 1, 8),
+            &device,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            FractalError::InvalidConfig(message)
+                if message.contains("baseline_v2_synthetic_model.vocab_size")
+        ));
     }
 }
