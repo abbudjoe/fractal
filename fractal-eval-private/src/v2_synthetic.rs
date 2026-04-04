@@ -4,8 +4,8 @@ use burn::{
 };
 
 use fractal_core::{
-    error::FractalError, v2::ReadFusionAblation, ExactLeafRead, FractalRouterHead, FractalV2Model,
-    LeafSummarizer, LocalTrunk, ReadFusion, TreeMergeCell,
+    error::FractalError, ExactLeafRead, FractalRouterHead, FractalV2MemoryMode, FractalV2Model,
+    LeafSummarizer, LocalTrunk, ReadFusion, TokenSpan, TreeMergeCell,
 };
 
 const MIN_V2_PROBE_VOCAB_SIZE: usize = 64;
@@ -37,11 +37,23 @@ pub enum SyntheticProbeMode {
 impl SyntheticProbeMode {
     pub const ALL: [Self; 3] = [Self::NoMemory, Self::TreeOnly, Self::TreePlusExactRead];
 
-    pub fn read_fusion_ablation(self) -> ReadFusionAblation {
+    pub fn memory_mode(self) -> FractalV2MemoryMode {
         match self {
-            Self::NoMemory => ReadFusionAblation::without_memory_reads(),
-            Self::TreeOnly => ReadFusionAblation::without_exact_read_values(),
-            Self::TreePlusExactRead => ReadFusionAblation::full(),
+            Self::NoMemory => FractalV2MemoryMode::NoMemory,
+            Self::TreeOnly => FractalV2MemoryMode::TreeOnly,
+            Self::TreePlusExactRead => FractalV2MemoryMode::TreePlusExactRead,
+        }
+    }
+
+    pub fn supports(self, minimum_mode: Self) -> bool {
+        self.rank() >= minimum_mode.rank()
+    }
+
+    fn rank(self) -> usize {
+        match self {
+            Self::NoMemory => 0,
+            Self::TreeOnly => 1,
+            Self::TreePlusExactRead => 2,
         }
     }
 }
@@ -53,6 +65,8 @@ pub struct SyntheticProbeSample {
     pub input_ids: Vec<i64>,
     pub target_position: usize,
     pub target_token_id: i64,
+    pub evidence_span: TokenSpan,
+    pub minimum_mode: SyntheticProbeMode,
 }
 
 impl SyntheticProbeSample {
@@ -61,6 +75,8 @@ impl SyntheticProbeSample {
         name: impl Into<String>,
         input_ids: Vec<i64>,
         target_token_id: i64,
+        evidence_span: TokenSpan,
+        minimum_mode: SyntheticProbeMode,
     ) -> Result<Self, FractalError> {
         if input_ids.is_empty() {
             return Err(FractalError::InvalidConfig(
@@ -75,16 +91,23 @@ impl SyntheticProbeSample {
             input_ids,
             target_position,
             target_token_id,
+            evidence_span,
+            minimum_mode,
         })
     }
 
-    pub fn validate_for_vocab(&self, vocab_size: usize) -> Result<(), FractalError> {
+    pub fn validate_for_vocab(
+        &self,
+        vocab_size: usize,
+        leaf_size: usize,
+    ) -> Result<(), FractalError> {
         if self.name.trim().is_empty() {
             return Err(FractalError::InvalidConfig(
                 "synthetic_probe_sample.name must not be empty".to_string(),
             ));
         }
         ensure_vocab_capacity(vocab_size)?;
+        ensure_nonzero("synthetic_probe_sample.leaf_size", leaf_size, &self.name)?;
         if self.input_ids.is_empty() {
             return Err(FractalError::InvalidConfig(format!(
                 "synthetic_probe_sample '{}' must contain at least one token",
@@ -111,6 +134,48 @@ impl SyntheticProbeSample {
             vocab_size,
             &format!("synthetic_probe_sample '{}'.target_token_id", self.name),
         )?;
+        if self.evidence_span.is_empty() {
+            return Err(FractalError::InvalidConfig(format!(
+                "synthetic_probe_sample '{}' evidence_span must not be empty",
+                self.name
+            )));
+        }
+        if self.evidence_span.end() > self.input_ids.len() {
+            return Err(FractalError::InvalidConfig(format!(
+                "synthetic_probe_sample '{}' evidence_span {:?} exceeds input length {}",
+                self.name,
+                self.evidence_span,
+                self.input_ids.len()
+            )));
+        }
+        if self.evidence_span.end() > self.target_position {
+            return Err(FractalError::InvalidConfig(format!(
+                "synthetic_probe_sample '{}' evidence_span {:?} must end before target position {}",
+                self.name, self.evidence_span, self.target_position
+            )));
+        }
+        if self.evidence_span.end() > leaf_size {
+            return Err(FractalError::InvalidConfig(format!(
+                "synthetic_probe_sample '{}' evidence_span {:?} must lie within the first sealed leaf of size {}",
+                self.name,
+                self.evidence_span,
+                leaf_size
+            )));
+        }
+        if self.target_position < leaf_size {
+            return Err(FractalError::InvalidConfig(format!(
+                "synthetic_probe_sample '{}' target_position {} must fall after the first sealed leaf of size {}",
+                self.name,
+                self.target_position,
+                leaf_size
+            )));
+        }
+        if matches!(self.minimum_mode, SyntheticProbeMode::NoMemory) {
+            return Err(FractalError::InvalidConfig(format!(
+                "synthetic_probe_sample '{}' minimum_mode must require memory",
+                self.name
+            )));
+        }
 
         Ok(())
     }
@@ -119,12 +184,14 @@ impl SyntheticProbeSample {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyntheticProbeSuite {
     pub kind: SyntheticProbeKind,
+    pub leaf_size: usize,
     pub samples: Vec<SyntheticProbeSample>,
 }
 
 impl SyntheticProbeSuite {
     pub fn validate_for_vocab(&self, vocab_size: usize) -> Result<(), FractalError> {
         ensure_vocab_capacity(vocab_size)?;
+        ensure_nonzero("synthetic_probe_suite.leaf_size", self.leaf_size, "")?;
         if self.samples.is_empty() {
             return Err(FractalError::InvalidConfig(format!(
                 "synthetic_probe_suite '{:?}' must contain at least one sample",
@@ -138,7 +205,7 @@ impl SyntheticProbeSuite {
                     self.kind, sample.kind
                 )));
             }
-            sample.validate_for_vocab(vocab_size)?;
+            sample.validate_for_vocab(vocab_size, self.leaf_size)?;
         }
 
         Ok(())
@@ -222,14 +289,14 @@ where
         mode: SyntheticProbeMode,
         device: &Self::Device,
     ) -> Result<Vec<f32>, FractalError> {
-        sample.validate_for_vocab(self.vocab_size())?;
+        sample.validate_for_vocab(self.vocab_size(), self.shape().local_trunk.leaf_size)?;
 
         let input_ids = Tensor::<B, 2, Int>::from_data(
             TensorData::new(sample.input_ids.clone(), [1, sample.input_ids.len()]),
             device,
         );
         let logits = self
-            .forward_with_ablation(input_ids, mode.read_fusion_ablation())?
+            .forward_with_memory_mode(input_ids, mode.memory_mode())?
             .logits()
             .narrow(1, sample.target_position, 1)
             .reshape([self.vocab_size()]);
@@ -406,6 +473,21 @@ fn ensure_vocab_capacity(vocab_size: usize) -> Result<(), FractalError> {
     Ok(())
 }
 
+fn ensure_nonzero(name: &str, value: usize, context: &str) -> Result<(), FractalError> {
+    if value == 0 {
+        let suffix = if context.is_empty() {
+            String::new()
+        } else {
+            format!(" for '{context}'")
+        };
+        return Err(FractalError::InvalidConfig(format!(
+            "{name} must be greater than zero{suffix}"
+        )));
+    }
+
+    Ok(())
+}
+
 fn ensure_token_in_vocab(token_id: i64, vocab_size: usize, name: &str) -> Result<(), FractalError> {
     if token_id < 0
         || usize::try_from(token_id)
@@ -428,9 +510,14 @@ fn invalid_state_from_data(
     move |error| FractalError::InvalidState(format!("{label} data conversion failed: {error}"))
 }
 
+fn span(start: usize, end: usize) -> TokenSpan {
+    TokenSpan::new(start, end).expect("default synthetic spans must be valid")
+}
+
 fn copy_probe_suite() -> SyntheticProbeSuite {
     SyntheticProbeSuite {
         kind: SyntheticProbeKind::Copy,
+        leaf_size: 16,
         samples: vec![
             SyntheticProbeSample::final_target(
                 SyntheticProbeKind::Copy,
@@ -470,6 +557,8 @@ fn copy_probe_suite() -> SyntheticProbeSuite {
                     11,
                 ],
                 41,
+                span(1, 2),
+                SyntheticProbeMode::TreePlusExactRead,
             )
             .unwrap(),
             SyntheticProbeSample::final_target(
@@ -510,6 +599,8 @@ fn copy_probe_suite() -> SyntheticProbeSuite {
                     12,
                 ],
                 42,
+                span(1, 2),
+                SyntheticProbeMode::TreePlusExactRead,
             )
             .unwrap(),
         ],
@@ -519,6 +610,7 @@ fn copy_probe_suite() -> SyntheticProbeSuite {
 fn associative_recall_probe_suite() -> SyntheticProbeSuite {
     SyntheticProbeSuite {
         kind: SyntheticProbeKind::AssociativeRecall,
+        leaf_size: 16,
         samples: vec![
             SyntheticProbeSample::final_target(
                 SyntheticProbeKind::AssociativeRecall,
@@ -558,6 +650,8 @@ fn associative_recall_probe_suite() -> SyntheticProbeSuite {
                     14,
                 ],
                 34,
+                span(7, 9),
+                SyntheticProbeMode::TreeOnly,
             )
             .unwrap(),
             SyntheticProbeSample::final_target(
@@ -598,6 +692,8 @@ fn associative_recall_probe_suite() -> SyntheticProbeSuite {
                     23,
                 ],
                 45,
+                span(9, 11),
+                SyntheticProbeMode::TreeOnly,
             )
             .unwrap(),
         ],
@@ -607,6 +703,7 @@ fn associative_recall_probe_suite() -> SyntheticProbeSuite {
 fn induction_probe_suite() -> SyntheticProbeSuite {
     SyntheticProbeSuite {
         kind: SyntheticProbeKind::Induction,
+        leaf_size: 16,
         samples: vec![
             SyntheticProbeSample::final_target(
                 SyntheticProbeKind::Induction,
@@ -646,6 +743,8 @@ fn induction_probe_suite() -> SyntheticProbeSuite {
                     31,
                 ],
                 11,
+                span(1, 4),
+                SyntheticProbeMode::TreeOnly,
             )
             .unwrap(),
             SyntheticProbeSample::final_target(
@@ -686,6 +785,8 @@ fn induction_probe_suite() -> SyntheticProbeSuite {
                     41,
                 ],
                 12,
+                span(1, 4),
+                SyntheticProbeMode::TreeOnly,
             )
             .unwrap(),
         ],
@@ -695,6 +796,7 @@ fn induction_probe_suite() -> SyntheticProbeSuite {
 fn noisy_retrieval_probe_suite() -> SyntheticProbeSuite {
     SyntheticProbeSuite {
         kind: SyntheticProbeKind::NoisyRetrieval,
+        leaf_size: 16,
         samples: vec![
             SyntheticProbeSample::final_target(
                 SyntheticProbeKind::NoisyRetrieval,
@@ -734,6 +836,8 @@ fn noisy_retrieval_probe_suite() -> SyntheticProbeSuite {
                     16,
                 ],
                 56,
+                span(11, 13),
+                SyntheticProbeMode::TreePlusExactRead,
             )
             .unwrap(),
             SyntheticProbeSample::final_target(
@@ -774,6 +878,8 @@ fn noisy_retrieval_probe_suite() -> SyntheticProbeSuite {
                     27,
                 ],
                 47,
+                span(13, 15),
+                SyntheticProbeMode::TreePlusExactRead,
             )
             .unwrap(),
         ],
@@ -783,6 +889,7 @@ fn noisy_retrieval_probe_suite() -> SyntheticProbeSuite {
 fn far_token_comparison_probe_suite() -> SyntheticProbeSuite {
     SyntheticProbeSuite {
         kind: SyntheticProbeKind::FarTokenComparison,
+        leaf_size: 16,
         samples: vec![
             SyntheticProbeSample::final_target(
                 SyntheticProbeKind::FarTokenComparison,
@@ -822,6 +929,8 @@ fn far_token_comparison_probe_suite() -> SyntheticProbeSuite {
                     19,
                 ],
                 LESS_THAN_TOKEN,
+                span(1, 2),
+                SyntheticProbeMode::TreeOnly,
             )
             .unwrap(),
             SyntheticProbeSample::final_target(
@@ -862,6 +971,8 @@ fn far_token_comparison_probe_suite() -> SyntheticProbeSuite {
                     44,
                 ],
                 EQUAL_TOKEN,
+                span(1, 2),
+                SyntheticProbeMode::TreeOnly,
             )
             .unwrap(),
         ],
@@ -891,6 +1002,7 @@ mod tests {
 
     struct FixtureModel {
         vocab_size: usize,
+        leaf_size: usize,
     }
 
     impl FixtureModel {
@@ -899,27 +1011,10 @@ mod tests {
             sample: &SyntheticProbeSample,
             mode: SyntheticProbeMode,
         ) -> i64 {
-            match (sample.kind, mode) {
-                (SyntheticProbeKind::Copy, SyntheticProbeMode::TreePlusExactRead) => {
-                    sample.target_token_id
-                }
-                (SyntheticProbeKind::Copy, _) => wrong_token(sample.target_token_id),
-                (SyntheticProbeKind::AssociativeRecall, SyntheticProbeMode::NoMemory) => {
-                    wrong_token(sample.target_token_id)
-                }
-                (SyntheticProbeKind::AssociativeRecall, _) => sample.target_token_id,
-                (SyntheticProbeKind::Induction, SyntheticProbeMode::NoMemory) => {
-                    wrong_token(sample.target_token_id)
-                }
-                (SyntheticProbeKind::Induction, _) => sample.target_token_id,
-                (SyntheticProbeKind::NoisyRetrieval, SyntheticProbeMode::TreePlusExactRead) => {
-                    sample.target_token_id
-                }
-                (SyntheticProbeKind::NoisyRetrieval, _) => wrong_token(sample.target_token_id),
-                (SyntheticProbeKind::FarTokenComparison, SyntheticProbeMode::NoMemory) => {
-                    wrong_token(sample.target_token_id)
-                }
-                (SyntheticProbeKind::FarTokenComparison, _) => sample.target_token_id,
+            if mode.supports(sample.minimum_mode) {
+                sample.target_token_id
+            } else {
+                wrong_token(sample.target_token_id)
             }
         }
     }
@@ -937,7 +1032,7 @@ mod tests {
             mode: SyntheticProbeMode,
             _device: &Self::Device,
         ) -> Result<Vec<f32>, FractalError> {
-            sample.validate_for_vocab(self.vocab_size)?;
+            sample.validate_for_vocab(self.vocab_size, self.leaf_size)?;
             let predicted = self.predicted_token_for(sample, mode);
             let mut logits = vec![-4.0f32; self.vocab_size];
             logits[usize::try_from(predicted).unwrap()] = 8.0;
@@ -1050,16 +1145,21 @@ mod tests {
             ]
         );
         assert!(suites.iter().all(|suite| suite.samples.len() >= 2));
-        assert!(suites
-            .iter()
-            .flat_map(|suite| suite.samples.iter())
-            .all(|sample| sample.input_ids.len() > 16));
+        assert!(suites.iter().all(|suite| suite.leaf_size == 16));
+        for suite in &suites {
+            suite.validate_for_vocab(64).unwrap();
+            assert!(suite
+                .samples
+                .iter()
+                .all(|sample| sample.input_ids.len() > suite.leaf_size));
+        }
     }
 
     #[test]
     fn synthetic_probe_suite_rejects_mismatched_sample_kind() {
         let suite = SyntheticProbeSuite {
             kind: SyntheticProbeKind::Copy,
+            leaf_size: 16,
             samples: vec![SyntheticProbeSample::final_target(
                 SyntheticProbeKind::AssociativeRecall,
                 "bad",
@@ -1083,6 +1183,8 @@ mod tests {
                     23,
                 ],
                 31,
+                span(1, 3),
+                SyntheticProbeMode::TreeOnly,
             )
             .unwrap()],
         };
@@ -1097,7 +1199,10 @@ mod tests {
 
     #[test]
     fn synthetic_probe_harness_distinguishes_memory_modes_with_fixture_model() {
-        let fixture = FixtureModel { vocab_size: 64 };
+        let fixture = FixtureModel {
+            vocab_size: 64,
+            leaf_size: 16,
+        };
         let report =
             run_v2_synthetic_probe_suites(&fixture, &default_v2_synthetic_probe_suites(), &())
                 .unwrap();
@@ -1168,6 +1273,136 @@ mod tests {
     }
 
     #[test]
+    fn default_v2_synthetic_probe_suites_are_memory_separating_on_real_v2_path() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = baseline_v2_model::<TestBackend>(&device);
+
+        for suite in default_v2_synthetic_probe_suites() {
+            suite.validate_for_vocab(model.vocab_size()).unwrap();
+            for sample in &suite.samples {
+                let input_ids = Tensor::<TestBackend, 2, Int>::from_data(
+                    TensorData::new(sample.input_ids.clone(), [1, sample.input_ids.len()]),
+                    &device,
+                );
+                let no_memory = model
+                    .forward_retrieval_trace_with_memory_mode(
+                        input_ids.clone(),
+                        FractalV2MemoryMode::NoMemory,
+                    )
+                    .unwrap();
+                let tree_only = model
+                    .forward_retrieval_trace_with_memory_mode(
+                        input_ids.clone(),
+                        FractalV2MemoryMode::TreeOnly,
+                    )
+                    .unwrap();
+                let full = model
+                    .forward_retrieval_trace_with_memory_mode(
+                        input_ids,
+                        FractalV2MemoryMode::TreePlusExactRead,
+                    )
+                    .unwrap();
+
+                let no_memory_step = no_memory.steps().last().unwrap();
+                assert!(
+                    no_memory
+                        .final_state()
+                        .leaf_token_cache()
+                        .shared_spans()
+                        .is_empty(),
+                    "no-memory mode unexpectedly sealed leaves for sample '{}'",
+                    sample.name
+                );
+                assert!(
+                    no_memory.final_state().tree().levels().is_empty(),
+                    "no-memory mode unexpectedly built a tree for sample '{}'",
+                    sample.name
+                );
+                assert!(
+                    mask_values(no_memory_step.routed().selected_leaf_mask())
+                        .into_iter()
+                        .all(|selected| !selected),
+                    "no-memory mode unexpectedly routed memory for sample '{}'",
+                    sample.name
+                );
+                assert!(
+                    mask_values(no_memory_step.exact_read().selected_token_mask())
+                        .into_iter()
+                        .all(|selected| !selected),
+                    "no-memory mode unexpectedly exact-read tokens for sample '{}'",
+                    sample.name
+                );
+
+                let tree_only_step = tree_only.steps().last().unwrap();
+                assert!(
+                    tree_only
+                        .final_state()
+                        .leaf_token_cache()
+                        .shared_spans()
+                        .iter()
+                        .any(|sealed_span| span_covers(sealed_span, sample.evidence_span)),
+                    "tree-only mode did not materialize evidence span {:?} for sample '{}'",
+                    sample.evidence_span,
+                    sample.name
+                );
+                assert!(
+                    tree_only
+                        .final_state()
+                        .tree()
+                        .level(0)
+                        .unwrap()
+                        .shared_spans()
+                        .iter()
+                        .any(|sealed_span| span_covers(sealed_span, sample.evidence_span)),
+                    "tree-only mode did not surface evidence span {:?} in level-0 summaries for sample '{}'",
+                    sample.evidence_span,
+                    sample.name
+                );
+                assert!(
+                    mask_values(tree_only_step.routed().selected_leaf_mask())
+                        .into_iter()
+                        .any(|selected| selected),
+                    "tree-only mode failed to route any sealed leaf for sample '{}'",
+                    sample.name
+                );
+                assert!(
+                    mask_values(tree_only_step.exact_read().selected_token_mask())
+                        .into_iter()
+                        .all(|selected| !selected),
+                    "tree-only mode unexpectedly performed exact read for sample '{}'",
+                    sample.name
+                );
+
+                let full_step = full.steps().last().unwrap();
+                assert!(
+                    full.final_state()
+                        .leaf_token_cache()
+                        .shared_spans()
+                        .iter()
+                        .any(|sealed_span| span_covers(sealed_span, sample.evidence_span)),
+                    "full mode did not materialize evidence span {:?} for sample '{}'",
+                    sample.evidence_span,
+                    sample.name
+                );
+                assert!(
+                    mask_values(full_step.routed().selected_leaf_mask())
+                        .into_iter()
+                        .any(|selected| selected),
+                    "full mode failed to route any sealed leaf for sample '{}'",
+                    sample.name
+                );
+                assert!(
+                    mask_values(full_step.exact_read().selected_token_mask())
+                        .into_iter()
+                        .any(|selected| selected),
+                    "full mode failed to perform exact read for sample '{}'",
+                    sample.name
+                );
+            }
+        }
+    }
+
+    #[test]
     fn synthetic_probe_harness_runs_against_baseline_v2_model() {
         let device = <TestBackend as Backend>::Device::default();
         let model = baseline_v2_model::<TestBackend>(&device);
@@ -1188,5 +1423,17 @@ mod tests {
                 assert!(mode_report.metrics.mean_loss.is_finite());
             }
         }
+    }
+
+    fn mask_values(tensor: Tensor<TestBackend, 3, burn::tensor::Bool>) -> Vec<bool> {
+        tensor
+            .to_data()
+            .convert::<bool>()
+            .into_vec::<bool>()
+            .unwrap()
+    }
+
+    fn span_covers(outer: &TokenSpan, inner: TokenSpan) -> bool {
+        outer.start() <= inner.start() && outer.end() >= inner.end()
     }
 }

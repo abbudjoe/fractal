@@ -31,8 +31,8 @@ pub use local_trunk::{
 };
 pub use model::{
     FractalV2Components, FractalV2ForwardOutput, FractalV2LocalBaselineModel,
-    FractalV2LocalBaselineOutput, FractalV2LocalBaselineShape, FractalV2Model, FractalV2ModelShape,
-    FractalV2RetrievalStepOutput, FractalV2RetrievalTrace,
+    FractalV2LocalBaselineOutput, FractalV2LocalBaselineShape, FractalV2MemoryMode, FractalV2Model,
+    FractalV2ModelShape, FractalV2RetrievalStepOutput, FractalV2RetrievalTrace,
 };
 pub use read_fusion::{
     BaselineReadFusion, BaselineReadFusionConfig, ReadFusion, ReadFusionAblation, ReadFusionInput,
