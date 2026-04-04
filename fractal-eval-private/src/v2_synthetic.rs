@@ -472,7 +472,7 @@ where
     }
 }
 
-fn projection_breakdown_for_sample<B, LT, LS, TM, RH, ER, RF>(
+pub(crate) fn projection_breakdown_for_sample<B, LT, LS, TM, RH, ER, RF>(
     model: &FractalV2Model<B, LT, LS, TM, RH, ER, RF>,
     sample: &SyntheticProbeSample,
     mode: SyntheticProbeMode,
@@ -1072,7 +1072,7 @@ fn score_projection_probe_sample<B: Backend>(
     })
 }
 
-fn score_probe_sample(
+pub(crate) fn score_probe_sample(
     sample: &SyntheticProbeSample,
     logits: &[f32],
     vocab_size: usize,

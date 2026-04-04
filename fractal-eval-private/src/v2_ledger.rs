@@ -12,7 +12,7 @@ use fractal_core::error::FractalError;
 
 use crate::{
     SyntheticProbeProjectionReport, SyntheticProbeReport, V2AblationReport, V2BenchmarkReport,
-    V2SmokeTrainReport,
+    V2SmokeTrainReport, V2SupervisedSyntheticTrainReport,
 };
 
 pub const DEFAULT_V2_RESULTS_LEDGER_PATH: &str = "docs/v2-results-ledger.jsonl";
@@ -21,6 +21,7 @@ pub const DEFAULT_V2_RESULTS_LEDGER_PATH: &str = "docs/v2-results-ledger.jsonl";
 #[serde(rename_all = "snake_case")]
 pub enum V2ResultsLedgerKind {
     SmokeTrain,
+    SupervisedSyntheticTrain,
     SyntheticProbe,
     FusionDiagnostic,
     Benchmark,
@@ -62,6 +63,21 @@ impl V2ResultsLedgerEntry {
     ) -> Result<Self, FractalError> {
         Self::from_payload(
             V2ResultsLedgerKind::SyntheticProbe,
+            model,
+            note,
+            run_label,
+            report,
+        )
+    }
+
+    pub fn supervised_synthetic_train(
+        model: impl Into<String>,
+        note: impl Into<String>,
+        report: &V2SupervisedSyntheticTrainReport,
+        run_label: Option<String>,
+    ) -> Result<Self, FractalError> {
+        Self::from_payload(
+            V2ResultsLedgerKind::SupervisedSyntheticTrain,
             model,
             note,
             run_label,

@@ -3,6 +3,7 @@ pub mod v2_benchmark;
 pub mod v2_checkpoint;
 pub mod v2_fixture;
 pub mod v2_ledger;
+pub mod v2_supervised;
 pub mod v2_synthetic;
 pub mod v2_training;
 
@@ -27,6 +28,19 @@ pub use v2_ledger::{
     resolve_requested_v2_results_ledger_path, V2ResultsLedgerEntry, V2ResultsLedgerKind,
     DEFAULT_V2_RESULTS_LEDGER_PATH,
 };
+pub use v2_supervised::{
+    filter_synthetic_probe_suites, mode_eval_summary_by_kind,
+    run_baseline_v2_supervised_synthetic_train,
+    run_baseline_v2_supervised_synthetic_train_with_modes,
+    run_v2_supervised_synthetic_train_with_model,
+    run_v2_supervised_synthetic_train_with_model_and_modes, V2SupervisedSyntheticEvalMetrics,
+    V2SupervisedSyntheticSplitStats, V2SupervisedSyntheticSuiteSplit,
+    V2SupervisedSyntheticTrainConfig, V2SupervisedSyntheticTrainModel,
+    V2SupervisedSyntheticTrainReport, V2SupervisedSyntheticTrainResult,
+    V2SupervisedSyntheticTrainStepReport, DEFAULT_V2_SUPERVISED_SYNTHETIC_EVAL_HOLDOUT_EVERY,
+    DEFAULT_V2_SUPERVISED_SYNTHETIC_LEARNING_RATE, DEFAULT_V2_SUPERVISED_SYNTHETIC_STEPS,
+    V2_SUPERVISED_SYNTHETIC_LEAF_SIZE,
+};
 pub use v2_synthetic::{
     default_v2_synthetic_probe_suites, run_v2_synthetic_probe_suite,
     run_v2_synthetic_probe_suite_with_modes, run_v2_synthetic_probe_suites,
@@ -42,10 +56,10 @@ pub use v2_synthetic::{
 pub use v2_training::{
     baseline_v2_byte_level_smoke_model_config, default_v2_smoke_corpus_paths,
     run_baseline_v2_smoke_train, run_v2_smoke_train_with_model, ByteLevelVocabularyContract,
-    V2SmokeCheckpointArtifacts, V2SmokeCheckpointKind, V2SmokeCorpusStats, V2SmokeEvalMetrics,
-    V2SmokeTrainConfig, V2SmokeTrainModel, V2SmokeTrainReport, V2SmokeTrainResult,
-    V2SmokeTrainStepReport, BYTE_LEVEL_PAD_TOKEN, BYTE_LEVEL_VOCAB_SIZE,
-    DEFAULT_V2_SMOKE_BATCH_SIZE, DEFAULT_V2_SMOKE_EVAL_BATCHES,
+    V2CheckpointArtifacts, V2CheckpointKind, V2SmokeCheckpointArtifacts, V2SmokeCheckpointKind,
+    V2SmokeCorpusStats, V2SmokeEvalMetrics, V2SmokeTrainConfig, V2SmokeTrainModel,
+    V2SmokeTrainReport, V2SmokeTrainResult, V2SmokeTrainStepReport, BYTE_LEVEL_PAD_TOKEN,
+    BYTE_LEVEL_VOCAB_SIZE, DEFAULT_V2_SMOKE_BATCH_SIZE, DEFAULT_V2_SMOKE_EVAL_BATCHES,
     DEFAULT_V2_SMOKE_EVAL_HOLDOUT_EVERY, DEFAULT_V2_SMOKE_LEARNING_RATE, DEFAULT_V2_SMOKE_SEQ_LEN,
     DEFAULT_V2_SMOKE_TRAIN_STEPS, DEFAULT_V2_SMOKE_WINDOW_STRIDE,
 };

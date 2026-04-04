@@ -167,7 +167,7 @@ pub struct V2SmokeEvalMetrics {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct V2SmokeCheckpointArtifacts {
+pub struct V2CheckpointArtifacts {
     pub directory: PathBuf,
     pub final_model_path: PathBuf,
     pub best_model_path: PathBuf,
@@ -177,10 +177,13 @@ pub struct V2SmokeCheckpointArtifacts {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum V2SmokeCheckpointKind {
+pub enum V2CheckpointKind {
     InitialEval,
     FinalEval,
 }
+
+pub type V2SmokeCheckpointArtifacts = V2CheckpointArtifacts;
+pub type V2SmokeCheckpointKind = V2CheckpointKind;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct V2SmokeTrainReport {
@@ -191,7 +194,7 @@ pub struct V2SmokeTrainReport {
     pub best_eval: V2SmokeEvalMetrics,
     pub best_checkpoint_kind: V2SmokeCheckpointKind,
     pub train_steps: Vec<V2SmokeTrainStepReport>,
-    pub checkpoint: V2SmokeCheckpointArtifacts,
+    pub checkpoint: V2CheckpointArtifacts,
 }
 
 #[derive(Debug)]
@@ -306,22 +309,22 @@ where
     let final_eval = evaluate_model(&model, &criterion, &eval_batches, config.eval_batches)?;
     let (best_eval, best_checkpoint_kind, best_model, best_optimizer) =
         if final_eval.mean_loss <= initial_eval.mean_loss {
-            (
-                final_eval.clone(),
-                V2SmokeCheckpointKind::FinalEval,
-                None,
-                None,
-            )
+            (final_eval.clone(), V2CheckpointKind::FinalEval, None, None)
         } else {
             (
                 initial_eval.clone(),
-                V2SmokeCheckpointKind::InitialEval,
+                V2CheckpointKind::InitialEval,
                 Some(&initial_model),
                 Some(&initial_optimizer),
             )
         };
-    let checkpoint =
-        persist_smoke_train_artifacts(&model, best_model, &optimizer, best_optimizer, &config)?;
+    let checkpoint = persist_v2_checkpoint_artifacts(
+        &model,
+        best_model,
+        &optimizer,
+        best_optimizer,
+        &config.output_dir,
+    )?;
     let corpus_paths = corpus.paths;
     let total_sequences = train_batches
         .iter()
@@ -576,25 +579,25 @@ where
     })
 }
 
-fn persist_smoke_train_artifacts<B, M>(
+pub(crate) fn persist_v2_checkpoint_artifacts<B, M>(
     final_model: &M,
     best_model: Option<&M>,
     final_optimizer: &OptimizerAdaptor<Adam, M, B>,
     best_optimizer: Option<&OptimizerAdaptor<Adam, M, B>>,
-    config: &V2SmokeTrainConfig,
-) -> Result<V2SmokeCheckpointArtifacts, FractalError>
+    output_dir: &Path,
+) -> Result<V2CheckpointArtifacts, FractalError>
 where
     B: AutodiffBackend,
     M: Module<B> + Clone + AutodiffModule<B>,
     <M as AutodiffModule<B>>::InnerModule: Module<B::InnerBackend>,
 {
-    ensure_empty_output_dir(&config.output_dir)?;
+    ensure_empty_output_dir(output_dir)?;
 
     let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
-    let final_model_stem = config.output_dir.join("model");
-    let best_model_stem = config.output_dir.join("best-model");
-    let final_optimizer_stem = config.output_dir.join("optimizer");
-    let best_optimizer_stem = config.output_dir.join("best-optimizer");
+    let final_model_stem = output_dir.join("model");
+    let best_model_stem = output_dir.join("best-model");
+    let final_optimizer_stem = output_dir.join("optimizer");
+    let best_optimizer_stem = output_dir.join("best-optimizer");
     final_model
         .clone()
         .save_file(final_model_stem.clone(), &recorder)
@@ -604,9 +607,9 @@ where
             .clone()
             .save_file(best_model_stem.clone(), &recorder)
             .map_err(recorder_error)?;
-        resolve_written_artifact(&config.output_dir, "best-model")?
+        resolve_written_artifact(output_dir, "best-model")?
     } else {
-        resolve_written_artifact(&config.output_dir, "model")?
+        resolve_written_artifact(output_dir, "model")?
     };
     recorder
         .record(final_optimizer.to_record(), final_optimizer_stem.clone())
@@ -617,22 +620,22 @@ where
             .record(best_optimizer.to_record(), best_optimizer_stem.clone())
             .map(|_| ())
             .map_err(recorder_error)?;
-        resolve_written_artifact(&config.output_dir, "best-optimizer")?
+        resolve_written_artifact(output_dir, "best-optimizer")?
     } else {
-        resolve_written_artifact(&config.output_dir, "optimizer")?
+        resolve_written_artifact(output_dir, "optimizer")?
     };
 
-    Ok(V2SmokeCheckpointArtifacts {
-        directory: config.output_dir.clone(),
-        final_model_path: resolve_written_artifact(&config.output_dir, "model")?,
+    Ok(V2CheckpointArtifacts {
+        directory: output_dir.to_path_buf(),
+        final_model_path: resolve_written_artifact(output_dir, "model")?,
         best_model_path,
-        final_optimizer_path: resolve_written_artifact(&config.output_dir, "optimizer")?,
+        final_optimizer_path: resolve_written_artifact(output_dir, "optimizer")?,
         best_optimizer_path,
-        report_path: config.output_dir.join("report.json"),
+        report_path: output_dir.join("report.json"),
     })
 }
 
-fn ensure_empty_output_dir(path: &Path) -> Result<(), FractalError> {
+pub(crate) fn ensure_empty_output_dir(path: &Path) -> Result<(), FractalError> {
     if path.exists() {
         let mut entries = fs::read_dir(path).map_err(|error| {
             FractalError::InvalidState(format!(
@@ -668,21 +671,34 @@ fn ensure_empty_output_dir(path: &Path) -> Result<(), FractalError> {
     Ok(())
 }
 
-fn write_report(report: &V2SmokeTrainReport) -> Result<(), FractalError> {
+pub(crate) fn write_json_report<T: Serialize>(
+    path: &Path,
+    report_name: &str,
+    report: &T,
+) -> Result<(), FractalError> {
     let payload = serde_json::to_vec_pretty(report).map_err(|error| {
-        FractalError::InvalidState(format!(
-            "failed to serialize v2 smoke training report: {error}"
-        ))
+        FractalError::InvalidState(format!("failed to serialize {report_name}: {error}"))
     })?;
-    fs::write(&report.checkpoint.report_path, payload).map_err(|error| {
+    fs::write(path, payload).map_err(|error| {
         FractalError::InvalidState(format!(
-            "failed to write v2 smoke training report {}: {error}",
-            report.checkpoint.report_path.display()
+            "failed to write {report_name} {}: {error}",
+            path.display()
         ))
     })
 }
 
-fn resolve_written_artifact(directory: &Path, prefix: &str) -> Result<PathBuf, FractalError> {
+fn write_report(report: &V2SmokeTrainReport) -> Result<(), FractalError> {
+    write_json_report(
+        &report.checkpoint.report_path,
+        "v2 smoke training report",
+        report,
+    )
+}
+
+pub(crate) fn resolve_written_artifact(
+    directory: &Path,
+    prefix: &str,
+) -> Result<PathBuf, FractalError> {
     let mut matches = fs::read_dir(directory)
         .map_err(|error| {
             FractalError::InvalidState(format!(
@@ -734,7 +750,7 @@ fn collect_markdown_files_recursive(
     Ok(())
 }
 
-fn recorder_error<E: std::fmt::Display>(error: E) -> FractalError {
+pub(crate) fn recorder_error<E: std::fmt::Display>(error: E) -> FractalError {
     FractalError::InvalidState(format!("checkpoint recorder failed: {error}"))
 }
 
