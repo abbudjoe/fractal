@@ -7,11 +7,11 @@ use std::{
 use burn::backend::Candle;
 use fractal_core::CpuTrainBackend;
 use fractal_eval_private::{
-    append_v2_results_ledger_entry, default_v2_smoke_corpus_paths,
-    default_v2_synthetic_probe_suites, filter_synthetic_probe_suites,
+    append_v2_results_ledger_entry, default_v2_smoke_corpus_paths, filter_synthetic_probe_suites,
     resolve_requested_v2_results_ledger_path, run_required_v2_learned_ablation_matrix,
-    SyntheticProbeKind, V2LearnedAblationConfig, V2LearnedAblationReport, V2ResultsLedgerEntry,
-    V2RootTopology, V2SmokeTrainConfig,
+    v2_synthetic_probe_suites_for_leaf_size, SyntheticProbeKind, V2CheckpointSelection,
+    V2LearnedAblationConfig, V2LearnedAblationReport, V2ResultsLedgerEntry, V2RootTopology,
+    V2SmokeTrainConfig,
 };
 use serde::Serialize;
 
@@ -37,7 +37,6 @@ fn run() -> Result<(), String> {
     } else {
         args.corpus_paths.clone()
     };
-    let suites = filter_requested_suites(default_v2_synthetic_probe_suites(), args.suite)?;
     let output_dir = args
         .output_dir
         .clone()
@@ -56,8 +55,17 @@ fn run() -> Result<(), String> {
     if let Some(leaf_size) = args.leaf_size {
         smoke.model = smoke.model.with_leaf_size(leaf_size);
     }
+    let suites = filter_requested_suites(
+        v2_synthetic_probe_suites_for_leaf_size(smoke.model.leaf_size)
+            .map_err(|error| format!("failed to build synthetic probe suites: {error}"))?,
+        args.suite,
+    )?;
 
-    let config = V2LearnedAblationConfig { smoke, suites };
+    let config = V2LearnedAblationConfig {
+        smoke,
+        checkpoint_selection: V2CheckpointSelection::Final,
+        suites,
+    };
     let train_device = <CpuTrainBackend as burn::tensor::backend::Backend>::Device::default();
     let eval_device = <EvalBackend as burn::tensor::backend::Backend>::Device::default();
     let report = run_required_v2_learned_ablation_matrix::<CpuTrainBackend, EvalBackend>(
@@ -374,7 +382,7 @@ fn render_table(report: &V2LearnedAblationReport) -> String {
             topology_run.model_config.total_root_state_dim,
             topology_run.model_config.total_root_readout_dim,
             topology_run.smoke.best_eval.mean_loss,
-            checkpoint_kind_label(topology_run.smoke.best_checkpoint_kind),
+            checkpoint_kind_label(topology_run.evaluated_checkpoint_kind),
         );
     }
 

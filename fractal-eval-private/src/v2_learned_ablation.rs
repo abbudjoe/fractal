@@ -10,7 +10,8 @@ use crate::{
     load_baseline_v2_checkpoint_model, run_baseline_v2_smoke_train,
     run_v2_synthetic_probe_suites_with_modes, BaselineV2SyntheticModelConfig, SyntheticProbeKind,
     SyntheticProbeMetrics, SyntheticProbeMode, SyntheticProbeReport, SyntheticProbeSuite,
-    V2CheckpointSelection, V2RootTopology, V2SmokeTrainConfig, V2SmokeTrainReport,
+    V2CheckpointKind, V2CheckpointSelection, V2RootTopology, V2SmokeTrainConfig,
+    V2SmokeTrainReport,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -108,12 +109,19 @@ impl V2RequiredAblationStep {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct V2LearnedAblationConfig {
     pub smoke: V2SmokeTrainConfig,
+    pub checkpoint_selection: V2CheckpointSelection,
     pub suites: Vec<SyntheticProbeSuite>,
 }
 
 impl V2LearnedAblationConfig {
     pub fn validate(&self) -> Result<(), FractalError> {
         self.smoke.validate()?;
+        if self.checkpoint_selection != V2CheckpointSelection::Final {
+            return Err(FractalError::InvalidConfig(format!(
+                "v2_learned_ablation.checkpoint_selection must be 'final' so both topologies are compared on trained checkpoints, got '{}'",
+                self.checkpoint_selection.label()
+            )));
+        }
         if self.smoke.model.root_count < 2 {
             return Err(FractalError::InvalidConfig(format!(
                 "v2_learned_ablation.smoke.model.root_count must be at least 2 for the multi-root control, got {}",
@@ -151,6 +159,8 @@ pub struct V2LearnedAblationStepReport {
 pub struct V2LearnedAblationTopologyReport {
     pub topology: V2RootTopology,
     pub model_config: BaselineV2SyntheticModelConfig,
+    pub checkpoint_selection: V2CheckpointSelection,
+    pub evaluated_checkpoint_kind: V2CheckpointKind,
     pub smoke: V2SmokeTrainReport,
     pub probe: SyntheticProbeReport,
 }
@@ -198,9 +208,10 @@ where
             .with_root_count_preserving_total_budget(topology.root_count(&config.smoke.model));
 
         let training = run_baseline_v2_smoke_train::<TrainB>(topology_smoke, train_device)?;
+        let evaluated_checkpoint_kind = config.checkpoint_selection.resolved_kind(&training.report);
         let loaded = load_baseline_v2_checkpoint_model::<EvalB>(
             &training.report.checkpoint.report_path,
-            V2CheckpointSelection::Best,
+            config.checkpoint_selection,
             eval_device,
         )?;
         let probe = run_v2_synthetic_probe_suites_with_modes(
@@ -213,6 +224,8 @@ where
         topology_runs.push(V2LearnedAblationTopologyReport {
             topology,
             model_config: loaded.report.config.model,
+            checkpoint_selection: loaded.selection,
+            evaluated_checkpoint_kind,
             smoke: training.report,
             probe,
         });
@@ -221,7 +234,10 @@ where
     let ordered_steps = build_ordered_step_reports(&topology_runs)?;
 
     Ok(V2LearnedAblationReport {
-        note: "single-root and multi-root checkpoints are trained separately at equal total root state/readout budget, then evaluated across no-memory, summaries-only, tree-only, and tree-plus-exact-read probe modes; checklist step 7 preserves the original sparse-retrieval wording and aliases the tree-only retrieval case".to_string(),
+        note: format!(
+            "single-root and multi-root checkpoints are trained separately at equal total root state/readout budget, then evaluated from the {} checkpoint across no-memory, summaries-only, tree-only, and tree-plus-exact-read probe modes; checklist step 7 preserves the original sparse-retrieval wording and aliases the tree-only retrieval case",
+            config.checkpoint_selection.label()
+        ),
         config,
         topology_runs,
         ordered_steps,
@@ -322,6 +338,7 @@ mod tests {
         let root = unique_temp_dir("v2-learned-ablation-invalid");
         let config = V2LearnedAblationConfig {
             smoke: V2SmokeTrainConfig::new(vec![root.join("corpus.md")], root.join("artifacts")),
+            checkpoint_selection: V2CheckpointSelection::Final,
             suites: default_v2_synthetic_probe_suites(),
         };
         let invalid = V2LearnedAblationConfig {
@@ -332,6 +349,7 @@ mod tests {
                     .with_root_count_preserving_total_budget(1),
                 ..config.smoke
             },
+            checkpoint_selection: V2CheckpointSelection::Final,
             suites: config.suites,
         };
 
@@ -359,7 +377,11 @@ mod tests {
         smoke.train_steps = 1;
         smoke.eval_batches = 1;
         smoke.eval_holdout_every = 2;
-        let config = V2LearnedAblationConfig { smoke, suites };
+        let config = V2LearnedAblationConfig {
+            smoke,
+            checkpoint_selection: V2CheckpointSelection::Final,
+            suites,
+        };
 
         let train_device = <TrainBackend as Backend>::Device::default();
         let eval_device = <EvalBackend as Backend>::Device::default();
@@ -387,6 +409,13 @@ mod tests {
             single.model_config.total_root_readout_dim,
             multi.model_config.total_root_readout_dim
         );
+        assert_eq!(single.checkpoint_selection, V2CheckpointSelection::Final);
+        assert_eq!(
+            single.evaluated_checkpoint_kind,
+            V2CheckpointKind::FinalEval
+        );
+        assert_eq!(multi.checkpoint_selection, V2CheckpointSelection::Final);
+        assert_eq!(multi.evaluated_checkpoint_kind, V2CheckpointKind::FinalEval);
         let step7 = report
             .step(V2RequiredAblationStep::MultiRootSparseRetrieval)
             .unwrap();
@@ -397,6 +426,22 @@ mod tests {
         assert_eq!(step8.mode, SyntheticProbeMode::TreeOnly);
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn learned_ablation_config_rejects_best_checkpoint_selection() {
+        let root = unique_temp_dir("v2-learned-ablation-best");
+        let config = V2LearnedAblationConfig {
+            smoke: V2SmokeTrainConfig::new(vec![root.join("corpus.md")], root.join("artifacts")),
+            checkpoint_selection: V2CheckpointSelection::Best,
+            suites: default_v2_synthetic_probe_suites(),
+        };
+
+        let error = config.validate().unwrap_err();
+        assert!(matches!(
+            error,
+            FractalError::InvalidConfig(message) if message.contains("checkpoint_selection")
+        ));
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {

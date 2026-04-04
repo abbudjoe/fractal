@@ -9,12 +9,16 @@ use burn::{
     record::{BinFileRecorder, FullPrecisionSettings},
     tensor::backend::Backend,
 };
+use serde::{Deserialize, Serialize};
 
 use fractal_core::error::FractalError;
 
-use crate::{build_baseline_v2_synthetic_model, BaselineV2SyntheticModel, V2SmokeTrainReport};
+use crate::{
+    build_baseline_v2_synthetic_model, BaselineV2SyntheticModel, V2CheckpointKind,
+    V2SmokeTrainReport,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum V2CheckpointSelection {
     Best,
     Final,
@@ -32,6 +36,13 @@ impl V2CheckpointSelection {
         match self {
             Self::Best => report.checkpoint.best_model_path.as_path(),
             Self::Final => report.checkpoint.final_model_path.as_path(),
+        }
+    }
+
+    pub const fn resolved_kind(self, report: &V2SmokeTrainReport) -> V2CheckpointKind {
+        match self {
+            Self::Best => report.best_checkpoint_kind,
+            Self::Final => V2CheckpointKind::FinalEval,
         }
     }
 }
@@ -178,7 +189,11 @@ mod tests {
     fn checkpoint_loader_supports_final_selection_from_relocated_report_directory() {
         let root = unique_temp_dir("v2-checkpoint-loader-relocated");
         let corpus_path = root.join("corpus.md");
-        fs::write(&corpus_path, "checkpoint relocation smoke corpus\n".repeat(32)).unwrap();
+        fs::write(
+            &corpus_path,
+            "checkpoint relocation smoke corpus\n".repeat(32),
+        )
+        .unwrap();
         let output_dir = root.join("artifacts");
         let mut config = V2SmokeTrainConfig::new(vec![corpus_path], output_dir.clone());
         config.train_steps = 2;
