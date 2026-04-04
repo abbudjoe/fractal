@@ -2,9 +2,11 @@ use std::fmt::Write as _;
 
 use burn::backend::Candle;
 use fractal_eval_private::{
-    run_baseline_v2_benchmark_suite, V2BenchmarkConfig, V2BenchmarkReport, V2BenchmarkSurface,
-    DEFAULT_V2_BENCHMARK_SEQUENCE_LENGTHS,
+    load_baseline_v2_checkpoint_model, run_baseline_v2_benchmark_suite,
+    run_v2_benchmark_suite_for_model, V2BenchmarkConfig, V2BenchmarkReport, V2BenchmarkSurface,
+    V2CheckpointSelection, DEFAULT_V2_BENCHMARK_SEQUENCE_LENGTHS,
 };
+use std::path::PathBuf;
 
 type BenchmarkBackend = Candle<f32, i64>;
 
@@ -18,16 +20,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let args = CliArgs::parse(std::env::args().skip(1))?;
     let device = <BenchmarkBackend as burn::tensor::backend::Backend>::Device::default();
-    let report = run_baseline_v2_benchmark_suite::<BenchmarkBackend>(
-        V2BenchmarkConfig {
-            sequence_lengths: args.sequence_lengths.clone(),
-            leaf_size: args.leaf_size,
-            iterations: args.iterations,
-            warmup_iterations: args.warmup_iterations,
-        },
-        &device,
-    )
-    .map_err(|error| format!("failed to run v2 benchmark suite: {error}"))?;
+    let report = run_benchmark(&args, &device)?;
     let rendered = render_report(&report, args.output)?;
     print!("{rendered}");
     Ok(())
@@ -36,19 +29,23 @@ fn run() -> Result<(), String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliArgs {
     sequence_lengths: Vec<usize>,
-    leaf_size: usize,
+    leaf_size_override: Option<usize>,
     iterations: usize,
     warmup_iterations: usize,
     output: OutputFormat,
+    checkpoint_report: Option<PathBuf>,
+    checkpoint_kind: V2CheckpointSelection,
 }
 
 impl CliArgs {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut sequence_lengths = DEFAULT_V2_BENCHMARK_SEQUENCE_LENGTHS.to_vec();
-        let mut leaf_size = 16usize;
+        let mut leaf_size_override = None;
         let mut iterations = 3usize;
         let mut warmup_iterations = 1usize;
         let mut output = OutputFormat::Table;
+        let mut checkpoint_report = None;
+        let mut checkpoint_kind = V2CheckpointSelection::Best;
         let mut show_help = false;
         let mut iter = args.peekable();
 
@@ -64,7 +61,7 @@ impl CliArgs {
                     let value = iter
                         .next()
                         .ok_or_else(|| "--leaf-size requires a value".to_owned())?;
-                    leaf_size = parse_positive_usize("--leaf-size", &value)?;
+                    leaf_size_override = Some(parse_positive_usize("--leaf-size", &value)?);
                 }
                 "--iterations" => {
                     let value = iter
@@ -84,6 +81,18 @@ impl CliArgs {
                         .ok_or_else(|| "--output requires a value".to_owned())?;
                     output = OutputFormat::parse(&value)?;
                 }
+                "--checkpoint-report" => {
+                    let value = iter
+                        .next()
+                        .ok_or_else(|| "--checkpoint-report requires a value".to_owned())?;
+                    checkpoint_report = Some(PathBuf::from(value));
+                }
+                "--checkpoint-kind" => {
+                    let value = iter
+                        .next()
+                        .ok_or_else(|| "--checkpoint-kind requires a value".to_owned())?;
+                    checkpoint_kind = parse_checkpoint_kind(&value)?;
+                }
                 "--help" | "-h" => {
                     show_help = true;
                 }
@@ -98,10 +107,12 @@ impl CliArgs {
 
         Ok(Self {
             sequence_lengths,
-            leaf_size,
+            leaf_size_override,
             iterations,
             warmup_iterations,
             output,
+            checkpoint_report,
+            checkpoint_kind,
         })
     }
 }
@@ -155,13 +166,72 @@ fn usage() -> String {
     let mut output = String::new();
     let _ = writeln!(
         output,
-        "Usage: cargo run --bin v2-benchmark-suite -- [--lengths <n1,n2,...>] [--leaf-size <n>] [--iterations <n>] [--warmup <n>] [--output <table|json>]"
+        "Usage: cargo run --bin v2-benchmark-suite -- [--lengths <n1,n2,...>] [--leaf-size <n>] [--iterations <n>] [--warmup <n>] [--output <table|json>] [--checkpoint-report <report.json>] [--checkpoint-kind <best|final>]"
     );
     let _ = writeln!(
         output,
-        "Defaults: --lengths 256,512,1024,2048,4096,8192 --leaf-size 16 --iterations 3 --warmup 1 --output table"
+        "Defaults: --lengths 256,512,1024,2048,4096,8192 --leaf-size 16 --iterations 3 --warmup 1 --output table --checkpoint-kind best"
     );
     output
+}
+
+fn run_benchmark(
+    args: &CliArgs,
+    device: &<BenchmarkBackend as burn::tensor::backend::Backend>::Device,
+) -> Result<V2BenchmarkReport, String> {
+    match &args.checkpoint_report {
+        Some(report_path) => {
+            if args.leaf_size_override.is_some() {
+                return Err(
+                    "--leaf-size cannot be combined with --checkpoint-report; trained checkpoints already carry a validated leaf_size".to_owned(),
+                );
+            }
+            let loaded = load_baseline_v2_checkpoint_model::<BenchmarkBackend>(
+                report_path,
+                args.checkpoint_kind,
+                device,
+            )
+            .map_err(|error| format!("failed to load trained checkpoint model: {error}"))?;
+            let config = V2BenchmarkConfig {
+                sequence_lengths: args.sequence_lengths.clone(),
+                leaf_size: loaded.report.config.model.leaf_size,
+                iterations: args.iterations,
+                warmup_iterations: args.warmup_iterations,
+            };
+            run_v2_benchmark_suite_for_model(
+                &loaded.model,
+                config,
+                format!("baseline_v2_smoke_checkpoint_{}", loaded.selection.label()),
+                format!(
+                    "trained smoke checkpoint loaded from {} using the {} checkpoint artifact; RSS metrics are sampled from getrusage(RUSAGE_SELF) after warmup and are useful for trend detection, not precise kernel-level attribution",
+                    loaded.report_path.display(),
+                    loaded.selection.label()
+                ),
+                device,
+            )
+            .map_err(|error| format!("failed to run v2 benchmark suite: {error}"))
+        }
+        None => run_baseline_v2_benchmark_suite::<BenchmarkBackend>(
+            V2BenchmarkConfig {
+                sequence_lengths: args.sequence_lengths.clone(),
+                leaf_size: args.leaf_size_override.unwrap_or(16),
+                iterations: args.iterations,
+                warmup_iterations: args.warmup_iterations,
+            },
+            device,
+        )
+        .map_err(|error| format!("failed to run v2 benchmark suite: {error}")),
+    }
+}
+
+fn parse_checkpoint_kind(value: &str) -> Result<V2CheckpointSelection, String> {
+    match value {
+        "best" => Ok(V2CheckpointSelection::Best),
+        "final" => Ok(V2CheckpointSelection::Final),
+        _ => Err(format!(
+            "unknown checkpoint kind: {value} (expected best or final)"
+        )),
+    }
 }
 
 fn render_report(report: &V2BenchmarkReport, output: OutputFormat) -> Result<String, String> {
@@ -232,10 +302,12 @@ mod tests {
             args.sequence_lengths,
             DEFAULT_V2_BENCHMARK_SEQUENCE_LENGTHS.to_vec()
         );
-        assert_eq!(args.leaf_size, 16);
+        assert_eq!(args.leaf_size_override, None);
         assert_eq!(args.iterations, 3);
         assert_eq!(args.warmup_iterations, 1);
         assert_eq!(args.output, OutputFormat::Table);
+        assert_eq!(args.checkpoint_report, None);
+        assert_eq!(args.checkpoint_kind, V2CheckpointSelection::Best);
     }
 
     #[test]
@@ -259,9 +331,47 @@ mod tests {
         .unwrap();
 
         assert_eq!(args.sequence_lengths, vec![32, 64, 128]);
-        assert_eq!(args.leaf_size, 32);
+        assert_eq!(args.leaf_size_override, Some(32));
         assert_eq!(args.iterations, 5);
         assert_eq!(args.warmup_iterations, 2);
         assert_eq!(args.output, OutputFormat::Json);
+    }
+
+    #[test]
+    fn cli_parses_checkpoint_source() {
+        let args = CliArgs::parse(
+            [
+                "--checkpoint-report",
+                "/tmp/report.json",
+                "--checkpoint-kind",
+                "final",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap();
+
+        assert_eq!(
+            args.checkpoint_report,
+            Some(PathBuf::from("/tmp/report.json"))
+        );
+        assert_eq!(args.checkpoint_kind, V2CheckpointSelection::Final);
+    }
+
+    #[test]
+    fn run_benchmark_rejects_leaf_size_override_for_checkpoint_models() {
+        let args = CliArgs {
+            sequence_lengths: vec![32],
+            leaf_size_override: Some(32),
+            iterations: 1,
+            warmup_iterations: 0,
+            output: OutputFormat::Table,
+            checkpoint_report: Some(PathBuf::from("/tmp/report.json")),
+            checkpoint_kind: V2CheckpointSelection::Best,
+        };
+
+        let error = run_benchmark(&args, &Default::default()).unwrap_err();
+
+        assert!(error.contains("--leaf-size cannot be combined with --checkpoint-report"));
     }
 }

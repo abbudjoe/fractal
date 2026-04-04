@@ -1,5 +1,6 @@
 pub mod v2_ablation;
 pub mod v2_benchmark;
+pub mod v2_checkpoint;
 pub mod v2_fixture;
 pub mod v2_synthetic;
 pub mod v2_training;
@@ -9,9 +10,13 @@ pub use v2_ablation::{
     V2AblationConfig, V2AblationReport, V2RootTopology,
 };
 pub use v2_benchmark::{
-    run_baseline_v2_benchmark_suite, V2BenchmarkConfig, V2BenchmarkEntry, V2BenchmarkReport,
-    V2BenchmarkSurface, V2LeafUsageBin, V2ObservabilitySnapshot,
-    DEFAULT_V2_BENCHMARK_SEQUENCE_LENGTHS,
+    run_baseline_v2_benchmark_suite, run_v2_benchmark_suite_for_model, V2BenchmarkConfig,
+    V2BenchmarkEntry, V2BenchmarkReport, V2BenchmarkSurface, V2LeafUsageBin,
+    V2ObservabilitySnapshot, DEFAULT_V2_BENCHMARK_SEQUENCE_LENGTHS,
+};
+pub use v2_checkpoint::{
+    load_baseline_v2_checkpoint_model, load_v2_smoke_train_report, LoadedV2CheckpointModel,
+    V2CheckpointSelection,
 };
 pub use v2_fixture::{
     build_baseline_v2_synthetic_model, BaselineV2SyntheticModel, BaselineV2SyntheticModelConfig,

@@ -11,7 +11,7 @@ use burn::{
     record::{BinFileRecorder, FullPrecisionSettings, Recorder},
     tensor::{backend::AutodiffBackend, backend::Backend, Int, Tensor, TensorData},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use fractal_core::{error::FractalError, TaskFamily, TokenBatch, PAD_TOKEN};
 
@@ -29,7 +29,7 @@ pub const DEFAULT_V2_SMOKE_EVAL_BATCHES: usize = 1;
 pub const DEFAULT_V2_SMOKE_EVAL_HOLDOUT_EVERY: usize = 10;
 pub const DEFAULT_V2_SMOKE_LEARNING_RATE: f64 = 1e-3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ByteLevelVocabularyContract {
     pub pad_token: usize,
     pub vocab_size: usize,
@@ -44,7 +44,7 @@ impl Default for ByteLevelVocabularyContract {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct V2SmokeTrainConfig {
     pub corpus_paths: Vec<PathBuf>,
     pub output_dir: PathBuf,
@@ -139,7 +139,7 @@ impl V2SmokeTrainConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct V2SmokeCorpusStats {
     pub files: Vec<PathBuf>,
     pub total_bytes: usize,
@@ -150,7 +150,7 @@ pub struct V2SmokeCorpusStats {
     pub window_stride: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct V2SmokeTrainStepReport {
     pub step: usize,
     pub learning_rate: f64,
@@ -159,14 +159,14 @@ pub struct V2SmokeTrainStepReport {
     pub seen_tokens: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct V2SmokeEvalMetrics {
     pub batch_count: usize,
     pub mean_loss: f64,
     pub perplexity: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct V2SmokeCheckpointArtifacts {
     pub directory: PathBuf,
     pub final_model_path: PathBuf,
@@ -176,13 +176,13 @@ pub struct V2SmokeCheckpointArtifacts {
     pub report_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum V2SmokeCheckpointKind {
     InitialEval,
     FinalEval,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct V2SmokeTrainReport {
     pub config: V2SmokeTrainConfig,
     pub corpus: V2SmokeCorpusStats,

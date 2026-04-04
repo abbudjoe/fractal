@@ -1,5 +1,5 @@
 use burn::{nn::Initializer, tensor::backend::Backend};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use fractal_core::{
     error::FractalError,
@@ -22,7 +22,7 @@ pub type BaselineV2SyntheticModel<B> = FractalV2Model<
     BaselineReadFusion<B>,
 >;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BaselineV2SyntheticModelConfig {
     pub vocab_size: usize,
     pub token_dim: usize,

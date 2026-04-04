@@ -3,10 +3,12 @@ use std::fmt::Write as _;
 use burn::backend::Candle;
 use fractal_eval_private::{
     build_baseline_v2_synthetic_model, default_v2_synthetic_probe_suites,
-    run_v2_synthetic_probe_suites, BaselineV2SyntheticModelConfig, SyntheticProbeKind,
-    SyntheticProbeReport, SyntheticProbeSuite,
+    load_baseline_v2_checkpoint_model, run_v2_synthetic_probe_suites,
+    BaselineV2SyntheticModelConfig, SyntheticProbeKind, SyntheticProbeReport, SyntheticProbeSuite,
+    V2CheckpointSelection,
 };
 use serde::Serialize;
+use std::path::PathBuf;
 
 type ProbeBackend = Candle<f32, i64>;
 
@@ -20,15 +22,16 @@ fn main() {
 fn run() -> Result<(), String> {
     let args = CliArgs::parse(std::env::args().skip(1))?;
     let device = <ProbeBackend as burn::tensor::backend::Backend>::Device::default();
-    let model = build_baseline_v2_synthetic_model::<ProbeBackend>(
-        BaselineV2SyntheticModelConfig::default(),
-        &device,
-    )
-    .map_err(|error| format!("failed to build baseline v2 model: {error}"))?;
+    let loaded_model = load_model(&args, &device)?;
     let suites = filter_suites(default_v2_synthetic_probe_suites(), args.suite)?;
-    let report = run_v2_synthetic_probe_suites(&model, &suites, &device)
+    let report = run_v2_synthetic_probe_suites(&loaded_model.model, &suites, &device)
         .map_err(|error| format!("failed to run v2 synthetic probes: {error}"))?;
-    let rendered = render_report(&report, args.output)?;
+    let rendered = render_report(
+        &report,
+        args.output,
+        &loaded_model.model_label,
+        &loaded_model.note,
+    )?;
     print!("{rendered}");
     Ok(())
 }
@@ -37,12 +40,16 @@ fn run() -> Result<(), String> {
 struct CliArgs {
     suite: SuiteSelection,
     output: OutputFormat,
+    checkpoint_report: Option<PathBuf>,
+    checkpoint_kind: V2CheckpointSelection,
 }
 
 impl CliArgs {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut suite = SuiteSelection::All;
         let mut output = OutputFormat::Table;
+        let mut checkpoint_report = None;
+        let mut checkpoint_kind = V2CheckpointSelection::Best;
         let mut show_help = false;
         let mut iter = args.peekable();
 
@@ -60,6 +67,18 @@ impl CliArgs {
                         .ok_or_else(|| "--output requires a value".to_owned())?;
                     output = OutputFormat::parse(&value)?;
                 }
+                "--checkpoint-report" => {
+                    let value = iter
+                        .next()
+                        .ok_or_else(|| "--checkpoint-report requires a value".to_owned())?;
+                    checkpoint_report = Some(PathBuf::from(value));
+                }
+                "--checkpoint-kind" => {
+                    let value = iter
+                        .next()
+                        .ok_or_else(|| "--checkpoint-kind requires a value".to_owned())?;
+                    checkpoint_kind = parse_checkpoint_kind(&value)?;
+                }
                 "--help" | "-h" => {
                     show_help = true;
                 }
@@ -72,7 +91,12 @@ impl CliArgs {
             std::process::exit(0);
         }
 
-        Ok(Self { suite, output })
+        Ok(Self {
+            suite,
+            output,
+            checkpoint_report,
+            checkpoint_kind,
+        })
     }
 }
 
@@ -120,8 +144,8 @@ impl OutputFormat {
 
 #[derive(Debug, Serialize)]
 struct RenderedReport<'a> {
-    model: &'static str,
-    note: &'static str,
+    model: &'a str,
+    note: &'a str,
     report: &'a SyntheticProbeReport,
 }
 
@@ -129,10 +153,56 @@ fn usage() -> String {
     let mut output = String::new();
     let _ = writeln!(
         output,
-        "Usage: cargo run --bin v2-synthetic-probe -- [--suite <all|copy|associative-recall|induction|noisy-retrieval|far-token-comparison>] [--output <table|json>]"
+        "Usage: cargo run --bin v2-synthetic-probe -- [--suite <all|copy|associative-recall|induction|noisy-retrieval|far-token-comparison>] [--output <table|json>] [--checkpoint-report <report.json>] [--checkpoint-kind <best|final>]"
     );
-    let _ = writeln!(output, "Defaults: --suite all --output table");
+    let _ = writeln!(
+        output,
+        "Defaults: --suite all --output table --checkpoint-kind best"
+    );
     output
+}
+
+struct LoadedModel {
+    model: fractal_eval_private::BaselineV2SyntheticModel<ProbeBackend>,
+    model_label: String,
+    note: String,
+}
+
+fn load_model(
+    args: &CliArgs,
+    device: &<ProbeBackend as burn::tensor::backend::Backend>::Device,
+) -> Result<LoadedModel, String> {
+    match &args.checkpoint_report {
+        Some(report_path) => {
+            let loaded = load_baseline_v2_checkpoint_model::<ProbeBackend>(
+                report_path,
+                args.checkpoint_kind,
+                device,
+            )
+            .map_err(|error| format!("failed to load trained checkpoint model: {error}"))?;
+            Ok(LoadedModel {
+                model: loaded.model,
+                model_label: format!("baseline_v2_smoke_checkpoint_{}", loaded.selection.label()),
+                note: format!(
+                    "trained smoke checkpoint loaded from {} using the {} checkpoint artifact",
+                    loaded.report_path.display(),
+                    loaded.selection.label()
+                ),
+            })
+        }
+        None => {
+            let model = build_baseline_v2_synthetic_model::<ProbeBackend>(
+                BaselineV2SyntheticModelConfig::default(),
+                device,
+            )
+            .map_err(|error| format!("failed to build baseline v2 model: {error}"))?;
+            Ok(LoadedModel {
+                model,
+                model_label: "baseline_v2_random_init_cpu_candle".to_string(),
+                note: "untrained random baseline; use for live execution sanity checks, not architecture quality claims".to_string(),
+            })
+        }
+    }
 }
 
 fn filter_suites(
@@ -153,26 +223,28 @@ fn filter_suites(
     Ok(filtered)
 }
 
-fn render_report(report: &SyntheticProbeReport, output: OutputFormat) -> Result<String, String> {
+fn render_report(
+    report: &SyntheticProbeReport,
+    output: OutputFormat,
+    model_label: &str,
+    note: &str,
+) -> Result<String, String> {
     match output {
-        OutputFormat::Table => Ok(render_table(report)),
+        OutputFormat::Table => Ok(render_table(report, model_label, note)),
         OutputFormat::Json => serde_json::to_string_pretty(&RenderedReport {
-            model: "baseline_v2_random_init_cpu_candle",
-            note: "untrained random baseline; use for live execution sanity checks, not architecture quality claims",
+            model: model_label,
+            note,
             report,
         })
         .map_err(|error| format!("failed to serialize json report: {error}")),
     }
 }
 
-fn render_table(report: &SyntheticProbeReport) -> String {
+fn render_table(report: &SyntheticProbeReport, model_label: &str, note: &str) -> String {
     let mut output = String::new();
     let _ = writeln!(output, "V2 Synthetic Probe Live Run");
-    let _ = writeln!(output, "model: baseline_v2 (random init, CPU Candle)");
-    let _ = writeln!(
-        output,
-        "note: this is an untrained live execution run, so accuracy is expected to be noisy"
-    );
+    let _ = writeln!(output, "model: {model_label}");
+    let _ = writeln!(output, "note: {note}");
 
     for suite in &report.suites {
         let _ = writeln!(output);
@@ -196,6 +268,16 @@ fn render_table(report: &SyntheticProbeReport) -> String {
     }
 
     output
+}
+
+fn parse_checkpoint_kind(value: &str) -> Result<V2CheckpointSelection, String> {
+    match value {
+        "best" => Ok(V2CheckpointSelection::Best),
+        "final" => Ok(V2CheckpointSelection::Final),
+        _ => Err(format!(
+            "unknown checkpoint kind: {value} (expected best or final)"
+        )),
+    }
 }
 
 fn suite_label(kind: SyntheticProbeKind) -> &'static str {
@@ -230,19 +312,35 @@ mod tests {
 
         assert_eq!(args.suite, SuiteSelection::All);
         assert_eq!(args.output, OutputFormat::Table);
+        assert_eq!(args.checkpoint_report, None);
+        assert_eq!(args.checkpoint_kind, V2CheckpointSelection::Best);
     }
 
     #[test]
-    fn cli_parses_specific_suite_and_json_output() {
+    fn cli_parses_specific_suite_json_output_and_checkpoint_source() {
         let args = CliArgs::parse(
-            ["--suite", "copy", "--output", "json"]
-                .into_iter()
-                .map(str::to_owned),
+            [
+                "--suite",
+                "copy",
+                "--output",
+                "json",
+                "--checkpoint-report",
+                "/tmp/report.json",
+                "--checkpoint-kind",
+                "final",
+            ]
+            .into_iter()
+            .map(str::to_owned),
         )
         .unwrap();
 
         assert_eq!(args.suite, SuiteSelection::Kind(SyntheticProbeKind::Copy));
         assert_eq!(args.output, OutputFormat::Json);
+        assert_eq!(
+            args.checkpoint_report,
+            Some(PathBuf::from("/tmp/report.json"))
+        );
+        assert_eq!(args.checkpoint_kind, V2CheckpointSelection::Final);
     }
 
     #[test]
@@ -275,7 +373,13 @@ mod tests {
             }],
         };
 
-        let rendered = render_report(&report, OutputFormat::Json).unwrap();
+        let rendered = render_report(
+            &report,
+            OutputFormat::Json,
+            "baseline_v2_random_init_cpu_candle",
+            "untrained random baseline; use for live execution sanity checks, not architecture quality claims",
+        )
+        .unwrap();
 
         assert!(rendered.contains("\"model\": \"baseline_v2_random_init_cpu_candle\""));
         assert!(rendered.contains("\"kind\": \"copy\""));

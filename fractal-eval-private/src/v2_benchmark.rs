@@ -150,13 +150,30 @@ pub fn run_baseline_v2_benchmark_suite<B: Backend>(
         BaselineV2SyntheticModelConfig::default().with_leaf_size(config.leaf_size),
         device,
     )?;
+    run_v2_benchmark_suite_for_model(
+        &model,
+        config,
+        "baseline_v2_random_init".to_string(),
+        "process RSS metrics are sampled from getrusage(RUSAGE_SELF) after warmup; they are useful for trend detection, not precise kernel-level attribution".to_string(),
+        device,
+    )
+}
+
+pub fn run_v2_benchmark_suite_for_model<B: Backend>(
+    model: &BaselineV2SyntheticModel<B>,
+    config: V2BenchmarkConfig,
+    model_label: String,
+    note: String,
+    device: &B::Device,
+) -> Result<V2BenchmarkReport, FractalError> {
+    config.validate()?;
     let mut entries = Vec::new();
 
     for sequence_length in &config.sequence_lengths {
-        let observability = observe_sequence(&model, *sequence_length, device)?;
+        let observability = observe_sequence(model, *sequence_length, device)?;
         for surface in V2BenchmarkSurface::ALL {
             entries.push(benchmark_surface(
-                &model,
+                model,
                 surface,
                 *sequence_length,
                 &config,
@@ -167,8 +184,8 @@ pub fn run_baseline_v2_benchmark_suite<B: Backend>(
     }
 
     Ok(V2BenchmarkReport {
-        model: "baseline_v2_random_init".to_string(),
-        note: "process RSS metrics are sampled from getrusage(RUSAGE_SELF) after warmup; they are useful for trend detection, not precise kernel-level attribution".to_string(),
+        model: model_label,
+        note,
         config,
         entries,
     })
