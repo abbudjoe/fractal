@@ -292,8 +292,13 @@ fn render_table(report: &fractal_eval_private::V2SmokeTrainReport) -> String {
     );
     let _ = writeln!(
         output,
-        "optimizer_path: {}",
-        report.checkpoint.optimizer_path.display()
+        "final_optimizer_path: {}",
+        report.checkpoint.final_optimizer_path.display()
+    );
+    let _ = writeln!(
+        output,
+        "best_optimizer_path: {}",
+        report.checkpoint.best_optimizer_path.display()
     );
     let _ = writeln!(
         output,

@@ -171,7 +171,8 @@ pub struct V2SmokeCheckpointArtifacts {
     pub directory: PathBuf,
     pub final_model_path: PathBuf,
     pub best_model_path: PathBuf,
-    pub optimizer_path: PathBuf,
+    pub final_optimizer_path: PathBuf,
+    pub best_optimizer_path: PathBuf,
     pub report_path: PathBuf,
 }
 
@@ -277,6 +278,7 @@ where
     let criterion = CrossEntropyLossConfig::new()
         .with_pad_tokens(Some(vec![BYTE_LEVEL_PAD_TOKEN]))
         .init(device);
+    let initial_optimizer = AdamConfig::new().init::<B, M>();
     let mut optimizer = AdamConfig::new().init::<B, M>();
     let initial_eval = evaluate_model(&model, &criterion, &eval_batches, config.eval_batches)?;
     let initial_model = model.clone();
@@ -312,7 +314,13 @@ where
                 Some(&initial_model),
             )
         };
-    let checkpoint = persist_smoke_train_artifacts(&model, best_model, &optimizer, &config)?;
+    let checkpoint = persist_smoke_train_artifacts(
+        &model,
+        best_model,
+        &optimizer,
+        Some(&initial_optimizer),
+        &config,
+    )?;
     let corpus_paths = corpus.paths;
     let total_sequences = train_batches
         .iter()
@@ -570,7 +578,8 @@ where
 fn persist_smoke_train_artifacts<B, M>(
     final_model: &M,
     best_model: Option<&M>,
-    optimizer: &OptimizerAdaptor<Adam, M, B>,
+    final_optimizer: &OptimizerAdaptor<Adam, M, B>,
+    best_optimizer: Option<&OptimizerAdaptor<Adam, M, B>>,
     config: &V2SmokeTrainConfig,
 ) -> Result<V2SmokeCheckpointArtifacts, FractalError>
 where
@@ -583,7 +592,8 @@ where
     let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
     let final_model_stem = config.output_dir.join("model");
     let best_model_stem = config.output_dir.join("best-model");
-    let optimizer_stem = config.output_dir.join("optimizer");
+    let final_optimizer_stem = config.output_dir.join("optimizer");
+    let best_optimizer_stem = config.output_dir.join("best-optimizer");
     final_model
         .clone()
         .save_file(final_model_stem.clone(), &recorder)
@@ -598,15 +608,25 @@ where
         resolve_written_artifact(&config.output_dir, "model")?
     };
     recorder
-        .record(optimizer.to_record(), optimizer_stem.clone())
+        .record(final_optimizer.to_record(), final_optimizer_stem.clone())
         .map(|_| ())
         .map_err(recorder_error)?;
+    let best_optimizer_path = if let Some(best_optimizer) = best_optimizer {
+        recorder
+            .record(best_optimizer.to_record(), best_optimizer_stem.clone())
+            .map(|_| ())
+            .map_err(recorder_error)?;
+        resolve_written_artifact(&config.output_dir, "best-optimizer")?
+    } else {
+        resolve_written_artifact(&config.output_dir, "optimizer")?
+    };
 
     Ok(V2SmokeCheckpointArtifacts {
         directory: config.output_dir.clone(),
         final_model_path: resolve_written_artifact(&config.output_dir, "model")?,
         best_model_path,
-        optimizer_path: resolve_written_artifact(&config.output_dir, "optimizer")?,
+        final_optimizer_path: resolve_written_artifact(&config.output_dir, "optimizer")?,
+        best_optimizer_path,
         report_path: config.output_dir.join("report.json"),
     })
 }
@@ -778,7 +798,8 @@ mod tests {
         assert!(result.report.final_eval.mean_loss.is_finite());
         assert!(result.report.checkpoint.final_model_path.exists());
         assert!(result.report.checkpoint.best_model_path.exists());
-        assert!(result.report.checkpoint.optimizer_path.exists());
+        assert!(result.report.checkpoint.final_optimizer_path.exists());
+        assert!(result.report.checkpoint.best_optimizer_path.exists());
         assert!(result.report.checkpoint.report_path.exists());
 
         fs::remove_dir_all(root).unwrap();
@@ -858,6 +879,10 @@ mod tests {
         assert_ne!(
             result.report.checkpoint.best_model_path,
             result.report.checkpoint.final_model_path
+        );
+        assert_ne!(
+            result.report.checkpoint.best_optimizer_path,
+            result.report.checkpoint.final_optimizer_path
         );
 
         fs::remove_dir_all(root).unwrap();
