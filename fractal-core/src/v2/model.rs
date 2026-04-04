@@ -22,7 +22,9 @@ use super::{
     local_trunk::{
         summarize_root_readout_sequence, LocalTrunk, LocalTrunkDiagnostics, LocalTrunkShape,
     },
-    read_fusion::{ReadFusion, ReadFusionAblation, ReadFusionInput, ReadFusionShape},
+    read_fusion::{
+        ReadFusion, ReadFusionAblation, ReadFusionInput, ReadFusionOutput, ReadFusionShape,
+    },
     router::{FractalRouterHead, FractalRouterHeadShape},
     state::{FractalV2State, MergeCheckpointPolicy, MultiRootState, SealedLeafMaterialization},
     tree::{TreeMergeCell, TreeMergeCellShape},
@@ -128,6 +130,16 @@ pub struct FractalV2RetrievalTrace<B: Backend> {
 }
 
 #[derive(Debug, Clone)]
+pub struct FractalV2ProjectionBreakdown<B: Backend> {
+    fusion: ReadFusionOutput<B>,
+    bias_logits: Tensor<B, 2>,
+    fused_logits: Tensor<B, 2>,
+    root_delta_logits: Tensor<B, 2>,
+    routed_delta_logits: Tensor<B, 2>,
+    exact_read_delta_logits: Tensor<B, 2>,
+}
+
+#[derive(Debug, Clone)]
 pub struct FractalV2ForwardOutput<B: Backend> {
     fused_readouts: Tensor<B, 3>,
     logits: Tensor<B, 3>,
@@ -155,6 +167,74 @@ impl<B: Backend> FractalV2ForwardOutput<B> {
 
     pub fn final_state(&self) -> &FractalV2State<B> {
         &self.final_state
+    }
+}
+
+impl<B: Backend> FractalV2ProjectionBreakdown<B> {
+    fn new(
+        fusion: ReadFusionOutput<B>,
+        bias_logits: Tensor<B, 2>,
+        fused_logits: Tensor<B, 2>,
+        root_delta_logits: Tensor<B, 2>,
+        routed_delta_logits: Tensor<B, 2>,
+        exact_read_delta_logits: Tensor<B, 2>,
+    ) -> Result<Self, FractalError> {
+        let [batch_size, vocab_size] = fused_logits.dims();
+        ensure_nonzero("fractal_v2_projection_breakdown.batch_size", batch_size)?;
+        ensure_nonzero("fractal_v2_projection_breakdown.vocab_size", vocab_size)?;
+        ensure_dims2(
+            "fractal_v2_projection_breakdown.bias_logits",
+            bias_logits.dims(),
+            [batch_size, vocab_size],
+        )?;
+        ensure_dims2(
+            "fractal_v2_projection_breakdown.root_delta_logits",
+            root_delta_logits.dims(),
+            [batch_size, vocab_size],
+        )?;
+        ensure_dims2(
+            "fractal_v2_projection_breakdown.routed_delta_logits",
+            routed_delta_logits.dims(),
+            [batch_size, vocab_size],
+        )?;
+        ensure_dims2(
+            "fractal_v2_projection_breakdown.exact_read_delta_logits",
+            exact_read_delta_logits.dims(),
+            [batch_size, vocab_size],
+        )?;
+
+        Ok(Self {
+            fusion,
+            bias_logits,
+            fused_logits,
+            root_delta_logits,
+            routed_delta_logits,
+            exact_read_delta_logits,
+        })
+    }
+
+    pub fn fusion(&self) -> &ReadFusionOutput<B> {
+        &self.fusion
+    }
+
+    pub fn bias_logits(&self) -> Tensor<B, 2> {
+        self.bias_logits.clone()
+    }
+
+    pub fn fused_logits(&self) -> Tensor<B, 2> {
+        self.fused_logits.clone()
+    }
+
+    pub fn root_delta_logits(&self) -> Tensor<B, 2> {
+        self.root_delta_logits.clone()
+    }
+
+    pub fn routed_delta_logits(&self) -> Tensor<B, 2> {
+        self.routed_delta_logits.clone()
+    }
+
+    pub fn exact_read_delta_logits(&self) -> Tensor<B, 2> {
+        self.exact_read_delta_logits.clone()
     }
 }
 
@@ -372,6 +452,29 @@ where
             exact_read.selected_token_mask(),
         )?;
         self.project_step_logits_from_fusion_input(
+            batch_size,
+            fusion_input,
+            memory_mode.read_fusion_ablation(),
+        )
+    }
+
+    pub fn project_retrieval_step_projection_breakdown_with_memory_mode(
+        &self,
+        root_readouts: Tensor<B, 3>,
+        routed: &crate::v2::FractalRouteOutput<B>,
+        exact_read: &crate::v2::ExactLeafReadOutput<B>,
+        memory_mode: FractalV2MemoryMode,
+    ) -> Result<FractalV2ProjectionBreakdown<B>, FractalError> {
+        let [batch_size, _, _] = root_readouts.dims();
+        let fusion_input = ReadFusionInput::new(
+            root_readouts,
+            routed.selected_leaf_values(),
+            routed.selected_leaf_scores(),
+            routed.selected_leaf_mask(),
+            exact_read.read_values(),
+            exact_read.selected_token_mask(),
+        )?;
+        self.project_step_projection_breakdown_from_fusion_input(
             batch_size,
             fusion_input,
             memory_mode.read_fusion_ablation(),
@@ -869,14 +972,46 @@ where
         ablation: ReadFusionAblation,
     ) -> Result<Tensor<B, 2>, FractalError> {
         let fusion = self.read_fusion.fuse(&fusion_input, ablation)?;
-        Ok(self
-            .output
-            .forward(
-                fusion
-                    .fused_readout()
-                    .reshape([batch_size, 1, self.fused_readout_dim]),
-            )
-            .reshape([batch_size, self.vocab_size]))
+        Ok(self.project_fused_readout_logits(fusion.fused_readout(), batch_size))
+    }
+
+    fn project_step_projection_breakdown_from_fusion_input(
+        &self,
+        batch_size: usize,
+        fusion_input: ReadFusionInput<B>,
+        ablation: ReadFusionAblation,
+    ) -> Result<FractalV2ProjectionBreakdown<B>, FractalError> {
+        let fusion = self.read_fusion.fuse(&fusion_input, ablation)?;
+        let device = fusion.fused_readout().device();
+        let bias_logits = self.project_fused_readout_logits(
+            Tensor::<B, 2>::zeros([batch_size, self.fused_readout_dim], &device),
+            batch_size,
+        );
+        let fused_logits = self.project_fused_readout_logits(fusion.fused_readout(), batch_size);
+        let root_lane_logits = self.project_fused_readout_logits(fusion.root_lane(), batch_size);
+        let routed_lane_logits =
+            self.project_fused_readout_logits(fusion.routed_lane(), batch_size);
+        let exact_read_lane_logits =
+            self.project_fused_readout_logits(fusion.exact_read_lane(), batch_size);
+
+        FractalV2ProjectionBreakdown::new(
+            fusion,
+            bias_logits.clone(),
+            fused_logits,
+            root_lane_logits - bias_logits.clone(),
+            routed_lane_logits - bias_logits.clone(),
+            exact_read_lane_logits - bias_logits,
+        )
+    }
+
+    fn project_fused_readout_logits(
+        &self,
+        fused_readout: Tensor<B, 2>,
+        batch_size: usize,
+    ) -> Tensor<B, 2> {
+        self.output
+            .forward(fused_readout.reshape([batch_size, 1, self.fused_readout_dim]))
+            .reshape([batch_size, self.vocab_size])
     }
 
     pub fn shape(&self) -> FractalV2ModelShape {
@@ -1898,6 +2033,16 @@ fn ensure_match(name: &str, actual: usize, expected: usize) -> Result<(), Fracta
     Ok(())
 }
 
+fn ensure_dims2(name: &str, actual: [usize; 2], expected: [usize; 2]) -> Result<(), FractalError> {
+    if actual != expected {
+        return Err(FractalError::InvalidConfig(format!(
+            "{name} mismatch: expected {expected:?}, got {actual:?}"
+        )));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use core::marker::PhantomData;
@@ -1905,7 +2050,7 @@ mod tests {
     use burn::{
         backend::Candle,
         module::Module,
-        tensor::{Tensor, TensorData},
+        tensor::{Tensor, TensorData, Tolerance},
     };
 
     use super::*;
@@ -3270,6 +3415,88 @@ mod tests {
             enabled.logits().to_data().convert::<f32>(),
             single_root.logits().to_data().convert::<f32>()
         );
+    }
+
+    #[test]
+    fn fractal_v2_projection_breakdown_additively_decomposes_fused_logits() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = FractalV2Model::new(32_000, 128, valid_components(), &device).unwrap();
+        let input_ids = token_ids::<TestBackend>(
+            &(1..=32).map(i64::from).collect::<Vec<_>>(),
+            [1, 32],
+            &device,
+        );
+        let trace = model.forward_retrieval_trace(input_ids).unwrap();
+        let step = trace.steps().last().unwrap();
+        let breakdown = model
+            .project_retrieval_step_projection_breakdown_with_memory_mode(
+                step.root_readouts(),
+                step.routed(),
+                step.exact_read(),
+                FractalV2MemoryMode::TreePlusExactRead,
+            )
+            .unwrap();
+
+        let reconstructed = breakdown.bias_logits()
+            + breakdown.root_delta_logits()
+            + breakdown.routed_delta_logits()
+            + breakdown.exact_read_delta_logits();
+        breakdown
+            .fused_logits()
+            .to_data()
+            .assert_approx_eq::<f32>(&reconstructed.to_data(), Tolerance::default());
+    }
+
+    #[test]
+    fn fractal_v2_projection_breakdown_respects_memory_ablation_modes() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = FractalV2Model::new(32_000, 128, valid_components(), &device).unwrap();
+        let input_ids = token_ids::<TestBackend>(
+            &(1..=32).map(i64::from).collect::<Vec<_>>(),
+            [1, 32],
+            &device,
+        );
+        let trace = model.forward_retrieval_trace(input_ids).unwrap();
+        let step = trace.steps().last().unwrap();
+
+        let no_memory = model
+            .project_retrieval_step_projection_breakdown_with_memory_mode(
+                step.root_readouts(),
+                step.routed(),
+                step.exact_read(),
+                FractalV2MemoryMode::NoMemory,
+            )
+            .unwrap();
+        let tree_only = model
+            .project_retrieval_step_projection_breakdown_with_memory_mode(
+                step.root_readouts(),
+                step.routed(),
+                step.exact_read(),
+                FractalV2MemoryMode::TreeOnly,
+            )
+            .unwrap();
+
+        no_memory
+            .routed_delta_logits()
+            .to_data()
+            .assert_approx_eq::<f32>(
+                &TensorData::zeros::<f32, _>(no_memory.routed_delta_logits().dims()),
+                Tolerance::default(),
+            );
+        no_memory
+            .exact_read_delta_logits()
+            .to_data()
+            .assert_approx_eq::<f32>(
+                &TensorData::zeros::<f32, _>(no_memory.exact_read_delta_logits().dims()),
+                Tolerance::default(),
+            );
+        tree_only
+            .exact_read_delta_logits()
+            .to_data()
+            .assert_approx_eq::<f32>(
+                &TensorData::zeros::<f32, _>(tree_only.exact_read_delta_logits().dims()),
+                Tolerance::default(),
+            );
     }
 
     #[test]

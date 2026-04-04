@@ -10,7 +10,10 @@ use serde_json::Value;
 
 use fractal_core::error::FractalError;
 
-use crate::{SyntheticProbeReport, V2AblationReport, V2BenchmarkReport, V2SmokeTrainReport};
+use crate::{
+    SyntheticProbeProjectionReport, SyntheticProbeReport, V2AblationReport, V2BenchmarkReport,
+    V2SmokeTrainReport,
+};
 
 pub const DEFAULT_V2_RESULTS_LEDGER_PATH: &str = "docs/v2-results-ledger.jsonl";
 
@@ -19,6 +22,7 @@ pub const DEFAULT_V2_RESULTS_LEDGER_PATH: &str = "docs/v2-results-ledger.jsonl";
 pub enum V2ResultsLedgerKind {
     SmokeTrain,
     SyntheticProbe,
+    FusionDiagnostic,
     Benchmark,
     AblationSweep,
 }
@@ -86,6 +90,21 @@ impl V2ResultsLedgerEntry {
     ) -> Result<Self, FractalError> {
         Self::from_payload(
             V2ResultsLedgerKind::AblationSweep,
+            model,
+            note,
+            run_label,
+            report,
+        )
+    }
+
+    pub fn fusion_diagnostic(
+        model: impl Into<String>,
+        note: impl Into<String>,
+        report: &SyntheticProbeProjectionReport,
+        run_label: Option<String>,
+    ) -> Result<Self, FractalError> {
+        Self::from_payload(
+            V2ResultsLedgerKind::FusionDiagnostic,
             model,
             note,
             run_label,
