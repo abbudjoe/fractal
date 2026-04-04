@@ -6,7 +6,8 @@ use std::{
 
 use fractal_core::CpuTrainBackend;
 use fractal_eval_private::{
-    default_v2_smoke_corpus_paths, run_baseline_v2_smoke_train, V2SmokeTrainConfig,
+    default_v2_smoke_corpus_paths, run_baseline_v2_smoke_train, V2SmokeCheckpointKind,
+    V2SmokeTrainConfig,
 };
 use serde::Serialize;
 
@@ -260,7 +261,13 @@ fn render_table(report: &fractal_eval_private::V2SmokeTrainReport) -> String {
         "final_eval:   loss={:.4} ppl={:.4} batches={}",
         report.final_eval.mean_loss, report.final_eval.perplexity, report.final_eval.batch_count
     );
-    let _ = writeln!(output, "best_eval_loss: {:.4}", report.best_eval_loss);
+    let _ = writeln!(
+        output,
+        "best_eval:    loss={:.4} ppl={:.4} source={}",
+        report.best_eval.mean_loss,
+        report.best_eval.perplexity,
+        best_checkpoint_kind_label(report.best_checkpoint_kind)
+    );
     if let Some(last_step) = report.train_steps.last() {
         let _ = writeln!(
             output,
@@ -275,8 +282,13 @@ fn render_table(report: &fractal_eval_private::V2SmokeTrainReport) -> String {
     );
     let _ = writeln!(
         output,
-        "model_path: {}",
-        report.checkpoint.model_path.display()
+        "final_model_path: {}",
+        report.checkpoint.final_model_path.display()
+    );
+    let _ = writeln!(
+        output,
+        "best_model_path: {}",
+        report.checkpoint.best_model_path.display()
     );
     let _ = writeln!(
         output,
@@ -289,6 +301,13 @@ fn render_table(report: &fractal_eval_private::V2SmokeTrainReport) -> String {
         report.checkpoint.report_path.display()
     );
     output
+}
+
+fn best_checkpoint_kind_label(kind: V2SmokeCheckpointKind) -> &'static str {
+    match kind {
+        V2SmokeCheckpointKind::InitialEval => "initial-eval",
+        V2SmokeCheckpointKind::FinalEval => "final-eval",
+    }
 }
 
 fn usage() -> String {

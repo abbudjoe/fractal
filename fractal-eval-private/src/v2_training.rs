@@ -21,11 +21,11 @@ use crate::{
 
 pub const BYTE_LEVEL_PAD_TOKEN: usize = PAD_TOKEN;
 pub const BYTE_LEVEL_VOCAB_SIZE: usize = 257;
-pub const DEFAULT_V2_SMOKE_SEQ_LEN: usize = 64;
+pub const DEFAULT_V2_SMOKE_SEQ_LEN: usize = 32;
 pub const DEFAULT_V2_SMOKE_WINDOW_STRIDE: usize = DEFAULT_V2_SMOKE_SEQ_LEN;
-pub const DEFAULT_V2_SMOKE_BATCH_SIZE: usize = 4;
-pub const DEFAULT_V2_SMOKE_TRAIN_STEPS: usize = 32;
-pub const DEFAULT_V2_SMOKE_EVAL_BATCHES: usize = 4;
+pub const DEFAULT_V2_SMOKE_BATCH_SIZE: usize = 1;
+pub const DEFAULT_V2_SMOKE_TRAIN_STEPS: usize = 2;
+pub const DEFAULT_V2_SMOKE_EVAL_BATCHES: usize = 1;
 pub const DEFAULT_V2_SMOKE_EVAL_HOLDOUT_EVERY: usize = 10;
 pub const DEFAULT_V2_SMOKE_LEARNING_RATE: f64 = 1e-3;
 
@@ -169,9 +169,16 @@ pub struct V2SmokeEvalMetrics {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct V2SmokeCheckpointArtifacts {
     pub directory: PathBuf,
-    pub model_path: PathBuf,
+    pub final_model_path: PathBuf,
+    pub best_model_path: PathBuf,
     pub optimizer_path: PathBuf,
     pub report_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum V2SmokeCheckpointKind {
+    InitialEval,
+    FinalEval,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -180,7 +187,8 @@ pub struct V2SmokeTrainReport {
     pub corpus: V2SmokeCorpusStats,
     pub initial_eval: V2SmokeEvalMetrics,
     pub final_eval: V2SmokeEvalMetrics,
-    pub best_eval_loss: f64,
+    pub best_eval: V2SmokeEvalMetrics,
+    pub best_checkpoint_kind: V2SmokeCheckpointKind,
     pub train_steps: Vec<V2SmokeTrainStepReport>,
     pub checkpoint: V2SmokeCheckpointArtifacts,
 }
@@ -271,11 +279,11 @@ where
         .init(device);
     let mut optimizer = AdamConfig::new().init::<B, M>();
     let initial_eval = evaluate_model(&model, &criterion, &eval_batches, config.eval_batches)?;
+    let initial_model = model.clone();
 
     let mut model = model;
     let mut seen_tokens = 0usize;
     let mut train_steps = Vec::with_capacity(config.train_steps);
-    let mut best_eval_loss = initial_eval.mean_loss;
 
     for step in 0..config.train_steps {
         let batch = &train_batches[step % train_batches.len()];
@@ -294,8 +302,17 @@ where
     }
 
     let final_eval = evaluate_model(&model, &criterion, &eval_batches, config.eval_batches)?;
-    best_eval_loss = best_eval_loss.min(final_eval.mean_loss);
-    let checkpoint = persist_smoke_train_artifacts(&model, &optimizer, &config)?;
+    let (best_eval, best_checkpoint_kind, best_model) =
+        if final_eval.mean_loss <= initial_eval.mean_loss {
+            (final_eval.clone(), V2SmokeCheckpointKind::FinalEval, None)
+        } else {
+            (
+                initial_eval.clone(),
+                V2SmokeCheckpointKind::InitialEval,
+                Some(&initial_model),
+            )
+        };
+    let checkpoint = persist_smoke_train_artifacts(&model, best_model, &optimizer, &config)?;
     let corpus_paths = corpus.paths;
     let total_sequences = train_batches
         .iter()
@@ -332,7 +349,8 @@ where
         },
         initial_eval,
         final_eval,
-        best_eval_loss,
+        best_eval,
+        best_checkpoint_kind,
         train_steps,
         checkpoint,
     };
@@ -550,7 +568,8 @@ where
 }
 
 fn persist_smoke_train_artifacts<B, M>(
-    model: &M,
+    final_model: &M,
+    best_model: Option<&M>,
     optimizer: &OptimizerAdaptor<Adam, M, B>,
     config: &V2SmokeTrainConfig,
 ) -> Result<V2SmokeCheckpointArtifacts, FractalError>
@@ -562,12 +581,22 @@ where
     ensure_empty_output_dir(&config.output_dir)?;
 
     let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
-    let model_stem = config.output_dir.join("model");
+    let final_model_stem = config.output_dir.join("model");
+    let best_model_stem = config.output_dir.join("best-model");
     let optimizer_stem = config.output_dir.join("optimizer");
-    model
+    final_model
         .clone()
-        .save_file(model_stem.clone(), &recorder)
+        .save_file(final_model_stem.clone(), &recorder)
         .map_err(recorder_error)?;
+    let best_model_path = if let Some(best_model) = best_model {
+        best_model
+            .clone()
+            .save_file(best_model_stem.clone(), &recorder)
+            .map_err(recorder_error)?;
+        resolve_written_artifact(&config.output_dir, "best-model")?
+    } else {
+        resolve_written_artifact(&config.output_dir, "model")?
+    };
     recorder
         .record(optimizer.to_record(), optimizer_stem.clone())
         .map(|_| ())
@@ -575,7 +604,8 @@ where
 
     Ok(V2SmokeCheckpointArtifacts {
         directory: config.output_dir.clone(),
-        model_path: resolve_written_artifact(&config.output_dir, "model")?,
+        final_model_path: resolve_written_artifact(&config.output_dir, "model")?,
+        best_model_path,
         optimizer_path: resolve_written_artifact(&config.output_dir, "optimizer")?,
         report_path: config.output_dir.join("report.json"),
     })
@@ -589,12 +619,16 @@ fn ensure_empty_output_dir(path: &Path) -> Result<(), FractalError> {
                 path.display()
             ))
         })?;
-        if entries.next().transpose().map_err(|error| {
-            FractalError::InvalidState(format!(
-                "failed to inspect v2 smoke output directory {}: {error}",
-                path.display()
-            ))
-        })?.is_some()
+        if entries
+            .next()
+            .transpose()
+            .map_err(|error| {
+                FractalError::InvalidState(format!(
+                    "failed to inspect v2 smoke output directory {}: {error}",
+                    path.display()
+                ))
+            })?
+            .is_some()
         {
             return Err(FractalError::InvalidConfig(format!(
                 "v2 smoke output directory {} must be empty when provided explicitly",
@@ -742,7 +776,8 @@ mod tests {
 
         assert!(result.report.initial_eval.mean_loss.is_finite());
         assert!(result.report.final_eval.mean_loss.is_finite());
-        assert!(result.report.checkpoint.model_path.exists());
+        assert!(result.report.checkpoint.final_model_path.exists());
+        assert!(result.report.checkpoint.best_model_path.exists());
         assert!(result.report.checkpoint.optimizer_path.exists());
         assert!(result.report.checkpoint.report_path.exists());
 
@@ -754,7 +789,11 @@ mod tests {
         let root = unique_temp_dir("v2-smoke-train-nonempty");
         fs::create_dir_all(&root).unwrap();
         let corpus = root.join("corpus.md");
-        fs::write(&corpus, "fractal v2 output dirs should be explicit.\n".repeat(12)).unwrap();
+        fs::write(
+            &corpus,
+            "fractal v2 output dirs should be explicit.\n".repeat(12),
+        )
+        .unwrap();
         let output_dir = root.join("out");
         fs::create_dir_all(&output_dir).unwrap();
         fs::write(output_dir.join("stale.txt"), "stale").unwrap();
@@ -780,6 +819,46 @@ mod tests {
             FractalError::InvalidConfig(message)
             if message.contains("must be empty")
         ));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn smoke_train_records_initial_best_checkpoint_when_final_eval_regresses() {
+        let root = unique_temp_dir("v2-smoke-train-best-checkpoint");
+        fs::create_dir_all(&root).unwrap();
+        let corpus = root.join("corpus.md");
+        fs::write(
+            &corpus,
+            "ENGINEERING smoke checkpoint regression.\n".repeat(16),
+        )
+        .unwrap();
+        let output_dir = root.join("out");
+        let config = V2SmokeTrainConfig {
+            corpus_paths: vec![corpus],
+            output_dir,
+            model: baseline_v2_byte_level_smoke_model_config(),
+            seq_len: 16,
+            window_stride: 16,
+            batch_size: 1,
+            train_steps: 1,
+            eval_batches: 1,
+            eval_holdout_every: 3,
+            learning_rate: 100.0,
+            vocabulary: ByteLevelVocabularyContract::default(),
+        };
+
+        let device = <TestBackend as Backend>::Device::default();
+        let result = run_baseline_v2_smoke_train::<TestBackend>(config, &device).unwrap();
+
+        assert_eq!(
+            result.report.best_checkpoint_kind,
+            V2SmokeCheckpointKind::InitialEval
+        );
+        assert_ne!(
+            result.report.checkpoint.best_model_path,
+            result.report.checkpoint.final_model_path
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
