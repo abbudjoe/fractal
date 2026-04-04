@@ -64,6 +64,10 @@ impl BaselineV2SyntheticModelConfig {
         }
     }
 
+    pub const fn with_leaf_size(self, leaf_size: usize) -> Self {
+        Self { leaf_size, ..self }
+    }
+
     pub const fn with_root_count_preserving_total_budget(self, root_count: usize) -> Self {
         Self { root_count, ..self }
     }
@@ -98,11 +102,10 @@ impl BaselineV2SyntheticModelConfig {
                 self.total_root_readout_dim, self.root_count
             )));
         }
-        if self.leaf_size != 16 {
-            return Err(FractalError::InvalidConfig(format!(
-                "baseline_v2_synthetic_model.leaf_size must equal 16 in v1, got {}",
-                self.leaf_size
-            )));
+        if self.leaf_size == 0 {
+            return Err(FractalError::InvalidConfig(
+                "baseline_v2_synthetic_model.leaf_size must be greater than zero".to_string(),
+            ));
         }
         if self.routing_head_count == 0 || self.exact_read_head_count == 0 {
             return Err(FractalError::InvalidConfig(
@@ -305,5 +308,19 @@ mod tests {
             FractalError::InvalidConfig(message)
                 if message.contains("total_root_state_dim")
         ));
+    }
+
+    #[test]
+    fn baseline_v2_fixture_supports_nondefault_leaf_size_for_exploratory_benchmarks() {
+        let device = Default::default();
+        let model = build_baseline_v2_synthetic_model::<TestBackend>(
+            BaselineV2SyntheticModelConfig::default().with_leaf_size(32),
+            &device,
+        )
+        .unwrap();
+
+        assert_eq!(model.shape().local_trunk.leaf_size, 32);
+        assert_eq!(model.shape().leaf_summarizer.leaf_size, 32);
+        assert_eq!(model.shape().exact_read.leaf_size, 32);
     }
 }

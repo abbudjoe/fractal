@@ -103,12 +103,7 @@ impl BaselineLocalTrunkConfig {
             "baseline_local_trunk.root_readout_dim",
             self.root_readout_dim,
         )?;
-        if self.leaf_size != 16 {
-            return Err(FractalError::InvalidConfig(format!(
-                "baseline_local_trunk.leaf_size must equal 16 in phase 3, got {}",
-                self.leaf_size
-            )));
-        }
+        ensure_nonzero("baseline_local_trunk.leaf_size", self.leaf_size)?;
 
         Ok(())
     }
@@ -553,9 +548,19 @@ mod tests {
     }
 
     #[test]
-    fn baseline_local_trunk_try_init_rejects_non_phase_three_leaf_size() {
+    fn baseline_local_trunk_try_init_accepts_nondefault_leaf_size() {
         let device = <TestBackend as Backend>::Device::default();
-        let error = BaselineLocalTrunkConfig::new(8, 2, 6, 4, 8)
+        let trunk = BaselineLocalTrunkConfig::new(8, 2, 6, 4, 8)
+            .try_init::<TestBackend>(&device)
+            .unwrap();
+
+        assert_eq!(trunk.shape().leaf_size, 8);
+    }
+
+    #[test]
+    fn baseline_local_trunk_try_init_rejects_zero_leaf_size() {
+        let device = <TestBackend as Backend>::Device::default();
+        let error = BaselineLocalTrunkConfig::new(8, 2, 6, 4, 0)
             .try_init::<TestBackend>(&device)
             .unwrap_err();
 

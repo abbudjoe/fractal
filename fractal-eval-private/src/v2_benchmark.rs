@@ -45,6 +45,7 @@ impl V2BenchmarkSurface {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct V2BenchmarkConfig {
     pub sequence_lengths: Vec<usize>,
+    pub leaf_size: usize,
     pub iterations: usize,
     pub warmup_iterations: usize,
 }
@@ -61,6 +62,22 @@ impl V2BenchmarkConfig {
                 "v2_benchmark.sequence_lengths must all be greater than zero".to_string(),
             ));
         }
+        if self.leaf_size == 0 {
+            return Err(FractalError::InvalidConfig(
+                "v2_benchmark.leaf_size must be greater than zero".to_string(),
+            ));
+        }
+        if let Some(sequence_length) = self
+            .sequence_lengths
+            .iter()
+            .copied()
+            .find(|sequence_length| *sequence_length < self.leaf_size)
+        {
+            return Err(FractalError::InvalidConfig(format!(
+                "v2_benchmark.sequence_lengths must all be at least leaf_size {} (got {})",
+                self.leaf_size, sequence_length
+            )));
+        }
         if self.iterations == 0 {
             return Err(FractalError::InvalidConfig(
                 "v2_benchmark.iterations must be greater than zero".to_string(),
@@ -75,6 +92,7 @@ impl Default for V2BenchmarkConfig {
     fn default() -> Self {
         Self {
             sequence_lengths: DEFAULT_V2_BENCHMARK_SEQUENCE_LENGTHS.to_vec(),
+            leaf_size: 16,
             iterations: 3,
             warmup_iterations: 1,
         }
@@ -128,8 +146,10 @@ pub fn run_baseline_v2_benchmark_suite<B: Backend>(
     device: &B::Device,
 ) -> Result<V2BenchmarkReport, FractalError> {
     config.validate()?;
-    let model =
-        build_baseline_v2_synthetic_model::<B>(BaselineV2SyntheticModelConfig::default(), device)?;
+    let model = build_baseline_v2_synthetic_model::<B>(
+        BaselineV2SyntheticModelConfig::default().with_leaf_size(config.leaf_size),
+        device,
+    )?;
     let mut entries = Vec::new();
 
     for sequence_length in &config.sequence_lengths {
@@ -784,6 +804,7 @@ mod tests {
     fn benchmark_config_rejects_zero_iterations() {
         let error = V2BenchmarkConfig {
             sequence_lengths: vec![32],
+            leaf_size: 16,
             iterations: 0,
             warmup_iterations: 0,
         }
@@ -797,11 +818,29 @@ mod tests {
     }
 
     #[test]
+    fn benchmark_config_rejects_leaf_size_larger_than_sequence_length() {
+        let error = V2BenchmarkConfig {
+            sequence_lengths: vec![32],
+            leaf_size: 64,
+            iterations: 1,
+            warmup_iterations: 0,
+        }
+        .validate()
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            FractalError::InvalidConfig(message) if message.contains("leaf_size 64")
+        ));
+    }
+
+    #[test]
     fn baseline_v2_benchmark_suite_runs_on_small_length() {
         let device = Default::default();
         let report = run_baseline_v2_benchmark_suite::<TestBackend>(
             V2BenchmarkConfig {
                 sequence_lengths: vec![32],
+                leaf_size: 16,
                 iterations: 1,
                 warmup_iterations: 0,
             },
@@ -814,9 +853,35 @@ mod tests {
             .entries
             .iter()
             .all(|entry| entry.sequence_length == 32));
+        assert_eq!(report.config.leaf_size, 16);
+        assert!(report
+            .entries
+            .iter()
+            .all(|entry| entry.observability.level0_leaf_count > 0));
         assert!(report
             .entries
             .iter()
             .all(|entry| entry.mean_wall_time_ms.is_finite()));
+    }
+
+    #[test]
+    fn baseline_v2_benchmark_suite_supports_exploratory_leaf_sizes() {
+        let device = Default::default();
+        let report = run_baseline_v2_benchmark_suite::<TestBackend>(
+            V2BenchmarkConfig {
+                sequence_lengths: vec![64],
+                leaf_size: 32,
+                iterations: 1,
+                warmup_iterations: 0,
+            },
+            &device,
+        )
+        .unwrap();
+
+        assert_eq!(report.config.leaf_size, 32);
+        assert!(report
+            .entries
+            .iter()
+            .all(|entry| entry.sequence_length == 64));
     }
 }

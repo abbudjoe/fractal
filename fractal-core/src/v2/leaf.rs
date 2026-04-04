@@ -149,12 +149,6 @@ impl BaselineLeafSummarizerConfig {
             "baseline_leaf_summarizer.token_cache_value_dim",
             self.token_cache_value_dim,
         )?;
-        if self.leaf_size != 16 {
-            return Err(FractalError::InvalidConfig(format!(
-                "baseline_leaf_summarizer.leaf_size must equal 16 in phase 4, got {}",
-                self.leaf_size
-            )));
-        }
 
         Ok(())
     }
@@ -307,12 +301,19 @@ mod tests {
     #[test]
     fn baseline_leaf_summarizer_produces_expected_shapes() {
         let device = Default::default();
-        let summarizer = BaselineLeafSummarizerConfig::new(3, 2, 5, 4, 6, 7, 8)
-            .try_init::<TestBackend>(&device)
-            .unwrap_err();
-        assert!(
-            matches!(summarizer, FractalError::InvalidConfig(message) if message.contains("leaf_size must equal 16"))
-        );
+        let summarizer =
+            BaselineLeafSummarizerConfig::new(3, 2, 5, 4, 6, 7, 8).init::<TestBackend>(&device);
+
+        let output = summarizer
+            .summarize_sealed_leaf(test_input(&device))
+            .unwrap();
+
+        assert_eq!(output.summary().dims(), [2, 5]);
+        assert_eq!(output.key().dims(), [2, 4]);
+        assert_eq!(output.value().dims(), [2, 6]);
+        assert_eq!(output.token_keys().dims(), [2, 2, 7]);
+        assert_eq!(output.token_values().dims(), [2, 2, 8]);
+        assert_eq!(output.token_mask().dims(), [2, 2]);
     }
 
     #[test]

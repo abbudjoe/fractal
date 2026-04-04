@@ -21,6 +21,7 @@ fn run() -> Result<(), String> {
     let report = run_baseline_v2_benchmark_suite::<BenchmarkBackend>(
         V2BenchmarkConfig {
             sequence_lengths: args.sequence_lengths.clone(),
+            leaf_size: args.leaf_size,
             iterations: args.iterations,
             warmup_iterations: args.warmup_iterations,
         },
@@ -35,6 +36,7 @@ fn run() -> Result<(), String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliArgs {
     sequence_lengths: Vec<usize>,
+    leaf_size: usize,
     iterations: usize,
     warmup_iterations: usize,
     output: OutputFormat,
@@ -43,6 +45,7 @@ struct CliArgs {
 impl CliArgs {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut sequence_lengths = DEFAULT_V2_BENCHMARK_SEQUENCE_LENGTHS.to_vec();
+        let mut leaf_size = 16usize;
         let mut iterations = 3usize;
         let mut warmup_iterations = 1usize;
         let mut output = OutputFormat::Table;
@@ -56,6 +59,12 @@ impl CliArgs {
                         .next()
                         .ok_or_else(|| "--lengths requires a comma-separated value".to_owned())?;
                     sequence_lengths = parse_lengths(&value)?;
+                }
+                "--leaf-size" => {
+                    let value = iter
+                        .next()
+                        .ok_or_else(|| "--leaf-size requires a value".to_owned())?;
+                    leaf_size = parse_positive_usize("--leaf-size", &value)?;
                 }
                 "--iterations" => {
                     let value = iter
@@ -89,6 +98,7 @@ impl CliArgs {
 
         Ok(Self {
             sequence_lengths,
+            leaf_size,
             iterations,
             warmup_iterations,
             output,
@@ -145,11 +155,11 @@ fn usage() -> String {
     let mut output = String::new();
     let _ = writeln!(
         output,
-        "Usage: cargo run --bin v2-benchmark-suite -- [--lengths <n1,n2,...>] [--iterations <n>] [--warmup <n>] [--output <table|json>]"
+        "Usage: cargo run --bin v2-benchmark-suite -- [--lengths <n1,n2,...>] [--leaf-size <n>] [--iterations <n>] [--warmup <n>] [--output <table|json>]"
     );
     let _ = writeln!(
         output,
-        "Defaults: --lengths 256,512,1024,2048,4096,8192 --iterations 3 --warmup 1 --output table"
+        "Defaults: --lengths 256,512,1024,2048,4096,8192 --leaf-size 16 --iterations 3 --warmup 1 --output table"
     );
     output
 }
@@ -166,6 +176,7 @@ fn render_table(report: &V2BenchmarkReport) -> String {
     let mut output = String::new();
     let _ = writeln!(output, "V2 Benchmark and Observability Suite");
     let _ = writeln!(output, "model: {}", report.model);
+    let _ = writeln!(output, "leaf_size: {}", report.config.leaf_size);
     let _ = writeln!(output, "note: {}", report.note);
 
     let mut current_length = None;
@@ -221,6 +232,7 @@ mod tests {
             args.sequence_lengths,
             DEFAULT_V2_BENCHMARK_SEQUENCE_LENGTHS.to_vec()
         );
+        assert_eq!(args.leaf_size, 16);
         assert_eq!(args.iterations, 3);
         assert_eq!(args.warmup_iterations, 1);
         assert_eq!(args.output, OutputFormat::Table);
@@ -232,6 +244,8 @@ mod tests {
             [
                 "--lengths",
                 "32,64,128",
+                "--leaf-size",
+                "32",
                 "--iterations",
                 "5",
                 "--warmup",
@@ -245,6 +259,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(args.sequence_lengths, vec![32, 64, 128]);
+        assert_eq!(args.leaf_size, 32);
         assert_eq!(args.iterations, 5);
         assert_eq!(args.warmup_iterations, 2);
         assert_eq!(args.output, OutputFormat::Json);
