@@ -940,17 +940,16 @@ fn head_contexts_for_route<B: Backend>(
                 head_trace.batch_routes.len()
             ))
         })?;
-        let span_distance = batch_route
-            .selected_leaf_spans
-            .first()
-            .copied()
-            .map(|span| selected_span_distance(query_position, span))
-            .transpose()?;
         head_contexts.push(CausalMemoryHeadContext {
             head_index,
             routing_depth: batch_route.steps.len(),
-            span_distance,
-            selected_leaf_index: batch_route.selected_leaf_indices.first().copied(),
+            span_distances: batch_route
+                .selected_leaf_spans
+                .iter()
+                .copied()
+                .map(|span| selected_span_distance(query_position, span))
+                .collect::<Result<Vec<_>, _>>()?,
+            selected_leaf_indices: batch_route.selected_leaf_indices.clone(),
         });
     }
 
@@ -1142,12 +1141,11 @@ fn next_best_route_for_batch<B: Backend>(
             ));
             break;
         }
-        let Some((next_index, next_score, next_span)) = alternate else {
+        let Some((next_index, _next_score, next_span)) = alternate else {
             return Ok(None);
         };
         index_data[primary_flat] = next_index as i64;
         mask_data[primary_flat] = true;
-        score_data[primary_flat] = next_score;
         let next_value = tree
             .level(0)
             .ok_or_else(|| {
@@ -1174,7 +1172,28 @@ fn next_best_route_for_batch<B: Backend>(
         }
         batch_route.selected_leaf_indices[0] = next_index;
         batch_route.selected_leaf_spans[0] = next_span;
-        batch_route.selected_leaf_scores[0] = next_score;
+        let active_slot_count = batch_route.selected_leaf_indices.len();
+        let mut raw_selected_scores = Vec::with_capacity(active_slot_count);
+        for slot in 0..active_slot_count {
+            let leaf_index = if slot == 0 {
+                next_index
+            } else {
+                batch_route.selected_leaf_indices[slot]
+            };
+            raw_selected_scores.push(raw_score_for_considered_leaf(final_step, leaf_index)?);
+        }
+        let normalized_selected_scores = softmax_vec(&raw_selected_scores);
+        for (slot, score) in normalized_selected_scores.iter().copied().enumerate() {
+            let flat_index =
+                selection_flat_index(batch_index, head_index, slot, head_count, top_leaf_reads);
+            score_data[flat_index] = score;
+            batch_route.selected_leaf_scores[slot] = score;
+        }
+        for slot in active_slot_count..top_leaf_reads {
+            let flat_index =
+                selection_flat_index(batch_index, head_index, slot, head_count, top_leaf_reads);
+            score_data[flat_index] = 0.0;
+        }
     }
 
     Ok(Some(crate::v2::FractalRouteOutput::from_parts(
@@ -1206,6 +1225,23 @@ fn top_scored_candidate_slots(scores: &[f32]) -> Vec<usize> {
     let mut slots = scores.iter().copied().enumerate().collect::<Vec<_>>();
     slots.sort_by(|(_, left), (_, right)| right.total_cmp(left));
     slots.into_iter().map(|(index, _)| index).collect()
+}
+
+fn raw_score_for_considered_leaf(
+    final_step: &crate::v2::BatchRouteStep,
+    leaf_index: usize,
+) -> Result<f32, FractalError> {
+    final_step
+        .considered_candidate_indices
+        .iter()
+        .position(|candidate| *candidate == leaf_index)
+        .map(|slot| final_step.considered_candidate_scores[slot])
+        .ok_or_else(|| {
+            FractalError::InvalidState(format!(
+                "leaf {} was not present in the final considered candidate set",
+                leaf_index
+            ))
+        })
 }
 
 fn selection_flat_index(

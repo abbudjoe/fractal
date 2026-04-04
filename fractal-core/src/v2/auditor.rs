@@ -108,12 +108,12 @@ pub struct CausalMemoryEvaluationContext {
     pub span_distance: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CausalMemoryHeadContext {
     pub head_index: usize,
     pub routing_depth: usize,
-    pub span_distance: Option<usize>,
-    pub selected_leaf_index: Option<usize>,
+    pub span_distances: Vec<usize>,
+    pub selected_leaf_indices: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -274,15 +274,15 @@ impl CausalMemoryAuditReport {
                         .entry(head_context.head_index)
                         .or_default()
                         .push(metrics);
-                    if let Some(span_distance) = head_context.span_distance {
+                    for span_distance in &head_context.span_distances {
                         span_distance_groups
-                            .entry(span_distance)
+                            .entry(*span_distance)
                             .or_default()
                             .push(metrics);
                     }
-                    if let Some(selected_leaf_index) = head_context.selected_leaf_index {
+                    for selected_leaf_index in &head_context.selected_leaf_indices {
                         selected_leaf_groups
-                            .entry(selected_leaf_index)
+                            .entry(*selected_leaf_index)
                             .or_default()
                             .push(metrics);
                     }
@@ -417,7 +417,7 @@ pub(crate) fn summarize_head_contexts(
         .unwrap_or(0);
     let span_distance = head_contexts
         .iter()
-        .filter_map(|head_context| head_context.span_distance)
+        .flat_map(|head_context| head_context.span_distances.iter().copied())
         .min();
 
     CausalMemoryEvaluationContext {
@@ -468,8 +468,8 @@ mod tests {
                 reference_head_contexts: vec![CausalMemoryHeadContext {
                     head_index: 0,
                     routing_depth: 2,
-                    span_distance: Some(8),
-                    selected_leaf_index: Some(1),
+                    span_distances: vec![8, 12],
+                    selected_leaf_indices: vec![1, 2],
                 }],
                 target_token_id: 7,
                 reference_loss: 1.0,
@@ -485,8 +485,8 @@ mod tests {
                         head_contexts: vec![CausalMemoryHeadContext {
                             head_index: 0,
                             routing_depth: 2,
-                            span_distance: Some(8),
-                            selected_leaf_index: Some(1),
+                            span_distances: vec![8, 12],
+                            selected_leaf_indices: vec![1, 2],
                         }],
                         metrics: Some(CausalMemoryDeltaMetrics {
                             loss_delta: 0.2,
@@ -505,8 +505,8 @@ mod tests {
                         head_contexts: vec![CausalMemoryHeadContext {
                             head_index: 0,
                             routing_depth: 2,
-                            span_distance: Some(8),
-                            selected_leaf_index: Some(1),
+                            span_distances: vec![8, 12],
+                            selected_leaf_indices: vec![1, 2],
                         }],
                         metrics: Some(CausalMemoryDeltaMetrics {
                             loss_delta: 0.6,
@@ -527,8 +527,8 @@ mod tests {
         assert_eq!(report.utility_by_routing_depth.len(), 1);
         assert_eq!(report.utility_by_routing_depth[0].routing_depth, 2);
         assert_eq!(report.utility_by_routing_head.len(), 1);
-        assert_eq!(report.utility_by_span_distance.len(), 1);
-        assert_eq!(report.utility_by_selected_leaf.len(), 1);
+        assert_eq!(report.utility_by_span_distance.len(), 2);
+        assert_eq!(report.utility_by_selected_leaf.len(), 2);
         assert_eq!(report.utility_by_task_family.len(), 1);
     }
 }
