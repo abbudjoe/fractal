@@ -376,12 +376,13 @@ fn render_table(report: &V2LearnedAblationReport) -> String {
         let _ = writeln!(output);
         let _ = writeln!(
             output,
-            "{} roots={} total_state={} total_readout={} best_eval_loss={:.4} best_checkpoint={}",
+            "{} roots={} total_state={} total_readout={} best_eval_loss={:.4} evaluated_eval_loss={:.4} evaluated_checkpoint={}",
             topology_label(topology_run.topology),
             topology_run.model_config.root_count,
             topology_run.model_config.total_root_state_dim,
             topology_run.model_config.total_root_readout_dim,
             topology_run.smoke.best_eval.mean_loss,
+            topology_run.evaluated_eval.mean_loss,
             checkpoint_kind_label(topology_run.evaluated_checkpoint_kind),
         );
     }

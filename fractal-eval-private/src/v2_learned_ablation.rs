@@ -10,8 +10,8 @@ use crate::{
     load_baseline_v2_checkpoint_model, run_baseline_v2_smoke_train,
     run_v2_synthetic_probe_suites_with_modes, BaselineV2SyntheticModelConfig, SyntheticProbeKind,
     SyntheticProbeMetrics, SyntheticProbeMode, SyntheticProbeReport, SyntheticProbeSuite,
-    V2CheckpointKind, V2CheckpointSelection, V2RootTopology, V2SmokeTrainConfig,
-    V2SmokeTrainReport,
+    V2CheckpointKind, V2CheckpointSelection, V2RootTopology, V2SmokeEvalMetrics,
+    V2SmokeTrainConfig, V2SmokeTrainReport,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -161,6 +161,7 @@ pub struct V2LearnedAblationTopologyReport {
     pub model_config: BaselineV2SyntheticModelConfig,
     pub checkpoint_selection: V2CheckpointSelection,
     pub evaluated_checkpoint_kind: V2CheckpointKind,
+    pub evaluated_eval: V2SmokeEvalMetrics,
     pub smoke: V2SmokeTrainReport,
     pub probe: SyntheticProbeReport,
 }
@@ -209,6 +210,10 @@ where
 
         let training = run_baseline_v2_smoke_train::<TrainB>(topology_smoke, train_device)?;
         let evaluated_checkpoint_kind = config.checkpoint_selection.resolved_kind(&training.report);
+        let evaluated_eval = match config.checkpoint_selection {
+            V2CheckpointSelection::Best => training.report.best_eval.clone(),
+            V2CheckpointSelection::Final => training.report.final_eval.clone(),
+        };
         let loaded = load_baseline_v2_checkpoint_model::<EvalB>(
             &training.report.checkpoint.report_path,
             config.checkpoint_selection,
@@ -226,6 +231,7 @@ where
             model_config: loaded.report.config.model,
             checkpoint_selection: loaded.selection,
             evaluated_checkpoint_kind,
+            evaluated_eval,
             smoke: training.report,
             probe,
         });
@@ -414,8 +420,10 @@ mod tests {
             single.evaluated_checkpoint_kind,
             V2CheckpointKind::FinalEval
         );
+        assert_eq!(single.evaluated_eval, single.smoke.final_eval);
         assert_eq!(multi.checkpoint_selection, V2CheckpointSelection::Final);
         assert_eq!(multi.evaluated_checkpoint_kind, V2CheckpointKind::FinalEval);
+        assert_eq!(multi.evaluated_eval, multi.smoke.final_eval);
         let step7 = report
             .step(V2RequiredAblationStep::MultiRootSparseRetrieval)
             .unwrap();
