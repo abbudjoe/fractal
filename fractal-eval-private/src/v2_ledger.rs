@@ -12,7 +12,7 @@ use fractal_core::error::FractalError;
 
 use crate::{
     SyntheticProbeProjectionReport, SyntheticProbeReport, V2AblationReport, V2BenchmarkReport,
-    V2SmokeTrainReport, V2SupervisedSyntheticTrainReport,
+    V2LearnedAblationReport, V2SmokeTrainReport, V2SupervisedSyntheticTrainReport,
 };
 
 pub const DEFAULT_V2_RESULTS_LEDGER_PATH: &str = "docs/v2-results-ledger.jsonl";
@@ -26,6 +26,7 @@ pub enum V2ResultsLedgerKind {
     FusionDiagnostic,
     Benchmark,
     AblationSweep,
+    LearnedAblationMatrix,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -106,6 +107,21 @@ impl V2ResultsLedgerEntry {
     ) -> Result<Self, FractalError> {
         Self::from_payload(
             V2ResultsLedgerKind::AblationSweep,
+            model,
+            note,
+            run_label,
+            report,
+        )
+    }
+
+    pub fn learned_ablation_matrix(
+        model: impl Into<String>,
+        note: impl Into<String>,
+        report: &V2LearnedAblationReport,
+        run_label: Option<String>,
+    ) -> Result<Self, FractalError> {
+        Self::from_payload(
+            V2ResultsLedgerKind::LearnedAblationMatrix,
             model,
             note,
             run_label,

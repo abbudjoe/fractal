@@ -2,6 +2,7 @@ pub mod v2_ablation;
 pub mod v2_benchmark;
 pub mod v2_checkpoint;
 pub mod v2_fixture;
+pub mod v2_learned_ablation;
 pub mod v2_ledger;
 pub mod v2_supervised;
 pub mod v2_synthetic;
@@ -22,6 +23,11 @@ pub use v2_checkpoint::{
 };
 pub use v2_fixture::{
     build_baseline_v2_synthetic_model, BaselineV2SyntheticModel, BaselineV2SyntheticModelConfig,
+};
+pub use v2_learned_ablation::{
+    required_v2_learned_ablation_modes, run_required_v2_learned_ablation_matrix,
+    V2LearnedAblationConfig, V2LearnedAblationReport, V2LearnedAblationStepReport,
+    V2LearnedAblationSuiteMetrics, V2LearnedAblationTopologyReport, V2RequiredAblationStep,
 };
 pub use v2_ledger::{
     append_v2_results_ledger_entry, default_v2_results_ledger_path, read_v2_results_ledger,
