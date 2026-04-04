@@ -2975,6 +2975,91 @@ mod tests {
     }
 
     #[test]
+    fn fractal_v2_causal_memory_audit_tracks_all_selected_slots_per_head() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = baseline_v2_model::<TestBackend>(&device);
+        let input_ids = token_ids::<TestBackend>(
+            &(1..=64)
+                .map(|value| (value % 63 + 1) as i64)
+                .collect::<Vec<_>>(),
+            [1, 64],
+            &device,
+        );
+        let target_ids = repeated_target_ids::<TestBackend>(7, [1, 64], &device);
+        let plan = CausalMemoryAuditPlan::all(vec![crate::v2::CausalMemoryAuditSample {
+            batch_index: 0,
+            position: 63,
+            task_family: crate::v2::CausalMemoryTaskFamily::OrdinaryLm,
+        }])
+        .unwrap();
+
+        let report = model.audit_causal_memory(input_ids, target_ids, &plan).unwrap();
+        let sample = &report.sample_reports[0];
+
+        assert_eq!(sample.reference_head_contexts.len(), 2);
+        assert!(sample
+            .reference_head_contexts
+            .iter()
+            .all(|context| context.selected_leaf_indices.len() == 2));
+        assert!(sample
+            .reference_head_contexts
+            .iter()
+            .all(|context| context.span_distances.len() == 2));
+        assert!(report.utility_by_selected_leaf.len() >= 2);
+        assert!(report.utility_by_span_distance.len() >= 2);
+    }
+
+    #[test]
+    fn fractal_v2_next_best_route_renormalizes_selected_scores() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = baseline_v2_model::<TestBackend>(&device);
+        let input_ids = token_ids::<TestBackend>(
+            &(1..=64)
+                .map(|value| (value % 63 + 1) as i64)
+                .collect::<Vec<_>>(),
+            [1, 64],
+            &device,
+        );
+
+        let trace = model.forward_retrieval_trace(input_ids).unwrap();
+        let final_step = trace.steps().last().unwrap();
+        let next_best = next_best_route_for_batch(final_step.routed(), trace.final_state().tree(), 0, 64)
+            .unwrap()
+            .expect("expected an unselected next-best leaf on the final step");
+        let next_best_scores = next_best
+            .selected_leaf_scores()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .unwrap();
+        let next_best_indices = next_best
+            .selected_leaf_indices()
+            .to_data()
+            .convert::<i64>()
+            .into_vec::<i64>()
+            .unwrap();
+
+        for head_index in 0..2 {
+            let batch_route = &next_best.traces()[head_index].batch_routes[0];
+            let final_route_step = batch_route.steps.last().unwrap();
+            let selected_raw_scores = batch_route
+                .selected_leaf_indices
+                .iter()
+                .map(|leaf_index| raw_score_for_considered_leaf(final_route_step, *leaf_index))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let expected = softmax_vec(&selected_raw_scores);
+            let score_base = head_index * 2;
+
+            assert!((next_best_scores[score_base] + next_best_scores[score_base + 1] - 1.0).abs() < 1.0e-5);
+            assert_eq!(next_best_indices[score_base] as usize, batch_route.selected_leaf_indices[0]);
+            assert_eq!(next_best_indices[score_base + 1] as usize, batch_route.selected_leaf_indices[1]);
+            assert!((next_best_scores[score_base] - expected[0]).abs() < 1.0e-5);
+            assert!((next_best_scores[score_base + 1] - expected[1]).abs() < 1.0e-5);
+        }
+    }
+
+    #[test]
     fn fractal_v2_causal_memory_audit_no_tree_matches_manual_final_step_ablation() {
         let device = <TestBackend as Backend>::Device::default();
         let model = baseline_v2_model::<TestBackend>(&device);
