@@ -340,6 +340,19 @@ where
         &self.output
     }
 
+    pub fn routing_query_from_root_readouts(
+        &self,
+        root_readouts: Tensor<B, 3>,
+        active_root_count: usize,
+    ) -> Result<Tensor<B, 2>, FractalError> {
+        summarize_query_from_roots(
+            root_readouts,
+            active_root_count,
+            self.root_count,
+            self.root_readout_dim,
+        )
+    }
+
     pub fn forward(
         &self,
         input_ids: Tensor<B, 2, Int>,
