@@ -151,6 +151,7 @@ pub struct CausalMemoryAggregateStats {
     pub average_loss_delta: f32,
     pub average_target_logit_delta: f32,
     pub average_kl_divergence: f32,
+    pub retrieval_accuracy_count: usize,
     pub average_retrieval_accuracy_delta: Option<f32>,
     pub average_perplexity_delta: f32,
 }
@@ -423,6 +424,7 @@ fn aggregate_metrics(metrics: &[CausalMemoryDeltaMetrics]) -> CausalMemoryAggreg
         average_loss_delta: loss_sum / count as f32,
         average_target_logit_delta: target_logit_sum / count as f32,
         average_kl_divergence: kl_sum / count as f32,
+        retrieval_accuracy_count,
         average_retrieval_accuracy_delta: if retrieval_accuracy_count == 0 {
             None
         } else {
@@ -560,8 +562,113 @@ mod tests {
         assert_eq!(
             report.utility_by_task_family[0]
                 .stats
+                .retrieval_accuracy_count,
+            2
+        );
+        assert_eq!(
+            report.utility_by_task_family[0]
+                .stats
                 .average_retrieval_accuracy_delta,
             Some(0.7)
         );
+    }
+
+    #[test]
+    fn causal_memory_aggregate_stats_expose_retrieval_accuracy_denominator() {
+        let report = CausalMemoryAuditReport::from_sample_reports(vec![
+            CausalMemoryAuditSampleReport {
+                sample: CausalMemoryAuditSample {
+                    batch_index: 0,
+                    position: 7,
+                    task_family: CausalMemoryTaskFamily::OrdinaryLm,
+                },
+                reference_context: CausalMemoryEvaluationContext {
+                    routing_depth: 1,
+                    span_distance: Some(2),
+                },
+                reference_head_contexts: vec![CausalMemoryHeadContext {
+                    head_index: 0,
+                    routing_depth: 1,
+                    span_distances: vec![2],
+                    selected_leaf_indices: vec![0],
+                }],
+                target_token_id: 3,
+                reference_loss: 1.0,
+                reference_target_logit: 0.5,
+                interventions: vec![CausalMemoryInterventionResult {
+                    intervention: CausalMemoryIntervention::NoTreeRead,
+                    applied: true,
+                    context: Some(CausalMemoryEvaluationContext {
+                        routing_depth: 1,
+                        span_distance: Some(2),
+                    }),
+                    head_contexts: vec![CausalMemoryHeadContext {
+                        head_index: 0,
+                        routing_depth: 1,
+                        span_distances: vec![2],
+                        selected_leaf_indices: vec![0],
+                    }],
+                    metrics: Some(CausalMemoryDeltaMetrics {
+                        loss_delta: 0.1,
+                        target_logit_delta: 0.2,
+                        kl_divergence: 0.3,
+                        retrieval_accuracy_delta: None,
+                        perplexity_delta: 0.4,
+                    }),
+                }],
+            },
+            CausalMemoryAuditSampleReport {
+                sample: CausalMemoryAuditSample {
+                    batch_index: 0,
+                    position: 15,
+                    task_family: CausalMemoryTaskFamily::Copy,
+                },
+                reference_context: CausalMemoryEvaluationContext {
+                    routing_depth: 1,
+                    span_distance: Some(4),
+                },
+                reference_head_contexts: vec![CausalMemoryHeadContext {
+                    head_index: 0,
+                    routing_depth: 1,
+                    span_distances: vec![4],
+                    selected_leaf_indices: vec![1],
+                }],
+                target_token_id: 5,
+                reference_loss: 1.2,
+                reference_target_logit: 0.7,
+                interventions: vec![CausalMemoryInterventionResult {
+                    intervention: CausalMemoryIntervention::NoTreeRead,
+                    applied: true,
+                    context: Some(CausalMemoryEvaluationContext {
+                        routing_depth: 1,
+                        span_distance: Some(4),
+                    }),
+                    head_contexts: vec![CausalMemoryHeadContext {
+                        head_index: 0,
+                        routing_depth: 1,
+                        span_distances: vec![4],
+                        selected_leaf_indices: vec![1],
+                    }],
+                    metrics: Some(CausalMemoryDeltaMetrics {
+                        loss_delta: 0.5,
+                        target_logit_delta: 0.6,
+                        kl_divergence: 0.7,
+                        retrieval_accuracy_delta: Some(1.0),
+                        perplexity_delta: 0.8,
+                    }),
+                }],
+            },
+        ]);
+
+        let stats = report
+            .utility_by_intervention
+            .iter()
+            .find(|aggregate| aggregate.intervention == CausalMemoryIntervention::NoTreeRead)
+            .unwrap()
+            .stats;
+
+        assert_eq!(stats.count, 2);
+        assert_eq!(stats.retrieval_accuracy_count, 1);
+        assert_eq!(stats.average_retrieval_accuracy_delta, Some(1.0));
     }
 }
