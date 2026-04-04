@@ -28,10 +28,12 @@ pub use v2_ledger::{
     DEFAULT_V2_RESULTS_LEDGER_PATH,
 };
 pub use v2_synthetic::{
-    default_v2_synthetic_probe_suites, run_v2_synthetic_probe_suite, run_v2_synthetic_probe_suites,
-    SyntheticProbeKind, SyntheticProbeMetrics, SyntheticProbeMode, SyntheticProbeModeReport,
-    SyntheticProbeModel, SyntheticProbeReport, SyntheticProbeSample, SyntheticProbeSampleResult,
-    SyntheticProbeSuite, SyntheticProbeSuiteReport,
+    default_v2_synthetic_probe_suites, run_v2_synthetic_probe_suite,
+    run_v2_synthetic_probe_suite_with_modes, run_v2_synthetic_probe_suites,
+    run_v2_synthetic_probe_suites_with_modes, SyntheticProbeKind, SyntheticProbeMetrics,
+    SyntheticProbeMode, SyntheticProbeModeReport, SyntheticProbeModel, SyntheticProbeReport,
+    SyntheticProbeSample, SyntheticProbeSampleResult, SyntheticProbeSuite,
+    SyntheticProbeSuiteReport,
 };
 pub use v2_training::{
     baseline_v2_byte_level_smoke_model_config, default_v2_smoke_corpus_paths,

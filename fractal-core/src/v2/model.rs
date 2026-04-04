@@ -355,6 +355,29 @@ where
         )
     }
 
+    pub fn project_retrieval_step_logits_with_memory_mode(
+        &self,
+        root_readouts: Tensor<B, 3>,
+        routed: &crate::v2::FractalRouteOutput<B>,
+        exact_read: &crate::v2::ExactLeafReadOutput<B>,
+        memory_mode: FractalV2MemoryMode,
+    ) -> Result<Tensor<B, 2>, FractalError> {
+        let [batch_size, _, _] = root_readouts.dims();
+        let fusion_input = ReadFusionInput::new(
+            root_readouts,
+            routed.selected_leaf_values(),
+            routed.selected_leaf_scores(),
+            routed.selected_leaf_mask(),
+            exact_read.read_values(),
+            exact_read.selected_token_mask(),
+        )?;
+        self.project_step_logits_from_fusion_input(
+            batch_size,
+            fusion_input,
+            memory_mode.read_fusion_ablation(),
+        )
+    }
+
     pub fn forward(
         &self,
         input_ids: Tensor<B, 2, Int>,
@@ -832,9 +855,20 @@ where
             exact_read_values,
             exact_read_mask,
         )?;
-        let fusion = self
-            .read_fusion
-            .fuse(&fusion_input, ReadFusionAblation::full())?;
+        self.project_step_logits_from_fusion_input(
+            batch_size,
+            fusion_input,
+            ReadFusionAblation::full(),
+        )
+    }
+
+    fn project_step_logits_from_fusion_input(
+        &self,
+        batch_size: usize,
+        fusion_input: ReadFusionInput<B>,
+        ablation: ReadFusionAblation,
+    ) -> Result<Tensor<B, 2>, FractalError> {
+        let fusion = self.read_fusion.fuse(&fusion_input, ablation)?;
         Ok(self
             .output
             .forward(

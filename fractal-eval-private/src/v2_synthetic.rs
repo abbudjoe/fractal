@@ -5,8 +5,9 @@ use burn::{
 use serde::Serialize;
 
 use fractal_core::{
-    error::FractalError, ExactLeafRead, FractalRouterHead, FractalV2MemoryMode, FractalV2Model,
-    LeafSummarizer, LocalTrunk, ReadFusion, TokenSpan, TreeMergeCell,
+    error::FractalError, BatchHeadRoute, ExactLeafRead, FractalRouteOutput, FractalRouterHead,
+    FractalRoutingDiagnostics, FractalV2MemoryMode, FractalV2Model, HeadRouteTrace, LeafSummarizer,
+    LocalTrunk, ReadFusion, TokenSpan, TreeMergeCell,
 };
 
 use crate::{
@@ -40,6 +41,8 @@ pub enum SyntheticProbeMode {
     SummariesOnly,
     TreeOnly,
     TreePlusExactRead,
+    OracleTreeOnly,
+    OracleTreePlusExactRead,
 }
 
 impl SyntheticProbeMode {
@@ -50,25 +53,46 @@ impl SyntheticProbeMode {
         Self::TreePlusExactRead,
     ];
 
-    pub fn memory_mode(self) -> FractalV2MemoryMode {
+    pub const ALL_WITH_ORACLE: [Self; 6] = [
+        Self::NoMemory,
+        Self::SummariesOnly,
+        Self::TreeOnly,
+        Self::TreePlusExactRead,
+        Self::OracleTreeOnly,
+        Self::OracleTreePlusExactRead,
+    ];
+
+    pub fn memory_mode(self) -> Option<FractalV2MemoryMode> {
         match self {
-            Self::NoMemory => FractalV2MemoryMode::NoMemory,
-            Self::SummariesOnly => FractalV2MemoryMode::SummariesOnly,
-            Self::TreeOnly => FractalV2MemoryMode::TreeOnly,
-            Self::TreePlusExactRead => FractalV2MemoryMode::TreePlusExactRead,
+            Self::NoMemory => Some(FractalV2MemoryMode::NoMemory),
+            Self::SummariesOnly => Some(FractalV2MemoryMode::SummariesOnly),
+            Self::TreeOnly => Some(FractalV2MemoryMode::TreeOnly),
+            Self::TreePlusExactRead => Some(FractalV2MemoryMode::TreePlusExactRead),
+            Self::OracleTreeOnly | Self::OracleTreePlusExactRead => None,
         }
     }
 
     pub fn supports(self, minimum_mode: Self) -> bool {
-        self.rank() >= minimum_mode.rank()
-    }
-
-    fn rank(self) -> usize {
-        match self {
-            Self::NoMemory => 0,
-            Self::SummariesOnly => 1,
-            Self::TreeOnly => 2,
-            Self::TreePlusExactRead => 3,
+        match minimum_mode {
+            Self::NoMemory => true,
+            Self::SummariesOnly => !matches!(self, Self::NoMemory),
+            Self::TreeOnly => matches!(
+                self,
+                Self::TreeOnly
+                    | Self::TreePlusExactRead
+                    | Self::OracleTreeOnly
+                    | Self::OracleTreePlusExactRead
+            ),
+            Self::TreePlusExactRead => {
+                matches!(
+                    self,
+                    Self::TreePlusExactRead | Self::OracleTreePlusExactRead
+                )
+            }
+            Self::OracleTreeOnly => {
+                matches!(self, Self::OracleTreeOnly | Self::OracleTreePlusExactRead)
+            }
+            Self::OracleTreePlusExactRead => matches!(self, Self::OracleTreePlusExactRead),
         }
     }
 }
@@ -345,11 +369,14 @@ where
             TensorData::new(sample.input_ids.clone(), [1, sample.input_ids.len()]),
             device,
         );
-        let logits = self
-            .forward_with_memory_mode(input_ids, mode.memory_mode())?
-            .logits()
-            .narrow(1, sample.target_position, 1)
-            .reshape([self.vocab_size()]);
+        let logits = match mode.memory_mode() {
+            Some(memory_mode) => self
+                .forward_with_memory_mode(input_ids, memory_mode)?
+                .logits()
+                .narrow(1, sample.target_position, 1)
+                .reshape([self.vocab_size()]),
+            None => oracle_logits_for_sample(self, sample, mode, input_ids)?,
+        };
 
         logits
             .to_data()
@@ -359,14 +386,208 @@ where
     }
 }
 
+fn oracle_logits_for_sample<B, LT, LS, TM, RH, ER, RF>(
+    model: &FractalV2Model<B, LT, LS, TM, RH, ER, RF>,
+    sample: &SyntheticProbeSample,
+    mode: SyntheticProbeMode,
+    input_ids: Tensor<B, 2, Int>,
+) -> Result<Tensor<B, 1>, FractalError>
+where
+    B: Backend,
+    LT: LocalTrunk<B> + Module<B>,
+    LS: LeafSummarizer<B> + Module<B>,
+    TM: TreeMergeCell<B> + Module<B>,
+    RH: FractalRouterHead<B> + Module<B>,
+    ER: ExactLeafRead<B> + Module<B>,
+    RF: ReadFusion<B> + Module<B>,
+{
+    let memory_mode = match mode {
+        SyntheticProbeMode::OracleTreeOnly => FractalV2MemoryMode::TreeOnly,
+        SyntheticProbeMode::OracleTreePlusExactRead => FractalV2MemoryMode::TreePlusExactRead,
+        _ => {
+            return Err(FractalError::InvalidConfig(format!(
+                "synthetic_probe oracle logits require an oracle mode, got {:?}",
+                mode
+            )))
+        }
+    };
+    let trace =
+        model.forward_retrieval_trace_with_memory_mode(input_ids, FractalV2MemoryMode::TreeOnly)?;
+    let step = trace.steps().get(sample.target_position).ok_or_else(|| {
+        FractalError::InvalidState(format!(
+            "synthetic_probe target position {} is out of bounds for {} retrieval steps",
+            sample.target_position,
+            trace.steps().len()
+        ))
+    })?;
+    let query_position = sample.target_position.checked_add(1).ok_or_else(|| {
+        FractalError::InvalidState("synthetic_probe query position overflowed".to_string())
+    })?;
+    let root_readouts = step.root_readouts();
+    let active_root_count = root_readouts.dims()[1];
+    let query = model.routing_query_from_root_readouts(root_readouts.clone(), active_root_count)?;
+    let oracle_routed = oracle_route_output(
+        model.router().shape(),
+        trace.final_state().tree(),
+        sample.evidence_span,
+        query_position,
+        &query.device(),
+    )?;
+    let oracle_exact = model.exact_read().read(
+        query,
+        query_position,
+        &oracle_routed,
+        trace.final_state().leaf_token_cache(),
+    )?;
+    let logits = model.project_retrieval_step_logits_with_memory_mode(
+        root_readouts,
+        &oracle_routed,
+        &oracle_exact,
+        memory_mode,
+    )?;
+
+    Ok(logits.reshape([model.shape().vocab_size]))
+}
+
+fn oracle_route_output<B: Backend>(
+    shape: fractal_core::FractalRouterHeadShape,
+    tree: &fractal_core::TreeSummaryState<B>,
+    evidence_span: TokenSpan,
+    query_position: usize,
+    device: &B::Device,
+) -> Result<FractalRouteOutput<B>, FractalError> {
+    let level_zero = tree.level(0).ok_or_else(|| {
+        FractalError::InvalidState(
+            "oracle synthetic probe requires a sealed level-0 summary tree".to_string(),
+        )
+    })?;
+    let oracle_leaf_index = level_zero
+        .shared_spans()
+        .iter()
+        .position(|span| span_covers(span, evidence_span) && span.end() <= query_position)
+        .ok_or_else(|| {
+            FractalError::InvalidState(format!(
+                "oracle synthetic probe could not find a sealed evidence leaf covering [{}, {}) before query position {}",
+                evidence_span.start(),
+                evidence_span.end(),
+                query_position
+            ))
+        })?;
+    let oracle_leaf_span = level_zero.shared_spans()[oracle_leaf_index];
+    let [batch_size, _, value_dim] = level_zero.values().dims();
+    let total_slots = batch_size * shape.head_count * shape.top_leaf_reads;
+    let mut selected_leaf_indices = vec![0i64; total_slots];
+    let mut selected_leaf_mask = vec![false; total_slots];
+    let mut selected_leaf_scores = vec![0.0f32; total_slots];
+    for batch_index in 0..batch_size {
+        for head_index in 0..shape.head_count {
+            let flat_index = (batch_index * shape.head_count + head_index) * shape.top_leaf_reads;
+            selected_leaf_indices[flat_index] = oracle_leaf_index as i64;
+            selected_leaf_mask[flat_index] = true;
+            selected_leaf_scores[flat_index] = 1.0;
+        }
+    }
+
+    let selected_leaf_value = level_zero
+        .values()
+        .slice([
+            0..batch_size,
+            oracle_leaf_index..oracle_leaf_index + 1,
+            0..value_dim,
+        ])
+        .reshape([batch_size, 1, 1, value_dim])
+        .repeat(&[1, shape.head_count, 1, 1]);
+    let selected_leaf_values = if shape.top_leaf_reads == 1 {
+        selected_leaf_value
+    } else {
+        Tensor::cat(
+            vec![
+                selected_leaf_value,
+                Tensor::<B, 4>::zeros(
+                    [
+                        batch_size,
+                        shape.head_count,
+                        shape.top_leaf_reads - 1,
+                        value_dim,
+                    ],
+                    device,
+                ),
+            ],
+            2,
+        )
+    };
+
+    let selected_span_distance = query_position.saturating_sub(oracle_leaf_span.end());
+    FractalRouteOutput::from_parts(
+        Tensor::<B, 3, Int>::from_data(
+            TensorData::new(
+                selected_leaf_indices,
+                [batch_size, shape.head_count, shape.top_leaf_reads],
+            ),
+            device,
+        ),
+        Tensor::<B, 3, burn::tensor::Bool>::from_data(
+            TensorData::new(
+                selected_leaf_mask,
+                [batch_size, shape.head_count, shape.top_leaf_reads],
+            ),
+            device,
+        ),
+        Tensor::<B, 3>::from_data(
+            TensorData::new(
+                selected_leaf_scores,
+                [batch_size, shape.head_count, shape.top_leaf_reads],
+            ),
+            device,
+        ),
+        selected_leaf_values,
+        (0..shape.head_count)
+            .map(|_| HeadRouteTrace {
+                batch_routes: (0..batch_size)
+                    .map(|_| BatchHeadRoute {
+                        steps: Vec::new(),
+                        selected_leaf_indices: vec![oracle_leaf_index],
+                        selected_leaf_spans: vec![oracle_leaf_span],
+                        selected_leaf_scores: vec![1.0],
+                    })
+                    .collect(),
+            })
+            .collect(),
+        FractalRoutingDiagnostics {
+            routing_depth_histogram: vec![fractal_core::RoutingHistogramBin {
+                value: 1,
+                count: batch_size * shape.head_count,
+            }],
+            candidate_entropy_per_head: vec![0.0; shape.head_count],
+            selected_span_distance_histogram: vec![fractal_core::RoutingHistogramBin {
+                value: selected_span_distance,
+                count: batch_size * shape.head_count,
+            }],
+            head_agreement_rate: 1.0,
+            head_disagreement_rate: 0.0,
+        },
+    )
+}
+
 pub fn run_v2_synthetic_probe_suites<M: SyntheticProbeModel>(
     model: &M,
     suites: &[SyntheticProbeSuite],
     device: &M::Device,
 ) -> Result<SyntheticProbeReport, FractalError> {
+    run_v2_synthetic_probe_suites_with_modes(model, suites, &SyntheticProbeMode::ALL, device)
+}
+
+pub fn run_v2_synthetic_probe_suites_with_modes<M: SyntheticProbeModel>(
+    model: &M,
+    suites: &[SyntheticProbeSuite],
+    modes: &[SyntheticProbeMode],
+    device: &M::Device,
+) -> Result<SyntheticProbeReport, FractalError> {
     let mut reports = Vec::with_capacity(suites.len());
     for suite in suites {
-        reports.push(run_v2_synthetic_probe_suite(model, suite, device)?);
+        reports.push(run_v2_synthetic_probe_suite_with_modes(
+            model, suite, modes, device,
+        )?);
     }
 
     Ok(SyntheticProbeReport { suites: reports })
@@ -377,10 +598,24 @@ pub fn run_v2_synthetic_probe_suite<M: SyntheticProbeModel>(
     suite: &SyntheticProbeSuite,
     device: &M::Device,
 ) -> Result<SyntheticProbeSuiteReport, FractalError> {
-    suite.validate_for_model(model.vocab_size(), model.leaf_size())?;
+    run_v2_synthetic_probe_suite_with_modes(model, suite, &SyntheticProbeMode::ALL, device)
+}
 
-    let mut mode_reports = Vec::with_capacity(SyntheticProbeMode::ALL.len());
-    for mode in SyntheticProbeMode::ALL {
+pub fn run_v2_synthetic_probe_suite_with_modes<M: SyntheticProbeModel>(
+    model: &M,
+    suite: &SyntheticProbeSuite,
+    modes: &[SyntheticProbeMode],
+    device: &M::Device,
+) -> Result<SyntheticProbeSuiteReport, FractalError> {
+    suite.validate_for_model(model.vocab_size(), model.leaf_size())?;
+    if modes.is_empty() {
+        return Err(FractalError::InvalidConfig(
+            "synthetic_probe.modes must not be empty".to_string(),
+        ));
+    }
+
+    let mut mode_reports = Vec::with_capacity(modes.len());
+    for &mode in modes {
         let mut sample_results = Vec::with_capacity(suite.samples.len());
         for sample in &suite.samples {
             let logits = model.logits_for_sample(sample, mode, device)?;
@@ -408,6 +643,10 @@ pub fn default_v2_synthetic_probe_suites() -> Vec<SyntheticProbeSuite> {
         noisy_retrieval_probe_suite(),
         far_token_comparison_probe_suite(),
     ]
+}
+
+fn span_covers(outer: &TokenSpan, inner: TokenSpan) -> bool {
+    outer.start() <= inner.start() && outer.end() >= inner.end()
 }
 
 fn score_probe_sample(
@@ -1557,6 +1796,16 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_probe_mode_supports_oracle_modes_explicitly() {
+        assert!(SyntheticProbeMode::OracleTreeOnly.supports(SyntheticProbeMode::TreeOnly));
+        assert!(!SyntheticProbeMode::OracleTreeOnly.supports(SyntheticProbeMode::TreePlusExactRead));
+        assert!(SyntheticProbeMode::OracleTreePlusExactRead
+            .supports(SyntheticProbeMode::TreePlusExactRead));
+        assert!(SyntheticProbeMode::OracleTreePlusExactRead.supports(SyntheticProbeMode::TreeOnly));
+        assert!(!SyntheticProbeMode::NoMemory.supports(SyntheticProbeMode::TreeOnly));
+    }
+
+    #[test]
     fn default_v2_synthetic_probe_suites_are_memory_separating_on_real_v2_path() {
         let device = <TestBackend as Backend>::Device::default();
         let model = structural_v2_model::<TestBackend>(&device);
@@ -1714,6 +1963,87 @@ mod tests {
     }
 
     #[test]
+    fn oracle_route_output_selects_the_evidence_leaf() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = structural_v2_model::<TestBackend>(&device);
+        let suite = copy_probe_suite();
+        let sample = &suite.samples[0];
+        let input_ids = Tensor::<TestBackend, 2, Int>::from_data(
+            TensorData::new(sample.input_ids.clone(), [1, sample.input_ids.len()]),
+            &device,
+        );
+        let trace = model
+            .forward_retrieval_trace_with_memory_mode(input_ids, FractalV2MemoryMode::TreeOnly)
+            .unwrap();
+        let step = trace.steps().last().unwrap();
+        let query = model
+            .routing_query_from_root_readouts(
+                step.root_readouts(),
+                model.shape().local_trunk.root_count,
+            )
+            .unwrap();
+        let routed = oracle_route_output(
+            model.router().shape(),
+            trace.final_state().tree(),
+            sample.evidence_span,
+            sample.target_position + 1,
+            &query.device(),
+        )
+        .unwrap();
+        let selected_spans = selected_route_spans(
+            &routed,
+            trace.final_state().tree().level(0).unwrap().shared_spans(),
+        );
+
+        assert_eq!(
+            selected_spans,
+            vec![trace.final_state().tree().level(0).unwrap().shared_spans()[0]]
+        );
+        assert!(selected_spans
+            .iter()
+            .all(|span| span_covers(span, sample.evidence_span)));
+    }
+
+    #[test]
+    fn oracle_probe_modes_extend_the_fixture_harness() {
+        let fixture = FixtureModel {
+            vocab_size: 64,
+            leaf_size: 16,
+        };
+        let modes = [
+            SyntheticProbeMode::OracleTreeOnly,
+            SyntheticProbeMode::OracleTreePlusExactRead,
+        ];
+        let report = run_v2_synthetic_probe_suites_with_modes(
+            &fixture,
+            &default_v2_synthetic_probe_suites(),
+            &modes,
+            &(),
+        )
+        .unwrap();
+
+        let copy = report
+            .suites
+            .iter()
+            .find(|suite| suite.kind == SyntheticProbeKind::Copy)
+            .unwrap();
+        assert_eq!(
+            copy.mode_report(SyntheticProbeMode::OracleTreeOnly)
+                .unwrap()
+                .metrics
+                .accuracy,
+            0.0
+        );
+        assert_eq!(
+            copy.mode_report(SyntheticProbeMode::OracleTreePlusExactRead)
+                .unwrap()
+                .metrics
+                .accuracy,
+            1.0
+        );
+    }
+
+    #[test]
     fn synthetic_probe_harness_runs_against_baseline_v2_model() {
         let device = <TestBackend as Backend>::Device::default();
         let model = baseline_v2_synthetic_model::<TestBackend>(&device).unwrap();
@@ -1770,7 +2100,9 @@ mod tests {
             .collect()
     }
 
-    fn selected_absolute_positions(output: &ExactLeafReadOutput<TestBackend>) -> Vec<usize> {
+    fn selected_absolute_positions(
+        output: &fractal_core::ExactLeafReadOutput<TestBackend>,
+    ) -> Vec<usize> {
         let positions = output
             .selected_token_absolute_positions()
             .to_data()

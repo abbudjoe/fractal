@@ -4,9 +4,9 @@ use burn::backend::Candle;
 use fractal_eval_private::{
     append_v2_results_ledger_entry, build_baseline_v2_synthetic_model,
     default_v2_synthetic_probe_suites, load_baseline_v2_checkpoint_model,
-    resolve_requested_v2_results_ledger_path, run_v2_synthetic_probe_suites,
-    BaselineV2SyntheticModelConfig, SyntheticProbeKind, SyntheticProbeReport, SyntheticProbeSuite,
-    V2CheckpointSelection, V2ResultsLedgerEntry,
+    resolve_requested_v2_results_ledger_path, run_v2_synthetic_probe_suites_with_modes,
+    BaselineV2SyntheticModelConfig, SyntheticProbeKind, SyntheticProbeMode, SyntheticProbeReport,
+    SyntheticProbeSuite, V2CheckpointSelection, V2ResultsLedgerEntry,
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -25,13 +25,23 @@ fn run() -> Result<(), String> {
     let device = <ProbeBackend as burn::tensor::backend::Backend>::Device::default();
     let loaded_model = load_model(&args, &device)?;
     let suites = filter_suites(default_v2_synthetic_probe_suites(), args.suite)?;
-    let report = run_v2_synthetic_probe_suites(&loaded_model.model, &suites, &device)
-        .map_err(|error| format!("failed to run v2 synthetic probes: {error}"))?;
+    let execution_modes = if args.oracle {
+        &SyntheticProbeMode::ALL_WITH_ORACLE[..]
+    } else {
+        &SyntheticProbeMode::ALL[..]
+    };
+    let report = run_v2_synthetic_probe_suites_with_modes(
+        &loaded_model.model,
+        &suites,
+        execution_modes,
+        &device,
+    )
+    .map_err(|error| format!("failed to run v2 synthetic probes: {error}"))?;
     let rendered = render_report(
         &report,
         args.output,
         &loaded_model.model_label,
-        &loaded_model.note,
+        &render_note(&loaded_model.note, args.oracle),
     )?;
     maybe_append_ledger_entry(
         resolve_requested_v2_results_ledger_path(
@@ -41,7 +51,7 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("failed to resolve v2 results ledger path: {error}"))?,
         &report,
         &loaded_model.model_label,
-        &loaded_model.note,
+        &render_note(&loaded_model.note, args.oracle),
         args.run_label.as_deref(),
     )?;
     print!("{rendered}");
@@ -52,6 +62,7 @@ fn run() -> Result<(), String> {
 struct CliArgs {
     suite: SuiteSelection,
     output: OutputFormat,
+    oracle: bool,
     checkpoint_report: Option<PathBuf>,
     checkpoint_kind_override: Option<V2CheckpointSelection>,
     ledger_path: Option<String>,
@@ -62,6 +73,7 @@ impl CliArgs {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut suite = SuiteSelection::All;
         let mut output = OutputFormat::Table;
+        let mut oracle = false;
         let mut checkpoint_report = None;
         let mut checkpoint_kind_override = None;
         let mut ledger_path = None;
@@ -82,6 +94,9 @@ impl CliArgs {
                         .next()
                         .ok_or_else(|| "--output requires a value".to_owned())?;
                     output = OutputFormat::parse(&value)?;
+                }
+                "--oracle" => {
+                    oracle = true;
                 }
                 "--checkpoint-report" => {
                     let value = iter
@@ -126,6 +141,7 @@ impl CliArgs {
         Ok(Self {
             suite,
             output,
+            oracle,
             checkpoint_report,
             checkpoint_kind_override,
             ledger_path,
@@ -192,7 +208,7 @@ fn usage() -> String {
     let mut output = String::new();
     let _ = writeln!(
         output,
-        "Usage: cargo run --bin v2-synthetic-probe -- [--suite <all|copy|associative-recall|induction|noisy-retrieval|far-token-comparison>] [--output <table|json>] [--checkpoint-report <report.json>] [--checkpoint-kind <best|final>] [--ledger-path <default|path>] [--run-label <label>]"
+        "Usage: cargo run --bin v2-synthetic-probe -- [--suite <all|copy|associative-recall|induction|noisy-retrieval|far-token-comparison>] [--output <table|json>] [--oracle] [--checkpoint-report <report.json>] [--checkpoint-kind <best|final>] [--ledger-path <default|path>] [--run-label <label>]"
     );
     let _ = writeln!(
         output,
@@ -279,6 +295,14 @@ fn render_report(
     }
 }
 
+fn render_note(note: &str, oracle: bool) -> String {
+    if oracle {
+        format!("{note}; oracle routing forced to the evidence leaf")
+    } else {
+        note.to_string()
+    }
+}
+
 fn render_table(report: &SyntheticProbeReport, model_label: &str, note: &str) -> String {
     let mut output = String::new();
     let _ = writeln!(output, "V2 Synthetic Probe Live Run");
@@ -356,6 +380,10 @@ fn mode_label(mode: fractal_eval_private::SyntheticProbeMode) -> &'static str {
         fractal_eval_private::SyntheticProbeMode::SummariesOnly => "SummariesOnly",
         fractal_eval_private::SyntheticProbeMode::TreeOnly => "TreeOnly",
         fractal_eval_private::SyntheticProbeMode::TreePlusExactRead => "TreePlusExactRead",
+        fractal_eval_private::SyntheticProbeMode::OracleTreeOnly => "OracleTreeOnly",
+        fractal_eval_private::SyntheticProbeMode::OracleTreePlusExactRead => {
+            "OracleTreePlusExactRead"
+        }
     }
 }
 
@@ -372,6 +400,7 @@ mod tests {
 
         assert_eq!(args.suite, SuiteSelection::All);
         assert_eq!(args.output, OutputFormat::Table);
+        assert!(!args.oracle);
         assert_eq!(args.checkpoint_report, None);
         assert_eq!(args.checkpoint_kind_override, None);
         assert_eq!(args.ledger_path, None);
@@ -387,6 +416,7 @@ mod tests {
                 "copy",
                 "--output",
                 "json",
+                "--oracle",
                 "--checkpoint-report",
                 "/tmp/report.json",
                 "--checkpoint-kind",
@@ -403,6 +433,7 @@ mod tests {
 
         assert_eq!(args.suite, SuiteSelection::Kind(SyntheticProbeKind::Copy));
         assert_eq!(args.output, OutputFormat::Json);
+        assert!(args.oracle);
         assert_eq!(
             args.checkpoint_report,
             Some(PathBuf::from("/tmp/report.json"))
