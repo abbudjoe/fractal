@@ -526,6 +526,7 @@ where
                     head_contexts_for_route(&routed, sample.batch_index, query_position)?;
                 let reference_context = summarize_head_contexts(&reference_head_contexts);
                 let reference_metrics = AuditMetricReference {
+                    task_family: &sample.task_family,
                     context: reference_context,
                     head_contexts: &reference_head_contexts,
                     reference_loss,
@@ -974,6 +975,7 @@ fn selected_span_distance(
 
 #[derive(Clone, Copy)]
 struct AuditMetricReference<'a> {
+    task_family: &'a crate::v2::CausalMemoryTaskFamily,
     context: CausalMemoryEvaluationContext,
     head_contexts: &'a [CausalMemoryHeadContext],
     reference_loss: f32,
@@ -1000,6 +1002,13 @@ fn intervention_result<B: Backend>(
         reference.target_token_id,
         reference.vocab_size,
     )?;
+    let retrieval_accuracy_delta = retrieval_accuracy_delta(
+        reference.task_family,
+        reference.reference_logits,
+        &perturbed_logits,
+        reference.target_token_id,
+        reference.vocab_size,
+    )?;
 
     Ok(CausalMemoryInterventionResult {
         intervention,
@@ -1010,9 +1019,58 @@ fn intervention_result<B: Backend>(
             loss_delta: perturbed_loss - reference.reference_loss,
             target_logit_delta: reference.reference_target_logit - perturbed_target_logit,
             kl_divergence: kl_divergence(reference.reference_logits, &perturbed_logits)?,
+            retrieval_accuracy_delta,
             perplexity_delta: perturbed_loss.exp() - reference.reference_loss.exp(),
         }),
     })
+}
+
+fn retrieval_accuracy_delta(
+    task_family: &crate::v2::CausalMemoryTaskFamily,
+    reference_logits: &[f32],
+    perturbed_logits: &[f32],
+    target_token_id: i64,
+    vocab_size: usize,
+) -> Result<Option<f32>, FractalError> {
+    match task_family {
+        crate::v2::CausalMemoryTaskFamily::OrdinaryLm => Ok(None),
+        crate::v2::CausalMemoryTaskFamily::Copy
+        | crate::v2::CausalMemoryTaskFamily::AssociativeRecall
+        | crate::v2::CausalMemoryTaskFamily::Induction
+        | crate::v2::CausalMemoryTaskFamily::NoisyRetrieval
+        | crate::v2::CausalMemoryTaskFamily::Custom(_) => Ok(Some(
+            target_prediction_accuracy(reference_logits, target_token_id, vocab_size)?
+                - target_prediction_accuracy(perturbed_logits, target_token_id, vocab_size)?,
+        )),
+    }
+}
+
+fn target_prediction_accuracy(
+    logits: &[f32],
+    target_token_id: i64,
+    vocab_size: usize,
+) -> Result<f32, FractalError> {
+    Ok(
+        if predicted_token_id(logits, vocab_size)? == target_token_id {
+            1.0
+        } else {
+            0.0
+        },
+    )
+}
+
+fn predicted_token_id(logits: &[f32], vocab_size: usize) -> Result<i64, FractalError> {
+    ensure_match("predicted_token_id.vocab_size", logits.len(), vocab_size)?;
+    let (predicted_index, _) = logits
+        .iter()
+        .copied()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.total_cmp(right))
+        .ok_or_else(|| {
+            FractalError::InvalidState("cannot predict from empty logits".to_string())
+        })?;
+
+    Ok(predicted_index as i64)
 }
 
 fn zero_root_readout_for_batch<B: Backend>(
@@ -2993,7 +3051,9 @@ mod tests {
         }])
         .unwrap();
 
-        let report = model.audit_causal_memory(input_ids, target_ids, &plan).unwrap();
+        let report = model
+            .audit_causal_memory(input_ids, target_ids, &plan)
+            .unwrap();
         let sample = &report.sample_reports[0];
 
         assert_eq!(sample.reference_head_contexts.len(), 2);
@@ -3023,9 +3083,10 @@ mod tests {
 
         let trace = model.forward_retrieval_trace(input_ids).unwrap();
         let final_step = trace.steps().last().unwrap();
-        let next_best = next_best_route_for_batch(final_step.routed(), trace.final_state().tree(), 0, 64)
-            .unwrap()
-            .expect("expected an unselected next-best leaf on the final step");
+        let next_best =
+            next_best_route_for_batch(final_step.routed(), trace.final_state().tree(), 0, 64)
+                .unwrap()
+                .expect("expected an unselected next-best leaf on the final step");
         let next_best_scores = next_best
             .selected_leaf_scores()
             .to_data()
@@ -3051,12 +3112,59 @@ mod tests {
             let expected = softmax_vec(&selected_raw_scores);
             let score_base = head_index * 2;
 
-            assert!((next_best_scores[score_base] + next_best_scores[score_base + 1] - 1.0).abs() < 1.0e-5);
-            assert_eq!(next_best_indices[score_base] as usize, batch_route.selected_leaf_indices[0]);
-            assert_eq!(next_best_indices[score_base + 1] as usize, batch_route.selected_leaf_indices[1]);
+            assert!(
+                (next_best_scores[score_base] + next_best_scores[score_base + 1] - 1.0).abs()
+                    < 1.0e-5
+            );
+            assert_eq!(
+                next_best_indices[score_base] as usize,
+                batch_route.selected_leaf_indices[0]
+            );
+            assert_eq!(
+                next_best_indices[score_base + 1] as usize,
+                batch_route.selected_leaf_indices[1]
+            );
             assert!((next_best_scores[score_base] - expected[0]).abs() < 1.0e-5);
             assert!((next_best_scores[score_base + 1] - expected[1]).abs() < 1.0e-5);
         }
+    }
+
+    #[test]
+    fn fractal_v2_causal_memory_audit_reports_retrieval_accuracy_for_retrieval_tasks() {
+        let device = <TestBackend as Backend>::Device::default();
+        let model = baseline_v2_model::<TestBackend>(&device);
+        let input_ids = token_ids::<TestBackend>(
+            &(1..=64)
+                .map(|value| (value % 63 + 1) as i64)
+                .collect::<Vec<_>>(),
+            [1, 64],
+            &device,
+        );
+        let target_ids = repeated_target_ids::<TestBackend>(7, [1, 64], &device);
+        let plan = CausalMemoryAuditPlan::all(vec![crate::v2::CausalMemoryAuditSample {
+            batch_index: 0,
+            position: 63,
+            task_family: crate::v2::CausalMemoryTaskFamily::Copy,
+        }])
+        .unwrap();
+
+        let report = model
+            .audit_causal_memory(input_ids, target_ids, &plan)
+            .unwrap();
+
+        assert!(report.sample_reports[0]
+            .interventions
+            .iter()
+            .filter(|result| result.applied)
+            .all(|result| result
+                .metrics
+                .and_then(|metrics| metrics.retrieval_accuracy_delta)
+                .is_some()));
+        assert_eq!(report.utility_by_task_family.len(), 1);
+        assert!(report.utility_by_task_family[0]
+            .stats
+            .average_retrieval_accuracy_delta
+            .is_some());
     }
 
     #[test]

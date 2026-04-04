@@ -121,6 +121,7 @@ pub struct CausalMemoryDeltaMetrics {
     pub loss_delta: f32,
     pub target_logit_delta: f32,
     pub kl_divergence: f32,
+    pub retrieval_accuracy_delta: Option<f32>,
     pub perplexity_delta: f32,
 }
 
@@ -150,6 +151,7 @@ pub struct CausalMemoryAggregateStats {
     pub average_loss_delta: f32,
     pub average_target_logit_delta: f32,
     pub average_kl_divergence: f32,
+    pub average_retrieval_accuracy_delta: Option<f32>,
     pub average_perplexity_delta: f32,
 }
 
@@ -386,13 +388,31 @@ where
 fn aggregate_metrics(metrics: &[CausalMemoryDeltaMetrics]) -> CausalMemoryAggregateStats {
     let count = metrics.len();
     assert!(count > 0, "aggregate_metrics requires at least one metric");
-    let (loss_sum, target_logit_sum, kl_sum, perplexity_sum) = metrics.iter().fold(
-        (0.0f32, 0.0f32, 0.0f32, 0.0f32),
-        |(loss_acc, target_acc, kl_acc, perplexity_acc), metric| {
+    let (
+        loss_sum,
+        target_logit_sum,
+        kl_sum,
+        retrieval_accuracy_sum,
+        retrieval_accuracy_count,
+        perplexity_sum,
+    ) = metrics.iter().fold(
+        (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0usize, 0.0f32),
+        |(
+            loss_acc,
+            target_acc,
+            kl_acc,
+            retrieval_accuracy_acc,
+            retrieval_accuracy_count_acc,
+            perplexity_acc,
+        ),
+         metric| {
             (
                 loss_acc + metric.loss_delta,
                 target_acc + metric.target_logit_delta,
                 kl_acc + metric.kl_divergence,
+                retrieval_accuracy_acc + metric.retrieval_accuracy_delta.unwrap_or(0.0),
+                retrieval_accuracy_count_acc
+                    + usize::from(metric.retrieval_accuracy_delta.is_some()),
                 perplexity_acc + metric.perplexity_delta,
             )
         },
@@ -403,6 +423,11 @@ fn aggregate_metrics(metrics: &[CausalMemoryDeltaMetrics]) -> CausalMemoryAggreg
         average_loss_delta: loss_sum / count as f32,
         average_target_logit_delta: target_logit_sum / count as f32,
         average_kl_divergence: kl_sum / count as f32,
+        average_retrieval_accuracy_delta: if retrieval_accuracy_count == 0 {
+            None
+        } else {
+            Some(retrieval_accuracy_sum / retrieval_accuracy_count as f32)
+        },
         average_perplexity_delta: perplexity_sum / count as f32,
     }
 }
@@ -492,6 +517,7 @@ mod tests {
                             loss_delta: 0.2,
                             target_logit_delta: 0.3,
                             kl_divergence: 0.4,
+                            retrieval_accuracy_delta: Some(0.5),
                             perplexity_delta: 0.5,
                         }),
                     },
@@ -512,6 +538,7 @@ mod tests {
                             loss_delta: 0.6,
                             target_logit_delta: 0.7,
                             kl_divergence: 0.8,
+                            retrieval_accuracy_delta: Some(0.9),
                             perplexity_delta: 0.9,
                         }),
                     },
@@ -530,5 +557,11 @@ mod tests {
         assert_eq!(report.utility_by_span_distance.len(), 2);
         assert_eq!(report.utility_by_selected_leaf.len(), 2);
         assert_eq!(report.utility_by_task_family.len(), 1);
+        assert_eq!(
+            report.utility_by_task_family[0]
+                .stats
+                .average_retrieval_accuracy_delta,
+            Some(0.7)
+        );
     }
 }
