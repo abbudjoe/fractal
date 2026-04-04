@@ -1,403 +1,400 @@
-# Recursive Memory Kernel v1 — First PR Series Checklist
+# Recursive Memory Kernel v1 — Implementation Checklist
 
-## Goal
-
-Land the smallest tree-only v1 that is:
-
-* causally correct
-* easy to instrument
-* easy to ablate
-* narrow enough to debug
-
-This checklist is ordered.
-Do not skip ahead unless the earlier layer is stable.
+> Purpose: land the smallest tree-only v1 that is causally correct, observable, ablatable, and narrow enough to debug.
+>
+> Rule of thumb: do **not** add side-memory bank, learned merge scheduling, routing early-stop, or dense fallback attention until this checklist is complete.
 
 ---
 
-## PR 1 — Carve out v2 module boundaries
+## PR 1 — Scaffold v2 module boundaries
+
+**Title:** `scaffold fractal-v2 module boundaries`
 
 ### Deliverables
-
-Create explicit module boundaries without changing the current v1 path:
-
-* `LocalTrunk`
-* `LeafSummarizer`
-* `TreeMergeCell`
-* `FractalRouterHead`
-* `ReadFusion`
-* `FractalV2Model`
+- [ ] Add `LocalTrunk`
+- [ ] Add `LeafSummarizer`
+- [ ] Add `TreeMergeCell`
+- [ ] Add `FractalRouterHead`
+- [ ] Add `ReadFusion`
+- [ ] Add `FractalV2Model`
 
 ### Requirements
+- [ ] Do not disturb `recursive-kernel-v1`
+- [ ] No side-memory bank
+- [ ] No learned merge scheduling
+- [ ] No routing early-stop
+- [ ] No broad tournament integration beyond stub wiring
 
-* no behavior claims yet
-* no side-memory bank
-* no learned merge scheduling
-* no routing early-stop
-* no integration with existing tournament presets beyond stub wiring
-
-### Exit criteria
-
-* code compiles
-* types are explicit
-* module ownership is clear
-* `recursive-kernel-v1` remains undisturbed
+### Merge criteria
+- [ ] Workspace compiles
+- [ ] Module ownership is explicit
+- [ ] Public type boundaries are clear
+- [ ] Existing v1 path still runs unchanged
 
 ---
 
 ## PR 2 — Add typed v2 runtime state
 
+**Title:** `add typed recursive-memory-kernel v2 state surfaces`
+
 ### Deliverables
-
-Introduce typed state/storage contracts for:
-
-* multi-root recurrent state
-* live leaf state
-* sealed leaf summaries
-* tree level summaries
-* leaf token cache
-* retrieval policy
+- [ ] Add multi-root recurrent state
+- [ ] Add live leaf state
+- [ ] Add sealed leaf summary store
+- [ ] Add tree level summary stores
+- [ ] Add exact leaf token cache
+- [ ] Add retrieval policy surface
 
 ### Requirements
+- [ ] Prefer backend-friendly tensor layouts in hot paths
+- [ ] Avoid pointer-heavy recursive state structures
+- [ ] Separate conceptual ownership from runtime storage
+- [ ] Sketch checkpoint/serialization boundary
 
-* prefer backend-friendly tensor layouts in hot paths
-* avoid pointer-heavy recursive state structures
-* separate conceptual ownership from runtime storage layout
-
-### Exit criteria
-
-* state updates are testable in isolation
-* shapes are explicit
-* no hidden global state
-* serialization/checkpoint surface is at least sketched
+### Merge criteria
+- [ ] State transitions are testable in isolation
+- [ ] Shapes are explicit
+- [ ] No hidden global state
+- [ ] Types are stable enough for later model wiring
 
 ---
 
 ## PR 3 — Multi-root local trunk baseline
 
+**Title:** `implement multi-root local trunk baseline`
+
 ### Deliverables
-
-Implement local token processing with:
-
-* 2 to 4 roots
-* leaf size 16
-* simple local recurrent/selective trunk
-* no tree retrieval yet
+- [ ] Implement 2 to 4 root local processing
+- [ ] Support leaf size 16
+- [ ] Use a simple local recurrent/selective trunk
+- [ ] Keep root outputs independently inspectable
 
 ### Requirements
+- [ ] Strict autoregressive behavior
+- [ ] Same token stream reaches all roots
+- [ ] No tree retrieval yet
+- [ ] No exact leaf read yet
 
-* strict autoregressive masking/causality
-* same token stream goes to all roots
-* root outputs remain separately inspectable
+### Diagnostics
+- [ ] Root similarity / collapse metric
+- [ ] Per-root norm tracking
+- [ ] Per-root activation statistics
 
-### Diagnostics to add now
-
-* root similarity / collapse metric
-* per-root norm tracking
-* per-root activation statistics
-
-### Exit criteria
-
-* forward pass works
-* training step works
-* roots do not trivially collapse on first smoke tests
-* single-root vs multi-root baseline is runnable
+### Merge criteria
+- [ ] Forward pass works
+- [ ] Training step works
+- [ ] Single-root vs multi-root baseline is runnable
+- [ ] Roots do not immediately collapse in smoke tests
 
 ---
 
-## PR 4 — Live leaf + sealed leaf mechanics
+## PR 4 — Live leaf and sealed leaf mechanics
+
+**Title:** `add live leaf append and sealed leaf summary path`
 
 ### Deliverables
-
-Implement:
-
-* live leaf append path
-* leaf sealing at fixed size 16
-* creation of sealed leaf summaries
-* typed token-level cache for sealed leaves
+- [ ] Implement live leaf append path
+- [ ] Seal leaves at fixed size 16
+- [ ] Create sealed leaf summaries
+- [ ] Populate token-level cache for sealed leaves
 
 ### Requirements
-
-* only sealed leaves enter global memory
-* live leaf remains local-only
-* exact leaf read target must be meaningful later
+- [ ] Only sealed leaves enter global memory
+- [ ] Live leaf remains local-only
+- [ ] Exact leaf read target is meaningful for later use
 
 ### Tests
+- [ ] Incremental append correctness
+- [ ] Leaf sealing boundaries
+- [ ] Correct sealed leaf spans
+- [ ] No future-token leakage
 
-* incremental append correctness
-* leaf seal boundaries
-* sealed leaf spans are correct
-* no future-token leakage
-
-### Exit criteria
-
-* live/sealed split is stable
-* leaf summaries are deterministic
-* leaf token cache is populated correctly
+### Merge criteria
+- [ ] Live/sealed split is stable
+- [ ] Leaf summaries are deterministic
+- [ ] Token cache contents are correct
+- [ ] Causality is preserved
 
 ---
 
 ## PR 5 — Regular dyadic summary tree
 
+**Title:** `implement regular causal dyadic summary tree`
+
 ### Deliverables
-
-Implement:
-
-* level-0 insertion from sealed leaves
-* deterministic parent merge
-* level-major summary storage
-* span metadata for each node
+- [ ] Insert sealed leaves into level 0
+- [ ] Add deterministic parent merge
+- [ ] Store summaries level-major
+- [ ] Track span metadata at each level
 
 ### Requirements
-
-* regular dyadic tree only
-* no learned merge gating
-* every sealed leaf participates
-* only prior sealed leaves are visible globally
+- [ ] Regular dyadic tree only
+- [ ] No learned merge gating
+- [ ] Every sealed leaf participates
+- [ ] Only prior sealed leaves are globally visible
 
 ### Tests
-
-* tree build equals reference recompute
-* spans are correct at all levels
-* causal visibility holds
-* parent count and level count are correct
+- [ ] Incremental tree build matches reference recompute
+- [ ] Span metadata is correct at all levels
+- [ ] Causal visibility holds
+- [ ] Parent and level counts are correct
 
 ### Diagnostics
+- [ ] Nodes per level
+- [ ] Tree depth reached
+- [ ] Dead / unused node detection
 
-* nodes per level
-* tree depth reached
-* dead/unused node detection
-
-### Exit criteria
-
-* tree construction is correct
-* tree updates are incremental
-* no causal violations
+### Merge criteria
+- [ ] Tree construction is correct
+- [ ] Incremental update path works
+- [ ] No causal violations
+- [ ] Summary tree is observable
 
 ---
 
 ## PR 6 — Sparse routing over the sealed tree
 
+**Title:** `add sparse fractal router over sealed tree`
+
 ### Deliverables
-
-Implement routing heads with:
-
-* 4 routing heads
-* beam width 2
-* top-down candidate scoring
-* descent to selected sealed leaves
+- [ ] Add 4 routing heads
+- [ ] Add beam width 2 routing
+- [ ] Score candidates top-down
+- [ ] Descend to selected sealed leaves
 
 ### Requirements
-
-* candidate scoring is explicit
-* normalization only over surviving candidates
-* no early stop in first runnable version
-* routing is inspectable per head
+- [ ] Candidate scoring is explicit
+- [ ] Normalize only over surviving candidates
+- [ ] No early-stop in first runnable version
+- [ ] Routing stays inspectable per head
 
 ### Diagnostics
-
-* routing depth histogram
-* candidate entropy per head
-* selected span distance histogram
-* head agreement / disagreement rate
+- [ ] Routing depth histogram
+- [ ] Candidate entropy per head
+- [ ] Selected span distance histogram
+- [ ] Head agreement / disagreement rate
 
 ### Tests
+- [ ] Routing touches sealed nodes only
+- [ ] Beam width is enforced
+- [ ] Behavior is deterministic under fixed seed
 
-* routing only touches sealed tree nodes
-* beam width is enforced
-* deterministic behavior under fixed seed
-
-### Exit criteria
-
-* routing is sparse
-* routing is query-dependent
-* heads do not all pick the same path by default
+### Merge criteria
+- [ ] Routing is sparse
+- [ ] Routing is query-dependent
+- [ ] Heads do not all choose the same path by default
+- [ ] Retrieval path is ablatable
 
 ---
 
 ## PR 7 — Exact leaf read
 
+**Title:** `implement exact local read for selected sealed leaves`
+
 ### Deliverables
-
-Implement one explicit exact-read mechanism:
-
-* local attention over cached token-level K/V in selected leaf
-  **or**
-* pointer-style read over cached token states
-  **or**
-* copy-distribution read over leaf token positions
+- [ ] Choose one exact-read mechanism:
+  - [ ] local attention over token-level K/V inside the selected leaf
+  - [ ] pointer-style read over cached token states
+  - [ ] copy-distribution read over leaf token positions
+- [ ] Wire exact read to selected routed leaves only
 
 ### Requirements
-
-* choose one mechanism first
-* keep it simple
-* no dense global token cache fallback
+- [ ] Keep the first mechanism simple
+- [ ] No dense global token cache fallback
+- [ ] Exact means token-level local access, not summary-only approximation
 
 ### Diagnostics
-
-* fraction of steps using exact leaf read
-* selected token-position distribution
-* read concentration / entropy
-
-### Tests
-
-* exact reads only target sealed leaves
-* exact read span matches routed leaf
-* local token indices are correct
-
-### Exit criteria
-
-* exact local read is real, not approximate
-* retrieval behavior changes when this path is enabled
-* copy/retrieval probes improve relative to no-exact-read
-
----
-
-## PR 8 — Read fusion + LM head wiring
-
-### Deliverables
-
-Fuse:
-
-* per-root recurrent outputs
-* routed tree values
-* exact leaf read values
-
-Then connect to existing LM head.
-
-### Requirements
-
-* fusion logic is explicit and typed
-* avoid burying routing usefulness inside a giant opaque mixer
-* keep ablations easy
+- [ ] Fraction of steps using exact leaf read
+- [ ] Selected token-position distribution
+- [ ] Read concentration / entropy
 
 ### Tests
+- [ ] Exact reads target sealed leaves only
+- [ ] Exact read span matches routed leaf
+- [ ] Local token indices are correct
 
-* zeroing routed values changes behavior predictably
-* zeroing exact leaf read changes behavior predictably
-* zeroing extra roots changes behavior predictably
-
-### Exit criteria
-
-* full forward path works end-to-end
-* each source path is individually ablatable
-* logits are stable enough for smoke training
+### Merge criteria
+- [ ] Exact read is real, not approximate
+- [ ] Retrieval behavior changes when enabled
+- [ ] Copy/retrieval probes improve relative to no-exact-read
 
 ---
 
-## PR 9 — Synthetic task harness
+## PR 8 — Read fusion and LM head wiring
+
+**Title:** `wire read fusion into existing language model head`
 
 ### Deliverables
-
-Add first-class probes for:
-
-* copy
-* associative recall
-* induction
-* noisy retrieval
-* far-token comparison
+- [ ] Fuse per-root recurrent outputs
+- [ ] Fuse routed tree values
+- [ ] Fuse exact leaf read values
+- [ ] Project fused output through LM head
 
 ### Requirements
+- [ ] Fusion logic is explicit and typed
+- [ ] Do not bury routing usefulness inside an opaque mixer
+- [ ] Keep all major sources easy to zero out for ablations
 
-* tasks must run quickly
-* tasks must produce comparable metrics across ablations
-* do not wait for large LM training to evaluate architecture value
+### Tests
+- [ ] Zeroing routed values changes behavior predictably
+- [ ] Zeroing exact leaf read changes behavior predictably
+- [ ] Zeroing extra roots changes behavior predictably
 
-### Exit criteria
-
-* each probe has a stable baseline
-* each probe can compare:
-
-  * no memory
-  * tree only
-  * tree + exact read
+### Merge criteria
+- [ ] Full forward path works end-to-end
+- [ ] Each source path is individually ablatable
+- [ ] Logits are stable enough for smoke training
 
 ---
 
-## PR 10 — Benchmark and observability pass
+## PR 9 — Causal Memory Auditor
+
+**Title:** `add causal memory auditor for counterfactual memory credit`
 
 ### Deliverables
+- [ ] Add full forward reference path
+- [ ] Add no-tree-read intervention
+- [ ] Add no-exact-leaf-read intervention
+- [ ] Add next-best-span substitution
+- [ ] Add root-drop intervention
+- [ ] Add structured reporting of utility deltas
 
-Add benchmarks for:
+### Requirements
+- [ ] Sampled, not always-on
+- [ ] Cheap enough for evaluation runs
+- [ ] Explicit intervention definitions
+- [ ] No silent mutation of reference forward behavior
 
-* token append
-* leaf sealing
-* tree update
-* routing
-* exact leaf read
-* full forward pass
+### Diagnostics
+- [ ] Loss delta
+- [ ] Target-logit delta
+- [ ] KL divergence from full forward
+- [ ] Utility by root
+- [ ] Utility by routing depth
+- [ ] Utility by task family
 
-At sequence lengths like:
+### Tests
+- [ ] Each intervention preserves shape compatibility
+- [ ] No-tree-read removes only tree-summary contributions
+- [ ] No-exact-read removes only exact-read contributions
+- [ ] Next-best substitution respects routing depth
+- [ ] Root-drop removes only the selected root contribution
 
-* 256
-* 512
-* 1k
-* 2k
-* 4k
-* 8k
-
-### Metrics to log
-
-* tokens/sec
-* wall-clock per forward
-* peak memory
-* routing sparsity
-* root collapse
-* exact-read usage
-* retrieval distance
-
-### Exit criteria
-
-* measured behavior trends toward intended scaling
-* hot paths are identifiable
-* no accidental quadratic fallback in implementation
+### Merge criteria
+- [ ] Tree retrieval utility is measurable
+- [ ] Exact leaf read utility is measurable
+- [ ] Root utility is measurable
+- [ ] Dead-weight tree behavior is detectable if present
 
 ---
 
-## Required ablations before calling v1 “real”
+## PR 10 — Synthetic task harness
+
+**Title:** `add synthetic retrieval and copy probes for v2`
+
+### Deliverables
+- [ ] Add copy task
+- [ ] Add associative recall task
+- [ ] Add induction task
+- [ ] Add noisy retrieval task
+- [ ] Add far-token comparison task
+
+### Requirements
+- [ ] Tasks run quickly
+- [ ] Metrics are comparable across ablations
+- [ ] Do not wait for large LM training to evaluate architecture value
+
+### Merge criteria
+- [ ] Each probe has a stable baseline
+- [ ] Probes can compare:
+  - [ ] no memory
+  - [ ] tree only
+  - [ ] tree + exact read
+- [ ] Results are logged in a repeatable format
+
+---
+
+## PR 11 — Benchmark and observability pass
+
+**Title:** `add scaling benchmarks and v2 observability suite`
+
+### Deliverables
+- [ ] Benchmark token append
+- [ ] Benchmark leaf sealing
+- [ ] Benchmark tree update
+- [ ] Benchmark routing
+- [ ] Benchmark exact leaf read
+- [ ] Benchmark end-to-end forward pass
+
+### Sequence lengths
+- [ ] 256
+- [ ] 512
+- [ ] 1k
+- [ ] 2k
+- [ ] 4k
+- [ ] 8k
+
+### Metrics
+- [ ] Tokens/sec
+- [ ] Wall-clock per forward
+- [ ] Peak memory
+- [ ] Routing sparsity
+- [ ] Root collapse metrics
+- [ ] Exact-read usage
+- [ ] Retrieval distance
+
+### Merge criteria
+- [ ] Measured behavior trends toward intended scaling
+- [ ] Hot paths are identifiable
+- [ ] No accidental quadratic fallback is present
+
+---
+
+# Required ablations before calling v1 “real”
 
 Run at equal total state / parameter budget:
 
-1. single-root, no memory
-2. multi-root, no memory
-3. single-root, summaries only
-4. single-root, sparse retrieval
-5. single-root, sparse retrieval + exact leaf read
-6. multi-root, summaries only
-7. multi-root, sparse retrieval
-8. multi-root, sparse retrieval without exact leaf read
-9. multi-root, sparse retrieval + exact leaf read
+- [ ] single-root, no memory
+- [ ] multi-root, no memory
+- [ ] single-root, summaries only
+- [ ] single-root, sparse retrieval
+- [ ] single-root, sparse retrieval + exact leaf read
+- [ ] multi-root, summaries only
+- [ ] multi-root, sparse retrieval
+- [ ] multi-root, sparse retrieval without exact leaf read
+- [ ] multi-root, sparse retrieval + exact leaf read
 
-Do not skip these.
+**Do not skip these.**
 
 ---
 
-## Deferred until after this checklist
+# Deferred until after this checklist
 
 Do **not** add yet:
 
-* side-memory bank
-* learned eviction
-* learned merge scheduling
-* routing early-stop
-* giant-scale training
-* dense fallback attention
-* extra complexity to “help” a weak first result
+- [ ] side-memory bank
+- [ ] learned eviction
+- [ ] learned merge scheduling
+- [ ] routing early-stop
+- [ ] giant-scale training
+- [ ] dense fallback attention
+- [ ] complexity added only to rescue weak early results
 
 ---
 
-## Definition of done for the first serious v1
+# Definition of done for first serious v1
 
 The first serious v1 exists only when all of these are true:
 
-* multi-root local trunk works
-* leaf sealing is causal and correct
-* dyadic tree is stable and incremental
-* routing is sparse and query-dependent
-* exact leaf read is implemented and ablatable
-* synthetic retrieval/copy tasks run
-* scaling benchmarks exist
-* diagnostics expose collapse and dead-weight behavior
-* the architecture can be falsified cleanly
+- [ ] multi-root local trunk works
+- [ ] leaf sealing is causal and correct
+- [ ] dyadic tree is stable and incremental
+- [ ] routing is sparse and query-dependent
+- [ ] exact leaf read is implemented and ablatable
+- [ ] causal memory auditing is implemented and reports useful deltas
+- [ ] synthetic retrieval/copy tasks run
+- [ ] scaling benchmarks exist
+- [ ] diagnostics expose collapse and dead-weight behavior
+- [ ] the architecture can be falsified cleanly
 
-If those are not true yet, the work is still infrastructure, not a validated architecture.
-
+If these are not true yet, the work is still infrastructure, not a validated architecture.

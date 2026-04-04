@@ -70,9 +70,26 @@ pub use registry::{
 pub use router::EarlyExitRouter;
 pub use state::{FractalState, StateLayout};
 pub use v2::{
-    FractalRouterHead, FractalRouterHeadShape, FractalV2Components, FractalV2Model,
-    FractalV2ModelShape, LeafSummarizer, LeafSummarizerShape, LocalTrunk, LocalTrunkShape,
-    ReadFusion, ReadFusionShape, TreeMergeCell, TreeMergeCellShape,
+    summarize_root_readout_sequence, BaselineExactLeafRead, BaselineExactLeafReadConfig,
+    BaselineFractalRouterHead, BaselineFractalRouterHeadConfig, BaselineLeafSummarizer,
+    BaselineLeafSummarizerConfig, BaselineLocalTrunk, BaselineLocalTrunkConfig,
+    BaselineTreeMergeCell, BaselineTreeMergeCellConfig, BatchHeadRoute, BatchRouteStep,
+    BatchTimelineMode, ExactLeafRead, ExactLeafReadDiagnostics, ExactLeafReadOutput,
+    ExactLeafReadShape, ExactReadHistogramBin, FractalRouteOutput, FractalRouterHead,
+    FractalRouterHeadShape, FractalRoutingDiagnostics, FractalV2Components,
+    FractalV2LocalBaselineModel, FractalV2LocalBaselineOutput, FractalV2LocalBaselineShape,
+    FractalV2MemoryMode, FractalV2Model, FractalV2ModelShape, FractalV2ProjectionBreakdown,
+    FractalV2RetrievalStepOutput, FractalV2RetrievalTrace, FractalV2State, FractalV2StateLayout,
+    FractalV2StateRecord, FractalV2StateShape, HeadRouteTrace, LeafSummarizer,
+    LeafSummarizerOutput, LeafSummarizerShape, LeafSummaryStore, LeafSummaryStoreRecord,
+    LeafSummaryStoreShape, LeafTokenCache, LeafTokenCacheRecord, LeafTokenCacheShape,
+    LiveLeafState, LiveLeafStateRecord, LiveLeafStateShape, LocalTrunk, LocalTrunkDiagnostics,
+    LocalTrunkShape, LocalTrunkStepOutput, MergeCheckpointPolicy, MultiRootState,
+    MultiRootStateRecord, MultiRootStateShape, ReadFusion, ReadFusionShape, RetrievalPolicy,
+    RootActivationStats, RoutingHistogramBin, SealedLeafMaterialization, TokenSpan, TreeLevelStore,
+    TreeLevelStoreRecord, TreeLevelStoreShape, TreeMergeCell, TreeMergeCellShape, TreeMergeOutput,
+    TreeNodeAddress, TreeNodeBatch, TreeSummaryDiagnostics, TreeSummaryState,
+    TreeSummaryStateRecord, TreeSummaryStateShape,
 };
 
 #[cfg(test)]

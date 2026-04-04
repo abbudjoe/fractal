@@ -1,3 +1,76 @@
+pub mod v2_ablation;
+pub mod v2_benchmark;
+pub mod v2_checkpoint;
+pub mod v2_fixture;
+pub mod v2_learned_ablation;
+pub mod v2_ledger;
+pub mod v2_supervised;
+pub mod v2_synthetic;
+pub mod v2_training;
+
+pub use v2_ablation::{
+    required_v2_ablation_modes, run_required_v2_ablation_sweep, V2AblationCaseReport,
+    V2AblationConfig, V2AblationReport, V2RootTopology,
+};
+pub use v2_benchmark::{
+    run_baseline_v2_benchmark_suite, run_v2_benchmark_suite_for_model, V2BenchmarkConfig,
+    V2BenchmarkEntry, V2BenchmarkReport, V2BenchmarkSurface, V2LeafUsageBin,
+    V2ObservabilitySnapshot, DEFAULT_V2_BENCHMARK_SEQUENCE_LENGTHS,
+};
+pub use v2_checkpoint::{
+    load_baseline_v2_checkpoint_model, load_v2_smoke_train_report, LoadedV2CheckpointModel,
+    V2CheckpointSelection,
+};
+pub use v2_fixture::{
+    build_baseline_v2_synthetic_model, BaselineV2SyntheticModel, BaselineV2SyntheticModelConfig,
+};
+pub use v2_learned_ablation::{
+    required_v2_learned_ablation_modes, run_required_v2_learned_ablation_matrix,
+    V2LearnedAblationConfig, V2LearnedAblationReport, V2LearnedAblationStepReport,
+    V2LearnedAblationSuiteMetrics, V2LearnedAblationTopologyReport, V2RequiredAblationStep,
+};
+pub use v2_ledger::{
+    append_v2_results_ledger_entry, default_v2_results_ledger_path, read_v2_results_ledger,
+    resolve_requested_v2_results_ledger_path, V2ResultsLedgerEntry, V2ResultsLedgerKind,
+    DEFAULT_V2_RESULTS_LEDGER_PATH,
+};
+pub use v2_supervised::{
+    filter_synthetic_probe_suites, mode_eval_summary_by_kind,
+    run_baseline_v2_supervised_synthetic_train,
+    run_baseline_v2_supervised_synthetic_train_with_modes,
+    run_v2_supervised_synthetic_train_with_model,
+    run_v2_supervised_synthetic_train_with_model_and_modes, V2SupervisedSyntheticEvalMetrics,
+    V2SupervisedSyntheticSplitStats, V2SupervisedSyntheticSuiteSplit,
+    V2SupervisedSyntheticTrainConfig, V2SupervisedSyntheticTrainModel,
+    V2SupervisedSyntheticTrainReport, V2SupervisedSyntheticTrainResult,
+    V2SupervisedSyntheticTrainStepReport, DEFAULT_V2_SUPERVISED_SYNTHETIC_EVAL_HOLDOUT_EVERY,
+    DEFAULT_V2_SUPERVISED_SYNTHETIC_LEARNING_RATE, DEFAULT_V2_SUPERVISED_SYNTHETIC_STEPS,
+    V2_SUPERVISED_SYNTHETIC_LEAF_SIZE,
+};
+pub use v2_synthetic::{
+    default_v2_synthetic_probe_suites, run_v2_synthetic_probe_suite,
+    run_v2_synthetic_probe_suite_with_modes, run_v2_synthetic_probe_suites,
+    run_v2_synthetic_probe_suites_with_modes,
+    run_v2_synthetic_projection_diagnostic_suite_with_modes,
+    run_v2_synthetic_projection_diagnostic_suites_with_modes,
+    v2_synthetic_probe_suites_for_leaf_size, SyntheticProbeKind, SyntheticProbeMetrics,
+    SyntheticProbeMode, SyntheticProbeModeReport, SyntheticProbeModel,
+    SyntheticProbeProjectionMetrics, SyntheticProbeProjectionModeReport,
+    SyntheticProbeProjectionReport, SyntheticProbeProjectionSampleResult,
+    SyntheticProbeProjectionSuiteReport, SyntheticProbeReport, SyntheticProbeSample,
+    SyntheticProbeSampleResult, SyntheticProbeSuite, SyntheticProbeSuiteReport,
+};
+pub use v2_training::{
+    baseline_v2_byte_level_smoke_model_config, default_v2_smoke_corpus_paths,
+    run_baseline_v2_smoke_train, run_v2_smoke_train_with_model, ByteLevelVocabularyContract,
+    V2CheckpointArtifacts, V2CheckpointKind, V2SmokeCheckpointArtifacts, V2SmokeCheckpointKind,
+    V2SmokeCorpusStats, V2SmokeEvalMetrics, V2SmokeTrainConfig, V2SmokeTrainModel,
+    V2SmokeTrainReport, V2SmokeTrainResult, V2SmokeTrainStepReport, BYTE_LEVEL_PAD_TOKEN,
+    BYTE_LEVEL_VOCAB_SIZE, DEFAULT_V2_SMOKE_BATCH_SIZE, DEFAULT_V2_SMOKE_EVAL_BATCHES,
+    DEFAULT_V2_SMOKE_EVAL_HOLDOUT_EVERY, DEFAULT_V2_SMOKE_LEARNING_RATE, DEFAULT_V2_SMOKE_SEQ_LEN,
+    DEFAULT_V2_SMOKE_TRAIN_STEPS, DEFAULT_V2_SMOKE_WINDOW_STRIDE,
+};
+
 use fractal_core::{RankedSpeciesResult, SpeciesRawMetrics};
 
 pub fn stability_score(grad_norm_depth_20: f64) -> f64 {
