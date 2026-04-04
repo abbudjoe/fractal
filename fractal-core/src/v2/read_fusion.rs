@@ -38,6 +38,14 @@ impl ReadFusionAblation {
         }
     }
 
+    pub const fn without_memory_reads() -> Self {
+        Self {
+            include_routed_values: false,
+            include_exact_read_values: false,
+            active_root_count: None,
+        }
+    }
+
     pub const fn without_routed_values() -> Self {
         Self {
             include_routed_values: false,
@@ -683,6 +691,9 @@ mod tests {
         let fusion = baseline_fusion();
         let input = fusion_input();
         let full = fusion.fuse(&input, ReadFusionAblation::full()).unwrap();
+        let without_memory = fusion
+            .fuse(&input, ReadFusionAblation::without_memory_reads())
+            .unwrap();
         let without_routed = fusion
             .fuse(&input, ReadFusionAblation::without_routed_values())
             .unwrap();
@@ -690,6 +701,22 @@ mod tests {
             .fuse(&input, ReadFusionAblation::without_exact_read_values())
             .unwrap();
 
+        assert!(without_memory
+            .routed_lane()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .unwrap()
+            .iter()
+            .all(|value| *value == 0.0));
+        assert!(without_memory
+            .exact_read_lane()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .unwrap()
+            .iter()
+            .all(|value| *value == 0.0));
         assert!(without_routed
             .routed_lane()
             .to_data()
@@ -709,6 +736,10 @@ mod tests {
         assert_ne!(
             full.fused_readout().to_data().convert::<f32>(),
             without_routed.fused_readout().to_data().convert::<f32>()
+        );
+        assert_ne!(
+            full.fused_readout().to_data().convert::<f32>(),
+            without_memory.fused_readout().to_data().convert::<f32>()
         );
         assert_ne!(
             full.fused_readout().to_data().convert::<f32>(),

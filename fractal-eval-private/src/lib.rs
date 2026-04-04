@@ -1,3 +1,12 @@
+pub mod v2_synthetic;
+
+pub use v2_synthetic::{
+    default_v2_synthetic_probe_suites, run_v2_synthetic_probe_suite, run_v2_synthetic_probe_suites,
+    SyntheticProbeKind, SyntheticProbeMetrics, SyntheticProbeMode, SyntheticProbeModeReport,
+    SyntheticProbeModel, SyntheticProbeReport, SyntheticProbeSample, SyntheticProbeSampleResult,
+    SyntheticProbeSuite, SyntheticProbeSuiteReport,
+};
+
 use fractal_core::{RankedSpeciesResult, SpeciesRawMetrics};
 
 pub fn stability_score(grad_norm_depth_20: f64) -> f64 {

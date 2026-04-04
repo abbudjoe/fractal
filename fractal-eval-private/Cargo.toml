@@ -9,4 +9,5 @@ name = "fractal_eval_private"
 path = "src/lib.rs"
 
 [dependencies]
+burn = { workspace = true }
 fractal-core = { path = "../fractal-core" }
