@@ -40,9 +40,8 @@ pub use hybrid_training::{
     run_hybrid_rescue_frozen_train_with_model, HybridRescueFrozenEvalMetrics,
     HybridRescueFrozenEvalModeSet, HybridRescueFrozenSplitStats, HybridRescueFrozenSuiteSplit,
     HybridRescueFrozenTrainConfig, HybridRescueFrozenTrainReport, HybridRescueFrozenTrainResult,
-    HybridRescueFrozenTrainStepReport, HybridRescueTrainScope,
-    DEFAULT_HYBRID_RESCUE_FROZEN_EVAL_HOLDOUT_EVERY, DEFAULT_HYBRID_RESCUE_FROZEN_LEARNING_RATE,
-    DEFAULT_HYBRID_RESCUE_FROZEN_STEPS,
+    HybridRescueFrozenTrainStepReport, DEFAULT_HYBRID_RESCUE_FROZEN_EVAL_HOLDOUT_EVERY,
+    DEFAULT_HYBRID_RESCUE_FROZEN_LEARNING_RATE, DEFAULT_HYBRID_RESCUE_FROZEN_STEPS,
 };
 pub use v2_ablation::{
     required_v2_ablation_modes, run_required_v2_ablation_sweep, V2AblationCaseReport,

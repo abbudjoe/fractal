@@ -480,17 +480,21 @@ impl<B: Backend> RustMamba3Mixer<B> {
         let nheads = self.derived.nheads;
         let headdim = self.config.headdim;
         let d_state = self.config.d_state;
-        let next_angle_state = previous_state.angle_dt_state.clone()
-            + projections.angles.clone() * projections.dt.clone().reshape([batch_size, nheads, 1]);
+        let delta_angles = projections.angles.clone().tanh()
+            * projections.dt.clone().reshape([batch_size, nheads, 1])
+            * core::f64::consts::PI;
+        let next_angle_state = previous_state.angle_dt_state.clone() + delta_angles;
         let rotated_b = rotate_state_prefix_pairs_last_dim_4(
             projections.b.clone(),
             next_angle_state.clone(),
             self.derived.split_tensor_size,
+            !self.config.is_mimo,
         );
         let rotated_c = rotate_state_prefix_pairs_last_dim_4(
             projections.c.clone(),
             next_angle_state.clone(),
             self.derived.split_tensor_size,
+            !self.config.is_mimo,
         );
         let x_ranked = self.expand_ranked_heads(projections.x.clone(), self.mimo_x.as_ref());
         let z_ranked = self.expand_ranked_heads(projections.z.clone(), self.mimo_z.as_ref());
@@ -991,6 +995,7 @@ fn rotate_state_prefix_pairs_last_dim_4<B: Backend>(
     tensor: Tensor<B, 4>,
     angles: Tensor<B, 3>,
     split_tensor_size: usize,
+    rotate_pairwise: bool,
 ) -> Tensor<B, 4> {
     if split_tensor_size == 0 {
         return tensor;
@@ -1003,31 +1008,48 @@ fn rotate_state_prefix_pairs_last_dim_4<B: Backend>(
     let pair_count = prefix_width / 2;
     let prefix = tensor
         .clone()
-        .slice([0..batch_size, 0..rank, 0..heads, 0..prefix_width])
-        .reshape([batch_size * rank * heads, pair_count, 2]);
-    let first = prefix
-        .clone()
-        .slice([0..batch_size * rank * heads, 0..pair_count, 0..1])
-        .reshape([batch_size * rank * heads, pair_count]);
-    let second = prefix
-        .slice([0..batch_size * rank * heads, 0..pair_count, 1..2])
-        .reshape([batch_size * rank * heads, pair_count]);
+        .slice([0..batch_size, 0..rank, 0..heads, 0..prefix_width]);
     let angle_grid = angles
         .reshape([batch_size, 1, heads, pair_count])
         .repeat(&[1, rank, 1, 1])
-        .reshape([batch_size * rank * heads, pair_count]);
+        .reshape([batch_size, rank, heads, pair_count]);
     let cos = angle_grid.clone().cos();
     let sin = angle_grid.sin();
-    let rotated_first = first.clone() * cos.clone() - second.clone() * sin.clone();
-    let rotated_second = first * sin + second * cos;
-    let rotated_prefix = Tensor::cat(
-        vec![
-            rotated_first.reshape([batch_size * rank * heads, pair_count, 1]),
-            rotated_second.reshape([batch_size * rank * heads, pair_count, 1]),
-        ],
-        2,
-    )
-    .reshape([batch_size, rank, heads, prefix_width]);
+    let (rotated_first, rotated_second) = if rotate_pairwise {
+        let paired = prefix.reshape([batch_size * rank * heads, pair_count, 2]);
+        let first = paired
+            .clone()
+            .slice([0..batch_size * rank * heads, 0..pair_count, 0..1])
+            .reshape([batch_size, rank, heads, pair_count]);
+        let second = paired
+            .slice([0..batch_size * rank * heads, 0..pair_count, 1..2])
+            .reshape([batch_size, rank, heads, pair_count]);
+        (
+            first.clone() * cos.clone() - second.clone() * sin.clone(),
+            first * sin + second * cos,
+        )
+    } else {
+        let first = prefix
+            .clone()
+            .slice([0..batch_size, 0..rank, 0..heads, 0..pair_count]);
+        let second = prefix.slice([0..batch_size, 0..rank, 0..heads, pair_count..prefix_width]);
+        (
+            first.clone() * cos.clone() - second.clone() * sin.clone(),
+            first * sin + second * cos,
+        )
+    };
+    let rotated_prefix = if rotate_pairwise {
+        Tensor::cat(
+            vec![
+                rotated_first.reshape([batch_size, rank, heads, pair_count, 1]),
+                rotated_second.reshape([batch_size, rank, heads, pair_count, 1]),
+            ],
+            4,
+        )
+        .reshape([batch_size, rank, heads, prefix_width])
+    } else {
+        Tensor::cat(vec![rotated_first, rotated_second], 3)
+    };
     if prefix_width == state_dim {
         rotated_prefix
     } else {
@@ -1043,16 +1065,204 @@ fn rotate_state_prefix_pairs_last_dim_4<B: Backend>(
 
 #[cfg(test)]
 mod tests {
-    use burn::backend::Candle;
-    use burn::tensor::{Int, Tensor};
+    use std::{
+        env, fs,
+        path::PathBuf,
+        process::Command,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use burn::{
+        backend::Candle,
+        module::{Module, Param},
+        tensor::{Int, Tensor, TensorData},
+    };
+    use serde::{Deserialize, Serialize};
 
     use super::{
         build_rust_mamba3_reference_hybrid_attention_model, rotate_state_prefix_pairs_last_dim_4,
-        RustMamba3BaselineConfig, RustMamba3RopeFraction,
+        RustMamba3BaselineConfig, RustMamba3DerivedShape, RustMamba3Mixer, RustMamba3RopeFraction,
     };
-    use crate::{phase1_hybrid_attention_baseline_matrix, ReferenceSsmFamily};
+    use crate::{
+        phase1_hybrid_attention_baseline_matrix,
+        projection::{ProjectionLayoutPolicy, StructuredProjection},
+        ReferenceSsmFamily,
+    };
 
     type TestBackend = Candle<f32, i64>;
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TensorFixture {
+        shape: Vec<usize>,
+        values: Vec<f32>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct PythonReferenceInput {
+        config: RustMamba3BaselineConfig,
+        derived: RustMamba3DerivedShape,
+        input: TensorFixture,
+        angle_state: TensorFixture,
+        in_proj_weight: TensorFixture,
+        dt_bias: TensorFixture,
+        b_bias: TensorFixture,
+        c_bias: TensorFixture,
+        b_norm_weight: TensorFixture,
+        c_norm_weight: TensorFixture,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct PythonReferenceOutput {
+        z: TensorFixture,
+        x: TensorFixture,
+        dt: TensorFixture,
+        a: TensorFixture,
+        trap: TensorFixture,
+        angles: TensorFixture,
+        b: TensorFixture,
+        c: TensorFixture,
+        next_angle_state: TensorFixture,
+        rotated_b: TensorFixture,
+        rotated_c: TensorFixture,
+    }
+
+    fn tensor_fixture<const D: usize>(tensor: Tensor<TestBackend, D>) -> TensorFixture {
+        TensorFixture {
+            shape: tensor.dims().to_vec(),
+            values: tensor.to_data().to_vec::<f32>().unwrap(),
+        }
+    }
+
+    fn assert_fixture_close(actual: TensorFixture, expected: TensorFixture, label: &str, tol: f32) {
+        assert_eq!(actual.shape, expected.shape, "{label} shape mismatch");
+        assert_eq!(
+            actual.values.len(),
+            expected.values.len(),
+            "{label} value length mismatch"
+        );
+        for (index, (lhs, rhs)) in actual.values.iter().zip(expected.values.iter()).enumerate() {
+            assert!(
+                (lhs - rhs).abs() <= tol,
+                "{label}[{index}] mismatch: actual={lhs} expected={rhs} tol={tol}"
+            );
+        }
+    }
+
+    fn projection_weight_fixture(projection: StructuredProjection<TestBackend>) -> TensorFixture {
+        let record = Module::into_record(projection);
+        let weight = match record.layout_policy {
+            ProjectionLayoutPolicy::InputByOutput => record.weight.val(),
+            ProjectionLayoutPolicy::OutputByInput => record.weight.val().transpose(),
+        };
+        tensor_fixture(weight)
+    }
+
+    fn deterministic_values(len: usize, scale: f32, offset: f32) -> Vec<f32> {
+        (0..len)
+            .map(|index| offset + scale * (index as f32 + 1.0))
+            .collect()
+    }
+
+    fn deterministic_test_mixer(
+        device: &<TestBackend as burn::tensor::backend::Backend>::Device,
+    ) -> RustMamba3Mixer<TestBackend> {
+        let config = RustMamba3BaselineConfig {
+            d_model: 8,
+            d_state: 8,
+            expand: 2,
+            headdim: 4,
+            ngroups: 1,
+            rope_fraction: RustMamba3RopeFraction::Half,
+            dt_min: 1.0e-3,
+            dt_max: 1.0e-1,
+            dt_init_floor: 1.0e-4,
+            a_floor: 1.0e-4,
+            is_outproj_norm: false,
+            is_mimo: true,
+            mimo_rank: 2,
+            chunk_size: 4,
+        };
+        let mut mixer = RustMamba3Mixer::new(config, device).unwrap();
+
+        let mut in_proj_record = Module::into_record(mixer.in_proj.clone());
+        in_proj_record.weight = Param::from_data(
+            TensorData::new(
+                deterministic_values(
+                    in_proj_record.weight.val().dims()[0] * in_proj_record.weight.val().dims()[1],
+                    0.01,
+                    -0.3,
+                ),
+                in_proj_record.weight.val().dims(),
+            ),
+            device,
+        );
+        mixer.in_proj = mixer.in_proj.clone().load_record(in_proj_record);
+
+        mixer.dt_bias = Param::from_data(
+            TensorData::new(
+                deterministic_values(mixer.derived_shape().nheads, 0.02, -0.1),
+                [mixer.derived_shape().nheads],
+            ),
+            device,
+        );
+        mixer.b_bias = Param::from_data(
+            TensorData::new(
+                deterministic_values(
+                    mixer.derived_shape().mimo_rank
+                        * mixer.derived_shape().nheads
+                        * mixer.config().d_state,
+                    0.01,
+                    0.2,
+                ),
+                [
+                    mixer.derived_shape().mimo_rank,
+                    mixer.derived_shape().nheads,
+                    mixer.config().d_state,
+                ],
+            ),
+            device,
+        );
+        mixer.c_bias = Param::from_data(
+            TensorData::new(
+                deterministic_values(
+                    mixer.derived_shape().mimo_rank
+                        * mixer.derived_shape().nheads
+                        * mixer.config().d_state,
+                    -0.01,
+                    0.15,
+                ),
+                [
+                    mixer.derived_shape().mimo_rank,
+                    mixer.derived_shape().nheads,
+                    mixer.config().d_state,
+                ],
+            ),
+            device,
+        );
+        mixer.b_norm.weight = Param::from_data(
+            TensorData::new(
+                deterministic_values(mixer.config().d_state, 0.03, 0.8),
+                [mixer.config().d_state],
+            ),
+            device,
+        );
+        mixer.c_norm.weight = Param::from_data(
+            TensorData::new(
+                deterministic_values(mixer.config().d_state, -0.02, 1.1),
+                [mixer.config().d_state],
+            ),
+            device,
+        );
+        mixer
+    }
+
+    fn temp_json_path(label: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        env::temp_dir().join(format!("fractal-{label}-{stamp}.json"))
+    }
 
     #[test]
     fn phase1_baseline_config_derives_official_style_shapes() {
@@ -1118,11 +1328,134 @@ mod tests {
         let state = Tensor::<TestBackend, 4>::from_data([[[[1.0, 0.0, 2.0, 0.0]]]], &device);
         let angles =
             Tensor::<TestBackend, 3>::from_data([[[core::f32::consts::FRAC_PI_2]]], &device);
-        let rotated = rotate_state_prefix_pairs_last_dim_4(state, angles, 2);
+        let rotated = rotate_state_prefix_pairs_last_dim_4(state, angles, 2, true);
         let values = rotated.to_data().to_vec::<f32>().unwrap();
         assert!((values[0] - 0.0).abs() < 1e-4);
         assert!((values[1] - 1.0).abs() < 1e-4);
         assert!((values[2] - 2.0).abs() < 1e-4);
         assert!((values[3] - 0.0).abs() < 1e-4);
+    }
+
+    #[test]
+    #[ignore = "requires FRACTAL_MAMBA3_PYTHON with torch installed"]
+    fn rust_mamba3_pre_kernel_contract_matches_pytorch_reference() {
+        let python = env::var("FRACTAL_MAMBA3_PYTHON")
+            .expect("set FRACTAL_MAMBA3_PYTHON to a python binary with torch installed");
+        let device = Default::default();
+        let mixer = deterministic_test_mixer(&device);
+        let batch_size = 2;
+        let input = Tensor::<TestBackend, 2>::from_data(
+            TensorData::new(
+                deterministic_values(batch_size * mixer.config().d_model, 0.05, -0.25),
+                [batch_size, mixer.config().d_model],
+            ),
+            &device,
+        );
+        let angle_state = Tensor::<TestBackend, 3>::from_data(
+            TensorData::new(
+                deterministic_values(
+                    batch_size
+                        * mixer.derived_shape().nheads
+                        * mixer.derived_shape().num_rope_angles,
+                    0.04,
+                    -0.2,
+                ),
+                [
+                    batch_size,
+                    mixer.derived_shape().nheads,
+                    mixer.derived_shape().num_rope_angles,
+                ],
+            ),
+            &device,
+        );
+
+        let projections = mixer.project_step(input.clone()).unwrap();
+        let next_angle_state = angle_state.clone()
+            + projections.angles.clone().tanh()
+                * projections
+                    .dt
+                    .clone()
+                    .reshape([batch_size, mixer.derived_shape().nheads, 1])
+                * core::f64::consts::PI;
+        let rotated_b = rotate_state_prefix_pairs_last_dim_4(
+            projections.b.clone(),
+            next_angle_state.clone(),
+            mixer.derived_shape().split_tensor_size,
+            !mixer.config().is_mimo,
+        );
+        let rotated_c = rotate_state_prefix_pairs_last_dim_4(
+            projections.c.clone(),
+            next_angle_state.clone(),
+            mixer.derived_shape().split_tensor_size,
+            !mixer.config().is_mimo,
+        );
+
+        let bundle = PythonReferenceInput {
+            config: mixer.config().clone(),
+            derived: mixer.derived_shape(),
+            input: tensor_fixture(input),
+            angle_state: tensor_fixture(angle_state),
+            in_proj_weight: projection_weight_fixture(mixer.in_proj.clone()),
+            dt_bias: tensor_fixture(mixer.dt_bias.val()),
+            b_bias: tensor_fixture(mixer.b_bias.val()),
+            c_bias: tensor_fixture(mixer.c_bias.val()),
+            b_norm_weight: tensor_fixture(mixer.b_norm.weight.val()),
+            c_norm_weight: tensor_fixture(mixer.c_norm.weight.val()),
+        };
+        let input_path = temp_json_path("mamba3-reference-input");
+        let output_path = temp_json_path("mamba3-reference-output");
+        fs::write(&input_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+
+        let script_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../scripts/mamba3_pytorch_reference.py");
+        let status = Command::new(python)
+            .arg(script_path)
+            .arg(&input_path)
+            .arg(&output_path)
+            .status()
+            .expect("python reference script should launch");
+        assert!(status.success(), "python reference script failed");
+
+        let reference: PythonReferenceOutput =
+            serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+        assert_fixture_close(tensor_fixture(projections.z), reference.z, "z", 1.0e-4);
+        assert_fixture_close(tensor_fixture(projections.x), reference.x, "x", 1.0e-4);
+        assert_fixture_close(tensor_fixture(projections.dt), reference.dt, "dt", 1.0e-4);
+        assert_fixture_close(tensor_fixture(projections.a), reference.a, "a", 1.0e-4);
+        assert_fixture_close(
+            tensor_fixture(projections.trap),
+            reference.trap,
+            "trap",
+            1.0e-4,
+        );
+        assert_fixture_close(
+            tensor_fixture(projections.angles),
+            reference.angles,
+            "angles",
+            1.0e-4,
+        );
+        assert_fixture_close(tensor_fixture(projections.b), reference.b, "b", 1.0e-4);
+        assert_fixture_close(tensor_fixture(projections.c), reference.c, "c", 1.0e-4);
+        assert_fixture_close(
+            tensor_fixture(next_angle_state),
+            reference.next_angle_state,
+            "next_angle_state",
+            1.0e-4,
+        );
+        assert_fixture_close(
+            tensor_fixture(rotated_b),
+            reference.rotated_b,
+            "rotated_b",
+            1.0e-4,
+        );
+        assert_fixture_close(
+            tensor_fixture(rotated_c),
+            reference.rotated_c,
+            "rotated_c",
+            1.0e-4,
+        );
+
+        let _ = fs::remove_file(input_path);
+        let _ = fs::remove_file(output_path);
     }
 }
