@@ -37,47 +37,75 @@ fn run() -> Result<(), String> {
         .unwrap_or_else(|| default_output_dir(&repo_root));
     let matrix = phase1_hybrid_attention_baseline_matrix();
     let device = <CpuTrainBackend as burn::tensor::backend::Backend>::Device::default();
-
-    let attention_report = run_attention_only_hybrid_attention_smoke_train::<CpuTrainBackend>(
-        smoke_config(
-            corpus_paths.clone(),
-            output_dir.join("attention-only"),
-            matrix.attention_only,
-            &args,
-        ),
-        &device,
-    )
-    .map(|report| HybridAttentionMatrixVariantOutcome::Executed(Box::new(report)))
-    .map_err(|error| format!("failed to run attention-only baseline: {error}"))?;
-
-    let reference_report = run_reference_ssm_hybrid_attention_smoke_train::<CpuTrainBackend>(
-        smoke_config(
-            corpus_paths.clone(),
-            output_dir.join("reference-ssm-hybrid"),
-            matrix.reference_ssm_hybrid,
-            &args,
-        ),
-        &device,
-    )
-    .map(|report| HybridAttentionMatrixVariantOutcome::Executed(Box::new(report)))
-    .map_err(|error| format!("failed to run reference-ssm-hybrid baseline: {error}"))?;
-
-    let primitive_report = run_primitive_hybrid_attention_smoke_train::<CpuTrainBackend>(
-        smoke_config(
-            corpus_paths,
-            output_dir.join("primitive-hybrid"),
-            matrix.primitive_hybrid,
-            &args,
-        ),
-        &device,
-    )
-    .map(|report| HybridAttentionMatrixVariantOutcome::Executed(Box::new(report)))
-    .map_err(|error| format!("failed to run primitive-hybrid baseline: {error}"))?;
+    let mut variants = Vec::new();
+    if args.variant.includes_attention_only() {
+        variants.push(
+            run_attention_only_hybrid_attention_smoke_train::<CpuTrainBackend>(
+                smoke_config(
+                    corpus_paths.clone(),
+                    output_dir.join("attention-only"),
+                    matrix.attention_only,
+                    &args,
+                ),
+                &device,
+            )
+            .map(|report| HybridAttentionMatrixVariantOutcome::Executed(Box::new(report)))
+            .map_err(|error| format!("failed to run attention-only baseline: {error}"))?,
+        );
+    } else {
+        variants.push(HybridAttentionMatrixVariantOutcome::Skipped {
+            label: matrix.attention_only.label.to_owned(),
+            kind: matrix.attention_only.kind,
+            reason: "not requested by --variant selection".to_owned(),
+        });
+    }
+    if args.variant.includes_reference_ssm_hybrid() {
+        variants.push(
+            run_reference_ssm_hybrid_attention_smoke_train::<CpuTrainBackend>(
+                smoke_config(
+                    corpus_paths.clone(),
+                    output_dir.join("reference-ssm-hybrid"),
+                    matrix.reference_ssm_hybrid,
+                    &args,
+                ),
+                &device,
+            )
+            .map(|report| HybridAttentionMatrixVariantOutcome::Executed(Box::new(report)))
+            .map_err(|error| format!("failed to run reference-ssm-hybrid baseline: {error}"))?,
+        );
+    } else {
+        variants.push(HybridAttentionMatrixVariantOutcome::Skipped {
+            label: matrix.reference_ssm_hybrid.label.to_owned(),
+            kind: matrix.reference_ssm_hybrid.kind,
+            reason: "not requested by --variant selection".to_owned(),
+        });
+    }
+    if args.variant.includes_primitive_hybrid() {
+        variants.push(
+            run_primitive_hybrid_attention_smoke_train::<CpuTrainBackend>(
+                smoke_config(
+                    corpus_paths,
+                    output_dir.join("primitive-hybrid"),
+                    matrix.primitive_hybrid,
+                    &args,
+                ),
+                &device,
+            )
+            .map(|report| HybridAttentionMatrixVariantOutcome::Executed(Box::new(report)))
+            .map_err(|error| format!("failed to run primitive-hybrid baseline: {error}"))?,
+        );
+    } else {
+        variants.push(HybridAttentionMatrixVariantOutcome::Skipped {
+            label: matrix.primitive_hybrid.label.to_owned(),
+            kind: matrix.primitive_hybrid.kind,
+            reason: "not requested by --variant selection".to_owned(),
+        });
+    }
 
     let rendered = render_report(
         &RenderedMatrixReport {
-            note: "Path 1 baseline matrix: attention-only, reference-ssm-hybrid, and primitive-hybrid are executable. The reference lane now uses the faithful Rust Mamba-3-style baseline block instead of the old proxy lane.",
-            variants: vec![attention_report, reference_report, primitive_report],
+            note: "Path 1 baseline matrix: attention-only, reference-ssm-hybrid, and primitive-hybrid remain the fixed three-lane report surface. Subset runs now emit explicit skipped states for unrequested lanes, and the reference lane uses the faithful Rust Mamba-3-style baseline block instead of the old proxy lane.",
+            variants,
         },
         args.output,
     )?;
@@ -115,6 +143,7 @@ struct CliArgs {
     eval_holdout_every: usize,
     learning_rate: f64,
     seed: u64,
+    variant: VariantSelection,
     output: OutputFormat,
 }
 
@@ -130,6 +159,7 @@ impl CliArgs {
         let mut eval_holdout_every = DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY;
         let mut learning_rate = DEFAULT_V3A_SMOKE_LEARNING_RATE;
         let mut seed = DEFAULT_V3A_SMOKE_SEED;
+        let mut variant = VariantSelection::All;
         let mut output = OutputFormat::Table;
         let mut show_help = false;
         let mut iter = args.peekable();
@@ -206,6 +236,13 @@ impl CliArgs {
                         .parse::<u64>()
                         .map_err(|error| format!("invalid --seed value '{value}': {error}"))?;
                 }
+                "--variant" => {
+                    variant = VariantSelection::parse(
+                        &iter
+                            .next()
+                            .ok_or_else(|| "--variant requires a value".to_owned())?,
+                    )?;
+                }
                 "--output" => {
                     output = OutputFormat::parse(
                         &iter
@@ -234,8 +271,41 @@ impl CliArgs {
             eval_holdout_every,
             learning_rate,
             seed,
+            variant,
             output,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VariantSelection {
+    All,
+    AttentionOnly,
+    ReferenceSsmHybrid,
+    PrimitiveHybrid,
+}
+
+impl VariantSelection {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "all" => Ok(Self::All),
+            "attention-only" => Ok(Self::AttentionOnly),
+            "reference-ssm-hybrid" => Ok(Self::ReferenceSsmHybrid),
+            "primitive-hybrid" => Ok(Self::PrimitiveHybrid),
+            _ => Err(format!("unknown variant selection: {value}")),
+        }
+    }
+
+    fn includes_attention_only(self) -> bool {
+        matches!(self, Self::All | Self::AttentionOnly)
+    }
+
+    fn includes_reference_ssm_hybrid(self) -> bool {
+        matches!(self, Self::All | Self::ReferenceSsmHybrid)
+    }
+
+    fn includes_primitive_hybrid(self) -> bool {
+        matches!(self, Self::All | Self::PrimitiveHybrid)
     }
 }
 
@@ -301,6 +371,10 @@ fn render_table(report: &RenderedMatrixReport<'_>) -> String {
                     report.report_path.display()
                 );
             }
+            HybridAttentionMatrixVariantOutcome::Skipped { label, reason, .. } => {
+                let _ = writeln!(output, "- {} (skipped)", label);
+                let _ = writeln!(output, "  reason={reason}");
+            }
             HybridAttentionMatrixVariantOutcome::RequiredMissing { label, reason, .. } => {
                 let _ = writeln!(output, "- {} (required-missing)", label);
                 let _ = writeln!(output, "  reason={reason}");
@@ -346,6 +420,7 @@ fn usage() -> String {
             "  --eval-holdout-every <n>     Hold out every nth sequence for eval (default: {holdout})\n",
             "  --learning-rate <value>      Learning rate (default: {lr})\n",
             "  --seed <n>                   Random seed for model initialization (default: {seed})\n",
+            "  --variant <name>             One of: all, attention-only, reference-ssm-hybrid, primitive-hybrid (default: all)\n",
             "  --output <table|json>        Output format (default: table)\n",
             "  -h, --help                   Show this help\n",
         ),
