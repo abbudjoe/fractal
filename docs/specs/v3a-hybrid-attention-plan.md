@@ -141,6 +141,28 @@ The ladder must be run in order.
 
 No step `5` before steps `1` through `4` are all real.
 
+6. composite hybrid phase
+   Only after an improved primitive has had a fair standalone shot:
+   * `attention + Rust Mamba-3`
+   * `attention + improved primitive`
+   * then, and only then:
+   * `attention + Rust Mamba-3 + improved primitive`
+
+This composite phase is for a new hypothesis:
+
+* our improved primitive may **complement** a strong Mamba-style block rather
+  than only replacing it
+
+But this may not be tested until the improved primitive is already real on its
+own. Otherwise we would not know whether the primitive is:
+
+* strong in its own right
+* merely smoothing or overparameterizing the stack
+* or only useful as a helper attached to Mamba-3
+
+So the composite hybrid is explicitly downstream of the standalone contender
+phase, not a shortcut around it.
+
 ### Phase-1 matched baseline matrix
 
 The first concrete matrix is fixed as the build order for Path 1:
@@ -179,6 +201,45 @@ For the first proving round, the typed control plane for this matrix lives in:
 The concrete baseline-build checklist lives in:
 
 * [`v3a-rust-mamba-baseline-checklist.md`](./v3a-rust-mamba-baseline-checklist.md)
+
+### Later composite matrix
+
+After the reference baseline is frozen and the improved primitive has been
+validated standalone, Path 1 may open one later composite matrix:
+
+1. `A`
+   * attention-only
+
+2. `A + M`
+   * attention + Rust Mamba-3 baseline
+
+3. `A + P2`
+   * attention + improved primitive
+
+4. `A + M + P2`
+   * attention + Rust Mamba-3 + improved primitive
+
+This matrix is allowed only under the following rules:
+
+* `P2` must first beat or at least seriously challenge the frozen baseline in
+  the standalone `A + P2` lane
+* the combined lane must test **one hypothesis at a time**
+  * complement: `P2` adds something Mamba-3 lacks
+  * not substitution by another name
+* all four variants must hold fixed:
+  * width
+  * depth
+  * local attention window
+  * training budget
+  * eval suites
+* `P2` remains a **predictive-core sequence primitive**
+  * not a memory/index sidecar
+  * not a Path 2 retrieval subsystem in disguise
+
+This keeps the comparison interpretable:
+
+* first prove `P2` alone
+* then test whether `P2` complements `M`
 
 ---
 
@@ -259,6 +320,17 @@ Phase 1B succeeds only if all of the following are true:
 If predictive quality drops while only efficiency improves, Path 1 has not yet
 validated.
 
+Phase 1C succeeds only if all of the following are true:
+
+* the improved primitive has already cleared its standalone `A + P2` gate
+* the combined `A + M + P2` lane beats or clearly complements `A + M`
+* the gain is interpretable as a true architectural contribution, not just
+  extra uncontrolled capacity
+* the combined lane preserves the predictive-core discipline of Path 1
+
+If `A + M + P2` looks stronger but `A + P2` never stood on its own, then the
+result is not scientifically clean enough to count as Path 1 validation.
+
 ---
 
 ## Failure Criteria
@@ -278,6 +350,15 @@ Phase 1B fails if:
   hybrid
 * efficiency gains are only marginal
 * copy and comparison behavior degrade materially
+
+Phase 1C fails if:
+
+* the combined lane is introduced before the improved primitive is validated
+  alone
+* any gain from `A + M + P2` disappears under a matched parameter/depth budget
+* the combined lane only helps because it quietly changes the Path 1 control
+  plane
+* the combined lane requires importing Path 2 memory/index ideas
 
 At that point, do not rescue Path 1 by importing Path 2 memory features.
 That would break the path split.

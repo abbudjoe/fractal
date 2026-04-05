@@ -229,6 +229,14 @@ Only after all phases above are done:
 - [ ] compare our primitive against the frozen Rust Mamba-style baseline
 - [ ] run matched ablations without changing the baseline definition midstream
 
+Only after the improved primitive is validated in that standalone contender
+phase:
+
+- [ ] open the later composite-hybrid matrix
+- [ ] compare `A`, `A + M`, `A + P2`, and `A + M + P2`
+- [ ] test complementarity without changing the fixed Path 1 control plane
+- [ ] forbid Path 2 memory/index features from entering the composite lane
+
 ---
 
 ## Definition Of Done
