@@ -2,6 +2,7 @@ pub mod data_generator;
 pub mod diagnostics;
 pub mod error;
 pub mod fitness;
+pub mod hybrid;
 pub mod language_model_head;
 pub mod lifecycle;
 pub mod model;
@@ -30,6 +31,15 @@ pub use diagnostics::{
     TensorLayoutTransform, TrainStepDiagnosticContext,
 };
 pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
+pub use hybrid::{
+    BaselineRescueAttentionBlock, BaselineRescueAttentionConfig, GatheredCandidateRecall,
+    GatheredRetrievalContext, GatheredRetrievalContextShape, GatheredRetrievalLayout,
+    GatheredRetrievalProvenance, HybridModelShape, HybridRescuePrevalidationMode,
+    RescueAttentionBlock, RescueAttentionDiagnostics, RescueAttentionInput,
+    RescueAttentionOutput, RescueAttentionShape, PHASE1_LEAF_SIZE,
+    PHASE1_LOCAL_WINDOW_SIZE, PHASE1_REMOTE_TOKEN_BUDGET, PHASE1_ROUTED_SPAN_COUNT,
+    PHASE1_TOTAL_TOKEN_BUDGET,
+};
 pub use language_model_head::{LanguageModelHead, LanguageModelHeadConfig};
 pub use lifecycle::{
     ArcSourceMode, ArcSourceSpec, ArtifactCompleteness, ArtifactPolicy, BatchingPolicy,
