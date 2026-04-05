@@ -201,6 +201,7 @@ For the first proving round, the typed control plane for this matrix lives in:
 The concrete baseline-build checklist lives in:
 
 * [`v3a-rust-mamba-baseline-checklist.md`](./v3a-rust-mamba-baseline-checklist.md)
+* [`v3a-baseline-freeze-and-p2-checklist.md`](./v3a-baseline-freeze-and-p2-checklist.md)
 
 ### Later composite matrix
 

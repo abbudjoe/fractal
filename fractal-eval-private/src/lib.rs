@@ -13,8 +13,10 @@ pub mod v2_synthetic;
 pub mod v2_training;
 
 pub use hybrid_attention::{
-    HybridAttentionMatrixConfig, HybridAttentionMatrixPlan, HybridAttentionRunnerLocation,
-    DEFAULT_V3A_RESULTS_LEDGER_PATH,
+    append_v3a_results_ledger_entry, default_v3a_results_ledger_path, read_v3a_results_ledger,
+    resolve_requested_v3a_results_ledger_path, HybridAttentionMatrixConfig,
+    HybridAttentionMatrixLedgerReport, HybridAttentionMatrixPlan, HybridAttentionRunnerLocation,
+    V3aResultsLedgerEntry, V3aResultsLedgerKind, DEFAULT_V3A_RESULTS_LEDGER_PATH,
 };
 pub use hybrid_attention_training::{
     run_attention_only_hybrid_attention_smoke_train, run_primitive_hybrid_attention_smoke_train,

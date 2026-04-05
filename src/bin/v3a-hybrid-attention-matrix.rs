@@ -6,9 +6,11 @@ use std::{
 
 use fractal_core::{phase1_hybrid_attention_baseline_matrix, CpuTrainBackend};
 use fractal_eval_private::{
-    default_v2_smoke_corpus_paths, run_attention_only_hybrid_attention_smoke_train,
+    append_v3a_results_ledger_entry, default_v2_smoke_corpus_paths,
+    resolve_requested_v3a_results_ledger_path, run_attention_only_hybrid_attention_smoke_train,
     run_primitive_hybrid_attention_smoke_train, run_reference_ssm_hybrid_attention_smoke_train,
-    HybridAttentionMatrixVariantOutcome, HybridAttentionSmokeTrainConfig,
+    HybridAttentionMatrixLedgerReport, HybridAttentionMatrixVariantOutcome,
+    HybridAttentionSmokeTrainConfig, V3aResultsLedgerEntry,
     DEFAULT_V3A_SMOKE_BATCH_SIZE, DEFAULT_V3A_SMOKE_EVAL_BATCHES,
     DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY, DEFAULT_V3A_SMOKE_LEARNING_RATE, DEFAULT_V3A_SMOKE_SEED,
     DEFAULT_V3A_SMOKE_SEQ_LEN, DEFAULT_V3A_SMOKE_TRAIN_STEPS, DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
@@ -25,6 +27,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let args = CliArgs::parse(std::env::args().skip(1))?;
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    const MATRIX_NOTE: &str = "Path 1 baseline matrix: attention-only, reference-ssm-hybrid, and primitive-hybrid remain the fixed three-lane report surface. Subset runs now emit explicit skipped states for unrequested lanes, and the reference lane uses the faithful Rust Mamba-3-style baseline block instead of the old proxy lane.";
     let corpus_paths = if args.corpus_paths.is_empty() {
         default_v2_smoke_corpus_paths(&repo_root)
             .map_err(|error| format!("failed to resolve default smoke corpus: {error}"))?
@@ -102,12 +105,23 @@ fn run() -> Result<(), String> {
         });
     }
 
+    let ledger_report = HybridAttentionMatrixLedgerReport {
+        requested_variant: args.variant.as_str().to_owned(),
+        note: MATRIX_NOTE.to_owned(),
+        variants: variants.clone(),
+    };
     let rendered = render_report(
         &RenderedMatrixReport {
-            note: "Path 1 baseline matrix: attention-only, reference-ssm-hybrid, and primitive-hybrid remain the fixed three-lane report surface. Subset runs now emit explicit skipped states for unrequested lanes, and the reference lane uses the faithful Rust Mamba-3-style baseline block instead of the old proxy lane.",
+            note: MATRIX_NOTE,
             variants,
         },
         args.output,
+    )?;
+    maybe_append_ledger_entry(
+        resolve_requested_v3a_results_ledger_path(&repo_root, args.ledger_path.as_deref())
+            .map_err(|error| format!("failed to resolve v3a results ledger path: {error}"))?,
+        &ledger_report,
+        args.run_label.as_deref(),
     )?;
     print!("{rendered}");
     Ok(())
@@ -144,6 +158,8 @@ struct CliArgs {
     learning_rate: f64,
     seed: u64,
     variant: VariantSelection,
+    ledger_path: Option<String>,
+    run_label: Option<String>,
     output: OutputFormat,
 }
 
@@ -160,6 +176,8 @@ impl CliArgs {
         let mut learning_rate = DEFAULT_V3A_SMOKE_LEARNING_RATE;
         let mut seed = DEFAULT_V3A_SMOKE_SEED;
         let mut variant = VariantSelection::All;
+        let mut ledger_path = None;
+        let mut run_label = None;
         let mut output = OutputFormat::Table;
         let mut show_help = false;
         let mut iter = args.peekable();
@@ -243,6 +261,18 @@ impl CliArgs {
                             .ok_or_else(|| "--variant requires a value".to_owned())?,
                     )?;
                 }
+                "--ledger-path" => {
+                    ledger_path = Some(
+                        iter.next()
+                            .ok_or_else(|| "--ledger-path requires a value".to_owned())?,
+                    );
+                }
+                "--run-label" => {
+                    run_label = Some(
+                        iter.next()
+                            .ok_or_else(|| "--run-label requires a value".to_owned())?,
+                    );
+                }
                 "--output" => {
                     output = OutputFormat::parse(
                         &iter
@@ -272,6 +302,8 @@ impl CliArgs {
             learning_rate,
             seed,
             variant,
+            ledger_path,
+            run_label,
             output,
         })
     }
@@ -307,6 +339,15 @@ impl VariantSelection {
     fn includes_primitive_hybrid(self) -> bool {
         matches!(self, Self::All | Self::PrimitiveHybrid)
     }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::AttentionOnly => "attention-only",
+            Self::ReferenceSsmHybrid => "reference-ssm-hybrid",
+            Self::PrimitiveHybrid => "primitive-hybrid",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -329,6 +370,25 @@ impl OutputFormat {
 struct RenderedMatrixReport<'a> {
     note: &'a str,
     variants: Vec<HybridAttentionMatrixVariantOutcome>,
+}
+
+fn maybe_append_ledger_entry(
+    ledger_path: Option<PathBuf>,
+    report: &HybridAttentionMatrixLedgerReport,
+    run_label: Option<&str>,
+) -> Result<(), String> {
+    let Some(ledger_path) = ledger_path else {
+        return Ok(());
+    };
+    let entry = V3aResultsLedgerEntry::path1_matrix_run(
+        "v3a_hybrid_attention_matrix",
+        &report.note,
+        report,
+        run_label.map(str::to_owned),
+    )
+    .map_err(|error| format!("failed to build v3a results ledger entry: {error}"))?;
+    append_v3a_results_ledger_entry(&ledger_path, &entry)
+        .map_err(|error| format!("failed to append v3a results ledger entry: {error}"))
 }
 
 fn render_report(
@@ -421,6 +481,8 @@ fn usage() -> String {
             "  --learning-rate <value>      Learning rate (default: {lr})\n",
             "  --seed <n>                   Random seed for model initialization (default: {seed})\n",
             "  --variant <name>             One of: all, attention-only, reference-ssm-hybrid, primitive-hybrid (default: all)\n",
+            "  --ledger-path <default|path> Append a structured v3a ledger entry for this run\n",
+            "  --run-label <label>          Optional label stored with the v3a ledger entry\n",
             "  --output <table|json>        Output format (default: table)\n",
             "  -h, --help                   Show this help\n",
         ),
