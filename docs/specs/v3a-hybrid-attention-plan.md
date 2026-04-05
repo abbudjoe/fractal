@@ -90,6 +90,27 @@ The reference hybrid must become real first.
 
 ---
 
+## RunPod Benchmark Gate
+
+RunPod benchmarking is **not** currently allowed for the Rust Mamba-3 baseline.
+
+We now have a credible Rust baseline for local CPU and Metal development, but
+that does **not** yet close the CUDA gap.
+
+Before any Path 1 benchmark is run on RunPod or any other CUDA-only surface, we
+must first:
+
+* implement a CUDA execution path for the Rust reference lane
+* validate CUDA correctness against the existing parity ladder
+* run at least one seeded CUDA smoke benchmark on the shared Path 1 surface
+* confirm report/schema parity with the local CPU/Metal control plane
+
+Until those are done, RunPod results would mix architecture questions with a
+missing-backend question, and that would break the apples-to-apples discipline
+for Path 1.
+
+---
+
 ## Baseline Ladder
 
 The ladder must be run in order.

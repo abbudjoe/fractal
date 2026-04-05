@@ -188,6 +188,23 @@ Exit criteria:
 
 ---
 
+## Phase 5A: CUDA / RunPod Benchmark Gate
+
+Do not benchmark Path 1 on RunPod until the backend gap is closed explicitly.
+
+- [ ] add a CUDA execution path for the Rust Mamba-3 reference lane
+- [ ] validate CUDA outputs against the existing parity ladder where possible
+- [ ] run at least one seeded CUDA smoke benchmark on the shared Path 1 matrix
+- [ ] confirm the CUDA report surface matches the local CPU/Metal report schema
+- [ ] document any remaining CUDA-vs-local numerical tolerance policy
+
+Exit criteria:
+
+- [ ] RunPod benchmarking is no longer blocked by a missing CUDA backend
+- [ ] CUDA is treated as a validated backend, not an aspirational future target
+
+---
+
 ## Phase 6: Freeze The Baseline
 
 Do not start contender redesign until this happens.
@@ -221,5 +238,7 @@ This checklist is complete only when all of the following are true:
 - [ ] the Path 1 reference lane is no longer a proxy
 - [ ] the Rust baseline is reproducible
 - [ ] the Rust baseline is validated on the shared Path 1 surface
+- [ ] the CUDA / RunPod benchmark gate is either complete or explicitly marked
+  out of scope for the current proving round
 - [ ] the baseline is frozen in docs and artifacts
 - [ ] contender work can proceed against a real apples-to-apples benchmark

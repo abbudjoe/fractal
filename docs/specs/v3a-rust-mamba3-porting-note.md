@@ -211,7 +211,9 @@ These things can be deferred without breaking the architectural baseline claim:
    We do not need Triton/CUTE/TileLang parity on day one.
 
 2. **CUDA-first execution strategy**
-   CPU and Metal correctness come first.
+   CPU and Metal correctness come first for local bring-up.
+   This is a deferral of backend work, not a waiver: CUDA must still be closed
+   before we treat RunPod benchmarking as valid for the Path 1 baseline.
 
 3. **full inference-cache parity**
    The training-time recurrent path is the initial priority.
@@ -231,6 +233,26 @@ These things can be deferred without breaking the architectural baseline claim:
    of matching Triton fused kernels.
 
 These are deferrals of **performance engineering**, not of the core contract.
+
+---
+
+## Explicit Current Gap
+
+The Rust baseline is now strong enough for local Path 1 comparison work, but
+CUDA is still an explicit gap.
+
+That means:
+
+* local CPU and Metal benchmarking is allowed
+* RunPod or other CUDA-only benchmark claims are **not** yet allowed
+* before CUDA benchmarking, we must validate the Rust lane on a CUDA backend
+  through the same parity and smoke surfaces we used locally
+
+This keeps the benchmark story honest:
+
+* local Rust baseline first
+* CUDA backend closure second
+* RunPod benchmark claims only after both are real
 
 ---
 
