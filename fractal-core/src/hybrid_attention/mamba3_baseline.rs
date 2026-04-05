@@ -286,7 +286,7 @@ struct RustMamba3StepProjection<B: Backend> {
     angles: Tensor<B, 3>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RustMamba3RecurrentState<B: Backend> {
     angle_dt_state: Tensor<B, 3>,
     ssm_state: Tensor<B, 4>,
@@ -328,6 +328,13 @@ impl<B: Backend> RustMamba3RecurrentState<B> {
 struct RustMamba3StepOutput<B: Backend> {
     output: Tensor<B, 2>,
     next_state: RustMamba3RecurrentState<B>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug)]
+struct RustMamba3SequenceOutput<B: Backend> {
+    outputs: Tensor<B, 3>,
+    final_state: RustMamba3RecurrentState<B>,
 }
 
 impl<B: Backend> RustMamba3Mixer<B> {
@@ -440,7 +447,14 @@ impl<B: Backend> RustMamba3Mixer<B> {
     }
 
     pub fn forward_sequence(&self, input: Tensor<B, 3>) -> Result<Tensor<B, 3>, FractalError> {
-        let [batch_size, seq_len, width] = input.dims();
+        Ok(self.scan_sequence(input)?.outputs)
+    }
+
+    fn scan_sequence(
+        &self,
+        input: Tensor<B, 3>,
+    ) -> Result<RustMamba3SequenceOutput<B>, FractalError> {
+        let [batch_size, _, width] = input.dims();
         if width != self.config.d_model {
             return Err(FractalError::Shape(format!(
                 "rust_mamba3_mixer expected width {}, got {}",
@@ -448,7 +462,22 @@ impl<B: Backend> RustMamba3Mixer<B> {
             )));
         }
         let device = input.device();
-        let mut state = self.allocate_recurrent_state(batch_size, &device);
+        let state = self.allocate_recurrent_state(batch_size, &device);
+        self.scan_sequence_from_state(input, state)
+    }
+
+    fn scan_sequence_from_state(
+        &self,
+        input: Tensor<B, 3>,
+        mut state: RustMamba3RecurrentState<B>,
+    ) -> Result<RustMamba3SequenceOutput<B>, FractalError> {
+        let [batch_size, seq_len, width] = input.dims();
+        if width != self.config.d_model {
+            return Err(FractalError::Shape(format!(
+                "rust_mamba3_mixer expected width {}, got {}",
+                self.config.d_model, width
+            )));
+        }
         let mut outputs = Vec::with_capacity(seq_len);
         for chunk_start in (0..seq_len).step_by(self.config.chunk_size) {
             let chunk_end = (chunk_start + self.config.chunk_size).min(seq_len);
@@ -466,7 +495,10 @@ impl<B: Backend> RustMamba3Mixer<B> {
                 state = step.next_state;
             }
         }
-        Ok(Tensor::cat(outputs, 1))
+        Ok(RustMamba3SequenceOutput {
+            outputs: Tensor::cat(outputs, 1),
+            final_state: state,
+        })
     }
 
     fn step(
@@ -498,65 +530,72 @@ impl<B: Backend> RustMamba3Mixer<B> {
         );
         let x_ranked = self.expand_ranked_heads(projections.x.clone(), self.mimo_x.as_ref());
         let z_ranked = self.expand_ranked_heads(projections.z.clone(), self.mimo_z.as_ref());
-        let decay = (projections.a.clone() * projections.dt.clone())
+        let alpha = (projections.a.clone() * projections.dt.clone())
             .exp()
             .reshape([batch_size, nheads, 1, 1]);
-        let one_minus_decay = decay.clone().mul_scalar(-1.0).add_scalar(1.0);
-        let mean_b = rotated_b.clone().sum_dim(1).mul_scalar(1.0 / rank as f64);
-        let candidate_state = projections
-            .x
+        let beta = projections
+            .trap
             .clone()
-            .reshape([batch_size, nheads, headdim, 1])
-            * mean_b.reshape([batch_size, nheads, 1, d_state]);
-        let next_ssm_state =
-            decay.clone() * previous_state.ssm_state + one_minus_decay * candidate_state;
+            .mul_scalar(-1.0)
+            .add_scalar(1.0)
+            * projections.dt.clone()
+            * alpha.clone().reshape([batch_size, nheads]);
+        let gamma = projections.trap.clone() * projections.dt.clone();
 
-        let state_readout = (next_ssm_state
+        let x_bt_state = (x_ranked
+            .clone()
+            * gamma
+                .clone()
+                .reshape([batch_size, 1, nheads, 1])
+                .repeat(&[1, rank, 1, headdim]))
+        .reshape([batch_size, rank, nheads, headdim, 1])
+            * rotated_b
+                .clone()
+                .reshape([batch_size, rank, nheads, 1, d_state]);
+        let x_bt_prev = (self.expand_ranked_heads(previous_state.v_state.clone(), self.mimo_x.as_ref())
+            * beta
+                .reshape([batch_size, 1, nheads, 1])
+                .repeat(&[1, rank, 1, headdim]))
+        .reshape([batch_size, rank, nheads, headdim, 1])
+            * previous_state
+                .k_state
+                .clone()
+                .reshape([batch_size, rank, nheads, 1, d_state]);
+        let next_ssm_state = previous_state.ssm_state.clone() * alpha
+            + x_bt_state.sum_dim(1).reshape([batch_size, nheads, headdim, d_state])
+            + x_bt_prev.sum_dim(1).reshape([batch_size, nheads, headdim, d_state]);
+
+        let out_ranked = (next_ssm_state
             .clone()
             .reshape([batch_size, 1, nheads, headdim, d_state])
             * rotated_c
                 .clone()
                 .reshape([batch_size, rank, nheads, 1, d_state]))
         .sum_dim(4)
-        .reshape([batch_size, rank, nheads, headdim]);
-        let cached_score = (previous_state.k_state.clone() * rotated_c)
-            .sum_dim(3)
-            .mul_scalar(1.0 / (d_state as f64).sqrt())
-            .reshape([batch_size, rank, nheads, 1]);
-        let cached_readout = cached_score
-            * previous_state
-                .v_state
-                .clone()
-                .reshape([batch_size, 1, nheads, headdim]);
-        let readout = state_readout + cached_readout;
+        .reshape([batch_size, rank, nheads, headdim])
+            + x_ranked.clone()
+                * self
+                    .d_skip
+                    .val()
+                    .reshape([1, 1, nheads, 1])
+                    .repeat(&[batch_size, rank, 1, headdim]);
+
         let next_v_state = projections.x.clone();
         let next_k_state = rotated_b;
-        let skip = x_ranked.clone()
-            * self
-                .d_skip
-                .val()
-                .reshape([1, 1, nheads, 1])
-                .repeat(&[batch_size, rank, 1, headdim]);
-        let trap = projections
-            .trap
-            .reshape([batch_size, 1, nheads, 1])
-            .repeat(&[1, rank, 1, headdim]);
-        let mixed_ranked = trap.clone() * readout + trap.mul_scalar(-1.0).add_scalar(1.0) * skip;
-        let combined = self.combine_ranked_outputs(mixed_ranked);
-        let z_combined = self.combine_ranked_outputs(z_ranked);
-        let gated = if let Some(norm) = &self.out_proj_norm {
-            norm.forward4_with_gate(
-                combined
+        let gated_ranked = if let Some(norm) = &self.out_proj_norm {
+            let combined = out_ranked.clone().reshape([batch_size, rank, 1, self.derived.d_inner]);
+            let z_combined =
+                z_ranked
                     .clone()
-                    .reshape([batch_size, 1, 1, self.derived.d_inner]),
-                z_combined
-                    .clone()
-                    .reshape([batch_size, 1, 1, self.derived.d_inner]),
-            )
-            .reshape([batch_size, self.derived.d_inner])
+                    .reshape([batch_size, rank, 1, self.derived.d_inner]);
+            norm.forward4_with_gate(combined, z_combined)
+                .reshape([batch_size, rank, nheads, headdim])
         } else {
-            combined * sigmoid(z_combined)
+            let z_silu = z_ranked.clone() * sigmoid(z_ranked);
+            out_ranked * z_silu
         };
+        let combined = self.combine_ranked_outputs(gated_ranked);
+        let gated = combined.reshape([batch_size, self.derived.d_inner]);
         let output = self.out_proj.forward(gated);
         Ok(RustMamba3StepOutput {
             output,
@@ -1075,18 +1114,24 @@ mod tests {
     use burn::{
         backend::Candle,
         module::{Module, Param},
+        record::{BinFileRecorder, FullPrecisionSettings},
         tensor::{Int, Tensor, TensorData},
     };
+    use serde::de::DeserializeOwned;
     use serde::{Deserialize, Serialize};
 
     use super::{
         build_rust_mamba3_reference_hybrid_attention_model, rotate_state_prefix_pairs_last_dim_4,
-        RustMamba3BaselineConfig, RustMamba3DerivedShape, RustMamba3Mixer, RustMamba3RopeFraction,
+        RustMamba3BaselineConfig, RustMamba3DerivedShape, RustMamba3Mixer,
+        RustMamba3RecurrentState, RustMamba3RopeFraction, SimpleRmsNorm,
+        DEFAULT_RUST_MAMBA3_NORM_EPS,
     };
     use crate::{
+        error::FractalError,
+        language_model_head::{LanguageModelHead, LanguageModelHeadConfig},
         phase1_hybrid_attention_baseline_matrix,
-        projection::{ProjectionLayoutPolicy, StructuredProjection},
-        ReferenceSsmFamily,
+        projection::{ProjectionLayoutPolicy, StructuredProjection, StructuredProjectionRecord},
+        MetalTrainBackend, ReferenceSsmFamily,
     };
 
     type TestBackend = Candle<f32, i64>;
@@ -1126,6 +1171,121 @@ mod tests {
         rotated_c: TensorFixture,
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct PythonStepReferenceInput {
+        mode: String,
+        official_repo: Option<String>,
+        config: RustMamba3BaselineConfig,
+        derived: RustMamba3DerivedShape,
+        input: TensorFixture,
+        angle_state: TensorFixture,
+        ssm_state: TensorFixture,
+        k_state: TensorFixture,
+        v_state: TensorFixture,
+        in_proj_weight: TensorFixture,
+        dt_bias: TensorFixture,
+        b_bias: TensorFixture,
+        c_bias: TensorFixture,
+        b_norm_weight: TensorFixture,
+        c_norm_weight: TensorFixture,
+        d_skip: TensorFixture,
+        mimo_x: Option<TensorFixture>,
+        mimo_z: Option<TensorFixture>,
+        mimo_o: Option<TensorFixture>,
+        out_proj_weight: TensorFixture,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct PythonStepReferenceOutput {
+        output: TensorFixture,
+        next_angle_state: TensorFixture,
+        next_ssm_state: TensorFixture,
+        next_k_state: TensorFixture,
+        next_v_state: TensorFixture,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct PythonSequenceReferenceInput {
+        mode: String,
+        official_repo: Option<String>,
+        config: RustMamba3BaselineConfig,
+        derived: RustMamba3DerivedShape,
+        sequence_input: TensorFixture,
+        angle_state: TensorFixture,
+        ssm_state: TensorFixture,
+        k_state: TensorFixture,
+        v_state: TensorFixture,
+        in_proj_weight: TensorFixture,
+        dt_bias: TensorFixture,
+        b_bias: TensorFixture,
+        c_bias: TensorFixture,
+        b_norm_weight: TensorFixture,
+        c_norm_weight: TensorFixture,
+        d_skip: TensorFixture,
+        mimo_x: Option<TensorFixture>,
+        mimo_z: Option<TensorFixture>,
+        mimo_o: Option<TensorFixture>,
+        out_proj_weight: TensorFixture,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct PythonSequenceReferenceOutput {
+        outputs: TensorFixture,
+        final_angle_state: TensorFixture,
+        final_ssm_state: TensorFixture,
+        final_k_state: TensorFixture,
+        final_v_state: TensorFixture,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct PythonModelSmokeReferenceInput {
+        mode: String,
+        official_repo: Option<String>,
+        config: RustMamba3BaselineConfig,
+        derived: RustMamba3DerivedShape,
+        sequence_input: TensorFixture,
+        angle_state: TensorFixture,
+        ssm_state: TensorFixture,
+        k_state: TensorFixture,
+        v_state: TensorFixture,
+        in_proj_weight: TensorFixture,
+        dt_bias: TensorFixture,
+        b_bias: TensorFixture,
+        c_bias: TensorFixture,
+        b_norm_weight: TensorFixture,
+        c_norm_weight: TensorFixture,
+        d_skip: TensorFixture,
+        mimo_x: Option<TensorFixture>,
+        mimo_z: Option<TensorFixture>,
+        mimo_o: Option<TensorFixture>,
+        out_proj_weight: TensorFixture,
+        final_norm_weight: TensorFixture,
+        lm_head_weight: TensorFixture,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct PythonModelSmokeReferenceOutput {
+        logits: TensorFixture,
+        final_angle_state: TensorFixture,
+        final_ssm_state: TensorFixture,
+        final_k_state: TensorFixture,
+        final_v_state: TensorFixture,
+    }
+
+    #[derive(Debug)]
+    struct TinyRustMamba3SmokeModel<B: burn::tensor::backend::Backend> {
+        mixer: RustMamba3Mixer<B>,
+        final_norm: SimpleRmsNorm<B>,
+        lm_head: LanguageModelHead<B>,
+    }
+
+    impl<B: burn::tensor::backend::Backend> TinyRustMamba3SmokeModel<B> {
+        fn forward_logits(&self, input: Tensor<B, 3>) -> Result<Tensor<B, 3>, FractalError> {
+            let mixed = self.mixer.forward_sequence(input)?;
+            Ok(self.lm_head.forward(self.final_norm.forward3(mixed)))
+        }
+    }
+
     fn tensor_fixture<const D: usize>(tensor: Tensor<TestBackend, D>) -> TensorFixture {
         TensorFixture {
             shape: tensor.dims().to_vec(),
@@ -1148,13 +1308,26 @@ mod tests {
         }
     }
 
-    fn projection_weight_fixture(projection: StructuredProjection<TestBackend>) -> TensorFixture {
-        let record = Module::into_record(projection);
+    fn structured_projection_weight_fixture(
+        record: StructuredProjectionRecord<TestBackend>,
+    ) -> TensorFixture {
         let weight = match record.layout_policy {
             ProjectionLayoutPolicy::InputByOutput => record.weight.val(),
             ProjectionLayoutPolicy::OutputByInput => record.weight.val().transpose(),
         };
         tensor_fixture(weight)
+    }
+
+    fn projection_weight_fixture(projection: StructuredProjection<TestBackend>) -> TensorFixture {
+        structured_projection_weight_fixture(Module::into_record(projection))
+    }
+
+    fn lm_head_weight_fixture(head: LanguageModelHead<TestBackend>) -> TensorFixture {
+        structured_projection_weight_fixture(Module::into_record(head))
+    }
+
+    fn optional_param_fixture(tensor: &Option<Param<Tensor<TestBackend, 3>>>) -> Option<TensorFixture> {
+        tensor.as_ref().map(|value| tensor_fixture(value.val()))
     }
 
     fn deterministic_values(len: usize, scale: f32, offset: f32) -> Vec<f32> {
@@ -1253,7 +1426,195 @@ mod tests {
             ),
             device,
         );
+        mixer.d_skip = Param::from_data(
+            TensorData::new(
+                deterministic_values(mixer.derived_shape().nheads, 0.015, 0.5),
+                [mixer.derived_shape().nheads],
+            ),
+            device,
+        );
+        mixer.mimo_x = Some(Param::from_data(
+            TensorData::new(
+                deterministic_values(
+                    mixer.derived_shape().mimo_rank
+                        * mixer.derived_shape().nheads
+                        * mixer.config().headdim,
+                    0.01,
+                    0.25,
+                ),
+                [
+                    mixer.derived_shape().mimo_rank,
+                    mixer.derived_shape().nheads,
+                    mixer.config().headdim,
+                ],
+            ),
+            device,
+        ));
+        mixer.mimo_z = Some(Param::from_data(
+            TensorData::new(
+                deterministic_values(
+                    mixer.derived_shape().mimo_rank
+                        * mixer.derived_shape().nheads
+                        * mixer.config().headdim,
+                    -0.008,
+                    0.9,
+                ),
+                [
+                    mixer.derived_shape().mimo_rank,
+                    mixer.derived_shape().nheads,
+                    mixer.config().headdim,
+                ],
+            ),
+            device,
+        ));
+        mixer.mimo_o = Some(Param::from_data(
+            TensorData::new(
+                deterministic_values(
+                    mixer.derived_shape().mimo_rank
+                        * mixer.derived_shape().nheads
+                        * mixer.config().headdim,
+                    0.007,
+                    -0.15,
+                ),
+                [
+                    mixer.derived_shape().mimo_rank,
+                    mixer.derived_shape().nheads,
+                    mixer.config().headdim,
+                ],
+            ),
+            device,
+        ));
+        let mut out_proj_record = Module::into_record(mixer.out_proj.clone());
+        out_proj_record.weight = Param::from_data(
+            TensorData::new(
+                deterministic_values(
+                    out_proj_record.weight.val().dims()[0] * out_proj_record.weight.val().dims()[1],
+                    0.009,
+                    -0.05,
+                ),
+                out_proj_record.weight.val().dims(),
+            ),
+            device,
+        );
+        mixer.out_proj = mixer.out_proj.clone().load_record(out_proj_record);
         mixer
+    }
+
+    fn deterministic_recurrent_state(
+        mixer: &RustMamba3Mixer<TestBackend>,
+        batch_size: usize,
+        device: &<TestBackend as burn::tensor::backend::Backend>::Device,
+    ) -> RustMamba3RecurrentState<TestBackend> {
+        RustMamba3RecurrentState {
+            angle_dt_state: Tensor::from_data(
+                TensorData::new(
+                    deterministic_values(
+                        batch_size
+                            * mixer.derived_shape().nheads
+                            * mixer.derived_shape().num_rope_angles,
+                        0.02,
+                        -0.1,
+                    ),
+                    [
+                        batch_size,
+                        mixer.derived_shape().nheads,
+                        mixer.derived_shape().num_rope_angles,
+                    ],
+                ),
+                device,
+            ),
+            ssm_state: Tensor::from_data(
+                TensorData::new(
+                    deterministic_values(
+                        batch_size
+                            * mixer.derived_shape().nheads
+                            * mixer.config().headdim
+                            * mixer.config().d_state,
+                        0.01,
+                        -0.2,
+                    ),
+                    [
+                        batch_size,
+                        mixer.derived_shape().nheads,
+                        mixer.config().headdim,
+                        mixer.config().d_state,
+                    ],
+                ),
+                device,
+            ),
+            k_state: Tensor::from_data(
+                TensorData::new(
+                    deterministic_values(
+                        batch_size
+                            * mixer.derived_shape().mimo_rank
+                            * mixer.derived_shape().nheads
+                            * mixer.config().d_state,
+                        -0.015,
+                        0.3,
+                    ),
+                    [
+                        batch_size,
+                        mixer.derived_shape().mimo_rank,
+                        mixer.derived_shape().nheads,
+                        mixer.config().d_state,
+                    ],
+                ),
+                device,
+            ),
+            v_state: Tensor::from_data(
+                TensorData::new(
+                    deterministic_values(
+                        batch_size
+                            * mixer.derived_shape().nheads
+                            * mixer.config().headdim,
+                        0.025,
+                        -0.35,
+                    ),
+                    [batch_size, mixer.derived_shape().nheads, mixer.config().headdim],
+                ),
+                device,
+            ),
+        }
+    }
+
+    fn deterministic_smoke_model(
+        device: &<TestBackend as burn::tensor::backend::Backend>::Device,
+    ) -> TinyRustMamba3SmokeModel<TestBackend> {
+        let mixer = deterministic_test_mixer(device);
+        let mut final_norm =
+            SimpleRmsNorm::new(mixer.config().d_model, DEFAULT_RUST_MAMBA3_NORM_EPS, device)
+                .unwrap();
+        final_norm.weight = Param::from_data(
+            TensorData::new(
+                deterministic_values(mixer.config().d_model, 0.02, 0.75),
+                [mixer.config().d_model],
+            ),
+            device,
+        );
+
+        let mut lm_head = LanguageModelHeadConfig::new(mixer.config().d_model, 11)
+            .with_bias(false)
+            .with_layout_policy(ProjectionLayoutPolicy::OutputByInput)
+            .init::<TestBackend>(device);
+        let mut lm_head_record = Module::into_record(lm_head.clone());
+        lm_head_record.weight = Param::from_data(
+            TensorData::new(
+                deterministic_values(
+                    lm_head_record.weight.val().dims()[0] * lm_head_record.weight.val().dims()[1],
+                    -0.01,
+                    0.2,
+                ),
+                lm_head_record.weight.val().dims(),
+            ),
+            device,
+        );
+        lm_head = lm_head.load_record(lm_head_record);
+
+        TinyRustMamba3SmokeModel {
+            mixer,
+            final_norm,
+            lm_head,
+        }
     }
 
     fn temp_json_path(label: &str) -> PathBuf {
@@ -1262,6 +1623,35 @@ mod tests {
             .unwrap()
             .as_nanos();
         env::temp_dir().join(format!("fractal-{label}-{stamp}.json"))
+    }
+
+    fn temp_model_stem(label: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        env::temp_dir().join(format!("fractal-{label}-{stamp}"))
+    }
+
+    fn python_reference_script_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scripts/mamba3_pytorch_reference.py")
+    }
+
+    fn run_python_reference<I: Serialize, O: DeserializeOwned>(python: &str, input: &I) -> O {
+        let input_path = temp_json_path("mamba3-reference-input");
+        let output_path = temp_json_path("mamba3-reference-output");
+        fs::write(&input_path, serde_json::to_vec(input).unwrap()).unwrap();
+        let status = Command::new(python)
+            .arg(python_reference_script_path())
+            .arg(&input_path)
+            .arg(&output_path)
+            .status()
+            .expect("python reference script should launch");
+        assert!(status.success(), "python reference script failed");
+        let output = serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+        let _ = fs::remove_file(input_path);
+        let _ = fs::remove_file(output_path);
+        output
     }
 
     #[test]
@@ -1304,6 +1694,34 @@ mod tests {
     }
 
     #[test]
+    fn reference_rust_mamba3_model_round_trips_through_recording_without_logit_drift() {
+        let device = Default::default();
+        let matrix = phase1_hybrid_attention_baseline_matrix();
+        let model = build_rust_mamba3_reference_hybrid_attention_model::<TestBackend>(
+            257,
+            &matrix.reference_ssm_hybrid,
+            &device,
+        )
+        .unwrap();
+        let input = Tensor::<TestBackend, 2, Int>::from_data(
+            TensorData::new(vec![1i64, 2, 3, 4, 5, 6, 7, 8, 2, 4, 6, 8, 1, 3, 5, 7], [2, 8]),
+            &device,
+        );
+        let expected_logits = model.forward_logits(input.clone()).unwrap();
+
+        let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
+        let stem = temp_model_stem("rust-mamba3-roundtrip");
+        model.clone().save_file(stem.clone(), &recorder).unwrap();
+        let restored = model.load_file(stem.clone(), &recorder, &device).unwrap();
+        let restored_logits = restored.forward_logits(input).unwrap();
+        restored_logits
+            .into_data()
+            .assert_approx_eq::<f32>(&expected_logits.into_data(), burn::tensor::Tolerance::default());
+
+        let _ = fs::remove_file(stem.with_extension("bin"));
+    }
+
+    #[test]
     fn rust_mamba3_mixer_allocates_official_style_recurrent_state() {
         let device = Default::default();
         let matrix = phase1_hybrid_attention_baseline_matrix();
@@ -1320,6 +1738,84 @@ mod tests {
         assert_eq!(state.ssm_state.dims(), [2, 8, 32, 128]);
         assert_eq!(state.k_state.dims(), [2, 4, 8, 128]);
         assert_eq!(state.v_state.dims(), [2, 8, 32]);
+    }
+
+    #[test]
+    fn rust_mamba3_step_loop_matches_sequence_scan_from_same_initial_state() {
+        let device = Default::default();
+        let mixer = deterministic_test_mixer(&device);
+        let batch_size = 2;
+        let seq_len = 5;
+        let sequence_input = Tensor::<TestBackend, 3>::from_data(
+            TensorData::new(
+                deterministic_values(batch_size * seq_len * mixer.config().d_model, 0.015, -0.12),
+                [batch_size, seq_len, mixer.config().d_model],
+            ),
+            &device,
+        );
+        let initial_state = deterministic_recurrent_state(&mixer, batch_size, &device);
+        let scanned = mixer
+            .scan_sequence_from_state(sequence_input.clone(), initial_state.clone())
+            .unwrap();
+
+        let mut manual_state = initial_state;
+        let mut manual_outputs = Vec::with_capacity(seq_len);
+        for position in 0..seq_len {
+            let input_t = sequence_input
+                .clone()
+                .slice([0..batch_size, position..position + 1, 0..mixer.config().d_model])
+                .reshape([batch_size, mixer.config().d_model]);
+            let step = mixer.step(input_t, manual_state).unwrap();
+            manual_outputs.push(step.output.reshape([batch_size, 1, mixer.config().d_model]));
+            manual_state = step.next_state;
+        }
+        let manual_outputs = Tensor::cat(manual_outputs, 1);
+
+        assert_fixture_close(
+            tensor_fixture(scanned.outputs),
+            tensor_fixture(manual_outputs),
+            "step_vs_sequence_outputs",
+            1.0e-5,
+        );
+        assert_fixture_close(
+            tensor_fixture(scanned.final_state.angle_dt_state),
+            tensor_fixture(manual_state.angle_dt_state),
+            "step_vs_sequence_angle_state",
+            1.0e-5,
+        );
+        assert_fixture_close(
+            tensor_fixture(scanned.final_state.ssm_state),
+            tensor_fixture(manual_state.ssm_state),
+            "step_vs_sequence_ssm_state",
+            1.0e-5,
+        );
+        assert_fixture_close(
+            tensor_fixture(scanned.final_state.k_state),
+            tensor_fixture(manual_state.k_state),
+            "step_vs_sequence_k_state",
+            1.0e-5,
+        );
+        assert_fixture_close(
+            tensor_fixture(scanned.final_state.v_state),
+            tensor_fixture(manual_state.v_state),
+            "step_vs_sequence_v_state",
+            1.0e-5,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reference_rust_mamba3_model_runs_on_metal_backend() {
+        let device = <MetalTrainBackend as burn::tensor::backend::Backend>::Device::default();
+        let matrix = phase1_hybrid_attention_baseline_matrix();
+        let model = build_rust_mamba3_reference_hybrid_attention_model::<MetalTrainBackend>(
+            257,
+            &matrix.reference_ssm_hybrid,
+            &device,
+        )
+        .unwrap();
+        let input = Tensor::<MetalTrainBackend, 2, Int>::zeros([1, 8], &device);
+        assert_eq!(model.forward_logits(input).unwrap().dims(), [1, 8, 257]);
     }
 
     #[test]
@@ -1402,22 +1898,7 @@ mod tests {
             b_norm_weight: tensor_fixture(mixer.b_norm.weight.val()),
             c_norm_weight: tensor_fixture(mixer.c_norm.weight.val()),
         };
-        let input_path = temp_json_path("mamba3-reference-input");
-        let output_path = temp_json_path("mamba3-reference-output");
-        fs::write(&input_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-
-        let script_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../scripts/mamba3_pytorch_reference.py");
-        let status = Command::new(python)
-            .arg(script_path)
-            .arg(&input_path)
-            .arg(&output_path)
-            .status()
-            .expect("python reference script should launch");
-        assert!(status.success(), "python reference script failed");
-
-        let reference: PythonReferenceOutput =
-            serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+        let reference: PythonReferenceOutput = run_python_reference(&python, &bundle);
         assert_fixture_close(tensor_fixture(projections.z), reference.z, "z", 1.0e-4);
         assert_fixture_close(tensor_fixture(projections.x), reference.x, "x", 1.0e-4);
         assert_fixture_close(tensor_fixture(projections.dt), reference.dt, "dt", 1.0e-4);
@@ -1454,8 +1935,335 @@ mod tests {
             "rotated_c",
             1.0e-4,
         );
+    }
 
-        let _ = fs::remove_file(input_path);
-        let _ = fs::remove_file(output_path);
+    #[test]
+    #[ignore = "requires FRACTAL_MAMBA3_PYTHON with torch installed"]
+    fn rust_mamba3_step_matches_pytorch_reference() {
+        let python = env::var("FRACTAL_MAMBA3_PYTHON")
+            .expect("set FRACTAL_MAMBA3_PYTHON to a python binary with torch installed");
+        let device = Default::default();
+        let mixer = deterministic_test_mixer(&device);
+        let batch_size = 2;
+        let input = Tensor::<TestBackend, 2>::from_data(
+            TensorData::new(
+                deterministic_values(batch_size * mixer.config().d_model, 0.04, -0.3),
+                [batch_size, mixer.config().d_model],
+            ),
+            &device,
+        );
+        let previous_state = deterministic_recurrent_state(&mixer, batch_size, &device);
+        let step = mixer.step(input.clone(), previous_state.clone()).unwrap();
+        let bundle = PythonStepReferenceInput {
+            mode: "step".to_string(),
+            official_repo: None,
+            config: mixer.config().clone(),
+            derived: mixer.derived_shape(),
+            input: tensor_fixture(input),
+            angle_state: tensor_fixture(previous_state.angle_dt_state),
+            ssm_state: tensor_fixture(previous_state.ssm_state),
+            k_state: tensor_fixture(previous_state.k_state),
+            v_state: tensor_fixture(previous_state.v_state),
+            in_proj_weight: projection_weight_fixture(mixer.in_proj.clone()),
+            dt_bias: tensor_fixture(mixer.dt_bias.val()),
+            b_bias: tensor_fixture(mixer.b_bias.val()),
+            c_bias: tensor_fixture(mixer.c_bias.val()),
+            b_norm_weight: tensor_fixture(mixer.b_norm.weight.val()),
+            c_norm_weight: tensor_fixture(mixer.c_norm.weight.val()),
+            d_skip: tensor_fixture(mixer.d_skip.val()),
+            mimo_x: optional_param_fixture(&mixer.mimo_x),
+            mimo_z: optional_param_fixture(&mixer.mimo_z),
+            mimo_o: optional_param_fixture(&mixer.mimo_o),
+            out_proj_weight: projection_weight_fixture(mixer.out_proj.clone()),
+        };
+        let reference: PythonStepReferenceOutput = run_python_reference(&python, &bundle);
+        assert_fixture_close(tensor_fixture(step.output), reference.output, "output", 1.0e-4);
+        assert_fixture_close(
+            tensor_fixture(step.next_state.angle_dt_state),
+            reference.next_angle_state,
+            "next_angle_state",
+            1.0e-4,
+        );
+        assert_fixture_close(
+            tensor_fixture(step.next_state.ssm_state),
+            reference.next_ssm_state,
+            "next_ssm_state",
+            1.0e-4,
+        );
+        assert_fixture_close(
+            tensor_fixture(step.next_state.k_state),
+            reference.next_k_state,
+            "next_k_state",
+            1.0e-4,
+        );
+        assert_fixture_close(
+            tensor_fixture(step.next_state.v_state),
+            reference.next_v_state,
+            "next_v_state",
+            1.0e-4,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires FRACTAL_MAMBA3_PYTHON with torch installed"]
+    fn rust_mamba3_short_sequence_matches_pytorch_reference() {
+        let python = env::var("FRACTAL_MAMBA3_PYTHON")
+            .expect("set FRACTAL_MAMBA3_PYTHON to a python binary with torch installed");
+        let device = Default::default();
+        let mixer = deterministic_test_mixer(&device);
+        let batch_size = 2;
+        let seq_len = 4;
+        let zero_state = mixer.allocate_recurrent_state(batch_size, &device);
+        let sequence_input = Tensor::<TestBackend, 3>::from_data(
+            TensorData::new(
+                deterministic_values(batch_size * seq_len * mixer.config().d_model, 0.02, -0.4),
+                [batch_size, seq_len, mixer.config().d_model],
+            ),
+            &device,
+        );
+        let sequence = mixer.scan_sequence(sequence_input.clone()).unwrap();
+        let bundle = PythonSequenceReferenceInput {
+            mode: "sequence".to_string(),
+            official_repo: None,
+            config: mixer.config().clone(),
+            derived: mixer.derived_shape(),
+            sequence_input: tensor_fixture(sequence_input),
+            angle_state: tensor_fixture(zero_state.angle_dt_state),
+            ssm_state: tensor_fixture(zero_state.ssm_state),
+            k_state: tensor_fixture(zero_state.k_state),
+            v_state: tensor_fixture(zero_state.v_state),
+            in_proj_weight: projection_weight_fixture(mixer.in_proj.clone()),
+            dt_bias: tensor_fixture(mixer.dt_bias.val()),
+            b_bias: tensor_fixture(mixer.b_bias.val()),
+            c_bias: tensor_fixture(mixer.c_bias.val()),
+            b_norm_weight: tensor_fixture(mixer.b_norm.weight.val()),
+            c_norm_weight: tensor_fixture(mixer.c_norm.weight.val()),
+            d_skip: tensor_fixture(mixer.d_skip.val()),
+            mimo_x: optional_param_fixture(&mixer.mimo_x),
+            mimo_z: optional_param_fixture(&mixer.mimo_z),
+            mimo_o: optional_param_fixture(&mixer.mimo_o),
+            out_proj_weight: projection_weight_fixture(mixer.out_proj.clone()),
+        };
+        let reference: PythonSequenceReferenceOutput = run_python_reference(&python, &bundle);
+        assert_fixture_close(
+            tensor_fixture(sequence.outputs),
+            reference.outputs,
+            "sequence_outputs",
+            1.0e-3,
+        );
+        assert_fixture_close(
+            tensor_fixture(sequence.final_state.angle_dt_state),
+            reference.final_angle_state,
+            "final_angle_state",
+            1.0e-3,
+        );
+        assert_fixture_close(
+            tensor_fixture(sequence.final_state.ssm_state),
+            reference.final_ssm_state,
+            "final_ssm_state",
+            1.0e-3,
+        );
+        assert_fixture_close(
+            tensor_fixture(sequence.final_state.k_state),
+            reference.final_k_state,
+            "final_k_state",
+            1.0e-3,
+        );
+        assert_fixture_close(
+            tensor_fixture(sequence.final_state.v_state),
+            reference.final_v_state,
+            "final_v_state",
+            1.0e-3,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires FRACTAL_MAMBA3_PYTHON and FRACTAL_MAMBA3_OFFICIAL_REPO"]
+    fn rust_mamba3_step_matches_official_module_step() {
+        let python = env::var("FRACTAL_MAMBA3_PYTHON")
+            .expect("set FRACTAL_MAMBA3_PYTHON to a python binary with torch installed");
+        let official_repo = env::var("FRACTAL_MAMBA3_OFFICIAL_REPO")
+            .expect("set FRACTAL_MAMBA3_OFFICIAL_REPO to a checkout of state-spaces/mamba");
+        let device = Default::default();
+        let mixer = deterministic_test_mixer(&device);
+        let batch_size = 2;
+        let input = Tensor::<TestBackend, 2>::from_data(
+            TensorData::new(
+                deterministic_values(batch_size * mixer.config().d_model, 0.04, -0.3),
+                [batch_size, mixer.config().d_model],
+            ),
+            &device,
+        );
+        let previous_state = deterministic_recurrent_state(&mixer, batch_size, &device);
+        let step = mixer.step(input.clone(), previous_state.clone()).unwrap();
+        let bundle = PythonStepReferenceInput {
+            mode: "official-step".to_string(),
+            official_repo: Some(official_repo),
+            config: mixer.config().clone(),
+            derived: mixer.derived_shape(),
+            input: tensor_fixture(input),
+            angle_state: tensor_fixture(previous_state.angle_dt_state),
+            ssm_state: tensor_fixture(previous_state.ssm_state),
+            k_state: tensor_fixture(previous_state.k_state),
+            v_state: tensor_fixture(previous_state.v_state),
+            in_proj_weight: projection_weight_fixture(mixer.in_proj.clone()),
+            dt_bias: tensor_fixture(mixer.dt_bias.val()),
+            b_bias: tensor_fixture(mixer.b_bias.val()),
+            c_bias: tensor_fixture(mixer.c_bias.val()),
+            b_norm_weight: tensor_fixture(mixer.b_norm.weight.val()),
+            c_norm_weight: tensor_fixture(mixer.c_norm.weight.val()),
+            d_skip: tensor_fixture(mixer.d_skip.val()),
+            mimo_x: optional_param_fixture(&mixer.mimo_x),
+            mimo_z: optional_param_fixture(&mixer.mimo_z),
+            mimo_o: optional_param_fixture(&mixer.mimo_o),
+            out_proj_weight: projection_weight_fixture(mixer.out_proj.clone()),
+        };
+        let reference: PythonStepReferenceOutput = run_python_reference(&python, &bundle);
+        assert_fixture_close(tensor_fixture(step.output), reference.output, "official_output", 1.0e-3);
+        assert_fixture_close(
+            tensor_fixture(step.next_state.angle_dt_state),
+            reference.next_angle_state,
+            "official_next_angle_state",
+            1.0e-3,
+        );
+        assert_fixture_close(
+            tensor_fixture(step.next_state.ssm_state),
+            reference.next_ssm_state,
+            "official_next_ssm_state",
+            1.0e-3,
+        );
+        assert_fixture_close(
+            tensor_fixture(step.next_state.k_state),
+            reference.next_k_state,
+            "official_next_k_state",
+            1.0e-3,
+        );
+        assert_fixture_close(
+            tensor_fixture(step.next_state.v_state),
+            reference.next_v_state,
+            "official_next_v_state",
+            1.0e-3,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires FRACTAL_MAMBA3_PYTHON and FRACTAL_MAMBA3_OFFICIAL_REPO"]
+    fn rust_mamba3_short_sequence_matches_official_module_step_loop() {
+        let python = env::var("FRACTAL_MAMBA3_PYTHON")
+            .expect("set FRACTAL_MAMBA3_PYTHON to a python binary with torch installed");
+        let official_repo = env::var("FRACTAL_MAMBA3_OFFICIAL_REPO")
+            .expect("set FRACTAL_MAMBA3_OFFICIAL_REPO to a checkout of state-spaces/mamba");
+        let device = Default::default();
+        let mixer = deterministic_test_mixer(&device);
+        let batch_size = 2;
+        let seq_len = 4;
+        let zero_state = mixer.allocate_recurrent_state(batch_size, &device);
+        let sequence_input = Tensor::<TestBackend, 3>::from_data(
+            TensorData::new(
+                deterministic_values(batch_size * seq_len * mixer.config().d_model, 0.02, -0.4),
+                [batch_size, seq_len, mixer.config().d_model],
+            ),
+            &device,
+        );
+        let sequence = mixer.scan_sequence(sequence_input.clone()).unwrap();
+        let bundle = PythonSequenceReferenceInput {
+            mode: "official-sequence".to_string(),
+            official_repo: Some(official_repo),
+            config: mixer.config().clone(),
+            derived: mixer.derived_shape(),
+            sequence_input: tensor_fixture(sequence_input),
+            angle_state: tensor_fixture(zero_state.angle_dt_state),
+            ssm_state: tensor_fixture(zero_state.ssm_state),
+            k_state: tensor_fixture(zero_state.k_state),
+            v_state: tensor_fixture(zero_state.v_state),
+            in_proj_weight: projection_weight_fixture(mixer.in_proj.clone()),
+            dt_bias: tensor_fixture(mixer.dt_bias.val()),
+            b_bias: tensor_fixture(mixer.b_bias.val()),
+            c_bias: tensor_fixture(mixer.c_bias.val()),
+            b_norm_weight: tensor_fixture(mixer.b_norm.weight.val()),
+            c_norm_weight: tensor_fixture(mixer.c_norm.weight.val()),
+            d_skip: tensor_fixture(mixer.d_skip.val()),
+            mimo_x: optional_param_fixture(&mixer.mimo_x),
+            mimo_z: optional_param_fixture(&mixer.mimo_z),
+            mimo_o: optional_param_fixture(&mixer.mimo_o),
+            out_proj_weight: projection_weight_fixture(mixer.out_proj.clone()),
+        };
+        let reference: PythonSequenceReferenceOutput = run_python_reference(&python, &bundle);
+        assert_fixture_close(
+            tensor_fixture(sequence.outputs),
+            reference.outputs,
+            "official_sequence_outputs",
+            1.0e-3,
+        );
+        assert_fixture_close(
+            tensor_fixture(sequence.final_state.angle_dt_state),
+            reference.final_angle_state,
+            "official_final_angle_state",
+            1.0e-3,
+        );
+        assert_fixture_close(
+            tensor_fixture(sequence.final_state.ssm_state),
+            reference.final_ssm_state,
+            "official_final_ssm_state",
+            1.0e-3,
+        );
+        assert_fixture_close(
+            tensor_fixture(sequence.final_state.k_state),
+            reference.final_k_state,
+            "official_final_k_state",
+            1.0e-3,
+        );
+        assert_fixture_close(
+            tensor_fixture(sequence.final_state.v_state),
+            reference.final_v_state,
+            "official_final_v_state",
+            1.0e-3,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires FRACTAL_MAMBA3_PYTHON with torch installed"]
+    fn rust_mamba3_model_smoke_logits_match_pytorch_reference() {
+        let python = env::var("FRACTAL_MAMBA3_PYTHON")
+            .expect("set FRACTAL_MAMBA3_PYTHON to a python binary with torch installed");
+        let device = Default::default();
+        let model = deterministic_smoke_model(&device);
+        let batch_size = 2;
+        let seq_len = 3;
+        let zero_state = model.mixer.allocate_recurrent_state(batch_size, &device);
+        let sequence_input = Tensor::<TestBackend, 3>::from_data(
+            TensorData::new(
+                deterministic_values(batch_size * seq_len * model.mixer.config().d_model, 0.03, -0.2),
+                [batch_size, seq_len, model.mixer.config().d_model],
+            ),
+            &device,
+        );
+        let logits = model.forward_logits(sequence_input.clone()).unwrap();
+        let bundle = PythonModelSmokeReferenceInput {
+            mode: "model-smoke".to_string(),
+            official_repo: None,
+            config: model.mixer.config().clone(),
+            derived: model.mixer.derived_shape(),
+            sequence_input: tensor_fixture(sequence_input),
+            angle_state: tensor_fixture(zero_state.angle_dt_state),
+            ssm_state: tensor_fixture(zero_state.ssm_state),
+            k_state: tensor_fixture(zero_state.k_state),
+            v_state: tensor_fixture(zero_state.v_state),
+            in_proj_weight: projection_weight_fixture(model.mixer.in_proj.clone()),
+            dt_bias: tensor_fixture(model.mixer.dt_bias.val()),
+            b_bias: tensor_fixture(model.mixer.b_bias.val()),
+            c_bias: tensor_fixture(model.mixer.c_bias.val()),
+            b_norm_weight: tensor_fixture(model.mixer.b_norm.weight.val()),
+            c_norm_weight: tensor_fixture(model.mixer.c_norm.weight.val()),
+            d_skip: tensor_fixture(model.mixer.d_skip.val()),
+            mimo_x: optional_param_fixture(&model.mixer.mimo_x),
+            mimo_z: optional_param_fixture(&model.mixer.mimo_z),
+            mimo_o: optional_param_fixture(&model.mixer.mimo_o),
+            out_proj_weight: projection_weight_fixture(model.mixer.out_proj.clone()),
+            final_norm_weight: tensor_fixture(model.final_norm.weight.val()),
+            lm_head_weight: lm_head_weight_fixture(model.lm_head.clone()),
+        };
+        let reference: PythonModelSmokeReferenceOutput = run_python_reference(&python, &bundle);
+        assert_fixture_close(tensor_fixture(logits), reference.logits, "logits", 1.0e-4);
     }
 }
