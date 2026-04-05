@@ -1637,6 +1637,37 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scripts/mamba3_pytorch_reference.py")
     }
 
+    fn default_python_reference_binary() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.venv-mamba3/bin/python")
+    }
+
+    fn resolve_python_reference_binary() -> String {
+        if let Ok(python) = env::var("FRACTAL_MAMBA3_PYTHON") {
+            return python;
+        }
+        let fallback = default_python_reference_binary();
+        if fallback.exists() {
+            return fallback.display().to_string();
+        }
+        panic!(
+            "set FRACTAL_MAMBA3_PYTHON or create the default Python reference environment at {}",
+            fallback.display()
+        );
+    }
+
+    fn resolve_official_repo_checkout() -> String {
+        if let Ok(repo) = env::var("FRACTAL_MAMBA3_OFFICIAL_REPO") {
+            return repo;
+        }
+        let fallback = PathBuf::from("/private/tmp/state-spaces-mamba");
+        if fallback.join("mamba_ssm/modules/mamba3.py").exists() {
+            return fallback.display().to_string();
+        }
+        panic!(
+            "set FRACTAL_MAMBA3_OFFICIAL_REPO to a checkout containing mamba_ssm/modules/mamba3.py"
+        );
+    }
+
     fn run_python_reference<I: Serialize, O: DeserializeOwned>(python: &str, input: &I) -> O {
         let input_path = temp_json_path("mamba3-reference-input");
         let output_path = temp_json_path("mamba3-reference-output");
@@ -1833,10 +1864,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires FRACTAL_MAMBA3_PYTHON with torch installed"]
     fn rust_mamba3_pre_kernel_contract_matches_pytorch_reference() {
-        let python = env::var("FRACTAL_MAMBA3_PYTHON")
-            .expect("set FRACTAL_MAMBA3_PYTHON to a python binary with torch installed");
+        let python = resolve_python_reference_binary();
         let device = Default::default();
         let mixer = deterministic_test_mixer(&device);
         let batch_size = 2;
@@ -1938,10 +1967,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires FRACTAL_MAMBA3_PYTHON with torch installed"]
     fn rust_mamba3_step_matches_pytorch_reference() {
-        let python = env::var("FRACTAL_MAMBA3_PYTHON")
-            .expect("set FRACTAL_MAMBA3_PYTHON to a python binary with torch installed");
+        let python = resolve_python_reference_binary();
         let device = Default::default();
         let mixer = deterministic_test_mixer(&device);
         let batch_size = 2;
@@ -2005,10 +2032,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires FRACTAL_MAMBA3_PYTHON with torch installed"]
     fn rust_mamba3_short_sequence_matches_pytorch_reference() {
-        let python = env::var("FRACTAL_MAMBA3_PYTHON")
-            .expect("set FRACTAL_MAMBA3_PYTHON to a python binary with torch installed");
+        let python = resolve_python_reference_binary();
         let device = Default::default();
         let mixer = deterministic_test_mixer(&device);
         let batch_size = 2;
@@ -2078,12 +2103,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires FRACTAL_MAMBA3_PYTHON and FRACTAL_MAMBA3_OFFICIAL_REPO"]
-    fn rust_mamba3_step_matches_official_module_step() {
-        let python = env::var("FRACTAL_MAMBA3_PYTHON")
-            .expect("set FRACTAL_MAMBA3_PYTHON to a python binary with torch installed");
-        let official_repo = env::var("FRACTAL_MAMBA3_OFFICIAL_REPO")
-            .expect("set FRACTAL_MAMBA3_OFFICIAL_REPO to a checkout of state-spaces/mamba");
+    #[ignore = "requires official Mamba3 checkout and validates official module wiring under reference-kernel shims"]
+    fn rust_mamba3_step_matches_official_module_wiring_under_reference_kernel_shims() {
+        let python = resolve_python_reference_binary();
+        let official_repo = resolve_official_repo_checkout();
         let device = Default::default();
         let mixer = deterministic_test_mixer(&device);
         let batch_size = 2;
@@ -2097,7 +2120,7 @@ mod tests {
         let previous_state = deterministic_recurrent_state(&mixer, batch_size, &device);
         let step = mixer.step(input.clone(), previous_state.clone()).unwrap();
         let bundle = PythonStepReferenceInput {
-            mode: "official-step".to_string(),
+            mode: "official-module-wiring-step".to_string(),
             official_repo: Some(official_repo),
             config: mixer.config().clone(),
             derived: mixer.derived_shape(),
@@ -2119,40 +2142,43 @@ mod tests {
             out_proj_weight: projection_weight_fixture(mixer.out_proj.clone()),
         };
         let reference: PythonStepReferenceOutput = run_python_reference(&python, &bundle);
-        assert_fixture_close(tensor_fixture(step.output), reference.output, "official_output", 1.0e-3);
+        assert_fixture_close(
+            tensor_fixture(step.output),
+            reference.output,
+            "official_module_wiring_output",
+            1.0e-3,
+        );
         assert_fixture_close(
             tensor_fixture(step.next_state.angle_dt_state),
             reference.next_angle_state,
-            "official_next_angle_state",
+            "official_module_wiring_next_angle_state",
             1.0e-3,
         );
         assert_fixture_close(
             tensor_fixture(step.next_state.ssm_state),
             reference.next_ssm_state,
-            "official_next_ssm_state",
+            "official_module_wiring_next_ssm_state",
             1.0e-3,
         );
         assert_fixture_close(
             tensor_fixture(step.next_state.k_state),
             reference.next_k_state,
-            "official_next_k_state",
+            "official_module_wiring_next_k_state",
             1.0e-3,
         );
         assert_fixture_close(
             tensor_fixture(step.next_state.v_state),
             reference.next_v_state,
-            "official_next_v_state",
+            "official_module_wiring_next_v_state",
             1.0e-3,
         );
     }
 
     #[test]
-    #[ignore = "requires FRACTAL_MAMBA3_PYTHON and FRACTAL_MAMBA3_OFFICIAL_REPO"]
-    fn rust_mamba3_short_sequence_matches_official_module_step_loop() {
-        let python = env::var("FRACTAL_MAMBA3_PYTHON")
-            .expect("set FRACTAL_MAMBA3_PYTHON to a python binary with torch installed");
-        let official_repo = env::var("FRACTAL_MAMBA3_OFFICIAL_REPO")
-            .expect("set FRACTAL_MAMBA3_OFFICIAL_REPO to a checkout of state-spaces/mamba");
+    #[ignore = "requires official Mamba3 checkout and validates official module step-loop wiring under reference-kernel shims"]
+    fn rust_mamba3_short_sequence_matches_official_module_step_loop_under_reference_kernel_shims() {
+        let python = resolve_python_reference_binary();
+        let official_repo = resolve_official_repo_checkout();
         let device = Default::default();
         let mixer = deterministic_test_mixer(&device);
         let batch_size = 2;
@@ -2167,7 +2193,7 @@ mod tests {
         );
         let sequence = mixer.scan_sequence(sequence_input.clone()).unwrap();
         let bundle = PythonSequenceReferenceInput {
-            mode: "official-sequence".to_string(),
+            mode: "official-module-wiring-sequence".to_string(),
             official_repo: Some(official_repo),
             config: mixer.config().clone(),
             derived: mixer.derived_shape(),
@@ -2192,40 +2218,38 @@ mod tests {
         assert_fixture_close(
             tensor_fixture(sequence.outputs),
             reference.outputs,
-            "official_sequence_outputs",
+            "official_module_wiring_sequence_outputs",
             1.0e-3,
         );
         assert_fixture_close(
             tensor_fixture(sequence.final_state.angle_dt_state),
             reference.final_angle_state,
-            "official_final_angle_state",
+            "official_module_wiring_final_angle_state",
             1.0e-3,
         );
         assert_fixture_close(
             tensor_fixture(sequence.final_state.ssm_state),
             reference.final_ssm_state,
-            "official_final_ssm_state",
+            "official_module_wiring_final_ssm_state",
             1.0e-3,
         );
         assert_fixture_close(
             tensor_fixture(sequence.final_state.k_state),
             reference.final_k_state,
-            "official_final_k_state",
+            "official_module_wiring_final_k_state",
             1.0e-3,
         );
         assert_fixture_close(
             tensor_fixture(sequence.final_state.v_state),
             reference.final_v_state,
-            "official_final_v_state",
+            "official_module_wiring_final_v_state",
             1.0e-3,
         );
     }
 
     #[test]
-    #[ignore = "requires FRACTAL_MAMBA3_PYTHON with torch installed"]
     fn rust_mamba3_model_smoke_logits_match_pytorch_reference() {
-        let python = env::var("FRACTAL_MAMBA3_PYTHON")
-            .expect("set FRACTAL_MAMBA3_PYTHON to a python binary with torch installed");
+        let python = resolve_python_reference_binary();
         let device = Default::default();
         let model = deterministic_smoke_model(&device);
         let batch_size = 2;

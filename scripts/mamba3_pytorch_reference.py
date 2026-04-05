@@ -428,7 +428,7 @@ def official_mamba3_step_fn(
     return out
 
 
-def load_official_mamba3_class(official_repo):
+def load_official_mamba3_class_with_reference_kernel_shims(official_repo):
     official_repo = Path(official_repo)
     module_path = official_repo / "mamba_ssm" / "modules" / "mamba3.py"
     if not module_path.exists():
@@ -467,6 +467,10 @@ def load_official_mamba3_class(official_repo):
     mimo_mod = ensure_module("mamba_ssm.ops.tilelang.mamba3.mamba3_mimo")
     mimo_mod.mamba3_mimo = object()
 
+    # The official module's CPU-unavailable rotary and fused-step kernels are replaced with
+    # explicit reference-kernel shims here. This validates wiring, projection layout, and
+    # cache/state contracts through the official module surface, but it is not a kernel-level
+    # differential against upstream Triton/CUTE implementations.
     rotary_mod = ensure_module("mamba_ssm.ops.triton.mamba3.mamba3_mimo_rotary_step")
     rotary_mod.apply_rotary_qk_inference_fwd = official_apply_rotary_qk_inference_fwd
 
@@ -513,8 +517,8 @@ def set_official_module_weights(module, bundle):
 def instantiate_official_mamba3(bundle):
     official_repo = bundle.get("official_repo")
     if not official_repo:
-        raise SystemExit("official_repo is required for official module differential modes")
-    Mamba3 = load_official_mamba3_class(official_repo)
+        raise SystemExit("official_repo is required for official module wiring-shim modes")
+    Mamba3 = load_official_mamba3_class_with_reference_kernel_shims(official_repo)
     config = bundle["config"]
     module = Mamba3(
         d_model=config["d_model"],
@@ -604,9 +608,9 @@ def main():
         output = run_step(bundle)
     elif mode == "sequence":
         output = run_sequence(bundle)
-    elif mode == "official-step":
+    elif mode == "official-module-wiring-step":
         output = run_official_module_step(bundle)
-    elif mode == "official-sequence":
+    elif mode == "official-module-wiring-sequence":
         output = run_official_module_sequence(bundle)
     elif mode == "model-smoke":
         output = run_model_smoke(bundle)

@@ -52,6 +52,12 @@ fn run() -> Result<(), String> {
             .map(|report| HybridAttentionMatrixVariantOutcome::Executed(Box::new(report)))
             .map_err(|error| format!("failed to run attention-only baseline: {error}"))?,
         );
+    } else {
+        variants.push(HybridAttentionMatrixVariantOutcome::Skipped {
+            label: matrix.attention_only.label.to_owned(),
+            kind: matrix.attention_only.kind,
+            reason: "not requested by --variant selection".to_owned(),
+        });
     }
     if args.variant.includes_reference_ssm_hybrid() {
         variants.push(
@@ -67,6 +73,12 @@ fn run() -> Result<(), String> {
             .map(|report| HybridAttentionMatrixVariantOutcome::Executed(Box::new(report)))
             .map_err(|error| format!("failed to run reference-ssm-hybrid baseline: {error}"))?,
         );
+    } else {
+        variants.push(HybridAttentionMatrixVariantOutcome::Skipped {
+            label: matrix.reference_ssm_hybrid.label.to_owned(),
+            kind: matrix.reference_ssm_hybrid.kind,
+            reason: "not requested by --variant selection".to_owned(),
+        });
     }
     if args.variant.includes_primitive_hybrid() {
         variants.push(
@@ -82,11 +94,17 @@ fn run() -> Result<(), String> {
             .map(|report| HybridAttentionMatrixVariantOutcome::Executed(Box::new(report)))
             .map_err(|error| format!("failed to run primitive-hybrid baseline: {error}"))?,
         );
+    } else {
+        variants.push(HybridAttentionMatrixVariantOutcome::Skipped {
+            label: matrix.primitive_hybrid.label.to_owned(),
+            kind: matrix.primitive_hybrid.kind,
+            reason: "not requested by --variant selection".to_owned(),
+        });
     }
 
     let rendered = render_report(
         &RenderedMatrixReport {
-            note: "Path 1 baseline matrix: attention-only, reference-ssm-hybrid, and primitive-hybrid are executable. The reference lane now uses the faithful Rust Mamba-3-style baseline block instead of the old proxy lane.",
+            note: "Path 1 baseline matrix: attention-only, reference-ssm-hybrid, and primitive-hybrid remain the fixed three-lane report surface. Subset runs now emit explicit skipped states for unrequested lanes, and the reference lane uses the faithful Rust Mamba-3-style baseline block instead of the old proxy lane.",
             variants,
         },
         args.output,
@@ -352,6 +370,10 @@ fn render_table(report: &RenderedMatrixReport<'_>) -> String {
                     report.config.seed,
                     report.report_path.display()
                 );
+            }
+            HybridAttentionMatrixVariantOutcome::Skipped { label, reason, .. } => {
+                let _ = writeln!(output, "- {} (skipped)", label);
+                let _ = writeln!(output, "  reason={reason}");
             }
             HybridAttentionMatrixVariantOutcome::RequiredMissing { label, reason, .. } => {
                 let _ = writeln!(output, "- {} (required-missing)", label);

@@ -313,6 +313,11 @@ fn write_report(report: &HybridAttentionSmokeTrainReport, path: &Path) -> Result
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HybridAttentionMatrixVariantOutcome {
     Executed(Box<HybridAttentionSmokeTrainReport>),
+    Skipped {
+        label: String,
+        kind: HybridAttentionVariantKind,
+        reason: String,
+    },
     RequiredMissing {
         label: String,
         kind: HybridAttentionVariantKind,
