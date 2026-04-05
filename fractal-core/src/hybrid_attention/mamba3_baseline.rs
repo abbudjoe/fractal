@@ -22,7 +22,6 @@ use crate::{
 const DEFAULT_RUST_MAMBA3_INIT_MIN: f64 = -0.08;
 const DEFAULT_RUST_MAMBA3_INIT_MAX: f64 = 0.08;
 const DEFAULT_RUST_MAMBA3_NORM_EPS: f64 = 1.0e-5;
-const PHASE1_INTERLEAVED_BLOCK_COUNT: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -180,8 +179,10 @@ impl RustMamba3BaselineConfig {
             ));
         }
         let mimo_rank = if self.is_mimo { self.mimo_rank } else { 1 };
-        let d_in_proj =
-            2 * d_inner + 2 * self.d_state * self.ngroups * mimo_rank + 3 * nheads + num_rope_angles;
+        let d_in_proj = 2 * d_inner
+            + 2 * self.d_state * self.ngroups * mimo_rank
+            + 3 * nheads
+            + num_rope_angles;
         Ok(RustMamba3DerivedShape {
             d_inner,
             nheads,
@@ -286,9 +287,47 @@ struct RustMamba3StepProjection<B: Backend> {
 }
 
 #[derive(Debug)]
+struct RustMamba3RecurrentState<B: Backend> {
+    angle_dt_state: Tensor<B, 3>,
+    ssm_state: Tensor<B, 4>,
+    k_state: Tensor<B, 4>,
+    v_state: Tensor<B, 3>,
+}
+
+impl<B: Backend> RustMamba3RecurrentState<B> {
+    fn zeros(
+        batch_size: usize,
+        derived: RustMamba3DerivedShape,
+        config: &RustMamba3BaselineConfig,
+        device: &B::Device,
+    ) -> Self {
+        Self {
+            angle_dt_state: Tensor::<B, 3>::zeros(
+                [batch_size, derived.nheads, derived.num_rope_angles],
+                device,
+            ),
+            ssm_state: Tensor::<B, 4>::zeros(
+                [batch_size, derived.nheads, config.headdim, config.d_state],
+                device,
+            ),
+            k_state: Tensor::<B, 4>::zeros(
+                [
+                    batch_size,
+                    derived.mimo_rank,
+                    derived.nheads,
+                    config.d_state,
+                ],
+                device,
+            ),
+            v_state: Tensor::<B, 3>::zeros([batch_size, derived.nheads, config.headdim], device),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct RustMamba3StepOutput<B: Backend> {
     output: Tensor<B, 2>,
-    next_state: Tensor<B, 5>,
+    next_state: RustMamba3RecurrentState<B>,
 }
 
 impl<B: Backend> RustMamba3Mixer<B> {
@@ -312,8 +351,10 @@ impl<B: Backend> RustMamba3Mixer<B> {
         Ok(Self {
             dt_bias: Param::from_data(
                 TensorData::new(
-                    vec![dt_bias_init(config.dt_min, config.dt_max, config.dt_init_floor) as f32;
-                        derived.nheads],
+                    vec![
+                        dt_bias_init(config.dt_min, config.dt_max, config.dt_init_floor) as f32;
+                        derived.nheads
+                    ],
                     [derived.nheads],
                 ),
                 device,
@@ -339,8 +380,10 @@ impl<B: Backend> RustMamba3Mixer<B> {
             mimo_x: config.is_mimo.then(|| {
                 Param::from_data(
                     TensorData::new(
-                        vec![1.0f32 / derived.mimo_rank as f32;
-                            derived.mimo_rank * derived.nheads * config.headdim],
+                        vec![
+                            1.0f32 / derived.mimo_rank as f32;
+                            derived.mimo_rank * derived.nheads * config.headdim
+                        ],
                         [derived.mimo_rank, derived.nheads, config.headdim],
                     ),
                     device,
@@ -358,8 +401,10 @@ impl<B: Backend> RustMamba3Mixer<B> {
             mimo_o: config.is_mimo.then(|| {
                 Param::from_data(
                     TensorData::new(
-                        vec![1.0f32 / derived.mimo_rank as f32;
-                            derived.mimo_rank * derived.nheads * config.headdim],
+                        vec![
+                            1.0f32 / derived.mimo_rank as f32;
+                            derived.mimo_rank * derived.nheads * config.headdim
+                        ],
                         [derived.mimo_rank, derived.nheads, config.headdim],
                     ),
                     device,
@@ -386,6 +431,14 @@ impl<B: Backend> RustMamba3Mixer<B> {
         *self.derived
     }
 
+    fn allocate_recurrent_state(
+        &self,
+        batch_size: usize,
+        device: &B::Device,
+    ) -> RustMamba3RecurrentState<B> {
+        RustMamba3RecurrentState::zeros(batch_size, self.derived_shape(), self.config(), device)
+    }
+
     pub fn forward_sequence(&self, input: Tensor<B, 3>) -> Result<Tensor<B, 3>, FractalError> {
         let [batch_size, seq_len, width] = input.dims();
         if width != self.config.d_model {
@@ -395,25 +448,23 @@ impl<B: Backend> RustMamba3Mixer<B> {
             )));
         }
         let device = input.device();
-        let mut state = Tensor::<B, 5>::zeros(
-            [
-                batch_size,
-                self.derived.mimo_rank,
-                self.derived.nheads,
-                self.config.headdim,
-                self.config.d_state,
-            ],
-            &device,
-        );
+        let mut state = self.allocate_recurrent_state(batch_size, &device);
         let mut outputs = Vec::with_capacity(seq_len);
-        for position in 0..seq_len {
-            let x_t = input
-                .clone()
-                .slice([0..batch_size, position..position + 1, 0..self.config.d_model])
-                .reshape([batch_size, self.config.d_model]);
-            let step = self.step(x_t, state)?;
-            outputs.push(step.output.reshape([batch_size, 1, self.config.d_model]));
-            state = step.next_state;
+        for chunk_start in (0..seq_len).step_by(self.config.chunk_size) {
+            let chunk_end = (chunk_start + self.config.chunk_size).min(seq_len);
+            for position in chunk_start..chunk_end {
+                let x_t = input
+                    .clone()
+                    .slice([
+                        0..batch_size,
+                        position..position + 1,
+                        0..self.config.d_model,
+                    ])
+                    .reshape([batch_size, self.config.d_model]);
+                let step = self.step(x_t, state)?;
+                outputs.push(step.output.reshape([batch_size, 1, self.config.d_model]));
+                state = step.next_state;
+            }
         }
         Ok(Tensor::cat(outputs, 1))
     }
@@ -421,7 +472,7 @@ impl<B: Backend> RustMamba3Mixer<B> {
     fn step(
         &self,
         input: Tensor<B, 2>,
-        previous_state: Tensor<B, 5>,
+        previous_state: RustMamba3RecurrentState<B>,
     ) -> Result<RustMamba3StepOutput<B>, FractalError> {
         let projections = self.project_step(input)?;
         let [batch_size, _, _] = projections.z.dims();
@@ -429,30 +480,53 @@ impl<B: Backend> RustMamba3Mixer<B> {
         let nheads = self.derived.nheads;
         let headdim = self.config.headdim;
         let d_state = self.config.d_state;
-
-        let rotated_state = rotate_state_prefix_pairs_last_dim_5(
-            previous_state,
-            projections.angles.clone(),
+        let next_angle_state = previous_state.angle_dt_state.clone()
+            + projections.angles.clone() * projections.dt.clone().reshape([batch_size, nheads, 1]);
+        let rotated_b = rotate_state_prefix_pairs_last_dim_4(
+            projections.b.clone(),
+            next_angle_state.clone(),
+            self.derived.split_tensor_size,
+        );
+        let rotated_c = rotate_state_prefix_pairs_last_dim_4(
+            projections.c.clone(),
+            next_angle_state.clone(),
             self.derived.split_tensor_size,
         );
         let x_ranked = self.expand_ranked_heads(projections.x.clone(), self.mimo_x.as_ref());
         let z_ranked = self.expand_ranked_heads(projections.z.clone(), self.mimo_z.as_ref());
         let decay = (projections.a.clone() * projections.dt.clone())
             .exp()
-            .reshape([batch_size, 1, nheads, 1, 1]);
+            .reshape([batch_size, nheads, 1, 1]);
         let one_minus_decay = decay.clone().mul_scalar(-1.0).add_scalar(1.0);
-        let b = projections
-            .b
-            .reshape([batch_size, rank, nheads, 1, d_state]);
-        let candidate = x_ranked.clone().reshape([batch_size, rank, nheads, headdim, 1]) * b;
-        let next_state = decay * rotated_state + one_minus_decay * candidate;
+        let mean_b = rotated_b.clone().sum_dim(1).mul_scalar(1.0 / rank as f64);
+        let candidate_state = projections
+            .x
+            .clone()
+            .reshape([batch_size, nheads, headdim, 1])
+            * mean_b.reshape([batch_size, nheads, 1, d_state]);
+        let next_ssm_state =
+            decay.clone() * previous_state.ssm_state + one_minus_decay * candidate_state;
 
-        let c = projections
-            .c
-            .reshape([batch_size, rank, nheads, 1, d_state]);
-        let readout = (next_state.clone() * c)
-            .sum_dim(4)
-            .reshape([batch_size, rank, nheads, headdim]);
+        let state_readout = (next_ssm_state
+            .clone()
+            .reshape([batch_size, 1, nheads, headdim, d_state])
+            * rotated_c
+                .clone()
+                .reshape([batch_size, rank, nheads, 1, d_state]))
+        .sum_dim(4)
+        .reshape([batch_size, rank, nheads, headdim]);
+        let cached_score = (previous_state.k_state.clone() * rotated_c)
+            .sum_dim(3)
+            .mul_scalar(1.0 / (d_state as f64).sqrt())
+            .reshape([batch_size, rank, nheads, 1]);
+        let cached_readout = cached_score
+            * previous_state
+                .v_state
+                .clone()
+                .reshape([batch_size, 1, nheads, headdim]);
+        let readout = state_readout + cached_readout;
+        let next_v_state = projections.x.clone();
+        let next_k_state = rotated_b;
         let skip = x_ranked.clone()
             * self
                 .d_skip
@@ -480,10 +554,21 @@ impl<B: Backend> RustMamba3Mixer<B> {
             combined * sigmoid(z_combined)
         };
         let output = self.out_proj.forward(gated);
-        Ok(RustMamba3StepOutput { output, next_state })
+        Ok(RustMamba3StepOutput {
+            output,
+            next_state: RustMamba3RecurrentState {
+                angle_dt_state: next_angle_state,
+                ssm_state: next_ssm_state,
+                k_state: next_k_state,
+                v_state: next_v_state,
+            },
+        })
     }
 
-    fn project_step(&self, input: Tensor<B, 2>) -> Result<RustMamba3StepProjection<B>, FractalError> {
+    fn project_step(
+        &self,
+        input: Tensor<B, 2>,
+    ) -> Result<RustMamba3StepProjection<B>, FractalError> {
         let [batch_size, width] = input.dims();
         if width != self.config.d_model {
             return Err(FractalError::Shape(format!(
@@ -536,8 +621,17 @@ impl<B: Backend> RustMamba3Mixer<B> {
             .slice([0..batch_size, trap_end..self.derived.d_in_proj])
             .reshape([batch_size, self.derived.num_rope_angles]);
 
-        let dt = softplus(dd_dt + self.dt_bias.val().reshape([1, nheads]).repeat(&[batch_size, 1]));
-        let a = softplus(dd_a).mul_scalar(-1.0).clamp(-1.0e9, -self.config.a_floor);
+        let dt = softplus(
+            dd_dt
+                + self
+                    .dt_bias
+                    .val()
+                    .reshape([1, nheads])
+                    .repeat(&[batch_size, 1]),
+        );
+        let a = softplus(dd_a)
+            .mul_scalar(-1.0)
+            .clamp(-1.0e9, -self.config.a_floor);
         let trap = sigmoid(trap_proj);
         let angles = angle_proj
             .reshape([batch_size, 1, self.derived.num_rope_angles])
@@ -583,15 +677,17 @@ impl<B: Backend> RustMamba3Mixer<B> {
     ) -> Tensor<B, 4> {
         let [batch_size, nheads, headdim] = tensor.dims();
         match weights {
-            Some(weights) => tensor.reshape([batch_size, 1, nheads, headdim]).repeat(&[
-                1,
-                self.derived.mimo_rank,
-                1,
-                1,
-            ]) * weights
-                .val()
-                .reshape([1, self.derived.mimo_rank, nheads, headdim])
-                .repeat(&[batch_size, 1, 1, 1]),
+            Some(weights) => {
+                tensor.reshape([batch_size, 1, nheads, headdim]).repeat(&[
+                    1,
+                    self.derived.mimo_rank,
+                    1,
+                    1,
+                ]) * weights
+                    .val()
+                    .reshape([1, self.derived.mimo_rank, nheads, headdim])
+                    .repeat(&[batch_size, 1, 1, 1])
+            }
             None => tensor.reshape([batch_size, 1, nheads, headdim]),
         }
     }
@@ -667,7 +763,9 @@ impl<B: Backend> RustMamba3MixerBlock<B> {
         let normed = self.input_norm.forward3(input.clone());
         let mixed = self.mixer.forward_sequence(normed)?;
         let residual = input + mixed;
-        let ff = self.feedforward.forward(self.output_norm.forward3(residual.clone()));
+        let ff = self
+            .feedforward
+            .forward(self.output_norm.forward3(residual.clone()));
         Ok(residual + ff)
     }
 }
@@ -677,6 +775,7 @@ pub struct RustMamba3ReferenceHybridAttentionModel<B: Backend> {
     embedding: Embedding<B>,
     attention_layers: Vec<TransformerEncoder<B>>,
     reference_layers: Vec<RustMamba3MixerBlock<B>>,
+    layer_schedule: Ignored<Vec<HybridAttentionLayerRole>>,
     final_norm: SimpleRmsNorm<B>,
     output: LanguageModelHead<B>,
     vocab_size: usize,
@@ -691,6 +790,7 @@ impl<B: Backend> RustMamba3ReferenceHybridAttentionModel<B> {
     pub fn new(
         shape: HybridAttentionModelShape,
         baseline: RustMamba3BaselineConfig,
+        layer_schedule: &[HybridAttentionLayerRole],
         device: &B::Device,
     ) -> Result<Self, FractalError> {
         shape.validate()?;
@@ -701,14 +801,37 @@ impl<B: Backend> RustMamba3ReferenceHybridAttentionModel<B> {
                 shape.d_model, baseline.d_model
             )));
         }
-        if shape.total_layers != PHASE1_INTERLEAVED_BLOCK_COUNT * 2 {
+        if shape.total_layers != layer_schedule.len() {
             return Err(FractalError::InvalidConfig(format!(
-                "rust_mamba3_reference_hybrid phase-1 expects {} total layers, got {}",
-                PHASE1_INTERLEAVED_BLOCK_COUNT * 2,
-                shape.total_layers
+                "rust_mamba3_reference_hybrid expected total_layers {} to match schedule length {}",
+                shape.total_layers,
+                layer_schedule.len()
             )));
         }
-        let attention_layers = (0..PHASE1_INTERLEAVED_BLOCK_COUNT)
+        if layer_schedule.iter().any(|role| {
+            !matches!(
+                role,
+                HybridAttentionLayerRole::ExactAttention | HybridAttentionLayerRole::ReferenceSsm
+            )
+        }) {
+            return Err(FractalError::InvalidConfig(
+                "rust_mamba3_reference_hybrid schedule may contain only exact-attention and reference-SSM layers".to_string(),
+            ));
+        }
+        let attention_count = layer_schedule
+            .iter()
+            .filter(|role| matches!(role, HybridAttentionLayerRole::ExactAttention))
+            .count();
+        let reference_count = layer_schedule
+            .iter()
+            .filter(|role| matches!(role, HybridAttentionLayerRole::ReferenceSsm))
+            .count();
+        if attention_count == 0 || reference_count == 0 {
+            return Err(FractalError::InvalidConfig(
+                "rust_mamba3_reference_hybrid schedule must contain at least one exact-attention and one reference-SSM layer".to_string(),
+            ));
+        }
+        let attention_layers = (0..attention_count)
             .map(|_| {
                 TransformerEncoderConfig::new(shape.d_model, shape.d_ff, shape.head_count, 1)
                     .with_dropout(0.0)
@@ -720,8 +843,8 @@ impl<B: Backend> RustMamba3ReferenceHybridAttentionModel<B> {
                     .init(device)
             })
             .collect();
-        let mut reference_layers = Vec::with_capacity(PHASE1_INTERLEAVED_BLOCK_COUNT);
-        for _ in 0..PHASE1_INTERLEAVED_BLOCK_COUNT {
+        let mut reference_layers = Vec::with_capacity(reference_count);
+        for _ in 0..reference_count {
             reference_layers.push(RustMamba3MixerBlock::new(shape, baseline.clone(), device)?);
         }
         Ok(Self {
@@ -733,6 +856,7 @@ impl<B: Backend> RustMamba3ReferenceHybridAttentionModel<B> {
                 .init(device),
             attention_layers,
             reference_layers,
+            layer_schedule: Ignored(layer_schedule.to_vec()),
             final_norm: SimpleRmsNorm::new(shape.d_model, DEFAULT_RUST_MAMBA3_NORM_EPS, device)?,
             output: LanguageModelHeadConfig::new(shape.d_model, shape.vocab_size)
                 .with_bias(false)
@@ -771,16 +895,26 @@ impl<B: Backend> RustMamba3ReferenceHybridAttentionModel<B> {
     ) -> Result<Tensor<B, 3>, FractalError> {
         let [batch_size, seq_len] = input_ids.dims();
         let mut hidden = self.embedding.forward(input_ids);
-        let mask =
-            local_causal_mask::<B>(batch_size, seq_len, self.local_window, &hidden.device());
-        for (attention, reference_ssm) in self
-            .attention_layers
-            .iter()
-            .zip(self.reference_layers.iter())
-        {
-            hidden =
-                attention.forward(TransformerEncoderInput::new(hidden).mask_attn(mask.clone()));
-            hidden = reference_ssm.forward(hidden)?;
+        let mask = local_causal_mask::<B>(batch_size, seq_len, self.local_window, &hidden.device());
+        let mut attention_index = 0;
+        let mut reference_index = 0;
+        for role in self.layer_schedule.iter() {
+            match role {
+                HybridAttentionLayerRole::ExactAttention => {
+                    hidden = self.attention_layers[attention_index]
+                        .forward(TransformerEncoderInput::new(hidden).mask_attn(mask.clone()));
+                    attention_index += 1;
+                }
+                HybridAttentionLayerRole::ReferenceSsm => {
+                    hidden = self.reference_layers[reference_index].forward(hidden)?;
+                    reference_index += 1;
+                }
+                HybridAttentionLayerRole::Primitive => {
+                    return Err(FractalError::InvalidConfig(
+                        "rust_mamba3_reference_hybrid schedule contained an unexpected primitive layer at runtime".to_string(),
+                    ));
+                }
+            }
         }
         Ok(self.output.forward(self.final_norm.forward3(hidden)))
     }
@@ -798,11 +932,12 @@ pub fn build_rust_mamba3_reference_hybrid_attention_model<B: Backend>(
             variant.label
         )));
     }
-    if variant
-        .layer_schedule
-        .iter()
-        .any(|role| !matches!(role, HybridAttentionLayerRole::ExactAttention | HybridAttentionLayerRole::ReferenceSsm))
-    {
+    if variant.layer_schedule.iter().any(|role| {
+        !matches!(
+            role,
+            HybridAttentionLayerRole::ExactAttention | HybridAttentionLayerRole::ReferenceSsm
+        )
+    }) {
         return Err(FractalError::InvalidConfig(format!(
             "reference variant {} must contain only exact-attention and reference-SSM layers",
             variant.label
@@ -817,8 +952,9 @@ pub fn build_rust_mamba3_reference_hybrid_attention_model<B: Backend>(
         local_window: variant.local_window,
         total_layers: variant.total_layers(),
     };
-    let baseline = RustMamba3BaselineConfig::phase1_default(variant.hidden_dim, variant.head_count)?;
-    RustMamba3ReferenceHybridAttentionModel::new(shape, baseline, device)
+    let baseline =
+        RustMamba3BaselineConfig::phase1_default(variant.hidden_dim, variant.head_count)?;
+    RustMamba3ReferenceHybridAttentionModel::new(shape, baseline, &variant.layer_schedule, device)
 }
 
 fn local_causal_mask<B: Backend>(
@@ -832,7 +968,7 @@ fn local_causal_mask<B: Backend>(
         for query in 0..seq_len {
             let earliest_visible = query.saturating_sub(local_window.saturating_sub(1));
             for key in 0..seq_len {
-                data.push(key >= earliest_visible && key <= query);
+                data.push(key < earliest_visible || key > query);
             }
         }
     }
@@ -851,15 +987,15 @@ fn dt_bias_init(dt_min: f64, dt_max: f64, dt_init_floor: f64) -> f64 {
     dt + (-(-dt).exp_m1()).ln()
 }
 
-fn rotate_state_prefix_pairs_last_dim_5<B: Backend>(
-    tensor: Tensor<B, 5>,
+fn rotate_state_prefix_pairs_last_dim_4<B: Backend>(
+    tensor: Tensor<B, 4>,
     angles: Tensor<B, 3>,
     split_tensor_size: usize,
-) -> Tensor<B, 5> {
+) -> Tensor<B, 4> {
     if split_tensor_size == 0 {
         return tensor;
     }
-    let [batch_size, rank, heads, width, state_dim] = tensor.dims();
+    let [batch_size, rank, heads, state_dim] = tensor.dims();
     let prefix_width = split_tensor_size.min(state_dim - (state_dim % 2));
     if prefix_width == 0 {
         return tensor;
@@ -867,40 +1003,40 @@ fn rotate_state_prefix_pairs_last_dim_5<B: Backend>(
     let pair_count = prefix_width / 2;
     let prefix = tensor
         .clone()
-        .slice([0..batch_size, 0..rank, 0..heads, 0..width, 0..prefix_width])
-        .reshape([batch_size * rank * heads * width, pair_count, 2]);
+        .slice([0..batch_size, 0..rank, 0..heads, 0..prefix_width])
+        .reshape([batch_size * rank * heads, pair_count, 2]);
     let first = prefix
         .clone()
-        .slice([0..batch_size * rank * heads * width, 0..pair_count, 0..1])
-        .reshape([batch_size * rank * heads * width, pair_count]);
+        .slice([0..batch_size * rank * heads, 0..pair_count, 0..1])
+        .reshape([batch_size * rank * heads, pair_count]);
     let second = prefix
-        .slice([0..batch_size * rank * heads * width, 0..pair_count, 1..2])
-        .reshape([batch_size * rank * heads * width, pair_count]);
+        .slice([0..batch_size * rank * heads, 0..pair_count, 1..2])
+        .reshape([batch_size * rank * heads, pair_count]);
     let angle_grid = angles
-        .reshape([batch_size, 1, heads, 1, pair_count])
-        .repeat(&[1, rank, 1, width, 1])
-        .reshape([batch_size * rank * heads * width, pair_count]);
+        .reshape([batch_size, 1, heads, pair_count])
+        .repeat(&[1, rank, 1, 1])
+        .reshape([batch_size * rank * heads, pair_count]);
     let cos = angle_grid.clone().cos();
     let sin = angle_grid.sin();
     let rotated_first = first.clone() * cos.clone() - second.clone() * sin.clone();
     let rotated_second = first * sin + second * cos;
     let rotated_prefix = Tensor::cat(
         vec![
-            rotated_first.reshape([batch_size * rank * heads * width, pair_count, 1]),
-            rotated_second.reshape([batch_size * rank * heads * width, pair_count, 1]),
+            rotated_first.reshape([batch_size * rank * heads, pair_count, 1]),
+            rotated_second.reshape([batch_size * rank * heads, pair_count, 1]),
         ],
         2,
     )
-    .reshape([batch_size, rank, heads, width, prefix_width]);
+    .reshape([batch_size, rank, heads, prefix_width]);
     if prefix_width == state_dim {
         rotated_prefix
     } else {
         Tensor::cat(
             vec![
                 rotated_prefix,
-                tensor.slice([0..batch_size, 0..rank, 0..heads, 0..width, prefix_width..state_dim]),
+                tensor.slice([0..batch_size, 0..rank, 0..heads, prefix_width..state_dim]),
             ],
-            4,
+            3,
         )
     }
 }
@@ -911,7 +1047,7 @@ mod tests {
     use burn::tensor::{Int, Tensor};
 
     use super::{
-        build_rust_mamba3_reference_hybrid_attention_model, rotate_state_prefix_pairs_last_dim_5,
+        build_rust_mamba3_reference_hybrid_attention_model, rotate_state_prefix_pairs_last_dim_4,
         RustMamba3BaselineConfig, RustMamba3RopeFraction,
     };
     use crate::{phase1_hybrid_attention_baseline_matrix, ReferenceSsmFamily};
@@ -958,15 +1094,31 @@ mod tests {
     }
 
     #[test]
+    fn rust_mamba3_mixer_allocates_official_style_recurrent_state() {
+        let device = Default::default();
+        let matrix = phase1_hybrid_attention_baseline_matrix();
+        let model = build_rust_mamba3_reference_hybrid_attention_model::<TestBackend>(
+            257,
+            &matrix.reference_ssm_hybrid,
+            &device,
+        )
+        .unwrap();
+        let state = model.reference_layers[0]
+            .mixer()
+            .allocate_recurrent_state(2, &device);
+        assert_eq!(state.angle_dt_state.dims(), [2, 8, 32]);
+        assert_eq!(state.ssm_state.dims(), [2, 8, 32, 128]);
+        assert_eq!(state.k_state.dims(), [2, 4, 8, 128]);
+        assert_eq!(state.v_state.dims(), [2, 8, 32]);
+    }
+
+    #[test]
     fn rotary_prefix_rotation_changes_only_the_target_prefix() {
         let device = Default::default();
-        let state = Tensor::<TestBackend, 5>::from_data(
-            [[[[[1.0, 0.0, 2.0, 0.0]]]]],
-            &device,
-        );
+        let state = Tensor::<TestBackend, 4>::from_data([[[[1.0, 0.0, 2.0, 0.0]]]], &device);
         let angles =
             Tensor::<TestBackend, 3>::from_data([[[core::f32::consts::FRAC_PI_2]]], &device);
-        let rotated = rotate_state_prefix_pairs_last_dim_5(state, angles, 2);
+        let rotated = rotate_state_prefix_pairs_last_dim_4(state, angles, 2);
         let values = rotated.to_data().to_vec::<f32>().unwrap();
         assert!((values[0] - 0.0).abs() < 1e-4);
         assert!((values[1] - 1.0).abs() < 1e-4);

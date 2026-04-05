@@ -1,5 +1,5 @@
 use burn::{
-    module::Module,
+    module::{Ignored, Module},
     nn::{
         transformer::{
             PositionWiseFeedForward, PositionWiseFeedForwardConfig, TransformerEncoder,
@@ -17,11 +17,10 @@ use crate::{
     primitives::{gated_sigmoid, one_minus},
     projection::{ProjectionLayoutPolicy, StructuredProjection, StructuredProjectionConfig},
     state::{FractalState, StateLayout},
-    HybridAttentionVariantSpec,
+    HybridAttentionLayerRole, HybridAttentionVariantSpec,
 };
 
 const DEFAULT_HYBRID_ATTENTION_FEEDFORWARD_MULTIPLIER: usize = 4;
-const PHASE1_INTERLEAVED_BLOCK_COUNT: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HybridAttentionModelShape {
@@ -359,6 +358,7 @@ pub struct PrimitiveHybridAttentionModel<B: Backend> {
     embedding: Embedding<B>,
     attention_layers: Vec<TransformerEncoder<B>>,
     primitive_layers: Vec<PrimitiveMixerBlock<B>>,
+    layer_schedule: Ignored<Vec<HybridAttentionLayerRole>>,
     output: LanguageModelHead<B>,
     vocab_size: usize,
     d_model: usize,
@@ -368,17 +368,44 @@ pub struct PrimitiveHybridAttentionModel<B: Backend> {
 }
 
 impl<B: Backend> PrimitiveHybridAttentionModel<B> {
-    pub fn new(shape: HybridAttentionModelShape, device: &B::Device) -> Result<Self, FractalError> {
+    pub fn new(
+        shape: HybridAttentionModelShape,
+        layer_schedule: &[HybridAttentionLayerRole],
+        device: &B::Device,
+    ) -> Result<Self, FractalError> {
         shape.validate()?;
-        if shape.total_layers != PHASE1_INTERLEAVED_BLOCK_COUNT * 2 {
+        if shape.total_layers != layer_schedule.len() {
             return Err(FractalError::InvalidConfig(format!(
-                "primitive_hybrid_attention_model phase-1 expects {} total layers, got {}",
-                PHASE1_INTERLEAVED_BLOCK_COUNT * 2,
-                shape.total_layers
+                "primitive_hybrid_attention_model expected total_layers {} to match schedule length {}",
+                shape.total_layers,
+                layer_schedule.len()
             )));
         }
+        if layer_schedule.iter().any(|role| {
+            !matches!(
+                role,
+                HybridAttentionLayerRole::ExactAttention | HybridAttentionLayerRole::Primitive
+            )
+        }) {
+            return Err(FractalError::InvalidConfig(
+                "primitive_hybrid_attention_model schedule may contain only exact-attention and primitive layers".to_string(),
+            ));
+        }
+        let attention_count = layer_schedule
+            .iter()
+            .filter(|role| matches!(role, HybridAttentionLayerRole::ExactAttention))
+            .count();
+        let primitive_count = layer_schedule
+            .iter()
+            .filter(|role| matches!(role, HybridAttentionLayerRole::Primitive))
+            .count();
+        if attention_count == 0 || primitive_count == 0 {
+            return Err(FractalError::InvalidConfig(
+                "primitive_hybrid_attention_model schedule must contain at least one exact-attention and one primitive layer".to_string(),
+            ));
+        }
 
-        let attention_layers = (0..PHASE1_INTERLEAVED_BLOCK_COUNT)
+        let attention_layers = (0..attention_count)
             .map(|_| {
                 TransformerEncoderConfig::new(shape.d_model, shape.d_ff, shape.head_count, 1)
                     .with_dropout(0.0)
@@ -390,8 +417,8 @@ impl<B: Backend> PrimitiveHybridAttentionModel<B> {
                     .init(device)
             })
             .collect();
-        let mut primitive_layers = Vec::with_capacity(PHASE1_INTERLEAVED_BLOCK_COUNT);
-        for _ in 0..PHASE1_INTERLEAVED_BLOCK_COUNT {
+        let mut primitive_layers = Vec::with_capacity(primitive_count);
+        for _ in 0..primitive_count {
             primitive_layers.push(PrimitiveMixerBlock::new(shape.d_model, shape.d_ff, device)?);
         }
 
@@ -404,6 +431,7 @@ impl<B: Backend> PrimitiveHybridAttentionModel<B> {
                 .init(device),
             attention_layers,
             primitive_layers,
+            layer_schedule: Ignored(layer_schedule.to_vec()),
             output: LanguageModelHeadConfig::new(shape.d_model, shape.vocab_size)
                 .with_initializer(Initializer::Uniform {
                     min: -0.08,
@@ -436,14 +464,25 @@ impl<B: Backend> PrimitiveHybridAttentionModel<B> {
         let [batch_size, seq_len] = input_ids.dims();
         let mut hidden = self.embedding.forward(input_ids);
         let mask = local_causal_mask::<B>(batch_size, seq_len, self.local_window, &hidden.device());
-        for (attention, primitive) in self
-            .attention_layers
-            .iter()
-            .zip(self.primitive_layers.iter())
-        {
-            hidden =
-                attention.forward(TransformerEncoderInput::new(hidden).mask_attn(mask.clone()));
-            hidden = primitive.forward(hidden)?;
+        let mut attention_index = 0;
+        let mut primitive_index = 0;
+        for role in self.layer_schedule.iter() {
+            match role {
+                HybridAttentionLayerRole::ExactAttention => {
+                    hidden = self.attention_layers[attention_index]
+                        .forward(TransformerEncoderInput::new(hidden).mask_attn(mask.clone()));
+                    attention_index += 1;
+                }
+                HybridAttentionLayerRole::Primitive => {
+                    hidden = self.primitive_layers[primitive_index].forward(hidden)?;
+                    primitive_index += 1;
+                }
+                HybridAttentionLayerRole::ReferenceSsm => {
+                    return Err(FractalError::InvalidConfig(
+                        "primitive_hybrid_attention_model schedule contained an unexpected reference-SSM layer at runtime".to_string(),
+                    ));
+                }
+            }
         }
         Ok(self.output.forward(hidden))
     }
@@ -454,6 +493,7 @@ pub struct ReferenceSsmHybridAttentionModel<B: Backend> {
     embedding: Embedding<B>,
     attention_layers: Vec<TransformerEncoder<B>>,
     reference_layers: Vec<ReferenceSsmMixerBlock<B>>,
+    layer_schedule: Ignored<Vec<HybridAttentionLayerRole>>,
     output: LanguageModelHead<B>,
     vocab_size: usize,
     d_model: usize,
@@ -463,7 +503,11 @@ pub struct ReferenceSsmHybridAttentionModel<B: Backend> {
 }
 
 impl<B: Backend> ReferenceSsmHybridAttentionModel<B> {
-    pub fn new(shape: HybridAttentionModelShape, device: &B::Device) -> Result<Self, FractalError> {
+    pub fn new(
+        shape: HybridAttentionModelShape,
+        layer_schedule: &[HybridAttentionLayerRole],
+        device: &B::Device,
+    ) -> Result<Self, FractalError> {
         shape.validate()?;
         if !shape.d_model.is_multiple_of(2) {
             return Err(FractalError::InvalidConfig(format!(
@@ -471,15 +515,38 @@ impl<B: Backend> ReferenceSsmHybridAttentionModel<B> {
                 shape.d_model
             )));
         }
-        if shape.total_layers != PHASE1_INTERLEAVED_BLOCK_COUNT * 2 {
+        if shape.total_layers != layer_schedule.len() {
             return Err(FractalError::InvalidConfig(format!(
-                "reference_ssm_hybrid_attention_model phase-1 expects {} total layers, got {}",
-                PHASE1_INTERLEAVED_BLOCK_COUNT * 2,
-                shape.total_layers
+                "reference_ssm_hybrid_attention_model expected total_layers {} to match schedule length {}",
+                shape.total_layers,
+                layer_schedule.len()
             )));
         }
+        if layer_schedule.iter().any(|role| {
+            !matches!(
+                role,
+                HybridAttentionLayerRole::ExactAttention | HybridAttentionLayerRole::ReferenceSsm
+            )
+        }) {
+            return Err(FractalError::InvalidConfig(
+                "reference_ssm_hybrid_attention_model schedule may contain only exact-attention and reference-SSM layers".to_string(),
+            ));
+        }
+        let attention_count = layer_schedule
+            .iter()
+            .filter(|role| matches!(role, HybridAttentionLayerRole::ExactAttention))
+            .count();
+        let reference_count = layer_schedule
+            .iter()
+            .filter(|role| matches!(role, HybridAttentionLayerRole::ReferenceSsm))
+            .count();
+        if attention_count == 0 || reference_count == 0 {
+            return Err(FractalError::InvalidConfig(
+                "reference_ssm_hybrid_attention_model schedule must contain at least one exact-attention and one reference-SSM layer".to_string(),
+            ));
+        }
 
-        let attention_layers = (0..PHASE1_INTERLEAVED_BLOCK_COUNT)
+        let attention_layers = (0..attention_count)
             .map(|_| {
                 TransformerEncoderConfig::new(shape.d_model, shape.d_ff, shape.head_count, 1)
                     .with_dropout(0.0)
@@ -491,8 +558,8 @@ impl<B: Backend> ReferenceSsmHybridAttentionModel<B> {
                     .init(device)
             })
             .collect();
-        let mut reference_layers = Vec::with_capacity(PHASE1_INTERLEAVED_BLOCK_COUNT);
-        for _ in 0..PHASE1_INTERLEAVED_BLOCK_COUNT {
+        let mut reference_layers = Vec::with_capacity(reference_count);
+        for _ in 0..reference_count {
             reference_layers.push(ReferenceSsmMixerBlock::new(
                 shape.d_model,
                 shape.d_ff,
@@ -509,6 +576,7 @@ impl<B: Backend> ReferenceSsmHybridAttentionModel<B> {
                 .init(device),
             attention_layers,
             reference_layers,
+            layer_schedule: Ignored(layer_schedule.to_vec()),
             output: LanguageModelHeadConfig::new(shape.d_model, shape.vocab_size)
                 .with_initializer(Initializer::Uniform {
                     min: -0.08,
@@ -541,14 +609,25 @@ impl<B: Backend> ReferenceSsmHybridAttentionModel<B> {
         let [batch_size, seq_len] = input_ids.dims();
         let mut hidden = self.embedding.forward(input_ids);
         let mask = local_causal_mask::<B>(batch_size, seq_len, self.local_window, &hidden.device());
-        for (attention, reference_ssm) in self
-            .attention_layers
-            .iter()
-            .zip(self.reference_layers.iter())
-        {
-            hidden =
-                attention.forward(TransformerEncoderInput::new(hidden).mask_attn(mask.clone()));
-            hidden = reference_ssm.forward(hidden)?;
+        let mut attention_index = 0;
+        let mut reference_index = 0;
+        for role in self.layer_schedule.iter() {
+            match role {
+                HybridAttentionLayerRole::ExactAttention => {
+                    hidden = self.attention_layers[attention_index]
+                        .forward(TransformerEncoderInput::new(hidden).mask_attn(mask.clone()));
+                    attention_index += 1;
+                }
+                HybridAttentionLayerRole::ReferenceSsm => {
+                    hidden = self.reference_layers[reference_index].forward(hidden)?;
+                    reference_index += 1;
+                }
+                HybridAttentionLayerRole::Primitive => {
+                    return Err(FractalError::InvalidConfig(
+                        "reference_ssm_hybrid_attention_model schedule contained an unexpected primitive layer at runtime".to_string(),
+                    ));
+                }
+            }
         }
         Ok(self.output.forward(hidden))
     }
@@ -583,7 +662,7 @@ pub fn build_primitive_hybrid_attention_model<B: Backend>(
         local_window: variant.local_window,
         total_layers: variant.total_layers(),
     };
-    PrimitiveHybridAttentionModel::new(shape, device)
+    PrimitiveHybridAttentionModel::new(shape, &variant.layer_schedule, device)
 }
 
 pub fn build_reference_ssm_hybrid_attention_model<B: Backend>(
@@ -599,7 +678,7 @@ pub fn build_reference_ssm_hybrid_attention_model<B: Backend>(
         local_window: variant.local_window,
         total_layers: variant.total_layers(),
     };
-    ReferenceSsmHybridAttentionModel::new(shape, device)
+    ReferenceSsmHybridAttentionModel::new(shape, &variant.layer_schedule, device)
 }
 
 fn local_causal_mask<B: Backend>(
@@ -613,7 +692,7 @@ fn local_causal_mask<B: Backend>(
         for query in 0..seq_len {
             let earliest_visible = query.saturating_sub(local_window.saturating_sub(1));
             for key in 0..seq_len {
-                data.push(key >= earliest_visible && key <= query);
+                data.push(key < earliest_visible || key > query);
             }
         }
     }
@@ -711,8 +790,8 @@ mod tests {
         assert_eq!(
             values,
             vec![
-                true, false, false, false, true, true, false, false, false, true, true, false,
-                false, false, true, true,
+                false, true, true, true, false, false, true, true, true, false, false, true, true,
+                true, false, false,
             ]
         );
     }
