@@ -34,9 +34,10 @@ pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
 pub use hybrid::{
     BaselineRescueAttentionBlock, BaselineRescueAttentionConfig, GatheredCandidateRecall,
     GatheredRetrievalContext, GatheredRetrievalContextShape, GatheredRetrievalLayout,
-    GatheredRetrievalProvenance, HybridModelShape, HybridRescuePrevalidationMode,
+    GatheredRetrievalProvenance, FractalHybridRescuePrevalidationModel, HybridModelShape,
+    HybridRescueForwardOutput, HybridRescuePrevalidationMode, HybridRescueStepOutput,
     RescueAttentionBlock, RescueAttentionDiagnostics, RescueAttentionInput,
-    RescueAttentionOutput, RescueAttentionShape, PHASE1_LEAF_SIZE,
+    RescueAttentionOutput, RescueAttentionShape, SealedTokenStateStore, PHASE1_LEAF_SIZE,
     PHASE1_LOCAL_WINDOW_SIZE, PHASE1_REMOTE_TOKEN_BUDGET, PHASE1_ROUTED_SPAN_COUNT,
     PHASE1_TOTAL_TOKEN_BUDGET,
 };

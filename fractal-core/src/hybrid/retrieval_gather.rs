@@ -1,8 +1,13 @@
-use std::collections::BTreeSet;
+use std::{cmp::Ordering, collections::{BTreeMap, BTreeSet}};
 
-use burn::tensor::{backend::Backend, Bool, Int, Tensor};
+use burn::tensor::{backend::Backend, Bool, Int, Tensor, TensorData};
 
-use crate::{error::FractalError, v2::TokenSpan};
+use crate::{
+    error::FractalError,
+    v2::{FractalRouteOutput, TokenSpan},
+};
+
+use super::model::HybridRescuePrevalidationMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GatheredRetrievalLayout {
@@ -93,6 +98,24 @@ pub struct GatheredRetrievalContext<B: Backend> {
     source_span_starts: Tensor<B, 2, Int>,
     source_span_ends: Tensor<B, 2, Int>,
     token_mask: Tensor<B, 2, Bool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SealedTokenStateStore<B: Backend> {
+    batch_size: usize,
+    leaf_size: usize,
+    token_state_dim: usize,
+    shared_spans: Vec<TokenSpan>,
+    token_states: Vec<Tensor<B, 3>>,
+}
+
+#[derive(Debug, Clone)]
+struct GatheredRowBatch<B: Backend> {
+    token_states: Tensor<B, 3>,
+    absolute_positions: Vec<i64>,
+    source_span_starts: Vec<i64>,
+    source_span_ends: Vec<i64>,
+    token_mask: Vec<bool>,
 }
 
 impl<B: Backend> GatheredRetrievalContext<B> {
@@ -268,6 +291,483 @@ impl<B: Backend> GatheredRetrievalContext<B> {
         }
 
         Ok(recalls)
+    }
+}
+
+impl<B: Backend> SealedTokenStateStore<B> {
+    pub fn new(
+        batch_size: usize,
+        leaf_size: usize,
+        token_state_dim: usize,
+    ) -> Result<Self, FractalError> {
+        ensure_nonzero("sealed_token_state_store.batch_size", batch_size)?;
+        ensure_nonzero("sealed_token_state_store.leaf_size", leaf_size)?;
+        ensure_nonzero("sealed_token_state_store.token_state_dim", token_state_dim)?;
+
+        Ok(Self {
+            batch_size,
+            leaf_size,
+            token_state_dim,
+            shared_spans: Vec::new(),
+            token_states: Vec::new(),
+        })
+    }
+
+    pub fn shared_spans(&self) -> &[TokenSpan] {
+        &self.shared_spans
+    }
+
+    pub fn push_sealed_leaf(
+        &mut self,
+        shared_span: TokenSpan,
+        token_states: Tensor<B, 3>,
+    ) -> Result<usize, FractalError> {
+        ensure_match(
+            "sealed_token_state_store.push_sealed_leaf.shared_span.len",
+            shared_span.len(),
+            self.leaf_size,
+        )?;
+        let [batch_size, leaf_size, token_state_dim] = token_states.dims();
+        ensure_match(
+            "sealed_token_state_store.push_sealed_leaf.batch_size",
+            batch_size,
+            self.batch_size,
+        )?;
+        ensure_match(
+            "sealed_token_state_store.push_sealed_leaf.leaf_size",
+            leaf_size,
+            self.leaf_size,
+        )?;
+        ensure_match(
+            "sealed_token_state_store.push_sealed_leaf.token_state_dim",
+            token_state_dim,
+            self.token_state_dim,
+        )?;
+        if let Some(previous_span) = self.shared_spans.last().copied() {
+            ensure_match(
+                "sealed_token_state_store.push_sealed_leaf.shared_span.start",
+                shared_span.start(),
+                previous_span.end(),
+            )?;
+        } else if shared_span.start() != 0 {
+            return Err(FractalError::InvalidConfig(format!(
+                "sealed_token_state_store first shared span must start at 0, got {}",
+                shared_span.start()
+            )));
+        }
+
+        let leaf_index = self.shared_spans.len();
+        self.shared_spans.push(shared_span);
+        self.token_states.push(token_states);
+        Ok(leaf_index)
+    }
+
+    pub fn gather_for_mode(
+        &self,
+        mode: HybridRescuePrevalidationMode,
+        routed: &FractalRouteOutput<B>,
+        query_position: usize,
+        oracle_evidence_spans: Option<&[Option<TokenSpan>]>,
+    ) -> Result<(GatheredRetrievalContext<B>, Option<Vec<GatheredCandidateRecall>>), FractalError> {
+        let [batch_size, _, _] = routed.selected_leaf_indices().dims();
+        ensure_match(
+            "sealed_token_state_store.gather_for_mode.batch_size",
+            batch_size,
+            self.batch_size,
+        )?;
+        if let Some(spans) = oracle_evidence_spans {
+            ensure_match(
+                "sealed_token_state_store.gather_for_mode.oracle_batch_size",
+                spans.len(),
+                batch_size,
+            )?;
+        } else if matches!(
+            mode,
+            HybridRescuePrevalidationMode::OracleRemote
+                | HybridRescuePrevalidationMode::OracleRemoteWithOracleExactTokenSubset
+        ) {
+            return Err(FractalError::InvalidConfig(
+                "sealed_token_state_store.gather_for_mode oracle modes require oracle_evidence_spans"
+                    .to_string(),
+            ));
+        }
+
+        let (layout, provenance) = match mode {
+            HybridRescuePrevalidationMode::LocalOnly => (
+                GatheredRetrievalLayout::SealedSpanPacks {
+                    max_span_count: 8,
+                    leaf_size: self.leaf_size,
+                },
+                GatheredRetrievalProvenance::Suppressed,
+            ),
+            HybridRescuePrevalidationMode::RoutedRemote => (
+                GatheredRetrievalLayout::SealedSpanPacks {
+                    max_span_count: 8,
+                    leaf_size: self.leaf_size,
+                },
+                GatheredRetrievalProvenance::Routed,
+            ),
+            HybridRescuePrevalidationMode::OracleRemote => (
+                GatheredRetrievalLayout::SealedSpanPacks {
+                    max_span_count: 8,
+                    leaf_size: self.leaf_size,
+                },
+                GatheredRetrievalProvenance::Oracle,
+            ),
+            HybridRescuePrevalidationMode::OracleRemoteWithOracleExactTokenSubset => (
+                GatheredRetrievalLayout::ExactTokenSubset {
+                    max_token_count: 8 * self.leaf_size,
+                },
+                GatheredRetrievalProvenance::OracleExactTokenSubset,
+            ),
+        };
+        let token_capacity = layout.token_capacity();
+        let device = routed.selected_leaf_scores().device();
+
+        let mut batch_token_rows = Vec::with_capacity(batch_size);
+        let mut absolute_positions = Vec::with_capacity(batch_size * token_capacity);
+        let mut source_span_starts = Vec::with_capacity(batch_size * token_capacity);
+        let mut source_span_ends = Vec::with_capacity(batch_size * token_capacity);
+        let mut token_mask = Vec::with_capacity(batch_size * token_capacity);
+
+        for batch_index in 0..batch_size {
+            let oracle_span = oracle_evidence_spans.and_then(|spans| spans[batch_index]);
+            let row_batch = match mode {
+                HybridRescuePrevalidationMode::LocalOnly => {
+                    self.build_inactive_rows(token_capacity, &device)
+                }
+                HybridRescuePrevalidationMode::RoutedRemote => {
+                    let selected_leaf_indices =
+                        self.select_routed_leaf_indices(routed, batch_index, query_position, 8)?;
+                    self.build_sealed_span_pack_rows(
+                        batch_index,
+                        &selected_leaf_indices,
+                        token_capacity,
+                        &device,
+                    )?
+                }
+                HybridRescuePrevalidationMode::OracleRemote => {
+                    if let Some(oracle_span) = oracle_span {
+                        let selected_leaf_indices =
+                            self.select_oracle_leaf_indices(oracle_span, query_position, 8);
+                        self.build_sealed_span_pack_rows(
+                            batch_index,
+                            &selected_leaf_indices,
+                            token_capacity,
+                            &device,
+                        )?
+                    } else {
+                        self.build_inactive_rows(token_capacity, &device)
+                    }
+                }
+                HybridRescuePrevalidationMode::OracleRemoteWithOracleExactTokenSubset => {
+                    if let Some(oracle_span) = oracle_span {
+                        let selected_tokens = self.select_oracle_exact_tokens(
+                            oracle_span,
+                            query_position,
+                            token_capacity,
+                        )?;
+                        self.build_exact_token_subset_rows(
+                            batch_index,
+                            &selected_tokens,
+                            token_capacity,
+                            &device,
+                        )?
+                    } else {
+                        self.build_inactive_rows(token_capacity, &device)
+                    }
+                }
+            };
+
+            batch_token_rows.push(row_batch.token_states);
+            absolute_positions.extend(row_batch.absolute_positions);
+            source_span_starts.extend(row_batch.source_span_starts);
+            source_span_ends.extend(row_batch.source_span_ends);
+            token_mask.extend(row_batch.token_mask);
+        }
+
+        let token_states = Tensor::cat(batch_token_rows, 0);
+        let context = GatheredRetrievalContext::from_tensors(
+            provenance,
+            layout,
+            token_states,
+            Tensor::<B, 2, Int>::from_data(
+                TensorData::new(absolute_positions, [batch_size, token_capacity]),
+                &device,
+            ),
+            Tensor::<B, 2, Int>::from_data(
+                TensorData::new(source_span_starts, [batch_size, token_capacity]),
+                &device,
+            ),
+            Tensor::<B, 2, Int>::from_data(
+                TensorData::new(source_span_ends, [batch_size, token_capacity]),
+                &device,
+            ),
+            Tensor::<B, 2, Bool>::from_data(
+                TensorData::new(token_mask, [batch_size, token_capacity]),
+                &device,
+            ),
+        )?;
+
+        let recalls = if let Some(spans) = oracle_evidence_spans {
+            let mut per_batch = Vec::with_capacity(batch_size);
+            for (batch_index, evidence_span) in spans.iter().copied().enumerate() {
+                if let Some(evidence_span) = evidence_span {
+                    let recall = context
+                        .candidate_recall_for_span(evidence_span)?
+                        .into_iter()
+                        .nth(batch_index)
+                        .ok_or_else(|| {
+                            FractalError::InvalidState(format!(
+                                "gathered retrieval candidate recall missing batch index {batch_index}"
+                            ))
+                        })?;
+                    per_batch.push(recall);
+                } else {
+                    per_batch.push(GatheredCandidateRecall {
+                        evidence_span_recalled: false,
+                        evidence_token_count: 0,
+                        gathered_evidence_token_count: 0,
+                    });
+                }
+            }
+            Some(per_batch)
+        } else {
+            None
+        };
+
+        Ok((context, recalls))
+    }
+
+    fn select_routed_leaf_indices(
+        &self,
+        routed: &FractalRouteOutput<B>,
+        batch_index: usize,
+        query_position: usize,
+        max_span_count: usize,
+    ) -> Result<Vec<usize>, FractalError> {
+        let mut by_leaf = BTreeMap::<usize, (TokenSpan, f32)>::new();
+        for head_trace in routed.traces() {
+            let batch_route = head_trace.batch_routes.get(batch_index).ok_or_else(|| {
+                FractalError::InvalidState(format!(
+                    "sealed_token_state_store batch route {batch_index} missing from routed trace"
+                ))
+            })?;
+            for selection_index in 0..batch_route.selected_leaf_indices.len() {
+                let leaf_index = batch_route.selected_leaf_indices[selection_index];
+                let shared_span = batch_route.selected_leaf_spans[selection_index];
+                let score = batch_route.selected_leaf_scores[selection_index];
+                if shared_span.end() >= query_position {
+                    continue;
+                }
+                let expected_span = *self.shared_spans.get(leaf_index).ok_or_else(|| {
+                    FractalError::InvalidState(format!(
+                        "sealed_token_state_store routed leaf index {leaf_index} is out of bounds for {} sealed spans",
+                        self.shared_spans.len()
+                    ))
+                })?;
+                if shared_span != expected_span {
+                    return Err(FractalError::InvalidState(format!(
+                        "sealed_token_state_store routed span mismatch at leaf {leaf_index}: expected [{}, {}), got [{}, {})",
+                        expected_span.start(),
+                        expected_span.end(),
+                        shared_span.start(),
+                        shared_span.end()
+                    )));
+                }
+                by_leaf
+                    .entry(leaf_index)
+                    .and_modify(|(_, best_score)| {
+                        if score > *best_score {
+                            *best_score = score;
+                        }
+                    })
+                    .or_insert((shared_span, score));
+            }
+        }
+
+        let mut ranked = by_leaf
+            .into_iter()
+            .map(|(leaf_index, (shared_span, score))| (leaf_index, shared_span, score))
+            .collect::<Vec<_>>();
+        ranked.sort_by(|left, right| {
+            right
+                .2
+                .partial_cmp(&left.2)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| left.1.start().cmp(&right.1.start()))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        Ok(ranked
+            .into_iter()
+            .take(max_span_count)
+            .map(|(leaf_index, _, _)| leaf_index)
+            .collect())
+    }
+
+    fn select_oracle_leaf_indices(
+        &self,
+        evidence_span: TokenSpan,
+        query_position: usize,
+        max_span_count: usize,
+    ) -> Vec<usize> {
+        self.shared_spans
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, span)| span.end() < query_position && spans_overlap(*span, evidence_span))
+            .map(|(leaf_index, _)| leaf_index)
+            .take(max_span_count)
+            .collect()
+    }
+
+    fn select_oracle_exact_tokens(
+        &self,
+        evidence_span: TokenSpan,
+        query_position: usize,
+        max_token_count: usize,
+    ) -> Result<Vec<(usize, usize, TokenSpan)>, FractalError> {
+        let mut selected = Vec::new();
+        for (leaf_index, shared_span) in self.shared_spans.iter().copied().enumerate() {
+            if shared_span.end() >= query_position || !spans_overlap(shared_span, evidence_span) {
+                continue;
+            }
+            let overlap_start = shared_span.start().max(evidence_span.start());
+            let overlap_end = shared_span.end().min(evidence_span.end());
+            for absolute_position in overlap_start..overlap_end {
+                let token_offset = absolute_position - shared_span.start();
+                selected.push((leaf_index, token_offset, shared_span));
+                if selected.len() == max_token_count {
+                    return Ok(selected);
+                }
+            }
+        }
+
+        Ok(selected)
+    }
+
+    fn build_sealed_span_pack_rows(
+        &self,
+        batch_index: usize,
+        selected_leaf_indices: &[usize],
+        token_capacity: usize,
+        device: &B::Device,
+    ) -> Result<GatheredRowBatch<B>, FractalError> {
+        let mut row_groups = Vec::new();
+        let mut absolute_positions = Vec::with_capacity(token_capacity);
+        let mut source_span_starts = Vec::with_capacity(token_capacity);
+        let mut source_span_ends = Vec::with_capacity(token_capacity);
+        let mut token_mask = Vec::with_capacity(token_capacity);
+
+        for &leaf_index in selected_leaf_indices {
+            let shared_span = *self.shared_spans.get(leaf_index).ok_or_else(|| {
+                FractalError::InvalidState(format!(
+                    "sealed_token_state_store selected leaf index {leaf_index} is out of bounds"
+                ))
+            })?;
+            let rows = self.token_states[leaf_index]
+                .clone()
+                .slice([
+                    batch_index..batch_index + 1,
+                    0..self.leaf_size,
+                    0..self.token_state_dim,
+                ])
+                .reshape([self.leaf_size, self.token_state_dim]);
+            row_groups.push(rows);
+            for absolute_position in shared_span.start()..shared_span.end() {
+                absolute_positions.push(absolute_position as i64);
+                source_span_starts.push(shared_span.start() as i64);
+                source_span_ends.push(shared_span.end() as i64);
+                token_mask.push(true);
+            }
+        }
+
+        let active_token_count = selected_leaf_indices.len() * self.leaf_size;
+        if active_token_count < token_capacity {
+            row_groups.push(Tensor::<B, 2>::zeros(
+                [token_capacity - active_token_count, self.token_state_dim],
+                device,
+            ));
+            for _ in active_token_count..token_capacity {
+                absolute_positions.push(-1);
+                source_span_starts.push(-1);
+                source_span_ends.push(-1);
+                token_mask.push(false);
+            }
+        }
+
+        Ok(GatheredRowBatch {
+            token_states: Tensor::cat(row_groups, 0).reshape([1, token_capacity, self.token_state_dim]),
+            absolute_positions,
+            source_span_starts,
+            source_span_ends,
+            token_mask,
+        })
+    }
+
+    fn build_exact_token_subset_rows(
+        &self,
+        batch_index: usize,
+        selected_tokens: &[(usize, usize, TokenSpan)],
+        token_capacity: usize,
+        device: &B::Device,
+    ) -> Result<GatheredRowBatch<B>, FractalError> {
+        let mut row_groups = Vec::new();
+        let mut absolute_positions = Vec::with_capacity(token_capacity);
+        let mut source_span_starts = Vec::with_capacity(token_capacity);
+        let mut source_span_ends = Vec::with_capacity(token_capacity);
+        let mut token_mask = Vec::with_capacity(token_capacity);
+
+        for &(leaf_index, token_offset, shared_span) in selected_tokens {
+            let rows = self.token_states[leaf_index]
+                .clone()
+                .slice([
+                    batch_index..batch_index + 1,
+                    token_offset..token_offset + 1,
+                    0..self.token_state_dim,
+                ])
+                .reshape([1, self.token_state_dim]);
+            row_groups.push(rows);
+            absolute_positions.push((shared_span.start() + token_offset) as i64);
+            source_span_starts.push(shared_span.start() as i64);
+            source_span_ends.push(shared_span.end() as i64);
+            token_mask.push(true);
+        }
+
+        if selected_tokens.len() < token_capacity {
+            row_groups.push(Tensor::<B, 2>::zeros(
+                [token_capacity - selected_tokens.len(), self.token_state_dim],
+                device,
+            ));
+            for _ in selected_tokens.len()..token_capacity {
+                absolute_positions.push(-1);
+                source_span_starts.push(-1);
+                source_span_ends.push(-1);
+                token_mask.push(false);
+            }
+        }
+
+        Ok(GatheredRowBatch {
+            token_states: Tensor::cat(row_groups, 0).reshape([1, token_capacity, self.token_state_dim]),
+            absolute_positions,
+            source_span_starts,
+            source_span_ends,
+            token_mask,
+        })
+    }
+
+    fn build_inactive_rows(
+        &self,
+        token_capacity: usize,
+        device: &B::Device,
+    ) -> GatheredRowBatch<B> {
+        GatheredRowBatch {
+            token_states: Tensor::<B, 3>::zeros([1, token_capacity, self.token_state_dim], device),
+            absolute_positions: vec![-1; token_capacity],
+            source_span_starts: vec![-1; token_capacity],
+            source_span_ends: vec![-1; token_capacity],
+            token_mask: vec![false; token_capacity],
+        }
     }
 }
 

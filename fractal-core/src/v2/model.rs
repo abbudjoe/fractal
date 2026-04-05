@@ -3420,6 +3420,7 @@ mod tests {
     #[test]
     fn fractal_v2_projection_breakdown_additively_decomposes_fused_logits() {
         let device = <TestBackend as Backend>::Device::default();
+        TestBackend::seed(&device, 42);
         let model = FractalV2Model::new(32_000, 128, valid_components(), &device).unwrap();
         let input_ids = token_ids::<TestBackend>(
             &(1..=32).map(i64::from).collect::<Vec<_>>(),
@@ -3450,6 +3451,7 @@ mod tests {
     #[test]
     fn fractal_v2_projection_breakdown_respects_memory_ablation_modes() {
         let device = <TestBackend as Backend>::Device::default();
+        TestBackend::seed(&device, 42);
         let model = FractalV2Model::new(32_000, 128, valid_components(), &device).unwrap();
         let input_ids = token_ids::<TestBackend>(
             &(1..=32).map(i64::from).collect::<Vec<_>>(),
