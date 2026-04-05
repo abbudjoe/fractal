@@ -1637,21 +1637,22 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scripts/mamba3_pytorch_reference.py")
     }
 
-    fn default_python_reference_binary() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.venv-mamba3/bin/python")
+    fn repo_root_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
+    }
+
+    fn python_reference_launcher_path() -> PathBuf {
+        repo_root_path().join("scripts/run_mamba3_python.sh")
     }
 
     fn resolve_python_reference_binary() -> String {
-        if let Ok(python) = env::var("FRACTAL_MAMBA3_PYTHON") {
-            return python;
-        }
-        let fallback = default_python_reference_binary();
-        if fallback.exists() {
-            return fallback.display().to_string();
+        let launcher = python_reference_launcher_path();
+        if launcher.exists() {
+            return launcher.display().to_string();
         }
         panic!(
-            "set FRACTAL_MAMBA3_PYTHON or create the default Python reference environment at {}",
-            fallback.display()
+            "missing Python reference launcher at {}; restore the repo-owned wrapper or set FRACTAL_MAMBA3_PYTHON explicitly",
+            launcher.display()
         );
     }
 
@@ -1659,12 +1660,13 @@ mod tests {
         if let Ok(repo) = env::var("FRACTAL_MAMBA3_OFFICIAL_REPO") {
             return repo;
         }
-        let fallback = PathBuf::from("/private/tmp/state-spaces-mamba");
+        let fallback = repo_root_path().join("third_party/state-spaces-mamba");
         if fallback.join("mamba_ssm/modules/mamba3.py").exists() {
             return fallback.display().to_string();
         }
         panic!(
-            "set FRACTAL_MAMBA3_OFFICIAL_REPO to a checkout containing mamba_ssm/modules/mamba3.py"
+            "set FRACTAL_MAMBA3_OFFICIAL_REPO or populate the repo-owned checkout at {}",
+            fallback.display()
         );
     }
 
