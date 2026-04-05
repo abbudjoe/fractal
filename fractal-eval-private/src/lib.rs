@@ -1,4 +1,7 @@
+pub mod hybrid_attention;
+pub mod hybrid_attention_training;
 pub mod hybrid_prevalidation;
+pub mod hybrid_training;
 pub mod v2_ablation;
 pub mod v2_benchmark;
 pub mod v2_checkpoint;
@@ -9,17 +12,37 @@ pub mod v2_supervised;
 pub mod v2_synthetic;
 pub mod v2_training;
 
+pub use hybrid_attention::{
+    HybridAttentionMatrixConfig, HybridAttentionMatrixPlan, HybridAttentionRunnerLocation,
+    DEFAULT_V3A_RESULTS_LEDGER_PATH,
+};
+pub use hybrid_attention_training::{
+    run_attention_only_hybrid_attention_smoke_train, run_primitive_hybrid_attention_smoke_train,
+    run_reference_ssm_hybrid_attention_smoke_train, HybridAttentionMatrixVariantOutcome,
+    HybridAttentionSmokeTrainConfig, HybridAttentionSmokeTrainReport, DEFAULT_V3A_SMOKE_BATCH_SIZE,
+    DEFAULT_V3A_SMOKE_EVAL_BATCHES, DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY,
+    DEFAULT_V3A_SMOKE_LEARNING_RATE, DEFAULT_V3A_SMOKE_SEED, DEFAULT_V3A_SMOKE_SEQ_LEN,
+    DEFAULT_V3A_SMOKE_TRAIN_STEPS, DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
+};
 pub use hybrid_prevalidation::{
     append_hybrid_results_ledger_entry, build_baseline_hybrid_rescue_model,
     default_hybrid_rescue_prevalidation_suites, default_hybrid_results_ledger_path,
-    hybrid_rescue_prevalidation_suites_for_leaf_size,
-    resolve_requested_hybrid_results_ledger_path, run_baseline_hybrid_rescue_prevalidation,
-    run_hybrid_rescue_prevalidation_suite_with_modes,
+    hybrid_rescue_prevalidation_suites_for_leaf_size, resolve_requested_hybrid_results_ledger_path,
+    run_baseline_hybrid_rescue_prevalidation, run_hybrid_rescue_prevalidation_suite_with_modes,
     run_hybrid_rescue_prevalidation_with_modes, BaselineHybridRescueModel,
     BaselineHybridRescueModelConfig, HybridRescueMetrics, HybridRescueModeReport,
     HybridRescuePrevalidationReport, HybridRescueProbeMode, HybridRescueProbeSuite,
     HybridRescueSampleResult, HybridRescueSuiteKind, HybridRescueSuiteReport,
     HybridResultsLedgerEntry, HybridResultsLedgerKind,
+};
+pub use hybrid_training::{
+    hybrid_eval_metrics_for_mode, run_baseline_hybrid_rescue_frozen_train,
+    run_hybrid_rescue_frozen_train_with_model, HybridRescueFrozenEvalMetrics,
+    HybridRescueFrozenEvalModeSet, HybridRescueFrozenSplitStats, HybridRescueFrozenSuiteSplit,
+    HybridRescueFrozenTrainConfig, HybridRescueFrozenTrainReport, HybridRescueFrozenTrainResult,
+    HybridRescueFrozenTrainStepReport, HybridRescueTrainScope,
+    DEFAULT_HYBRID_RESCUE_FROZEN_EVAL_HOLDOUT_EVERY, DEFAULT_HYBRID_RESCUE_FROZEN_LEARNING_RATE,
+    DEFAULT_HYBRID_RESCUE_FROZEN_STEPS,
 };
 pub use v2_ablation::{
     required_v2_ablation_modes, run_required_v2_ablation_sweep, V2AblationCaseReport,

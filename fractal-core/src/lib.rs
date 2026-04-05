@@ -3,6 +3,7 @@ pub mod diagnostics;
 pub mod error;
 pub mod fitness;
 pub mod hybrid;
+pub mod hybrid_attention;
 pub mod language_model_head;
 pub mod lifecycle;
 pub mod model;
@@ -32,14 +33,25 @@ pub use diagnostics::{
 };
 pub use fitness::{RankedSpeciesResult, SpeciesRawMetrics};
 pub use hybrid::{
-    BaselineRescueAttentionBlock, BaselineRescueAttentionConfig, GatheredCandidateRecall,
-    GatheredRetrievalContext, GatheredRetrievalContextShape, GatheredRetrievalLayout,
-    GatheredRetrievalProvenance, FractalHybridRescuePrevalidationModel, HybridModelShape,
-    HybridRescueForwardOutput, HybridRescuePrevalidationMode, HybridRescueStepOutput,
-    RescueAttentionBlock, RescueAttentionDiagnostics, RescueAttentionInput,
-    RescueAttentionOutput, RescueAttentionShape, SealedTokenStateStore, PHASE1_LEAF_SIZE,
-    PHASE1_LOCAL_WINDOW_SIZE, PHASE1_REMOTE_TOKEN_BUDGET, PHASE1_ROUTED_SPAN_COUNT,
-    PHASE1_TOTAL_TOKEN_BUDGET,
+    BaselineRescueAttentionBlock, BaselineRescueAttentionConfig,
+    FractalHybridRescuePrevalidationModel, GatheredCandidateRecall, GatheredRetrievalContext,
+    GatheredRetrievalContextShape, GatheredRetrievalLayout, GatheredRetrievalProvenance,
+    HybridModelShape, HybridRescueForwardOutput, HybridRescuePrevalidationMode,
+    HybridRescueStepOutput, PreparedHybridRescueStep, RescueAttentionBlock,
+    RescueAttentionDiagnostics, RescueAttentionInput, RescueAttentionOutput, RescueAttentionShape,
+    SealedTokenStateStore, PHASE1_LEAF_SIZE, PHASE1_LOCAL_WINDOW_SIZE, PHASE1_REMOTE_TOKEN_BUDGET,
+    PHASE1_ROUTED_SPAN_COUNT, PHASE1_TOTAL_TOKEN_BUDGET,
+};
+pub use hybrid_attention::{
+    build_attention_only_hybrid_attention_model, build_primitive_hybrid_attention_model,
+    build_rust_mamba3_reference_hybrid_attention_model, phase1_hybrid_attention_baseline_matrix,
+    AttentionOnlyHybridAttentionModel, HybridAttentionBaselineMatrix,
+    HybridAttentionComparisonContract, HybridAttentionEfficiencyTarget, HybridAttentionLayerRole,
+    HybridAttentionModelShape, HybridAttentionVariantKind, HybridAttentionVariantSpec,
+    PrimitiveHybridAttentionModel, PrimitiveHybridPrimitive, ReferenceSsmFamily,
+    RustMamba3BaselineConfig, RustMamba3DerivedShape, RustMamba3Mixer, RustMamba3MixerBlock,
+    RustMamba3ReferenceHybridAttentionModel, RustMamba3RopeFraction,
+    PATH1_PHASE1_LOCAL_WINDOW_SIZE,
 };
 pub use language_model_head::{LanguageModelHead, LanguageModelHeadConfig};
 pub use lifecycle::{
