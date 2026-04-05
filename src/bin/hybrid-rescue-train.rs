@@ -5,7 +5,7 @@ use std::{
 };
 
 use burn::tensor::backend::AutodiffBackend;
-use fractal_core::{CpuTrainBackend, MetalTrainBackend};
+use fractal_core::CpuTrainBackend;
 use fractal_eval_private::{
     append_hybrid_results_ledger_entry, default_hybrid_rescue_prevalidation_suites,
     resolve_requested_hybrid_results_ledger_path, run_baseline_hybrid_rescue_frozen_train,
@@ -46,7 +46,12 @@ fn run() -> Result<(), String> {
     let model_label = args.backend.model_label();
     let report = match args.backend {
         BackendSelection::Cpu => run_with_backend::<CpuTrainBackend>(config)?,
-        BackendSelection::Metal => run_with_backend::<MetalTrainBackend>(config)?,
+        BackendSelection::Metal => {
+            return Err(
+                "metal backend is not yet supported for hybrid rescue training: the shared v2 state path still allocates zero-sized tensors that WGPU/Metal rejects. Use --backend cpu until the state/control plane is de-zeroed."
+                    .to_string(),
+            )
+        }
     };
     let rendered = render_report(&report, args.output, model_label)?;
     maybe_append_ledger_entry(

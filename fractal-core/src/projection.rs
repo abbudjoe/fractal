@@ -126,6 +126,7 @@ pub struct StructuredProjection<B: Backend> {
     weight: Param<Tensor<B, 2>>,
     bias: Option<Param<Tensor<B, 1>>>,
     layout_policy: ProjectionLayoutPolicy,
+    logical_dims: [usize; 2],
 }
 
 #[derive(Clone, Debug)]
@@ -173,6 +174,7 @@ impl StructuredProjectionConfig {
             weight,
             bias,
             layout_policy: self.layout_policy,
+            logical_dims: [self.d_input, self.d_output],
         }
     }
 }
@@ -200,8 +202,7 @@ impl<B: Backend> StructuredProjection<B> {
     }
 
     pub fn logical_dims(&self) -> [usize; 2] {
-        self.layout_policy
-            .logical_dims_from_stored_shape(self.weight.shape().dims())
+        self.logical_dims
     }
 
     pub fn diagnostic_spec(
@@ -292,6 +293,7 @@ impl<B: Backend> Module<B> for StructuredProjection<B> {
             weight: Module::map(self.weight, mapper),
             bias: self.bias.map(|bias| Module::map(bias, mapper)),
             layout_policy: self.layout_policy,
+            logical_dims: self.logical_dims,
         }
     }
 
@@ -300,6 +302,7 @@ impl<B: Backend> Module<B> for StructuredProjection<B> {
             weight: self.load_weight_record(record.weight, record.layout_policy),
             bias: self.load_bias_record(record.bias),
             layout_policy: self.layout_policy,
+            logical_dims: self.logical_dims,
         }
     }
 
@@ -316,6 +319,7 @@ impl<B: Backend> Module<B> for StructuredProjection<B> {
             weight: self.weight.to_device(device),
             bias: self.bias.map(|bias| bias.to_device(device)),
             layout_policy: self.layout_policy,
+            logical_dims: self.logical_dims,
         }
     }
 
@@ -324,6 +328,7 @@ impl<B: Backend> Module<B> for StructuredProjection<B> {
             weight: self.weight.fork(device),
             bias: self.bias.map(|bias| bias.fork(device)),
             layout_policy: self.layout_policy,
+            logical_dims: self.logical_dims,
         }
     }
 
@@ -344,6 +349,7 @@ impl<B: AutodiffBackend> AutodiffModule<B> for StructuredProjection<B> {
             weight: self.weight.valid(),
             bias: self.bias.as_ref().map(AutodiffModule::valid),
             layout_policy: self.layout_policy,
+            logical_dims: self.logical_dims,
         }
     }
 }
