@@ -259,6 +259,7 @@ pub struct HybridRescuePrevalidationReport {
 #[serde(rename_all = "snake_case")]
 pub enum HybridResultsLedgerKind {
     RescuePrevalidationProbe,
+    RescueFrozenTrain,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -296,12 +297,34 @@ impl HybridResultsLedgerEntry {
             })?,
         })
     }
+
+    pub fn rescue_frozen_train(
+        model: impl Into<String>,
+        note: impl Into<String>,
+        report: &crate::hybrid_training::HybridRescueFrozenTrainReport,
+        run_label: Option<String>,
+    ) -> Result<Self, FractalError> {
+        Ok(Self {
+            schema_version: 1,
+            recorded_at_unix_seconds: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            kind: HybridResultsLedgerKind::RescueFrozenTrain,
+            model: model.into(),
+            note: note.into(),
+            run_label,
+            payload: serde_json::to_value(report).map_err(|error| {
+                FractalError::InvalidState(format!(
+                    "failed to serialize hybrid frozen-train ledger payload: {error}"
+                ))
+            })?,
+        })
+    }
 }
 
 pub fn default_hybrid_results_ledger_path(repo_root: impl AsRef<Path>) -> PathBuf {
-    repo_root
-        .as_ref()
-        .join(DEFAULT_HYBRID_RESULTS_LEDGER_PATH)
+    repo_root.as_ref().join(DEFAULT_HYBRID_RESULTS_LEDGER_PATH)
 }
 
 pub fn resolve_requested_hybrid_results_ledger_path(
@@ -426,7 +449,10 @@ pub fn run_hybrid_rescue_prevalidation_suite_with_modes<B: Backend>(
     modes: &[HybridRescueProbeMode],
     device: &B::Device,
 ) -> Result<HybridRescueSuiteReport, FractalError> {
-    suite.validate_for_model(model.backbone().shape().vocab_size, model.shape().rescue_attention.leaf_size)?;
+    suite.validate_for_model(
+        model.backbone().shape().vocab_size,
+        model.shape().rescue_attention.leaf_size,
+    )?;
     let mut mode_reports = Vec::with_capacity(modes.len());
     for &mode in modes {
         let mut sample_results = Vec::with_capacity(suite.samples.len());
@@ -462,7 +488,10 @@ fn run_hybrid_rescue_sample<B: Backend>(
     mode: HybridRescueProbeMode,
     device: &B::Device,
 ) -> Result<HybridRescueSampleResult, FractalError> {
-    sample.validate_for_vocab(model.backbone().shape().vocab_size, model.shape().rescue_attention.leaf_size)?;
+    sample.validate_for_vocab(
+        model.backbone().shape().vocab_size,
+        model.shape().rescue_attention.leaf_size,
+    )?;
     let input_ids = Tensor::<B, 2, Int>::from_data(
         TensorData::new(sample.input_ids.clone(), [1, sample.input_ids.len()]),
         device,
@@ -539,7 +568,9 @@ fn aggregate_hybrid_metrics(sample_results: &[HybridRescueSampleResult]) -> Hybr
         evidence_span_recall_count,
         evidence_token_recall_sum,
     ) = sample_results.iter().fold(
-        (0usize, 0usize, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0usize, 0.0f32),
+        (
+            0usize, 0usize, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0usize, 0.0f32,
+        ),
         |acc, result| {
             (
                 acc.0 + usize::from(result.correct),
@@ -570,16 +601,25 @@ fn take_single_suite(
     suites: &[crate::SyntheticProbeSuite],
     kind: SyntheticProbeKind,
 ) -> Result<&crate::SyntheticProbeSuite, FractalError> {
-    suites.iter().find(|suite| suite.kind == kind).ok_or_else(|| {
-        FractalError::InvalidState(format!(
-            "failed to locate synthetic probe suite for {:?}",
-            kind
-        ))
-    })
+    suites
+        .iter()
+        .find(|suite| suite.kind == kind)
+        .ok_or_else(|| {
+            FractalError::InvalidState(format!(
+                "failed to locate synthetic probe suite for {:?}",
+                kind
+            ))
+        })
 }
 
-fn mqar_probe_suite_for_leaf_size(leaf_size: usize) -> Result<HybridRescueProbeSuite, FractalError> {
-    ensure_match("hybrid_rescue_prevalidation.mqar.leaf_size", leaf_size, PHASE1_LEAF_SIZE)?;
+fn mqar_probe_suite_for_leaf_size(
+    leaf_size: usize,
+) -> Result<HybridRescueProbeSuite, FractalError> {
+    ensure_match(
+        "hybrid_rescue_prevalidation.mqar.leaf_size",
+        leaf_size,
+        PHASE1_LEAF_SIZE,
+    )?;
     Ok(HybridRescueProbeSuite {
         kind: HybridRescueSuiteKind::Mqar,
         leaf_size,
@@ -588,9 +628,38 @@ fn mqar_probe_suite_for_leaf_size(leaf_size: usize) -> Result<HybridRescueProbeS
                 SyntheticProbeKind::AssociativeRecall,
                 "mqar-alpha",
                 vec![
-                    MQAR_SENTINEL, 11, 31, 12, 32, 13, 33, 14, 34, 21, 22, 23, 24, 25, 26, 27,
-                    MQAR_QUERY_SENTINEL, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53,
-                    MQAR_QUERY_SENTINEL, 12,
+                    MQAR_SENTINEL,
+                    11,
+                    31,
+                    12,
+                    32,
+                    13,
+                    33,
+                    14,
+                    34,
+                    21,
+                    22,
+                    23,
+                    24,
+                    25,
+                    26,
+                    27,
+                    MQAR_QUERY_SENTINEL,
+                    41,
+                    42,
+                    43,
+                    44,
+                    45,
+                    46,
+                    47,
+                    48,
+                    49,
+                    50,
+                    51,
+                    52,
+                    53,
+                    MQAR_QUERY_SENTINEL,
+                    12,
                 ],
                 32,
                 TokenSpan::new(4, 5)?,
@@ -601,9 +670,38 @@ fn mqar_probe_suite_for_leaf_size(leaf_size: usize) -> Result<HybridRescueProbeS
                 SyntheticProbeKind::AssociativeRecall,
                 "mqar-beta",
                 vec![
-                    MQAR_SENTINEL, 15, 35, 16, 36, 17, 37, 18, 38, 28, 29, 30, 31, 32, 33, 34,
-                    MQAR_QUERY_SENTINEL, 54, 55, 56, 57, 58, 59, 20, 19, 18, 17, 16, 15, 14,
-                    MQAR_QUERY_SENTINEL, 18,
+                    MQAR_SENTINEL,
+                    15,
+                    35,
+                    16,
+                    36,
+                    17,
+                    37,
+                    18,
+                    38,
+                    28,
+                    29,
+                    30,
+                    31,
+                    32,
+                    33,
+                    34,
+                    MQAR_QUERY_SENTINEL,
+                    54,
+                    55,
+                    56,
+                    57,
+                    58,
+                    59,
+                    20,
+                    19,
+                    18,
+                    17,
+                    16,
+                    15,
+                    14,
+                    MQAR_QUERY_SENTINEL,
+                    18,
                 ],
                 38,
                 TokenSpan::new(8, 9)?,
@@ -669,7 +767,9 @@ mod tests {
 
     #[test]
     fn baseline_hybrid_rescue_default_config_is_phase1_compatible() {
-        BaselineHybridRescueModelConfig::default().validate().unwrap();
+        BaselineHybridRescueModelConfig::default()
+            .validate()
+            .unwrap();
     }
 
     #[test]
@@ -713,6 +813,9 @@ mod tests {
     #[test]
     fn hybrid_results_ledger_default_path_points_at_v3_file() {
         let path = default_hybrid_results_ledger_path("/tmp/fractal");
-        assert_eq!(path, PathBuf::from("/tmp/fractal/docs/v3-results-ledger.jsonl"));
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/fractal/docs/v3-results-ledger.jsonl")
+        );
     }
 }

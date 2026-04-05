@@ -25,8 +25,7 @@ pub const PHASE1_LOCAL_WINDOW_SIZE: usize = 256;
 pub const PHASE1_ROUTED_SPAN_COUNT: usize = 8;
 pub const PHASE1_LEAF_SIZE: usize = 16;
 pub const PHASE1_REMOTE_TOKEN_BUDGET: usize = PHASE1_ROUTED_SPAN_COUNT * PHASE1_LEAF_SIZE;
-pub const PHASE1_TOTAL_TOKEN_BUDGET: usize =
-    PHASE1_LOCAL_WINDOW_SIZE + PHASE1_REMOTE_TOKEN_BUDGET;
+pub const PHASE1_TOTAL_TOKEN_BUDGET: usize = PHASE1_LOCAL_WINDOW_SIZE + PHASE1_REMOTE_TOKEN_BUDGET;
 
 #[derive(Module, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RescueAttentionShape {
@@ -622,8 +621,10 @@ fn validate_input_against_shape<B: Backend>(
         )));
     }
 
-    let local_mask =
-        tensor_data_to_bool(input.local_token_mask(), "rescue_attention.local_token_mask")?;
+    let local_mask = tensor_data_to_bool(
+        input.local_token_mask(),
+        "rescue_attention.local_token_mask",
+    )?;
     let remote_active_counts = input.gathered_remote().active_token_counts()?;
     for (batch_index, remote_active_count) in remote_active_counts
         .iter()
@@ -739,7 +740,9 @@ fn ensure_causal_positions(
     } else {
         local_window_size
     };
-    let earliest_local_position = query_position.saturating_add(1).saturating_sub(local_window_span);
+    let earliest_local_position = query_position
+        .saturating_add(1)
+        .saturating_sub(local_window_span);
 
     for slot in 0..local_token_count {
         let flat_index = batch_index * local_token_count + slot;

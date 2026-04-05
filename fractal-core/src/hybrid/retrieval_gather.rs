@@ -1,4 +1,7 @@
-use std::{cmp::Ordering, collections::{BTreeMap, BTreeSet}};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use burn::tensor::{backend::Backend, Bool, Int, Tensor, TensorData};
 
@@ -31,7 +34,10 @@ impl GatheredRetrievalLayout {
                     "gathered_retrieval.layout.sealed_span_packs.max_span_count",
                     max_span_count,
                 )?;
-                ensure_nonzero("gathered_retrieval.layout.sealed_span_packs.leaf_size", leaf_size)?;
+                ensure_nonzero(
+                    "gathered_retrieval.layout.sealed_span_packs.leaf_size",
+                    leaf_size,
+                )?;
             }
             Self::ExactTokenSubset { max_token_count } => {
                 ensure_nonzero(
@@ -368,7 +374,13 @@ impl<B: Backend> SealedTokenStateStore<B> {
         routed: &FractalRouteOutput<B>,
         query_position: usize,
         oracle_evidence_spans: Option<&[Option<TokenSpan>]>,
-    ) -> Result<(GatheredRetrievalContext<B>, Option<Vec<GatheredCandidateRecall>>), FractalError> {
+    ) -> Result<
+        (
+            GatheredRetrievalContext<B>,
+            Option<Vec<GatheredCandidateRecall>>,
+        ),
+        FractalError,
+    > {
         let [batch_size, _, _] = routed.selected_leaf_indices().dims();
         ensure_match(
             "sealed_token_state_store.gather_for_mode.batch_size",
@@ -697,7 +709,11 @@ impl<B: Backend> SealedTokenStateStore<B> {
         }
 
         Ok(GatheredRowBatch {
-            token_states: Tensor::cat(row_groups, 0).reshape([1, token_capacity, self.token_state_dim]),
+            token_states: Tensor::cat(row_groups, 0).reshape([
+                1,
+                token_capacity,
+                self.token_state_dim,
+            ]),
             absolute_positions,
             source_span_starts,
             source_span_ends,
@@ -748,7 +764,11 @@ impl<B: Backend> SealedTokenStateStore<B> {
         }
 
         Ok(GatheredRowBatch {
-            token_states: Tensor::cat(row_groups, 0).reshape([1, token_capacity, self.token_state_dim]),
+            token_states: Tensor::cat(row_groups, 0).reshape([
+                1,
+                token_capacity,
+                self.token_state_dim,
+            ]),
             absolute_positions,
             source_span_starts,
             source_span_ends,

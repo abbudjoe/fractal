@@ -44,6 +44,13 @@ pub struct HybridRescueStepOutput<B: Backend> {
 }
 
 #[derive(Debug, Clone)]
+pub struct PreparedHybridRescueStep<B: Backend> {
+    query_position: usize,
+    input: RescueAttentionInput<B>,
+    candidate_recall: Option<Vec<GatheredCandidateRecall>>,
+}
+
+#[derive(Debug, Clone)]
 pub struct HybridRescueForwardOutput<B: Backend> {
     updated_token_states: Tensor<B, 3>,
     logits: Tensor<B, 3>,
@@ -98,6 +105,20 @@ impl<B: Backend> HybridRescueStepOutput<B> {
 
     pub fn attention_diagnostics(&self) -> &RescueAttentionDiagnostics {
         &self.attention_diagnostics
+    }
+
+    pub fn candidate_recall(&self) -> Option<&[GatheredCandidateRecall]> {
+        self.candidate_recall.as_deref()
+    }
+}
+
+impl<B: Backend> PreparedHybridRescueStep<B> {
+    pub fn query_position(&self) -> usize {
+        self.query_position
+    }
+
+    pub fn input(&self) -> RescueAttentionInput<B> {
+        self.input.clone()
     }
 
     pub fn candidate_recall(&self) -> Option<&[GatheredCandidateRecall]> {
@@ -216,34 +237,38 @@ where
         mode: HybridRescuePrevalidationMode,
         oracle_evidence_spans: Option<&[Option<TokenSpan>]>,
     ) -> Result<HybridRescueForwardOutput<B>, FractalError> {
-        let [batch_size, seq_len] = input_ids.dims();
-        ensure_nonzero("hybrid_forward.batch_size", batch_size)?;
-        ensure_nonzero("hybrid_forward.seq_len", seq_len)?;
-        if let Some(spans) = oracle_evidence_spans {
-            ensure_match(
-                "hybrid_forward.oracle_evidence_spans.len",
-                spans.len(),
-                seq_len,
-            )?;
-            ensure_match(
-                "hybrid_forward.oracle_evidence_spans.batch_size",
-                batch_size,
-                1,
-            )?;
-        } else if matches!(
-            mode,
-            HybridRescuePrevalidationMode::OracleRemote
-                | HybridRescuePrevalidationMode::OracleRemoteWithOracleExactTokenSubset
-        ) {
-            return Err(FractalError::InvalidConfig(
-                "hybrid_forward oracle modes require oracle_evidence_spans".to_string(),
-            ));
-        }
-
+        validate_oracle_request(input_ids.dims(), mode, oracle_evidence_spans)?;
         let trace = self
             .backbone
             .forward_retrieval_trace_with_memory_mode(input_ids, FractalV2MemoryMode::TreeOnly)?;
         self.forward_from_retrieval_trace(trace, mode, oracle_evidence_spans)
+    }
+
+    pub fn prepare_rescue_steps_with_mode_and_oracle_spans(
+        &self,
+        input_ids: Tensor<B, 2, Int>,
+        mode: HybridRescuePrevalidationMode,
+        oracle_evidence_spans: Option<&[Option<TokenSpan>]>,
+    ) -> Result<Vec<PreparedHybridRescueStep<B>>, FractalError> {
+        validate_oracle_request(input_ids.dims(), mode, oracle_evidence_spans)?;
+        let trace = self
+            .backbone
+            .forward_retrieval_trace_with_memory_mode(input_ids, FractalV2MemoryMode::TreeOnly)?;
+        self.prepare_rescue_steps_from_retrieval_trace(trace, mode, oracle_evidence_spans)
+    }
+
+    pub fn prepare_rescue_steps_from_retrieval_trace(
+        &self,
+        trace: FractalV2RetrievalTrace<B>,
+        mode: HybridRescuePrevalidationMode,
+        oracle_evidence_spans: Option<&[Option<TokenSpan>]>,
+    ) -> Result<Vec<PreparedHybridRescueStep<B>>, FractalError> {
+        let steps = trace.steps();
+        ensure_nonzero("hybrid_forward.trace_step_count", steps.len())?;
+        let batch_size = steps[0].root_readouts().dims()[0];
+        let seq_len = steps.len();
+        validate_oracle_request([batch_size, seq_len], mode, oracle_evidence_spans)?;
+        self.prepare_steps_from_trace_internal(trace, mode, oracle_evidence_spans)
     }
 
     pub fn forward_from_retrieval_trace(
@@ -252,6 +277,48 @@ where
         mode: HybridRescuePrevalidationMode,
         oracle_evidence_spans: Option<&[Option<TokenSpan>]>,
     ) -> Result<HybridRescueForwardOutput<B>, FractalError> {
+        let prepared_steps =
+            self.prepare_rescue_steps_from_retrieval_trace(trace, mode, oracle_evidence_spans)?;
+        let batch_size = prepared_steps[0].input().query_state().dims()[0];
+        let mut updated_states = Vec::with_capacity(prepared_steps.len());
+        let mut logits = Vec::with_capacity(prepared_steps.len());
+        let mut step_outputs = Vec::with_capacity(prepared_steps.len());
+
+        for prepared_step in prepared_steps {
+            let rescue_output = self.rescue_attention.attend(prepared_step.input())?;
+            let updated_state = rescue_output.updated_state();
+            let step_logits = self.output().forward(updated_state.clone());
+            updated_states.push(updated_state.clone().reshape([
+                batch_size,
+                1,
+                self.shape.token_state_dim,
+            ]));
+            logits.push(
+                step_logits
+                    .clone()
+                    .reshape([batch_size, 1, self.shape.vocab_size]),
+            );
+            step_outputs.push(HybridRescueStepOutput {
+                query_position: prepared_step.query_position,
+                attention_weights: rescue_output.attention_weights(),
+                attention_diagnostics: rescue_output.diagnostics().clone(),
+                candidate_recall: prepared_step.candidate_recall,
+            });
+        }
+
+        Ok(HybridRescueForwardOutput {
+            updated_token_states: Tensor::cat(updated_states, 1),
+            logits: Tensor::cat(logits, 1),
+            steps: step_outputs,
+        })
+    }
+
+    fn prepare_steps_from_trace_internal(
+        &self,
+        trace: FractalV2RetrievalTrace<B>,
+        mode: HybridRescuePrevalidationMode,
+        oracle_evidence_spans: Option<&[Option<TokenSpan>]>,
+    ) -> Result<Vec<PreparedHybridRescueStep<B>>, FractalError> {
         let steps = trace.steps();
         ensure_nonzero("hybrid_forward.trace_step_count", steps.len())?;
         let batch_size = steps[0].root_readouts().dims()[0];
@@ -264,9 +331,7 @@ where
         )?;
         let mut current_leaf = Vec::with_capacity(self.shape.rescue_attention.leaf_size);
         let mut token_history = Vec::with_capacity(steps.len());
-        let mut updated_states = Vec::with_capacity(steps.len());
-        let mut logits = Vec::with_capacity(steps.len());
-        let mut step_outputs = Vec::with_capacity(steps.len());
+        let mut prepared_steps = Vec::with_capacity(steps.len());
 
         for (position, step) in steps.iter().enumerate() {
             let query_position = position + 1;
@@ -312,7 +377,7 @@ where
             )?;
             let rescue_input = RescueAttentionInput::new(
                 mode,
-                token_state.clone(),
+                token_state,
                 Tensor::<B, 1, Int>::from_data(
                     TensorData::new(vec![query_position as i64; batch_size], [batch_size]),
                     &device,
@@ -322,33 +387,47 @@ where
                 local_window.mask,
                 gathered_remote,
             )?;
-            let rescue_output = self.rescue_attention.attend(rescue_input)?;
-            let updated_state = rescue_output.updated_state();
-            let step_logits = self.output().forward(updated_state.clone());
-            updated_states.push(updated_state.clone().reshape([
-                batch_size,
-                1,
-                self.shape.token_state_dim,
-            ]));
-            logits.push(step_logits.clone().reshape([
-                batch_size,
-                1,
-                self.shape.vocab_size,
-            ]));
-            step_outputs.push(HybridRescueStepOutput {
+            prepared_steps.push(PreparedHybridRescueStep {
                 query_position,
-                attention_weights: rescue_output.attention_weights(),
-                attention_diagnostics: rescue_output.diagnostics().clone(),
+                input: rescue_input,
                 candidate_recall,
             });
         }
 
-        Ok(HybridRescueForwardOutput {
-            updated_token_states: Tensor::cat(updated_states, 1),
-            logits: Tensor::cat(logits, 1),
-            steps: step_outputs,
-        })
+        Ok(prepared_steps)
     }
+}
+
+fn validate_oracle_request(
+    input_dims: [usize; 2],
+    mode: HybridRescuePrevalidationMode,
+    oracle_evidence_spans: Option<&[Option<TokenSpan>]>,
+) -> Result<(), FractalError> {
+    let [batch_size, seq_len] = input_dims;
+    ensure_nonzero("hybrid_forward.batch_size", batch_size)?;
+    ensure_nonzero("hybrid_forward.seq_len", seq_len)?;
+    if let Some(spans) = oracle_evidence_spans {
+        ensure_match(
+            "hybrid_forward.oracle_evidence_spans.len",
+            spans.len(),
+            seq_len,
+        )?;
+        ensure_match(
+            "hybrid_forward.oracle_evidence_spans.batch_size",
+            batch_size,
+            1,
+        )?;
+    } else if matches!(
+        mode,
+        HybridRescuePrevalidationMode::OracleRemote
+            | HybridRescuePrevalidationMode::OracleRemoteWithOracleExactTokenSubset
+    ) {
+        return Err(FractalError::InvalidConfig(
+            "hybrid_forward oracle modes require oracle_evidence_spans".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 fn build_local_window<B: Backend>(
@@ -372,7 +451,11 @@ fn build_local_window<B: Backend>(
     let local_token_states = Tensor::cat(
         token_history[start_index..]
             .iter()
-            .map(|token_state| token_state.clone().reshape([batch_size, 1, token_state_dim]))
+            .map(|token_state| {
+                token_state
+                    .clone()
+                    .reshape([batch_size, 1, token_state_dim])
+            })
             .collect(),
         1,
     );
@@ -445,9 +528,8 @@ mod tests {
     use crate::v2::{
         BaselineExactLeafRead, BaselineExactLeafReadConfig, BaselineFractalRouterHead,
         BaselineFractalRouterHeadConfig, BaselineLeafSummarizer, BaselineLeafSummarizerConfig,
-        BaselineLocalTrunk, BaselineLocalTrunkConfig, BaselineReadFusion,
-        BaselineReadFusionConfig, BaselineTreeMergeCell, BaselineTreeMergeCellConfig,
-        FractalV2Components,
+        BaselineLocalTrunk, BaselineLocalTrunkConfig, BaselineReadFusion, BaselineReadFusionConfig,
+        BaselineTreeMergeCell, BaselineTreeMergeCellConfig, FractalV2Components,
     };
 
     use super::*;
@@ -650,8 +732,8 @@ mod tests {
         }
         .init::<TestBackend>(&device);
 
-        let error = FractalHybridRescuePrevalidationModel::new(backbone, rescue_attention)
-            .unwrap_err();
+        let error =
+            FractalHybridRescuePrevalidationModel::new(backbone, rescue_attention).unwrap_err();
 
         assert!(
             matches!(error, FractalError::InvalidConfig(message) if message.contains("root_count"))
@@ -663,7 +745,10 @@ mod tests {
         let device = <TestBackend as Backend>::Device::default();
         let model = test_model(&device);
         let input_ids = Tensor::<TestBackend, 2, Int>::from_data(
-            TensorData::new((0..20).map(|index| (index % 64) as i64).collect::<Vec<_>>(), [1, 20]),
+            TensorData::new(
+                (0..20).map(|index| (index % 64) as i64).collect::<Vec<_>>(),
+                [1, 20],
+            ),
             &device,
         );
 
@@ -681,7 +766,10 @@ mod tests {
         let device = <TestBackend as Backend>::Device::default();
         let model = test_model(&device);
         let input_ids = Tensor::<TestBackend, 2, Int>::from_data(
-            TensorData::new((0..20).map(|index| (index % 64) as i64).collect::<Vec<_>>(), [1, 20]),
+            TensorData::new(
+                (0..20).map(|index| (index % 64) as i64).collect::<Vec<_>>(),
+                [1, 20],
+            ),
             &device,
         );
         let mut oracle_spans = vec![None; 20];

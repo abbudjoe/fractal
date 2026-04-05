@@ -4,7 +4,7 @@ pub mod retrieval_gather;
 
 pub use model::{
     FractalHybridRescuePrevalidationModel, HybridModelShape, HybridRescueForwardOutput,
-    HybridRescuePrevalidationMode, HybridRescueStepOutput,
+    HybridRescuePrevalidationMode, HybridRescueStepOutput, PreparedHybridRescueStep,
 };
 pub use rescue_attention::{
     BaselineRescueAttentionBlock, BaselineRescueAttentionConfig, RescueAttentionBlock,
