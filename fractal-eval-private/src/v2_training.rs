@@ -29,6 +29,8 @@ pub const DEFAULT_V2_SMOKE_EVAL_BATCHES: usize = 1;
 pub const DEFAULT_V2_SMOKE_EVAL_HOLDOUT_EVERY: usize = 10;
 pub const DEFAULT_V2_SMOKE_LEARNING_RATE: f64 = 1e-3;
 
+pub(crate) type SmokeBatchSplit<B> = (V2SmokeCorpusStats, Vec<TokenBatch<B>>, Vec<TokenBatch<B>>);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ByteLevelVocabularyContract {
     pub pad_token: usize,
@@ -417,6 +419,51 @@ fn load_byte_level_corpus(paths: &[PathBuf]) -> Result<LoadedCorpus, FractalErro
     })
 }
 
+pub(crate) fn load_byte_level_smoke_batches<B: Backend>(
+    paths: &[PathBuf],
+    seq_len: usize,
+    window_stride: usize,
+    eval_holdout_every: usize,
+    batch_size: usize,
+    device: &B::Device,
+) -> Result<SmokeBatchSplit<B>, FractalError> {
+    let corpus = load_byte_level_corpus(paths)?;
+    let sequences = byte_sequences_from_corpus(&corpus.files, seq_len, window_stride)?;
+    let (train_sequences, eval_sequences) =
+        split_sequences_for_eval(sequences, eval_holdout_every)?;
+    let train_batches = sequences_into_batches::<B>(train_sequences, batch_size, device)?;
+    let eval_batches = sequences_into_batches::<B>(eval_sequences, batch_size, device)?;
+    let total_sequences = train_batches
+        .iter()
+        .map(|batch| batch.input_ids.dims()[0])
+        .sum::<usize>()
+        + eval_batches
+            .iter()
+            .map(|batch| batch.input_ids.dims()[0])
+            .sum::<usize>();
+    let train_sequences = train_batches
+        .iter()
+        .map(|batch| batch.input_ids.dims()[0])
+        .sum::<usize>();
+    let eval_sequences = eval_batches
+        .iter()
+        .map(|batch| batch.input_ids.dims()[0])
+        .sum::<usize>();
+    Ok((
+        V2SmokeCorpusStats {
+            files: corpus.paths,
+            total_bytes: corpus.total_bytes,
+            total_sequences,
+            train_sequences,
+            eval_sequences,
+            seq_len,
+            window_stride,
+        },
+        train_batches,
+        eval_batches,
+    ))
+}
+
 fn byte_sequences_from_corpus(
     files: &[Vec<u8>],
     seq_len: usize,
@@ -516,7 +563,7 @@ fn sequences_into_batches<B: Backend>(
     Ok(batches)
 }
 
-fn next_token_loss<B, M>(
+pub(crate) fn next_token_loss<B, M>(
     model: &M,
     batch: &TokenBatch<B>,
     criterion: &CrossEntropyLoss<B>,
@@ -548,7 +595,7 @@ where
     ))
 }
 
-fn evaluate_model<B, M>(
+pub(crate) fn evaluate_model<B, M>(
     model: &M,
     criterion: &CrossEntropyLoss<B>,
     batches: &[TokenBatch<B>],
