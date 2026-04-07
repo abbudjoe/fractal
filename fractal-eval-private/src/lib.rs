@@ -2,6 +2,7 @@ pub mod hybrid_attention;
 pub mod hybrid_attention_training;
 pub mod hybrid_prevalidation;
 pub mod hybrid_training;
+pub mod process_memory;
 pub mod v2_ablation;
 pub mod v2_benchmark;
 pub mod v2_checkpoint;
@@ -46,6 +47,10 @@ pub use hybrid_training::{
     HybridRescueFrozenTrainConfig, HybridRescueFrozenTrainReport, HybridRescueFrozenTrainResult,
     HybridRescueFrozenTrainStepReport, DEFAULT_HYBRID_RESCUE_FROZEN_EVAL_HOLDOUT_EVERY,
     DEFAULT_HYBRID_RESCUE_FROZEN_LEARNING_RATE, DEFAULT_HYBRID_RESCUE_FROZEN_STEPS,
+};
+pub use process_memory::{
+    process_memory_measurement_note, process_memory_metric_kind, process_peak_memory_bytes,
+    ProcessMemoryMetricKind,
 };
 pub use v2_ablation::{
     required_v2_ablation_modes, run_required_v2_ablation_sweep, V2AblationCaseReport,

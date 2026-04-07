@@ -3,9 +3,10 @@ use std::fmt::Write as _;
 use burn::backend::Candle;
 use fractal_eval_private::{
     append_v2_results_ledger_entry, load_baseline_v2_checkpoint_model,
-    resolve_requested_v2_results_ledger_path, run_baseline_v2_benchmark_suite,
-    run_v2_benchmark_suite_for_model, V2BenchmarkConfig, V2BenchmarkReport, V2BenchmarkSurface,
-    V2CheckpointSelection, V2ResultsLedgerEntry, DEFAULT_V2_BENCHMARK_SEQUENCE_LENGTHS,
+    process_memory_measurement_note, resolve_requested_v2_results_ledger_path,
+    run_baseline_v2_benchmark_suite, run_v2_benchmark_suite_for_model, V2BenchmarkConfig,
+    V2BenchmarkReport, V2BenchmarkSurface, V2CheckpointSelection, V2ResultsLedgerEntry,
+    DEFAULT_V2_BENCHMARK_SEQUENCE_LENGTHS,
 };
 use std::path::PathBuf;
 
@@ -240,9 +241,10 @@ fn run_benchmark(
                 config,
                 format!("baseline_v2_smoke_checkpoint_{}", loaded.selection.label()),
                 format!(
-                    "trained smoke checkpoint loaded from {} using the {} checkpoint artifact; RSS metrics are sampled from getrusage(RUSAGE_SELF) after warmup and are useful for trend detection, not precise kernel-level attribution",
+                    "trained smoke checkpoint loaded from {} using the {} checkpoint artifact; {}",
                     loaded.report_path.display(),
-                    loaded.selection.label()
+                    loaded.selection.label(),
+                    process_memory_measurement_note("after warmup"),
                 ),
                 device,
             )
@@ -295,12 +297,13 @@ fn render_table(report: &V2BenchmarkReport) -> String {
         }
         let _ = writeln!(
             output,
-            "  {:<12} mean_ms={:>8.3} total_ms={:>8.3} tok/s={:>10.2} rss_delta_mb={:>8.2} sparsity={:>5.3} collapse={:>5.3} exact={:>5.3} distance={:>7.2} depth={} leaves={} agreement={:>5.3} dead_nodes={} leaf_bins={}",
+            "  {:<12} mean_ms={:>8.3} total_ms={:>8.3} tok/s={:>10.2} mem_metric={} mem_delta_mb={:>8.2} sparsity={:>5.3} collapse={:>5.3} exact={:>5.3} distance={:>7.2} depth={} leaves={} agreement={:>5.3} dead_nodes={} leaf_bins={}",
             surface_label(entry.surface),
             entry.mean_wall_time_ms,
             entry.total_wall_time_ms,
             entry.tokens_per_sec,
-            entry.peak_rss_delta_bytes as f64 / (1024.0 * 1024.0),
+            entry.process_memory_metric.as_str(),
+            entry.peak_process_memory_delta_bytes as f64 / (1024.0 * 1024.0),
             entry.observability.routing_sparsity,
             entry.observability.root_collapse_mean_pairwise_cosine_similarity,
             entry.observability.exact_read_usage,

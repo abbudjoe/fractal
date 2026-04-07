@@ -15,7 +15,9 @@ use fractal_core::{
 };
 
 use crate::{
-    build_baseline_v2_synthetic_model, BaselineV2SyntheticModel, BaselineV2SyntheticModelConfig,
+    build_baseline_v2_synthetic_model, process_memory_measurement_note, process_memory_metric_kind,
+    process_peak_memory_bytes, BaselineV2SyntheticModel, BaselineV2SyntheticModelConfig,
+    ProcessMemoryMetricKind,
 };
 
 pub const DEFAULT_V2_BENCHMARK_SEQUENCE_LENGTHS: [usize; 6] = [256, 512, 1024, 2048, 4096, 8192];
@@ -128,8 +130,12 @@ pub struct V2BenchmarkEntry {
     pub total_wall_time_ms: f64,
     pub mean_wall_time_ms: f64,
     pub tokens_per_sec: f64,
-    pub peak_rss_bytes: u64,
-    pub peak_rss_delta_bytes: u64,
+    #[serde(default)]
+    pub process_memory_metric: ProcessMemoryMetricKind,
+    #[serde(default, alias = "peak_rss_bytes")]
+    pub peak_process_memory_bytes: u64,
+    #[serde(default, alias = "peak_rss_delta_bytes")]
+    pub peak_process_memory_delta_bytes: u64,
     pub observability: V2ObservabilitySnapshot,
 }
 
@@ -154,7 +160,7 @@ pub fn run_baseline_v2_benchmark_suite<B: Backend>(
         &model,
         config,
         "baseline_v2_random_init".to_string(),
-        "process RSS metrics are sampled from getrusage(RUSAGE_SELF) after warmup; they are useful for trend detection, not precise kernel-level attribution".to_string(),
+        process_memory_measurement_note("after warmup"),
         device,
     )
 }
@@ -254,8 +260,9 @@ fn benchmark_surface<B: Backend>(
         total_wall_time_ms: timing.total_wall_time_ms,
         mean_wall_time_ms: timing.mean_wall_time_ms,
         tokens_per_sec: timing.tokens_per_sec(logical_tokens_per_iteration),
-        peak_rss_bytes: timing.peak_rss_bytes,
-        peak_rss_delta_bytes: timing.peak_rss_delta_bytes,
+        process_memory_metric: timing.process_memory_metric,
+        peak_process_memory_bytes: timing.peak_process_memory_bytes,
+        peak_process_memory_delta_bytes: timing.peak_process_memory_delta_bytes,
         observability: observability.clone(),
     })
 }
@@ -271,8 +278,9 @@ fn logical_tokens_per_iteration(surface: V2BenchmarkSurface, sequence_length: us
 struct BenchmarkTiming {
     total_wall_time_ms: f64,
     mean_wall_time_ms: f64,
-    peak_rss_bytes: u64,
-    peak_rss_delta_bytes: u64,
+    process_memory_metric: ProcessMemoryMetricKind,
+    peak_process_memory_bytes: u64,
+    peak_process_memory_delta_bytes: u64,
 }
 
 impl BenchmarkTiming {
@@ -300,23 +308,25 @@ where
         black_box(run(prepare()?)?);
     }
 
-    let baseline_rss = process_peak_rss_bytes();
+    let baseline_process_memory = process_peak_memory_bytes();
     let mut total_ms = 0.0f64;
-    let mut peak_rss_bytes = baseline_rss;
+    let mut peak_process_memory_bytes = baseline_process_memory;
     for _ in 0..iterations {
         let prepared = prepare()?;
         let start = Instant::now();
         black_box(run(prepared)?);
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         total_ms += elapsed_ms;
-        peak_rss_bytes = peak_rss_bytes.max(process_peak_rss_bytes());
+        peak_process_memory_bytes = peak_process_memory_bytes.max(process_peak_memory_bytes());
     }
 
     Ok(BenchmarkTiming {
         total_wall_time_ms: total_ms,
         mean_wall_time_ms: total_ms / iterations as f64,
-        peak_rss_bytes,
-        peak_rss_delta_bytes: peak_rss_bytes.saturating_sub(baseline_rss),
+        process_memory_metric: process_memory_metric_kind(),
+        peak_process_memory_bytes,
+        peak_process_memory_delta_bytes: peak_process_memory_bytes
+            .saturating_sub(baseline_process_memory),
     })
 }
 
@@ -790,23 +800,6 @@ fn invalid_state_from_data(
     label: &'static str,
 ) -> impl FnOnce(burn::tensor::DataError) -> FractalError {
     move |error| FractalError::InvalidState(format!("{label} data conversion failed: {error}"))
-}
-
-fn process_peak_rss_bytes() -> u64 {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
-    if status != 0 {
-        return 0;
-    }
-    let usage = unsafe { usage.assume_init() };
-    #[cfg(target_os = "macos")]
-    {
-        usage.ru_maxrss as u64
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        (usage.ru_maxrss as u64) * 1024
-    }
 }
 
 #[cfg(test)]

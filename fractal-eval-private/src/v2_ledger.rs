@@ -455,8 +455,9 @@ mod tests {
                 total_wall_time_ms: 4.0,
                 mean_wall_time_ms: 4.0,
                 tokens_per_sec: 64.0,
-                peak_rss_bytes: 1_000,
-                peak_rss_delta_bytes: 100,
+                process_memory_metric: crate::ProcessMemoryMetricKind::PeakRss,
+                peak_process_memory_bytes: 1_000,
+                peak_process_memory_delta_bytes: 100,
                 observability: V2ObservabilitySnapshot {
                     routing_sparsity: 0.5,
                     root_collapse_mean_pairwise_cosine_similarity: 0.8,

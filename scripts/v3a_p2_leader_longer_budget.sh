@@ -53,6 +53,7 @@ run_if_needed() {
   "${cmd[@]}"
 }
 
+declare -a COMMON_ARGS
 COMMON_ARGS=()
 if [[ -n "${CORPUS_TRAIN_JSONL}" || -n "${CORPUS_EVAL_JSONL}" ]]; then
   if [[ -z "${CORPUS_TRAIN_JSONL}" || -z "${CORPUS_EVAL_JSONL}" ]]; then
@@ -69,18 +70,18 @@ if [[ -n "${CORPUS_TRAIN_JSONL}" || -n "${CORPUS_EVAL_JSONL}" ]]; then
 fi
 run_if_needed \
   "${LABEL_PREFIX}-s${SEED}-reference-ssm-hybrid" \
-  "${COMMON_ARGS[@]}" \
+  ${COMMON_ARGS[@]+"${COMMON_ARGS[@]}"} \
   --variant reference-ssm-hybrid
 
 run_if_needed \
   "${LABEL_PREFIX}-s${SEED}-p2-incumbent" \
-  "${COMMON_ARGS[@]}" \
+  ${COMMON_ARGS[@]+"${COMMON_ARGS[@]}"} \
   --variant primitive-hybrid \
   --primitive-profile p2
 
 run_if_needed \
   "${LABEL_PREFIX}-s${SEED}-p2-3-gated-projected-norm-residual-renorm-standard" \
-  "${COMMON_ARGS[@]}" \
+  ${COMMON_ARGS[@]+"${COMMON_ARGS[@]}"} \
   --variant primitive-hybrid \
   --primitive-profile p2-3 \
   --primitive-residual-profile gated \
@@ -90,7 +91,7 @@ run_if_needed \
 
 run_if_needed \
   "${LABEL_PREFIX}-s${SEED}-p2-0-scaled-projected-pre-norm-only-standard" \
-  "${COMMON_ARGS[@]}" \
+  ${COMMON_ARGS[@]+"${COMMON_ARGS[@]}"} \
   --variant primitive-hybrid \
   --primitive-profile p2-0 \
   --primitive-residual-profile scaled \
@@ -100,7 +101,7 @@ run_if_needed \
 
 run_if_needed \
   "${LABEL_PREFIX}-s${SEED}-p2-0-plain-projected-pre-norm-only-standard" \
-  "${COMMON_ARGS[@]}" \
+  ${COMMON_ARGS[@]+"${COMMON_ARGS[@]}"} \
   --variant primitive-hybrid \
   --primitive-profile p2-0 \
   --primitive-residual-profile plain \
@@ -110,7 +111,7 @@ run_if_needed \
 
 run_if_needed \
   "${LABEL_PREFIX}-s${SEED}-attention-only" \
-  "${COMMON_ARGS[@]}" \
+  ${COMMON_ARGS[@]+"${COMMON_ARGS[@]}"} \
   --variant attention-only
 
 echo "completed leader longer-budget run set"

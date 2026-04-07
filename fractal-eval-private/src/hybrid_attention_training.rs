@@ -21,10 +21,11 @@ use fractal_core::{
 };
 
 use crate::{
+    process_memory_measurement_note, process_memory_metric_kind, process_peak_memory_bytes,
     v2_training::{evaluate_model, load_byte_level_smoke_batches_from_source, next_token_loss},
-    ByteLevelSmokeCorpusSource, ByteLevelVocabularyContract, V2SmokeCorpusStats,
-    V2SmokeEvalMetrics, V2SmokeTrainModel, V2SmokeTrainStepReport, BYTE_LEVEL_PAD_TOKEN,
-    BYTE_LEVEL_VOCAB_SIZE,
+    ByteLevelSmokeCorpusSource, ByteLevelVocabularyContract, ProcessMemoryMetricKind,
+    V2SmokeCorpusStats, V2SmokeEvalMetrics, V2SmokeTrainModel, V2SmokeTrainStepReport,
+    BYTE_LEVEL_PAD_TOKEN, BYTE_LEVEL_VOCAB_SIZE,
 };
 
 pub const DEFAULT_V3A_SMOKE_SEQ_LEN: usize = 32;
@@ -37,7 +38,7 @@ pub const DEFAULT_V3A_SMOKE_LEARNING_RATE: f64 = 1e-3;
 pub const DEFAULT_V3A_SMOKE_SEED: u64 = 42;
 
 pub const HYBRID_ATTENTION_RUNTIME_MEMORY_NOTE: &str =
-    "process RSS metrics are sampled from getrusage(RUSAGE_SELF) around train/eval phases; they are useful for trend detection, not precise kernel-level attribution";
+    "process memory metrics are sampled around train/eval phases using the platform-specific process-memory primitive; see process_memory_metric for the exact source";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -154,8 +155,12 @@ pub struct HybridAttentionRuntimeMetrics {
     pub eval_tokens_per_pass: usize,
     pub train_tokens_per_second: f64,
     pub overall_tokens_per_second: f64,
-    pub peak_rss_bytes: u64,
-    pub peak_rss_delta_bytes: u64,
+    #[serde(default)]
+    pub process_memory_metric: ProcessMemoryMetricKind,
+    #[serde(default, alias = "peak_rss_bytes")]
+    pub peak_process_memory_bytes: u64,
+    #[serde(default, alias = "peak_rss_delta_bytes")]
+    pub peak_process_memory_delta_bytes: u64,
     pub memory_note: String,
 }
 
@@ -292,13 +297,13 @@ where
         .take(config.eval_batches.min(eval_batches.len()))
         .map(|batch| batch.token_count)
         .sum::<usize>();
-    let baseline_rss = process_peak_rss_bytes();
-    let mut peak_rss_bytes = baseline_rss;
+    let baseline_process_memory = process_peak_memory_bytes();
+    let mut peak_process_memory_bytes = baseline_process_memory;
     let total_start = Instant::now();
     let initial_eval_start = Instant::now();
     let initial_eval = evaluate_model(&model, &criterion, &eval_batches, config.eval_batches)?;
     let initial_eval_wall_time_ms = initial_eval_start.elapsed().as_secs_f64() * 1000.0;
-    peak_rss_bytes = peak_rss_bytes.max(process_peak_rss_bytes());
+    peak_process_memory_bytes = peak_process_memory_bytes.max(process_peak_memory_bytes());
 
     let mut model = model;
     let mut seen_tokens = 0usize;
@@ -318,13 +323,13 @@ where
             train_perplexity: train_loss.exp(),
             seen_tokens,
         });
-        peak_rss_bytes = peak_rss_bytes.max(process_peak_rss_bytes());
+        peak_process_memory_bytes = peak_process_memory_bytes.max(process_peak_memory_bytes());
     }
     let train_wall_time_ms = train_start.elapsed().as_secs_f64() * 1000.0;
     let final_eval_start = Instant::now();
     let final_eval = evaluate_model(&model, &criterion, &eval_batches, config.eval_batches)?;
     let final_eval_wall_time_ms = final_eval_start.elapsed().as_secs_f64() * 1000.0;
-    peak_rss_bytes = peak_rss_bytes.max(process_peak_rss_bytes());
+    peak_process_memory_bytes = peak_process_memory_bytes.max(process_peak_memory_bytes());
     let total_wall_time_ms = total_start.elapsed().as_secs_f64() * 1000.0;
     let runtime = HybridAttentionRuntimeMetrics {
         total_wall_time_ms,
@@ -338,9 +343,11 @@ where
             seen_tokens + (selected_eval_tokens * 2),
             total_wall_time_ms,
         ),
-        peak_rss_bytes,
-        peak_rss_delta_bytes: peak_rss_bytes.saturating_sub(baseline_rss),
-        memory_note: HYBRID_ATTENTION_RUNTIME_MEMORY_NOTE.to_string(),
+        process_memory_metric: process_memory_metric_kind(),
+        peak_process_memory_bytes,
+        peak_process_memory_delta_bytes: peak_process_memory_bytes
+            .saturating_sub(baseline_process_memory),
+        memory_note: process_memory_measurement_note("around train/eval phases"),
     };
 
     fs::create_dir_all(&config.output_dir).map_err(|error| {
@@ -384,23 +391,6 @@ fn tokens_per_second(tokens: usize, wall_time_ms: f64) -> f64 {
         0.0
     } else {
         tokens as f64 / (wall_time_ms / 1000.0)
-    }
-}
-
-fn process_peak_rss_bytes() -> u64 {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
-    if status != 0 {
-        return 0;
-    }
-    let usage = unsafe { usage.assume_init() };
-    #[cfg(target_os = "macos")]
-    {
-        usage.ru_maxrss as u64
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        (usage.ru_maxrss as u64) * 1024
     }
 }
 

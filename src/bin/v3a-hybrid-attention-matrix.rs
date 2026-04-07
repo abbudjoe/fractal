@@ -916,10 +916,11 @@ fn render_table(report: &RenderedMatrixReport<'_>) -> String {
                 );
                 let _ = writeln!(
                     output,
-                    "  train_tok_s={:.2} overall_tok_s={:.2} rss_delta_mb={:.2}",
+                    "  train_tok_s={:.2} overall_tok_s={:.2} mem_metric={} mem_delta_mb={:.2}",
                     report.runtime.train_tokens_per_second,
                     report.runtime.overall_tokens_per_second,
-                    report.runtime.peak_rss_delta_bytes as f64 / (1024.0 * 1024.0),
+                    report.runtime.process_memory_metric.as_str(),
+                    report.runtime.peak_process_memory_delta_bytes as f64 / (1024.0 * 1024.0),
                 );
                 let _ = writeln!(
                     output,
