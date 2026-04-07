@@ -25,8 +25,10 @@ Wrapper options:
   --timeout-seconds N             Wait timeout for pod + SSH readiness. Default: 900
   --poll-seconds N                Poll interval while waiting. Default: 5
   --run-timeout-seconds N         Bound remote tournament runtime with timeout(1).
-  --binary-kind KIND             Cargo target kind: example or bin. Default: example
-  --binary-name NAME             Cargo target name. Default: tournament
+  --binary-kind KIND             Execution kind: example, bin, or python. Default: example
+  --binary-name NAME             Cargo target name or repo-relative Python script path. Default: tournament
+  --python-requirements FILE     Repo-relative or local repo-root-backed requirements file for python runs
+  --python-install-mode MODE     Python bootstrap mode: requirements-only or official-mamba3. Default: requirements-only
   --no-compile                    Reuse a cached remote binary and fail if it is missing.
   --stop-after-run                Always stop the pod after the command finishes.
   --keep-pod                      Never stop the pod automatically.
@@ -449,6 +451,20 @@ build_remote_tournament_args() {
             REMOTE_TOURNAMENT_ARGS+=(
                 "--ledger-path"
                 "${STATE_DIR}/artifacts/v3a-results-ledger.jsonl"
+            )
+        fi
+    fi
+    if [ "$BINARY_KIND" = "python" ] && [ "$BINARY_NAME" = "scripts/v3a_pytorch_mamba3_hybrid.py" ]; then
+        if [ "$has_output_dir" -eq 0 ]; then
+            REMOTE_TOURNAMENT_ARGS+=(
+                "--output-dir"
+                "${STATE_DIR}/artifacts/v3a-python-mamba3/${RUN_ID}"
+            )
+        fi
+        if [ "$has_ledger_path" -eq 0 ]; then
+            REMOTE_TOURNAMENT_ARGS+=(
+                "--ledger-path"
+                "${STATE_DIR}/artifacts/v3a-python-mamba3-results-ledger.jsonl"
             )
         fi
     fi
@@ -936,11 +952,12 @@ REMOTE
 
 bootstrap_remote() {
     log "bootstrapping remote toolchain"
-    "${SSH_BASE[@]}" bash -s -- "$REMOTE_DIR" "$STATE_DIR" <<'REMOTE'
+    "${SSH_BASE[@]}" bash -s -- "$REMOTE_DIR" "$STATE_DIR" "$BINARY_KIND" <<'REMOTE'
 set -euo pipefail
 
 remote_dir="$1"
 state_dir="$2"
+binary_kind="$3"
 export DEBIAN_FRONTEND=noninteractive
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 if [ -d "${CUDA_HOME}/bin" ]; then
@@ -960,19 +977,22 @@ for cmd in curl git cmake pkg-config g++ python3; do
         need_apt=1
     fi
 done
+if ! python3 -m pip --version >/dev/null 2>&1; then
+    need_apt=1
+fi
 
 if [ "$need_apt" -eq 1 ]; then
     apt-get update
-    apt-get install -y build-essential cmake curl git pkg-config libssl-dev python3
+    apt-get install -y build-essential cmake curl git pkg-config libssl-dev python3 python3-dev python3-pip python3-venv
 fi
 
-if ! command -v cargo >/dev/null 2>&1 || ! cargo --version >/dev/null 2>&1; then
+if [ "$binary_kind" != "python" ] && { ! command -v cargo >/dev/null 2>&1 || ! cargo --version >/dev/null 2>&1; }; then
     curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
     # shellcheck disable=SC1090
     . "$HOME/.cargo/env"
 fi
 
-if command -v rustup >/dev/null 2>&1; then
+if [ "$binary_kind" != "python" ] && command -v rustup >/dev/null 2>&1; then
     rustup default stable >/dev/null
 fi
 
@@ -988,25 +1008,40 @@ REMOTE
 run_remote_tournament() {
     local local_build_key
     local run_experiment_context_b64
-    local_build_key="$(python3 - "$REPO_ROOT" <<'PY'
+    local_build_key="$(python3 - "$REPO_ROOT" "$BINARY_KIND" "$BINARY_NAME" "$PYTHON_REQUIREMENTS_FILE" "$PYTHON_INSTALL_MODE" <<'PY'
 import hashlib
 import os
 import sys
 
 root = sys.argv[1]
-paths = [
-    "Cargo.toml",
-    "Cargo.lock",
-    ".cargo",
-    "src",
-    "examples",
-    "fractal-core",
-    "fractal-primitives-private",
-    "fractal-eval-private",
-    "vendor",
-]
+binary_kind = sys.argv[2]
+binary_name = sys.argv[3]
+python_requirements_file = sys.argv[4]
+python_install_mode = sys.argv[5]
+
+if binary_kind == "python":
+    paths = ["scripts", "experiments/stage0/assets/fineweb"]
+    if binary_name:
+        paths.append(binary_name)
+    if python_requirements_file:
+        paths.append(python_requirements_file)
+else:
+    paths = [
+        "Cargo.toml",
+        "Cargo.lock",
+        ".cargo",
+        "src",
+        "examples",
+        "fractal-core",
+        "fractal-primitives-private",
+        "fractal-eval-private",
+        "vendor",
+    ]
 
 digest = hashlib.sha256()
+if binary_kind == "python":
+    digest.update(f"python-install-mode:{python_install_mode}".encode())
+    digest.update(b"\0")
 for rel in paths:
     full = os.path.join(root, rel)
     if not os.path.exists(full):
@@ -1039,6 +1074,14 @@ PY
 
     RUN_LOCAL_BUILD_KEY="$local_build_key"
     build_remote_tournament_args
+    local remote_python_requirements_file="$PYTHON_REQUIREMENTS_FILE"
+    if [ -n "$remote_python_requirements_file" ]; then
+        if [ "$remote_python_requirements_file" = "$REPO_ROOT" ]; then
+            remote_python_requirements_file="$REMOTE_DIR"
+        elif [ "${remote_python_requirements_file#${REPO_ROOT}/}" != "$remote_python_requirements_file" ]; then
+            remote_python_requirements_file="${REMOTE_DIR}/${remote_python_requirements_file#${REPO_ROOT}/}"
+        fi
+    fi
     run_experiment_context_b64="$(printf '%s' "$RUN_EXPERIMENT_CONTEXT_JSON" | base64 | tr -d '\n')"
 
     write_local_wrapper_manifest "running" 0 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RUN_LOCAL_BRANCH" "$local_build_key" "$RUN_LOCAL_COMMIT_SHA"
@@ -1052,6 +1095,8 @@ PY
         "$local_build_key" \
         "$BINARY_KIND" \
         "$BINARY_NAME" \
+        "$remote_python_requirements_file" \
+        "$PYTHON_INSTALL_MODE" \
         "$NO_COMPILE" \
         "$RUN_TIMEOUT_SECONDS" \
         "$RUN_ID" \
@@ -1067,12 +1112,14 @@ local_commit_sha="$4"
 local_build_key="$5"
 binary_kind="$6"
 binary_name="$7"
-no_compile="$8"
-run_timeout_seconds="$9"
-run_id="${10}"
-pod_id="${11}"
-experiment_context_b64="${12}"
-shift 12
+python_requirements_file="$8"
+python_install_mode="$9"
+no_compile="${10}"
+run_timeout_seconds="${11}"
+run_id="${12}"
+pod_id="${13}"
+experiment_context_b64="${14}"
+shift 14
 
 if [ -f "$HOME/.cargo/env" ]; then
     # shellcheck disable=SC1090
@@ -1100,8 +1147,10 @@ binary_dir="$state_dir/bin"
 binary_path="$binary_dir/$binary_name"
 build_key_file="$state_dir/last-build-key.txt"
 remote_manifest="$state_dir/manifests/run-manifest.json"
+python_venv_dir="$state_dir/python-envs/$(printf '%s' "$binary_name" | tr '/.' '__')"
+python_bootstrap_stamp="$python_venv_dir/.fractal-bootstrap-spec.txt"
 
-mkdir -p "$state_dir/logs" "$binary_dir"
+mkdir -p "$state_dir/logs" "$binary_dir" "$state_dir/python-envs"
 mkdir -p "$(dirname "$remote_manifest")" "$state_dir/artifacts"
 printf 'branch=%s\nbuild_key=%s\nrun_at=%s\n' \
     "$local_branch" \
@@ -1201,47 +1250,165 @@ cleanup_manifest() {
 }
 trap 'rc=$?; cleanup_manifest "$rc" "${command_args[@]}"' EXIT
 
-needs_build=1
-if [ -x "$binary_path" ] && [ -f "$build_key_file" ] && [ "$(cat "$build_key_file")" = "$local_build_key" ]; then
-    needs_build=0
-fi
-
-if [ "$no_compile" = "1" ]; then
-    if [ ! -x "$binary_path" ]; then
-        echo "cached binary missing; run without --no-compile first" >&2
+if [ "$binary_kind" = "python" ]; then
+    script_path="$binary_name"
+    if [ "${script_path#/}" = "$script_path" ]; then
+        script_path="$remote_dir/$script_path"
+    fi
+    if [ ! -f "$script_path" ]; then
+        echo "python script not found at $script_path" >&2
         exit 1
     fi
-    needs_build=0
-fi
+    python_exec="$python_venv_dir/bin/python"
+    bootstrap_spec="python-kind:${binary_name}|install:${python_install_mode}"
+    if [ "$python_install_mode" = "official-mamba3" ]; then
+        bootstrap_spec="${bootstrap_spec}|official-mamba3-bootstrap:v2"
+    fi
+    if [ -n "$python_requirements_file" ]; then
+        requirements_path="$python_requirements_file"
+        if [ "${requirements_path#/}" = "$requirements_path" ]; then
+            requirements_path="$remote_dir/$requirements_path"
+        fi
+        if [ ! -f "$requirements_path" ]; then
+            echo "python requirements file not found at $requirements_path" >&2
+            exit 1
+        fi
+        requirements_hash="$(sha256sum "$requirements_path" | awk '{print $1}')"
+        bootstrap_spec="${bootstrap_spec}|req:${requirements_hash}"
+    fi
+    cuda_arch_list=""
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        cuda_arch_list="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)"
+        if [ -n "$cuda_arch_list" ]; then
+            bootstrap_spec="${bootstrap_spec}|arch:${cuda_arch_list}"
+        fi
+    fi
+    needs_bootstrap=1
+    if [ -x "$python_exec" ] && [ -f "$python_bootstrap_stamp" ] && [ "$(cat "$python_bootstrap_stamp")" = "$bootstrap_spec" ]; then
+        needs_bootstrap=0
+    fi
+    if [ "$no_compile" = "1" ] && [ "$needs_bootstrap" -eq 1 ]; then
+        echo "cached python environment missing or stale; run without --no-compile first" >&2
+        exit 1
+    fi
+    if [ "$needs_bootstrap" -eq 1 ]; then
+        echo "[runpod-wrapper] bootstrapping python environment" | tee -a "$state_dir/logs/latest.log"
+        rm -rf "$python_venv_dir"
+        python3 -m venv --system-site-packages "$python_venv_dir"
+        # shellcheck disable=SC1091
+        . "$python_venv_dir/bin/activate"
+        python -m pip install --upgrade pip setuptools wheel >/dev/null
+        if [ -n "${requirements_path:-}" ]; then
+            python -m pip install --no-build-isolation -r "$requirements_path" \
+                2>&1 | tee -a "$state_dir/logs/latest.log"
+        fi
+        case "$python_install_mode" in
+            requirements-only)
+                ;;
+            official-mamba3)
+                if [ -n "$cuda_arch_list" ]; then
+                    echo "[runpod-wrapper] constraining official mamba build to CUDA arch ${cuda_arch_list}" | tee -a "$state_dir/logs/latest.log"
+                    mamba_src_dir="$(mktemp -d)"
+                    git clone --depth 1 https://github.com/state-spaces/mamba.git "$mamba_src_dir" \
+                        2>&1 | tee -a "$state_dir/logs/latest.log"
+                    patch_script_path="$mamba_src_dir/.patch_setup_arch.py"
+                    cat >"$patch_script_path" <<'PY'
+import os
+import pathlib
+import sys
 
-if [ "$needs_build" -eq 1 ]; then
-    echo "[runpod-wrapper] compiling release binary" | tee -a "$state_dir/logs/latest.log"
-    build_rustflags="-Clink-self-contained=no -Clink-arg=-fuse-ld=bfd"
-    if [ -n "${RUSTFLAGS:-}" ]; then
-        export RUSTFLAGS="${RUSTFLAGS} ${build_rustflags}"
+setup_path = pathlib.Path(sys.argv[1])
+arch = os.environ["CUDA_ARCH_LIST"].strip()
+major, minor = arch.split(".", 1)
+sm = f"{major}{minor}"
+lines = setup_path.read_text(encoding="utf-8").splitlines()
+start = None
+end = None
+for index, line in enumerate(lines):
+    if 'cc_flag.append("-gencode")' in line and start is None:
+        start = index
+    if start is not None and line.startswith("    # HACK:"):
+        end = index
+        break
+if start is None or end is None or end <= start:
+    raise SystemExit(f"failed to locate CUDA arch block in {setup_path}")
+replacement = [
+    '        cc_flag.append("-gencode")',
+    f'        cc_flag.append("arch=compute_{sm},code=sm_{sm}")',
+    "",
+]
+patched = lines[:start] + replacement + lines[end:]
+setup_path.write_text("\n".join(patched) + "\n", encoding="utf-8")
+print(f"patched {setup_path} to build only sm_{sm}")
+PY
+                    CUDA_ARCH_LIST="$cuda_arch_list" python "$patch_script_path" "$mamba_src_dir/setup.py" \
+                        2>&1 | tee -a "$state_dir/logs/latest.log"
+                    TORCH_CUDA_ARCH_LIST="$cuda_arch_list" \
+                    MAMBA_FORCE_BUILD=TRUE \
+                    python -m pip install --no-build-isolation --no-deps --no-cache-dir \
+                        "$mamba_src_dir" \
+                        2>&1 | tee -a "$state_dir/logs/latest.log"
+                    rm -rf "$mamba_src_dir"
+                else
+                    MAMBA_FORCE_BUILD=TRUE python -m pip install --no-build-isolation --no-deps --no-cache-dir \
+                        git+https://github.com/state-spaces/mamba.git \
+                        2>&1 | tee -a "$state_dir/logs/latest.log"
+                fi
+                ;;
+            *)
+                echo "unsupported python install mode: $python_install_mode" >&2
+                exit 1
+                ;;
+        esac
+        printf '%s\n' "$bootstrap_spec" > "$python_bootstrap_stamp"
     else
-        export RUSTFLAGS="$build_rustflags"
+        echo "[runpod-wrapper] reusing cached python environment" | tee -a "$state_dir/logs/latest.log"
     fi
-    echo "[runpod-wrapper] using system bfd linker for remote cargo build" \
-        | tee -a "$state_dir/logs/latest.log"
-    stdbuf -oL -eL cargo build --release --features cuda --"$binary_kind" "$binary_name" \
-        2>&1 | tee -a "$state_dir/logs/latest.log"
-    if [ "$binary_kind" = "example" ]; then
-        built_binary_path="$CARGO_TARGET_DIR/release/examples/$binary_name"
-    else
-        built_binary_path="$CARGO_TARGET_DIR/release/$binary_name"
-    fi
-    cp "$built_binary_path" "$binary_path"
-    chmod +x "$binary_path"
-    printf '%s\n' "$local_build_key" > "$build_key_file"
+    run_command=("$python_exec" "$script_path" --backend cuda "$@")
 else
-    echo "[runpod-wrapper] reusing cached release binary" | tee -a "$state_dir/logs/latest.log"
+    needs_build=1
+    if [ -x "$binary_path" ] && [ -f "$build_key_file" ] && [ "$(cat "$build_key_file")" = "$local_build_key" ]; then
+        needs_build=0
+    fi
+
+    if [ "$no_compile" = "1" ]; then
+        if [ ! -x "$binary_path" ]; then
+            echo "cached binary missing; run without --no-compile first" >&2
+            exit 1
+        fi
+        needs_build=0
+    fi
+
+    if [ "$needs_build" -eq 1 ]; then
+        echo "[runpod-wrapper] compiling release binary" | tee -a "$state_dir/logs/latest.log"
+        build_rustflags="-Clink-self-contained=no -Clink-arg=-fuse-ld=bfd"
+        if [ -n "${RUSTFLAGS:-}" ]; then
+            export RUSTFLAGS="${RUSTFLAGS} ${build_rustflags}"
+        else
+            export RUSTFLAGS="$build_rustflags"
+        fi
+        echo "[runpod-wrapper] using system bfd linker for remote cargo build" \
+            | tee -a "$state_dir/logs/latest.log"
+        stdbuf -oL -eL cargo build --release --features cuda --"$binary_kind" "$binary_name" \
+            2>&1 | tee -a "$state_dir/logs/latest.log"
+        if [ "$binary_kind" = "example" ]; then
+            built_binary_path="$CARGO_TARGET_DIR/release/examples/$binary_name"
+        else
+            built_binary_path="$CARGO_TARGET_DIR/release/$binary_name"
+        fi
+        cp "$built_binary_path" "$binary_path"
+        chmod +x "$binary_path"
+        printf '%s\n' "$local_build_key" > "$build_key_file"
+    else
+        echo "[runpod-wrapper] reusing cached release binary" | tee -a "$state_dir/logs/latest.log"
+    fi
+    run_command=("$binary_path" --backend cuda "$@")
 fi
 
 if [ -n "$run_timeout_seconds" ] && [ "$run_timeout_seconds" -gt 0 ]; then
     set +e
     timeout --signal=TERM "$run_timeout_seconds" \
-        stdbuf -oL -eL "$binary_path" --backend cuda "$@" 2>&1 | tee -a "$state_dir/logs/latest.log"
+        stdbuf -oL -eL "${run_command[@]}" 2>&1 | tee -a "$state_dir/logs/latest.log"
     run_status=$?
     set -e
     if [ "$run_status" -eq 124 ]; then
@@ -1251,7 +1418,7 @@ if [ -n "$run_timeout_seconds" ] && [ "$run_timeout_seconds" -gt 0 ]; then
     exit "$run_status"
 fi
 
-stdbuf -oL -eL "$binary_path" --backend cuda "$@" 2>&1 | tee -a "$state_dir/logs/latest.log"
+stdbuf -oL -eL "${run_command[@]}" 2>&1 | tee -a "$state_dir/logs/latest.log"
 REMOTE
 }
 
@@ -1303,6 +1470,8 @@ RUN_TIMEOUT_SECONDS="0"
 BINARY_KIND="example"
 BINARY_NAME="tournament"
 NO_COMPILE=0
+PYTHON_REQUIREMENTS_FILE=""
+PYTHON_INSTALL_MODE="requirements-only"
 STOP_MODE="auto"
 DRY_RUN=0
 CREATED_POD=0
@@ -1403,6 +1572,14 @@ while [ $# -gt 0 ]; do
             NO_COMPILE=1
             shift
             ;;
+        --python-requirements)
+            PYTHON_REQUIREMENTS_FILE="$2"
+            shift 2
+            ;;
+        --python-install-mode)
+            PYTHON_INSTALL_MODE="$2"
+            shift 2
+            ;;
         --stop-after-run)
             STOP_MODE="always"
             shift
@@ -1437,12 +1614,32 @@ require_cmd tar
 require_cmd git
 
 case "$BINARY_KIND" in
-    example|bin)
+    example|bin|python)
         ;;
     *)
-        die "invalid --binary-kind: $BINARY_KIND (expected example or bin)"
+        die "invalid --binary-kind: $BINARY_KIND (expected example, bin, or python)"
         ;;
 esac
+
+if [ "$BINARY_KIND" != "python" ] && [ -n "$PYTHON_REQUIREMENTS_FILE" ]; then
+    die "--python-requirements may only be used with --binary-kind python"
+fi
+
+if [ "$BINARY_KIND" != "python" ] && [ "$PYTHON_INSTALL_MODE" != "requirements-only" ]; then
+    die "--python-install-mode may only be used with --binary-kind python"
+fi
+
+case "$PYTHON_INSTALL_MODE" in
+    requirements-only|official-mamba3)
+        ;;
+    *)
+        die "invalid --python-install-mode: $PYTHON_INSTALL_MODE (expected requirements-only or official-mamba3)"
+        ;;
+esac
+
+if [ "$BINARY_KIND" = "python" ] && [ -z "$BINARY_NAME" ]; then
+    die "--binary-name is required for --binary-kind python"
+fi
 
 trap cleanup EXIT
 
@@ -1458,7 +1655,9 @@ if [ "$DRY_RUN" -eq 1 ]; then
     if [ -n "$REMOTE_DIR" ]; then
         log "dry-run remote dir: $REMOTE_DIR"
     fi
-    if [ "$NO_COMPILE" -eq 1 ]; then
+    if [ "$BINARY_KIND" = "python" ]; then
+        log "dry-run command: python <remote-script> --backend cuda $(quote_cmd "${TOURNAMENT_ARGS[@]}")"
+    elif [ "$NO_COMPILE" -eq 1 ]; then
         log "dry-run command: <cached-binary> --backend cuda $(quote_cmd "${TOURNAMENT_ARGS[@]}")"
     else
         log "dry-run command: cargo build --release --features cuda --${BINARY_KIND} ${BINARY_NAME} && <cached-binary> --backend cuda $(quote_cmd "${TOURNAMENT_ARGS[@]}")"

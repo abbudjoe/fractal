@@ -1,0 +1,5 @@
+einops>=0.8.0
+ninja>=1.11.0
+packaging>=24.0
+transformers>=4.51.0
+triton>=3.5.0
