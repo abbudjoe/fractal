@@ -12,6 +12,7 @@ use burn::{
     tensor::{backend::AutodiffBackend, backend::Backend, Int, Tensor, TensorData},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use fractal_core::{error::FractalError, TaskFamily, TokenBatch, PAD_TOKEN};
 
@@ -30,6 +31,79 @@ pub const DEFAULT_V2_SMOKE_EVAL_HOLDOUT_EVERY: usize = 10;
 pub const DEFAULT_V2_SMOKE_LEARNING_RATE: f64 = 1e-3;
 
 pub(crate) type SmokeBatchSplit<B> = (V2SmokeCorpusStats, Vec<TokenBatch<B>>, Vec<TokenBatch<B>>);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ByteLevelSmokeCorpusSource {
+    RawFiles {
+        paths: Vec<PathBuf>,
+    },
+    JsonlTextSplits {
+        name: String,
+        train_path: PathBuf,
+        eval_path: PathBuf,
+        text_field: String,
+    },
+}
+
+impl ByteLevelSmokeCorpusSource {
+    pub fn raw_files(paths: Vec<PathBuf>) -> Self {
+        Self::RawFiles { paths }
+    }
+
+    pub fn jsonl_text_splits(
+        name: impl Into<String>,
+        train_path: impl Into<PathBuf>,
+        eval_path: impl Into<PathBuf>,
+        text_field: impl Into<String>,
+    ) -> Self {
+        Self::JsonlTextSplits {
+            name: name.into(),
+            train_path: train_path.into(),
+            eval_path: eval_path.into(),
+            text_field: text_field.into(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), FractalError> {
+        match self {
+            Self::RawFiles { paths } => {
+                if paths.is_empty() {
+                    return Err(FractalError::InvalidConfig(
+                        "byte-level smoke corpus source raw_files must include at least one file"
+                            .to_string(),
+                    ));
+                }
+            }
+            Self::JsonlTextSplits {
+                name,
+                train_path,
+                eval_path,
+                text_field,
+            } => {
+                if name.trim().is_empty() {
+                    return Err(FractalError::InvalidConfig(
+                        "byte-level smoke corpus source jsonl_text_splits.name must be non-empty"
+                            .to_string(),
+                    ));
+                }
+                if text_field.trim().is_empty() {
+                    return Err(FractalError::InvalidConfig(
+                        "byte-level smoke corpus source jsonl_text_splits.text_field must be non-empty"
+                            .to_string(),
+                    ));
+                }
+                if train_path == eval_path {
+                    return Err(FractalError::InvalidConfig(
+                        "byte-level smoke corpus source jsonl_text_splits train and eval paths must differ"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ByteLevelVocabularyContract {
@@ -251,6 +325,81 @@ pub fn default_v2_smoke_corpus_paths(
     Ok(paths)
 }
 
+pub fn default_v3a_fineweb_stage0_canary_corpus_source(
+    repo_root: impl AsRef<Path>,
+) -> Result<ByteLevelSmokeCorpusSource, FractalError> {
+    let root = repo_root.as_ref();
+    let train_path = root.join("experiments/stage0/assets/fineweb/stage0-canary/train.jsonl");
+    let eval_path = root.join("experiments/stage0/assets/fineweb/stage0-canary/eval.jsonl");
+    for path in [&train_path, &eval_path] {
+        if !path.is_file() {
+            return Err(FractalError::InvalidState(format!(
+                "default v3a FineWeb canary corpus expected file {} to exist",
+                path.display()
+            )));
+        }
+    }
+    Ok(ByteLevelSmokeCorpusSource::jsonl_text_splits(
+        "fineweb-stage0-canary",
+        train_path,
+        eval_path,
+        "text",
+    ))
+}
+
+pub fn byte_level_smoke_corpus_stats_from_source(
+    source: &ByteLevelSmokeCorpusSource,
+    seq_len: usize,
+    window_stride: usize,
+    eval_holdout_every: usize,
+) -> Result<V2SmokeCorpusStats, FractalError> {
+    source.validate()?;
+    match source {
+        ByteLevelSmokeCorpusSource::RawFiles { paths } => {
+            let corpus = load_byte_level_corpus(paths)?;
+            let sequences = byte_sequences_from_corpus(&corpus.files, seq_len, window_stride)?;
+            let (train_sequences, eval_sequences) =
+                split_sequences_for_eval(sequences, eval_holdout_every)?;
+            Ok(V2SmokeCorpusStats {
+                files: corpus.paths,
+                total_bytes: corpus.total_bytes,
+                total_sequences: train_sequences.len() + eval_sequences.len(),
+                train_sequences: train_sequences.len(),
+                eval_sequences: eval_sequences.len(),
+                seq_len,
+                window_stride,
+            })
+        }
+        ByteLevelSmokeCorpusSource::JsonlTextSplits {
+            train_path,
+            eval_path,
+            text_field,
+            ..
+        } => {
+            let train_documents = load_jsonl_text_documents(train_path, text_field)?;
+            let eval_documents = load_jsonl_text_documents(eval_path, text_field)?;
+            let train_sequences =
+                byte_sequences_from_corpus(&train_documents, seq_len, window_stride)?;
+            let eval_sequences =
+                byte_sequences_from_corpus(&eval_documents, seq_len, window_stride)?;
+            let total_bytes = train_documents
+                .iter()
+                .chain(eval_documents.iter())
+                .map(Vec::len)
+                .sum::<usize>();
+            Ok(V2SmokeCorpusStats {
+                files: vec![train_path.to_path_buf(), eval_path.to_path_buf()],
+                total_bytes,
+                total_sequences: train_sequences.len() + eval_sequences.len(),
+                train_sequences: train_sequences.len(),
+                eval_sequences: eval_sequences.len(),
+                seq_len,
+                window_stride,
+            })
+        }
+    }
+}
+
 pub fn run_baseline_v2_smoke_train<B>(
     config: V2SmokeTrainConfig,
     device: &B::Device,
@@ -464,6 +613,41 @@ pub(crate) fn load_byte_level_smoke_batches<B: Backend>(
     ))
 }
 
+pub(crate) fn load_byte_level_smoke_batches_from_source<B: Backend>(
+    source: &ByteLevelSmokeCorpusSource,
+    seq_len: usize,
+    window_stride: usize,
+    eval_holdout_every: usize,
+    batch_size: usize,
+    device: &B::Device,
+) -> Result<SmokeBatchSplit<B>, FractalError> {
+    source.validate()?;
+    match source {
+        ByteLevelSmokeCorpusSource::RawFiles { paths } => load_byte_level_smoke_batches::<B>(
+            paths,
+            seq_len,
+            window_stride,
+            eval_holdout_every,
+            batch_size,
+            device,
+        ),
+        ByteLevelSmokeCorpusSource::JsonlTextSplits {
+            train_path,
+            eval_path,
+            text_field,
+            ..
+        } => load_byte_level_smoke_batches_from_jsonl_splits::<B>(
+            train_path,
+            eval_path,
+            text_field,
+            seq_len,
+            window_stride,
+            batch_size,
+            device,
+        ),
+    }
+}
+
 fn byte_sequences_from_corpus(
     files: &[Vec<u8>],
     seq_len: usize,
@@ -497,6 +681,100 @@ fn byte_sequences_from_corpus(
     }
 
     Ok(sequences)
+}
+
+fn load_byte_level_smoke_batches_from_jsonl_splits<B: Backend>(
+    train_path: &Path,
+    eval_path: &Path,
+    text_field: &str,
+    seq_len: usize,
+    window_stride: usize,
+    batch_size: usize,
+    device: &B::Device,
+) -> Result<SmokeBatchSplit<B>, FractalError> {
+    let train_documents = load_jsonl_text_documents(train_path, text_field)?;
+    let eval_documents = load_jsonl_text_documents(eval_path, text_field)?;
+    let train_sequences = byte_sequences_from_corpus(&train_documents, seq_len, window_stride)?;
+    let eval_sequences = byte_sequences_from_corpus(&eval_documents, seq_len, window_stride)?;
+    let train_batches = sequences_into_batches::<B>(train_sequences, batch_size, device)?;
+    let eval_batches = sequences_into_batches::<B>(eval_sequences, batch_size, device)?;
+    let total_sequences = train_batches
+        .iter()
+        .map(|batch| batch.input_ids.dims()[0])
+        .sum::<usize>()
+        + eval_batches
+            .iter()
+            .map(|batch| batch.input_ids.dims()[0])
+            .sum::<usize>();
+    let train_sequence_count = train_batches
+        .iter()
+        .map(|batch| batch.input_ids.dims()[0])
+        .sum::<usize>();
+    let eval_sequence_count = eval_batches
+        .iter()
+        .map(|batch| batch.input_ids.dims()[0])
+        .sum::<usize>();
+    let total_bytes = train_documents
+        .iter()
+        .chain(eval_documents.iter())
+        .map(Vec::len)
+        .sum::<usize>();
+    Ok((
+        V2SmokeCorpusStats {
+            files: vec![train_path.to_path_buf(), eval_path.to_path_buf()],
+            total_bytes,
+            total_sequences,
+            train_sequences: train_sequence_count,
+            eval_sequences: eval_sequence_count,
+            seq_len,
+            window_stride,
+        },
+        train_batches,
+        eval_batches,
+    ))
+}
+
+fn load_jsonl_text_documents(path: &Path, text_field: &str) -> Result<Vec<Vec<u8>>, FractalError> {
+    let content = fs::read_to_string(path).map_err(|error| {
+        FractalError::InvalidState(format!(
+            "failed to read jsonl text corpus {}: {error}",
+            path.display()
+        ))
+    })?;
+    let mut documents = Vec::new();
+    for (line_index, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = serde_json::from_str::<Value>(line).map_err(|error| {
+            FractalError::InvalidState(format!(
+                "failed to parse jsonl text corpus {} line {}: {error}",
+                path.display(),
+                line_index + 1
+            ))
+        })?;
+        let text = value
+            .get(text_field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                FractalError::InvalidState(format!(
+                    "jsonl text corpus {} line {} is missing string field {:?}",
+                    path.display(),
+                    line_index + 1,
+                    text_field
+                ))
+            })?;
+        if !text.is_empty() {
+            documents.push(text.as_bytes().to_vec());
+        }
+    }
+    if documents.is_empty() {
+        return Err(FractalError::InvalidConfig(format!(
+            "jsonl text corpus {} did not yield any non-empty documents",
+            path.display()
+        )));
+    }
+    Ok(documents)
 }
 
 fn split_sequences_for_eval(
@@ -811,6 +1089,86 @@ mod tests {
     use super::*;
 
     type TestBackend = Autodiff<Candle<f32, i64>>;
+
+    #[test]
+    fn default_v3a_fineweb_stage0_canary_source_points_to_checked_in_assets() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let source = default_v3a_fineweb_stage0_canary_corpus_source(&repo_root).unwrap();
+        match source {
+            ByteLevelSmokeCorpusSource::JsonlTextSplits {
+                name,
+                train_path,
+                eval_path,
+                text_field,
+            } => {
+                assert_eq!(name, "fineweb-stage0-canary");
+                assert_eq!(text_field, "text");
+                assert!(train_path
+                    .ends_with("experiments/stage0/assets/fineweb/stage0-canary/train.jsonl"));
+                assert!(eval_path
+                    .ends_with("experiments/stage0/assets/fineweb/stage0-canary/eval.jsonl"));
+                assert!(train_path.is_file());
+                assert!(eval_path.is_file());
+            }
+            other => panic!("expected jsonl text split source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_byte_level_smoke_batches_from_jsonl_text_splits_uses_explicit_train_eval() {
+        let root = unique_temp_dir("v2-jsonl-smoke-source");
+        fs::create_dir_all(&root).unwrap();
+        let train_path = root.join("train.jsonl");
+        let eval_path = root.join("eval.jsonl");
+        fs::write(
+            &train_path,
+            concat!(
+                "{\"text\":\"alpha beta gamma delta epsilon zeta eta theta\\n\"}\n",
+                "{\"text\":\"iota kappa lambda mu nu xi omicron pi\\n\"}\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &eval_path,
+            "{\"text\":\"rho sigma tau upsilon phi chi psi omega\\n\"}\n",
+        )
+        .unwrap();
+        let source = ByteLevelSmokeCorpusSource::jsonl_text_splits(
+            "jsonl-smoke",
+            &train_path,
+            &eval_path,
+            "text",
+        );
+
+        let device = <TestBackend as Backend>::Device::default();
+        let (corpus, train_batches, eval_batches) =
+            load_byte_level_smoke_batches_from_source::<TestBackend>(&source, 8, 8, 10, 1, &device)
+                .unwrap();
+
+        assert_eq!(corpus.files, vec![train_path.clone(), eval_path.clone()]);
+        assert!(corpus.train_sequences > 0);
+        assert!(corpus.eval_sequences > 0);
+        assert_eq!(
+            corpus.total_sequences,
+            corpus.train_sequences + corpus.eval_sequences
+        );
+        assert_eq!(
+            train_batches
+                .iter()
+                .map(|batch| batch.input_ids.dims()[0])
+                .sum::<usize>(),
+            corpus.train_sequences
+        );
+        assert_eq!(
+            eval_batches
+                .iter()
+                .map(|batch| batch.input_ids.dims()[0])
+                .sum::<usize>(),
+            corpus.eval_sequences
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn byte_level_sequences_shift_bytes_and_preserve_pad_zero() {

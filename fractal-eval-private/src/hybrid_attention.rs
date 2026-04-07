@@ -13,7 +13,9 @@ use fractal_core::{
     HybridAttentionComparisonContract, HybridAttentionEfficiencyTarget,
 };
 
-use crate::hybrid_attention_training::HybridAttentionMatrixVariantOutcome;
+use crate::{
+    hybrid_attention_training::HybridAttentionMatrixVariantOutcome, ByteLevelSmokeCorpusSource,
+};
 
 pub const DEFAULT_V3A_RESULTS_LEDGER_PATH: &str = "docs/v3a-results-ledger.jsonl";
 pub const DEFAULT_V3A_SMOKE_TRAIN_STEPS: usize = 128;
@@ -21,7 +23,7 @@ pub const DEFAULT_V3A_SMOKE_EVAL_BATCHES: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HybridAttentionMatrixConfig {
-    pub corpus_paths: Vec<PathBuf>,
+    pub corpus_source: ByteLevelSmokeCorpusSource,
     pub output_dir: PathBuf,
     pub baseline_matrix: HybridAttentionBaselineMatrix,
     pub train_steps: usize,
@@ -29,9 +31,9 @@ pub struct HybridAttentionMatrixConfig {
 }
 
 impl HybridAttentionMatrixConfig {
-    pub fn new(corpus_paths: Vec<PathBuf>, output_dir: PathBuf) -> Self {
+    pub fn new(corpus_source: ByteLevelSmokeCorpusSource, output_dir: PathBuf) -> Self {
         Self {
-            corpus_paths,
+            corpus_source,
             output_dir,
             baseline_matrix: phase1_hybrid_attention_baseline_matrix(),
             train_steps: DEFAULT_V3A_SMOKE_TRAIN_STEPS,
@@ -40,11 +42,6 @@ impl HybridAttentionMatrixConfig {
     }
 
     pub fn validate(&self) -> Result<(), FractalError> {
-        if self.corpus_paths.is_empty() {
-            return Err(FractalError::InvalidConfig(
-                "hybrid_attention_matrix.corpus_paths must include at least one file".to_string(),
-            ));
-        }
         if self.train_steps == 0 {
             return Err(FractalError::InvalidConfig(
                 "hybrid_attention_matrix.train_steps must be greater than zero".to_string(),
@@ -55,6 +52,7 @@ impl HybridAttentionMatrixConfig {
                 "hybrid_attention_matrix.eval_batches must be greater than zero".to_string(),
             ));
         }
+        self.corpus_source.validate()?;
         self.baseline_matrix.validate()
     }
 }
@@ -251,7 +249,7 @@ mod tests {
         HybridAttentionMatrixLedgerReport, HybridAttentionMatrixPlan, V3aResultsLedgerEntry,
         V3aResultsLedgerKind,
     };
-    use crate::HybridAttentionMatrixVariantOutcome;
+    use crate::{ByteLevelSmokeCorpusSource, HybridAttentionMatrixVariantOutcome};
 
     #[test]
     fn phase1_plan_points_to_dedicated_runner_surface() {
@@ -261,21 +259,30 @@ mod tests {
 
     #[test]
     fn matrix_config_requires_real_corpus_paths() {
-        let config = HybridAttentionMatrixConfig::new(vec![], "tmp".into());
+        let config = HybridAttentionMatrixConfig::new(
+            ByteLevelSmokeCorpusSource::raw_files(vec![]),
+            "tmp".into(),
+        );
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn default_v3a_ledger_path_points_to_docs_jsonl() {
         let path = default_v3a_results_ledger_path("/tmp/fractal");
-        assert_eq!(path, PathBuf::from("/tmp/fractal/docs/v3a-results-ledger.jsonl"));
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/fractal/docs/v3a-results-ledger.jsonl")
+        );
     }
 
     #[test]
     fn resolve_requested_v3a_ledger_supports_default() {
-        let path = resolve_requested_v3a_results_ledger_path("/tmp/fractal", Some("default"))
-            .unwrap();
-        assert_eq!(path, Some(PathBuf::from("/tmp/fractal/docs/v3a-results-ledger.jsonl")));
+        let path =
+            resolve_requested_v3a_results_ledger_path("/tmp/fractal", Some("default")).unwrap();
+        assert_eq!(
+            path,
+            Some(PathBuf::from("/tmp/fractal/docs/v3a-results-ledger.jsonl"))
+        );
     }
 
     #[test]

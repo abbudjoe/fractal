@@ -27,9 +27,12 @@ fn run() -> Result<(), String> {
         &device,
     )
     .map_err(|error| format!("failed to build hybrid rescue baseline model: {error}"))?;
-    let suites = filter_suites(default_hybrid_rescue_prevalidation_suites().map_err(|error| {
-        format!("failed to build default hybrid prevalidation suites: {error}")
-    })?, args.suite)?;
+    let suites = filter_suites(
+        default_hybrid_rescue_prevalidation_suites().map_err(|error| {
+            format!("failed to build default hybrid prevalidation suites: {error}")
+        })?,
+        args.suite,
+    )?;
     let report = run_hybrid_rescue_prevalidation_with_modes(
         &model,
         &suites,
@@ -38,8 +41,7 @@ fn run() -> Result<(), String> {
     )
     .map_err(|error| format!("failed to run hybrid rescue prevalidation: {error}"))?;
     let model_label = "hybrid_rescue_prevalidation_random_init_cpu_candle";
-    let note =
-        "single-root phase-1 rescue matrix over fixed suites; random-init live sanity check";
+    let note = "single-root phase-1 rescue matrix over fixed suites; random-init live sanity check";
     let rendered = render_report(&report, args.output, model_label, note)?;
     maybe_append_ledger_entry(
         resolve_requested_hybrid_results_ledger_path(
@@ -206,11 +208,7 @@ fn render_report(
     }
 }
 
-fn render_table(
-    report: &HybridRescuePrevalidationReport,
-    model_label: &str,
-    note: &str,
-) -> String {
+fn render_table(report: &HybridRescuePrevalidationReport, model_label: &str, note: &str) -> String {
     let mut output = String::new();
     let _ = writeln!(output, "Hybrid Rescue Prevalidation");
     let _ = writeln!(output, "model: {model_label}");
@@ -318,7 +316,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(args.suite, SuiteSelection::Kind(HybridRescueSuiteKind::Mqar));
+        assert_eq!(
+            args.suite,
+            SuiteSelection::Kind(HybridRescueSuiteKind::Mqar)
+        );
         assert_eq!(args.output, OutputFormat::Json);
         assert_eq!(args.ledger_path.as_deref(), Some("default"));
         assert_eq!(args.run_label.as_deref(), Some("phase1"));

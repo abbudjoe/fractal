@@ -87,31 +87,25 @@ impl DiagnosticProbeRequest {
                 | DiagnosticProbeKind::RuleProjection
                 | DiagnosticProbeKind::OutputProjection,
                 Some(0),
-            ) => {
-                Err(FractalError::InvalidConfig(format!(
-                    "{} position_interval must be greater than zero",
-                    self.kind.as_str()
-                )))
-            }
+            ) => Err(FractalError::InvalidConfig(format!(
+                "{} position_interval must be greater than zero",
+                self.kind.as_str()
+            ))),
             (
                 DiagnosticProbeKind::ForwardPosition
                 | DiagnosticProbeKind::RuleProjection
                 | DiagnosticProbeKind::OutputProjection,
                 None,
-            ) => {
-                Err(FractalError::InvalidConfig(format!(
-                    "{} diagnostics require position_interval",
-                    self.kind.as_str()
-                )))
-            }
+            ) => Err(FractalError::InvalidConfig(format!(
+                "{} diagnostics require position_interval",
+                self.kind.as_str()
+            ))),
             (
                 DiagnosticProbeKind::ForwardPosition
                 | DiagnosticProbeKind::RuleProjection
                 | DiagnosticProbeKind::OutputProjection,
                 Some(_),
-            ) => {
-                Ok(())
-            }
+            ) => Ok(()),
             (_, Some(_)) => Err(FractalError::InvalidConfig(format!(
                 "{} does not support position_interval",
                 self.kind.as_str()
@@ -1048,12 +1042,7 @@ impl DiagnosticsRecorder {
     }
 
     pub fn should_emit_forward_position(&self, step: usize, position: usize) -> bool {
-        self.should_emit_position_probe(
-            DiagnosticProbeKind::ForwardPosition,
-            step,
-            position,
-            None,
-        )
+        self.should_emit_position_probe(DiagnosticProbeKind::ForwardPosition, step, position, None)
     }
 
     pub fn should_emit_rule_projection(
@@ -1133,8 +1122,11 @@ impl DiagnosticsRecorder {
         projection: RuleProjectionKind,
         spec: RuleProjectionDiagnosticSpec,
     ) -> Result<(), FractalError> {
-        if !self.should_emit_rule_projection(context.step, context.position, context.sequence_length)
-        {
+        if !self.should_emit_rule_projection(
+            context.step,
+            context.position,
+            context.sequence_length,
+        ) {
             return Ok(());
         }
         self.push_event(
@@ -1158,8 +1150,11 @@ impl DiagnosticsRecorder {
         context: OutputProjectionDiagnosticContext,
         spec: OutputProjectionDiagnosticSpec,
     ) -> Result<(), FractalError> {
-        if !self.should_emit_output_projection(context.step, context.position, context.sequence_length)
-        {
+        if !self.should_emit_output_projection(
+            context.step,
+            context.position,
+            context.sequence_length,
+        ) {
             return Ok(());
         }
         self.push_event(
@@ -1423,7 +1418,9 @@ fn format_diagnostic_event(event: &DiagnosticEvent) -> String {
             spec,
         } => {
             parts.push(format!("position={position}/{sequence_length}"));
-            parts.push(format!("recursion_depth={recursion_depth}/{max_recursion_depth}"));
+            parts.push(format!(
+                "recursion_depth={recursion_depth}/{max_recursion_depth}"
+            ));
             parts.push(format!(
                 "projection_path={}.{}",
                 spec.identity.rule_name, spec.identity.projection_name
@@ -1473,7 +1470,10 @@ fn format_diagnostic_event(event: &DiagnosticEvent) -> String {
                 ));
             }
         }
-        DiagnosticEventKind::ForwardComplete { logits_shape, graph_burden } => {
+        DiagnosticEventKind::ForwardComplete {
+            logits_shape,
+            graph_burden,
+        } => {
             parts.push(format!("logits_shape={logits_shape:?}"));
             parts.push(format!(
                 "rule_invocations={}",
@@ -1564,8 +1564,7 @@ fn derive_boundary_memory_deltas(events: &[DiagnosticEvent]) -> Vec<BoundaryMemo
             total_mib,
             delta_used_mib: previous_snapshot.map(|(used, _, _)| used_mib as i64 - used as i64),
             delta_free_mib: previous_snapshot.map(|(_, free, _)| free_mib as i64 - free as i64),
-            delta_total_mib: previous_snapshot
-                .map(|(_, _, total)| total_mib as i64 - total as i64),
+            delta_total_mib: previous_snapshot.map(|(_, _, total)| total_mib as i64 - total as i64),
         });
         previous_snapshot = Some((used_mib, free_mib, total_mib));
     }

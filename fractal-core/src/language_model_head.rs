@@ -10,7 +10,10 @@ use burn::{
 
 use crate::{
     diagnostics::OutputProjectionDiagnosticSpec,
-    projection::{ProjectionLayoutPolicy, StructuredProjection, StructuredProjectionConfig, StructuredProjectionRecord},
+    projection::{
+        ProjectionLayoutPolicy, StructuredProjection, StructuredProjectionConfig,
+        StructuredProjectionRecord,
+    },
 };
 
 #[derive(Config, Debug)]
@@ -19,9 +22,7 @@ pub struct LanguageModelHeadConfig {
     pub vocab_size: usize,
     #[config(default = true)]
     pub bias: bool,
-    #[config(
-        default = "Initializer::KaimingUniform{gain:1.0/3.0_f64.sqrt(), fan_out_only:false}"
-    )]
+    #[config(default = "Initializer::KaimingUniform{gain:1.0/3.0_f64.sqrt(), fan_out_only:false}")]
     pub initializer: Initializer,
     #[config(default = "ProjectionLayoutPolicy::OutputByInput")]
     pub layout_policy: ProjectionLayoutPolicy,

@@ -45,10 +45,15 @@ pub use hybrid::{
 pub use hybrid_attention::{
     build_attention_only_hybrid_attention_model, build_primitive_hybrid_attention_model,
     build_rust_mamba3_reference_hybrid_attention_model, phase1_hybrid_attention_baseline_matrix,
+    phase1_p20_candidate_variant, phase1_p21_candidate_variant, phase1_p22_candidate_variant,
+    phase1_p23_candidate_variant, phase1_p2_candidate_variant, phase1_p2_factor_candidate_variant,
+    phase1_p2_interface_candidate_variant, primitive_from_p2_factors,
     AttentionOnlyHybridAttentionModel, HybridAttentionBaselineMatrix,
     HybridAttentionComparisonContract, HybridAttentionEfficiencyTarget, HybridAttentionLayerRole,
     HybridAttentionModelShape, HybridAttentionVariantKind, HybridAttentionVariantSpec,
-    PrimitiveHybridAttentionModel, PrimitiveHybridPrimitive, ReferenceSsmFamily,
+    P2InternalReadoutFactor, P2LatentWidthFactor, PrimitiveHybridAttentionModel,
+    PrimitiveHybridNormMode, PrimitiveHybridPrimitive, PrimitiveHybridReadoutMode,
+    PrimitiveHybridResidualMode, PrimitiveHybridWrapperSymmetryMode, ReferenceSsmFamily,
     RustMamba3BaselineConfig, RustMamba3DerivedShape, RustMamba3Mixer, RustMamba3MixerBlock,
     RustMamba3ReferenceHybridAttentionModel, RustMamba3RopeFraction,
     PATH1_PHASE1_LOCAL_WINDOW_SIZE,
@@ -82,13 +87,13 @@ pub use projection::{
     StructuredProjectionRecord,
 };
 pub use registry::{
-    is_valid_primitive_variant_name, load_weight_export_artifact, load_weight_export_metadata,
-    read_weight_export_metadata, resolve_precision_profile, run_species_with_batches,
-    CandleBf16Backend, CandleBf16TrainBackend, CandleF32Backend, CandleF32TrainBackend,
-    ComputeBackend, CpuBackend, CpuTrainBackend, ExecutionMode, MetalBackend, MetalBf16Backend,
-    MetalBf16TrainBackend, MetalF32Backend, MetalF32TrainBackend, MetalTrainBackend,
-    PrimitiveVariantName, ResolvedExecutablePrecisionProfile, SpeciesDefinition, SpeciesId,
-    TrainingBatchSet,
+    initialize_metal_runtime, is_valid_primitive_variant_name, load_weight_export_artifact,
+    load_weight_export_metadata, read_weight_export_metadata, resolve_precision_profile,
+    run_species_with_batches, CandleBf16Backend, CandleBf16TrainBackend, CandleF32Backend,
+    CandleF32TrainBackend, ComputeBackend, CpuBackend, CpuTrainBackend, ExecutionMode,
+    MetalBackend, MetalBf16Backend, MetalBf16TrainBackend, MetalF32Backend, MetalF32TrainBackend,
+    MetalTrainBackend, PrimitiveVariantName, ResolvedExecutablePrecisionProfile, SpeciesDefinition,
+    SpeciesId, TrainingBatchSet,
 };
 pub use router::EarlyExitRouter;
 pub use state::{FractalState, StateLayout};

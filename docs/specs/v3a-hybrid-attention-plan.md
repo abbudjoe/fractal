@@ -88,6 +88,35 @@ Do not let our primitive line define the benchmark it is supposed to beat.
 
 The reference hybrid must become real first.
 
+### Benchmark Surface Contract
+
+Decision-bearing `v3a` runs must now use a **frozen corpus surface** by
+default.
+
+The default Path 1 benchmark corpus is:
+
+* the checked-in FineWeb canary slice at:
+  * `experiments/stage0/assets/fineweb/stage0-canary/train.jsonl`
+  * `experiments/stage0/assets/fineweb/stage0-canary/eval.jsonl`
+* loaded through a typed JSONL-text corpus contract
+* not through mutable repo docs
+
+Why this changed:
+
+* earlier `v3a` runs used the default repo-docs smoke corpus
+* those docs were also being edited during the experiment
+* that changed byte counts, sequence counts, and deterministic train/eval splits
+* so some cross-seed comparisons were confounded by corpus drift, not only model
+  seed
+
+Going forward:
+
+* the frozen FineWeb canary is the default `v3a` proving surface
+* the runner now supports `--backend cpu|metal` for local Path 1 work
+* recorded reports include the execution backend as part of the run contract
+* explicit `--corpus-path` overrides remain allowed for exploratory runs
+* but contender freeze decisions should not rely on the old mutable-docs surface
+
 ---
 
 ## RunPod Benchmark Gate
@@ -202,6 +231,47 @@ The concrete baseline-build checklist lives in:
 
 * [`v3a-rust-mamba-baseline-checklist.md`](./v3a-rust-mamba-baseline-checklist.md)
 * [`v3a-baseline-freeze-and-p2-checklist.md`](./v3a-baseline-freeze-and-p2-checklist.md)
+
+### Compact Comparison
+
+At a practical asymptotic level, with sequence length `n`, local attention
+window `w`, and model width `d`:
+
+| Variant | Main components | Sequence-length cost | Decode-time intuition | KV cache | Main question |
+| --- | --- | --- | --- | --- | --- |
+| `A` | local causal attention only | `O(n * w * d)` | pays attention cost at every layer | yes | strongest exact token interaction, but attention stays the main bottleneck |
+| `A + M` | local attention + Rust Mamba-3 recurrent blocks | `O(n * w * d + n * d^2)` | attention layers still cost the same; recurrent layers add linear sequence cost | reduced vs pure attention if fewer attention-heavy layers are needed | can a strong recurrent block preserve quality while reducing reliance on dense attention work? |
+| `A + P2` | local attention + improved primitive recurrent blocks | `O(n * w * d + n * d^2)` | same asymptotic story as `A + M`; the difference is in constants and effectiveness | reduced vs pure attention if the primitive can replace some attention role | can our richer primitive match or beat the Mamba role at the same attention budget? |
+
+Notes:
+
+* if `w` grows with `n`, the attention term trends toward quadratic behavior
+* `M` and `P2` do not change the Path 1 asymptotic story by themselves
+* the real win condition is better accuracy / throughput / memory tradeoff at
+  the same attention budget, not a different Big-O label alone
+
+### Current Tracked Comparison
+
+The current best comparison table uses:
+
+* isolated `64`-step / `8`-eval-batch runs for loss, throughput, and memory
+* the two tracked `16`-step seeds for stability
+
+| Variant | Loss | Throughput | Memory | Stability |
+| --- | --- | --- | --- | --- |
+| `A` | `3.5946` final eval loss | `39.71` train tok/s | `56.58 MB` RSS delta | `0.0734` two-seed final-loss spread |
+| `A + M` | `3.5186` final eval loss | `0.64` train tok/s | `700.97 MB` RSS delta | `0.0680` two-seed final-loss spread |
+| `A + P2` | `3.6133` final eval loss | `4.44` train tok/s | `166.06 MB` RSS delta | `0.2698` two-seed final-loss spread |
+
+Current read:
+
+* `A + M` remains best on quality
+* `A + P2` is still materially faster and lighter than the current Rust
+  `A + M` lane
+* `A + P2` has not yet shown the same stability as `A + M`
+* the interface sweep plateaued without a clean new winner, so the incumbent `P2` wrapper remains frozen by non-replacement
+* the next disciplined question is now primitive quality:
+  * can wider latent state first, and later primitive-internal tuning after that, close quality without giving back the systems advantage?
 
 ### Later composite matrix
 

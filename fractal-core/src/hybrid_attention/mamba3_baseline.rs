@@ -21,7 +21,7 @@ use crate::{
 
 const DEFAULT_RUST_MAMBA3_INIT_MIN: f64 = -0.08;
 const DEFAULT_RUST_MAMBA3_INIT_MAX: f64 = 0.08;
-const DEFAULT_RUST_MAMBA3_NORM_EPS: f64 = 1.0e-5;
+pub const DEFAULT_RUST_MAMBA3_NORM_EPS: f64 = 1.0e-5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -533,17 +533,12 @@ impl<B: Backend> RustMamba3Mixer<B> {
         let alpha = (projections.a.clone() * projections.dt.clone())
             .exp()
             .reshape([batch_size, nheads, 1, 1]);
-        let beta = projections
-            .trap
-            .clone()
-            .mul_scalar(-1.0)
-            .add_scalar(1.0)
+        let beta = projections.trap.clone().mul_scalar(-1.0).add_scalar(1.0)
             * projections.dt.clone()
             * alpha.clone().reshape([batch_size, nheads]);
         let gamma = projections.trap.clone() * projections.dt.clone();
 
-        let x_bt_state = (x_ranked
-            .clone()
+        let x_bt_state = (x_ranked.clone()
             * gamma
                 .clone()
                 .reshape([batch_size, 1, nheads, 1])
@@ -552,7 +547,8 @@ impl<B: Backend> RustMamba3Mixer<B> {
             * rotated_b
                 .clone()
                 .reshape([batch_size, rank, nheads, 1, d_state]);
-        let x_bt_prev = (self.expand_ranked_heads(previous_state.v_state.clone(), self.mimo_x.as_ref())
+        let x_bt_prev = (self
+            .expand_ranked_heads(previous_state.v_state.clone(), self.mimo_x.as_ref())
             * beta
                 .reshape([batch_size, 1, nheads, 1])
                 .repeat(&[1, rank, 1, headdim]))
@@ -562,8 +558,12 @@ impl<B: Backend> RustMamba3Mixer<B> {
                 .clone()
                 .reshape([batch_size, rank, nheads, 1, d_state]);
         let next_ssm_state = previous_state.ssm_state.clone() * alpha
-            + x_bt_state.sum_dim(1).reshape([batch_size, nheads, headdim, d_state])
-            + x_bt_prev.sum_dim(1).reshape([batch_size, nheads, headdim, d_state]);
+            + x_bt_state
+                .sum_dim(1)
+                .reshape([batch_size, nheads, headdim, d_state])
+            + x_bt_prev
+                .sum_dim(1)
+                .reshape([batch_size, nheads, headdim, d_state]);
 
         let out_ranked = (next_ssm_state
             .clone()
@@ -583,11 +583,12 @@ impl<B: Backend> RustMamba3Mixer<B> {
         let next_v_state = projections.x.clone();
         let next_k_state = rotated_b;
         let gated_ranked = if let Some(norm) = &self.out_proj_norm {
-            let combined = out_ranked.clone().reshape([batch_size, rank, 1, self.derived.d_inner]);
-            let z_combined =
-                z_ranked
-                    .clone()
-                    .reshape([batch_size, rank, 1, self.derived.d_inner]);
+            let combined = out_ranked
+                .clone()
+                .reshape([batch_size, rank, 1, self.derived.d_inner]);
+            let z_combined = z_ranked
+                .clone()
+                .reshape([batch_size, rank, 1, self.derived.d_inner]);
             norm.forward4_with_gate(combined, z_combined)
                 .reshape([batch_size, rank, nheads, headdim])
         } else {
@@ -1326,7 +1327,9 @@ mod tests {
         structured_projection_weight_fixture(Module::into_record(head))
     }
 
-    fn optional_param_fixture(tensor: &Option<Param<Tensor<TestBackend, 3>>>) -> Option<TensorFixture> {
+    fn optional_param_fixture(
+        tensor: &Option<Param<Tensor<TestBackend, 3>>>,
+    ) -> Option<TensorFixture> {
         tensor.as_ref().map(|value| tensor_fixture(value.val()))
     }
 
@@ -1564,13 +1567,15 @@ mod tests {
             v_state: Tensor::from_data(
                 TensorData::new(
                     deterministic_values(
-                        batch_size
-                            * mixer.derived_shape().nheads
-                            * mixer.config().headdim,
+                        batch_size * mixer.derived_shape().nheads * mixer.config().headdim,
                         0.025,
                         -0.35,
                     ),
-                    [batch_size, mixer.derived_shape().nheads, mixer.config().headdim],
+                    [
+                        batch_size,
+                        mixer.derived_shape().nheads,
+                        mixer.config().headdim,
+                    ],
                 ),
                 device,
             ),
@@ -1737,7 +1742,10 @@ mod tests {
         )
         .unwrap();
         let input = Tensor::<TestBackend, 2, Int>::from_data(
-            TensorData::new(vec![1i64, 2, 3, 4, 5, 6, 7, 8, 2, 4, 6, 8, 1, 3, 5, 7], [2, 8]),
+            TensorData::new(
+                vec![1i64, 2, 3, 4, 5, 6, 7, 8, 2, 4, 6, 8, 1, 3, 5, 7],
+                [2, 8],
+            ),
             &device,
         );
         let expected_logits = model.forward_logits(input.clone()).unwrap();
@@ -1747,9 +1755,10 @@ mod tests {
         model.clone().save_file(stem.clone(), &recorder).unwrap();
         let restored = model.load_file(stem.clone(), &recorder, &device).unwrap();
         let restored_logits = restored.forward_logits(input).unwrap();
-        restored_logits
-            .into_data()
-            .assert_approx_eq::<f32>(&expected_logits.into_data(), burn::tensor::Tolerance::default());
+        restored_logits.into_data().assert_approx_eq::<f32>(
+            &expected_logits.into_data(),
+            burn::tensor::Tolerance::default(),
+        );
 
         let _ = fs::remove_file(stem.with_extension("bin"));
     }
@@ -1796,7 +1805,11 @@ mod tests {
         for position in 0..seq_len {
             let input_t = sequence_input
                 .clone()
-                .slice([0..batch_size, position..position + 1, 0..mixer.config().d_model])
+                .slice([
+                    0..batch_size,
+                    position..position + 1,
+                    0..mixer.config().d_model,
+                ])
                 .reshape([batch_size, mixer.config().d_model]);
             let step = mixer.step(input_t, manual_state).unwrap();
             manual_outputs.push(step.output.reshape([batch_size, 1, mixer.config().d_model]));
@@ -2006,7 +2019,12 @@ mod tests {
             out_proj_weight: projection_weight_fixture(mixer.out_proj.clone()),
         };
         let reference: PythonStepReferenceOutput = run_python_reference(&python, &bundle);
-        assert_fixture_close(tensor_fixture(step.output), reference.output, "output", 1.0e-4);
+        assert_fixture_close(
+            tensor_fixture(step.output),
+            reference.output,
+            "output",
+            1.0e-4,
+        );
         assert_fixture_close(
             tensor_fixture(step.next_state.angle_dt_state),
             reference.next_angle_state,
@@ -2259,7 +2277,11 @@ mod tests {
         let zero_state = model.mixer.allocate_recurrent_state(batch_size, &device);
         let sequence_input = Tensor::<TestBackend, 3>::from_data(
             TensorData::new(
-                deterministic_values(batch_size * seq_len * model.mixer.config().d_model, 0.03, -0.2),
+                deterministic_values(
+                    batch_size * seq_len * model.mixer.config().d_model,
+                    0.03,
+                    -0.2,
+                ),
                 [batch_size, seq_len, model.mixer.config().d_model],
             ),
             &device,

@@ -4,11 +4,11 @@ pub fn one_minus<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Tensor<B, 
     tensor.mul_scalar(-1.0).add_scalar(1.0)
 }
 
-pub fn gated_sigmoid<B: Backend>(tensor: Tensor<B, 2>) -> Tensor<B, 2> {
+pub fn gated_sigmoid<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Tensor<B, D> {
     sigmoid(tensor)
 }
 
-pub fn gated_sigmoid_clamped<B: Backend>(tensor: Tensor<B, 2>) -> Tensor<B, 2> {
+pub fn gated_sigmoid_clamped<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Tensor<B, D> {
     sigmoid(tensor).clamp(0.0, 0.9)
 }
 

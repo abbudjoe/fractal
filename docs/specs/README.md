@@ -15,3 +15,5 @@ This folder contains the updated planning documents with **Causal Memory Auditor
 - [`v3a-baseline-freeze-and-p2-checklist.md`](./v3a-baseline-freeze-and-p2-checklist.md) — gated next-step checklist for baseline freeze, `P2` definition, and the first `A + P2` run
 - [`v3a-baseline-freeze-record.md`](./v3a-baseline-freeze-record.md) — freeze record template for the eventual `A` vs `A + M` baseline decision
 - [`v3a-p2-primitive-contract.md`](./v3a-p2-primitive-contract.md) — working contract doc for the first improved Path 1 primitive
+- [`v3a-p2-interface-ablation-plan.md`](./v3a-p2-interface-ablation-plan.md) — gated next-step plan for testing whether the main remaining `P2` gap is in the wrapper/interface rather than the primitive core
+- [`v3a-p2-primitive-quality-plan.md`](./v3a-p2-primitive-quality-plan.md) — gated primitive-internal tuning ladder for `P2`, beginning with `P2.1`
