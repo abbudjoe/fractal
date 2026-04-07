@@ -44,6 +44,9 @@ Notes:
     logical experiment id/name stay stable across retries, while each attempt gets a new run id.
   - Command arguments after "--" are passed to the cached release binary as:
       <cached-binary> --backend cuda ...
+  - When launching `v3a-hybrid-attention-matrix` as a bin target, the wrapper automatically
+    routes reports and the v3a ledger into `<state-dir>/artifacts/` unless you explicitly pass
+    `--output-dir` or `--ledger-path`.
 
 Examples:
   scripts/runpod-tournament.sh \
@@ -402,8 +405,16 @@ build_remote_tournament_args() {
     local arg
     local manifest_path
     local rewritten
+    local has_output_dir=0
+    local has_ledger_path=0
     while [ "$index" -lt "${#TOURNAMENT_ARGS[@]}" ]; do
         arg="${TOURNAMENT_ARGS[$index]}"
+        if [ "$arg" = "--output-dir" ] && [ $((index + 1)) -lt "${#TOURNAMENT_ARGS[@]}" ]; then
+            has_output_dir=1
+        fi
+        if [ "$arg" = "--ledger-path" ] && [ $((index + 1)) -lt "${#TOURNAMENT_ARGS[@]}" ]; then
+            has_ledger_path=1
+        fi
         if [ "$arg" = "--experiment-manifest" ] && [ $((index + 1)) -lt "${#TOURNAMENT_ARGS[@]}" ]; then
             manifest_path="${TOURNAMENT_ARGS[$((index + 1))]}"
             if [ "${manifest_path#${REPO_ROOT}/}" != "$manifest_path" ]; then
@@ -418,6 +429,21 @@ build_remote_tournament_args() {
         REMOTE_TOURNAMENT_ARGS+=("$arg")
         index=$((index + 1))
     done
+
+    if [ "$BINARY_KIND" = "bin" ] && [ "$BINARY_NAME" = "v3a-hybrid-attention-matrix" ]; then
+        if [ "$has_output_dir" -eq 0 ]; then
+            REMOTE_TOURNAMENT_ARGS+=(
+                "--output-dir"
+                "${STATE_DIR}/artifacts/v3a-hybrid-attention-matrix/${RUN_ID}"
+            )
+        fi
+        if [ "$has_ledger_path" -eq 0 ]; then
+            REMOTE_TOURNAMENT_ARGS+=(
+                "--ledger-path"
+                "${STATE_DIR}/artifacts/v3a-results-ledger.jsonl"
+            )
+        fi
+    fi
 }
 
 resolve_local_identity_context() {
@@ -678,7 +704,9 @@ def infer_identity(manifest: dict[str, Any]) -> tuple[str, str, str | None]:
                 return str(logical_id), str(logical_name), str(created_at) if created_at else None
     runtime = manifest.get("runtime") if isinstance(manifest.get("runtime"), dict) else {}
     build = manifest.get("build") if isinstance(manifest.get("build"), dict) else {}
-    args = runtime.get("tournament_args")
+    args = runtime.get("command_args")
+    if not isinstance(args, list):
+        args = runtime.get("tournament_args")
     if not isinstance(args, list):
         args = []
     inferred = resolve_spec(
@@ -694,7 +722,7 @@ def infer_identity(manifest: dict[str, Any]) -> tuple[str, str, str | None]:
 
 
 identity = resolve_spec(
-    tournament_args,
+    command_args,
     branch_value=branch,
     commit_value=commit_sha,
     timeout_seconds=run_timeout_seconds,
@@ -821,7 +849,7 @@ import sys
     local_commit_sha,
     run_timeout_seconds,
     experiment_context_json,
-    *tournament_args,
+    *command_args,
 ) = sys.argv[1:]
 
 experiment = json.loads(experiment_context_json)
@@ -1079,6 +1107,7 @@ write_manifest() {
     local status="$1"
     local exit_code="$2"
     local finished_at="$3"
+    shift 3
     python3 - "$remote_manifest" \
         "$status" \
         "$exit_code" \
@@ -1153,6 +1182,7 @@ write_manifest "running" 0 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${command_args[@]}"
 
 cleanup_manifest() {
     local exit_code="$1"
+    shift
     local final_status="failure"
     if [ "$exit_code" -eq 0 ]; then
         final_status="success"
