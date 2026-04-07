@@ -347,6 +347,30 @@ pub fn default_v3a_fineweb_stage0_canary_corpus_source(
     ))
 }
 
+pub fn default_v3a_fineweb_stage0_local_bench_9row_v1_corpus_source(
+    repo_root: impl AsRef<Path>,
+) -> Result<ByteLevelSmokeCorpusSource, FractalError> {
+    let root = repo_root.as_ref();
+    let train_path =
+        root.join("experiments/stage0/assets/fineweb/stage0-local-bench-9row-v1/train.jsonl");
+    let eval_path =
+        root.join("experiments/stage0/assets/fineweb/stage0-local-bench-9row-v1/eval.jsonl");
+    for path in [&train_path, &eval_path] {
+        if !path.is_file() {
+            return Err(FractalError::InvalidState(format!(
+                "default v3a FineWeb local bench corpus expected file {} to exist",
+                path.display()
+            )));
+        }
+    }
+    Ok(ByteLevelSmokeCorpusSource::jsonl_text_splits(
+        "fineweb-stage0-local-bench-9row-v1",
+        train_path,
+        eval_path,
+        "text",
+    ))
+}
+
 pub fn byte_level_smoke_corpus_stats_from_source(
     source: &ByteLevelSmokeCorpusSource,
     seq_len: usize,

@@ -17,15 +17,16 @@ use fractal_core::{
 };
 use fractal_eval_private::{
     append_v3a_results_ledger_entry, byte_level_smoke_corpus_stats_from_source,
-    default_v3a_fineweb_stage0_canary_corpus_source, resolve_requested_v3a_results_ledger_path,
-    run_attention_only_hybrid_attention_smoke_train, run_primitive_hybrid_attention_smoke_train,
-    run_reference_ssm_hybrid_attention_smoke_train, ByteLevelSmokeCorpusSource,
-    HybridAttentionCudaDeviceMemoryMetrics, HybridAttentionExecutionBackend,
-    HybridAttentionMatrixLedgerReport, HybridAttentionMatrixVariantOutcome,
-    HybridAttentionSmokeTrainConfig, V3aResultsLedgerEntry, DEFAULT_V3A_SMOKE_BATCH_SIZE,
-    DEFAULT_V3A_SMOKE_EVAL_BATCHES, DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY,
-    DEFAULT_V3A_SMOKE_LEARNING_RATE, DEFAULT_V3A_SMOKE_SEED, DEFAULT_V3A_SMOKE_SEQ_LEN,
-    DEFAULT_V3A_SMOKE_TRAIN_STEPS, DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
+    default_v3a_fineweb_stage0_canary_corpus_source,
+    default_v3a_fineweb_stage0_local_bench_9row_v1_corpus_source,
+    resolve_requested_v3a_results_ledger_path, run_attention_only_hybrid_attention_smoke_train,
+    run_primitive_hybrid_attention_smoke_train, run_reference_ssm_hybrid_attention_smoke_train,
+    ByteLevelSmokeCorpusSource, HybridAttentionCudaDeviceMemoryMetrics,
+    HybridAttentionExecutionBackend, HybridAttentionMatrixLedgerReport,
+    HybridAttentionMatrixVariantOutcome, HybridAttentionSmokeTrainConfig, V3aResultsLedgerEntry,
+    DEFAULT_V3A_SMOKE_BATCH_SIZE, DEFAULT_V3A_SMOKE_EVAL_BATCHES,
+    DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY, DEFAULT_V3A_SMOKE_LEARNING_RATE, DEFAULT_V3A_SMOKE_SEED,
+    DEFAULT_V3A_SMOKE_SEQ_LEN, DEFAULT_V3A_SMOKE_TRAIN_STEPS, DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
 };
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +40,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let args = CliArgs::parse(std::env::args().skip(1))?;
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let args = apply_benchmark_profile_overrides(args)?;
     if matches!(args.primitive_profile, PrimitiveProfile::P1)
         && !matches!(
             args.primitive_residual_profile,
@@ -87,13 +89,20 @@ fn run() -> Result<(), String> {
         args.primitive_norm_profile,
         args.primitive_wrapper_profile,
     );
+    let benchmark_prefix = args
+        .benchmark_profile
+        .map(|profile| format!("benchmark={}. {} ", profile.as_str(), profile.note()))
+        .unwrap_or_default();
     let matrix_note = if args.isolate_variants && args.variant.includes_multiple_variants() {
         format!(
-            "backend={}. {base_note} Variants are executed in isolated child processes for fairer throughput and memory comparison.",
+            "{benchmark_prefix}backend={}. {base_note} Variants are executed in isolated child processes for fairer throughput and memory comparison.",
             args.backend.as_str()
         )
     } else {
-        format!("backend={}. {base_note}", args.backend.as_str())
+        format!(
+            "{benchmark_prefix}backend={}. {base_note}",
+            args.backend.as_str()
+        )
     };
     let corpus_source = resolve_corpus_source(&args, &repo_root)?;
     let args = apply_full_pass_overrides(args, &corpus_source)?;
@@ -164,13 +173,63 @@ fn resolve_corpus_source(
             args.corpus_text_field.clone(),
         ))
     } else if args.corpus_paths.is_empty() {
-        default_v3a_fineweb_stage0_canary_corpus_source(repo_root)
-            .map_err(|error| format!("failed to resolve default v3a FineWeb smoke corpus: {error}"))
+        match args.benchmark_profile {
+            Some(BenchmarkProfile::CudaFaithfulSmallV1) => {
+                default_v3a_fineweb_stage0_local_bench_9row_v1_corpus_source(repo_root).map_err(
+                    |error| {
+                        format!(
+                            "failed to resolve default v3a FineWeb faithful-small corpus: {error}"
+                        )
+                    },
+                )
+            }
+            None => default_v3a_fineweb_stage0_canary_corpus_source(repo_root).map_err(|error| {
+                format!("failed to resolve default v3a FineWeb smoke corpus: {error}")
+            }),
+        }
     } else {
         Ok(ByteLevelSmokeCorpusSource::raw_files(
             args.corpus_paths.clone(),
         ))
     }
+}
+
+fn apply_benchmark_profile_overrides(mut args: CliArgs) -> Result<CliArgs, String> {
+    let Some(profile) = args.benchmark_profile else {
+        return Ok(args);
+    };
+    match profile {
+        BenchmarkProfile::CudaFaithfulSmallV1 => {
+            if !args.corpus_paths.is_empty()
+                || args.jsonl_train_path.is_some()
+                || args.jsonl_eval_path.is_some()
+            {
+                return Err(
+                    "--benchmark-profile cuda-faithful-small-v1 may not be combined with explicit corpus path flags"
+                        .to_owned(),
+                );
+            }
+            if args.steps != DEFAULT_V3A_SMOKE_TRAIN_STEPS && !args.full_train_pass {
+                return Err(
+                    "--benchmark-profile cuda-faithful-small-v1 may not be combined with explicit --steps"
+                        .to_owned(),
+                );
+            }
+            if args.eval_batches != DEFAULT_V3A_SMOKE_EVAL_BATCHES && !args.full_eval_pass {
+                return Err(
+                    "--benchmark-profile cuda-faithful-small-v1 may not be combined with explicit --eval-batches"
+                        .to_owned(),
+                );
+            }
+            args.full_train_pass = true;
+            args.full_eval_pass = true;
+            args.batch_size = DEFAULT_V3A_SMOKE_BATCH_SIZE;
+            args.seq_len = DEFAULT_V3A_SMOKE_SEQ_LEN;
+            args.window_stride = Some(DEFAULT_V3A_SMOKE_WINDOW_STRIDE);
+            args.eval_holdout_every = DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY;
+        }
+    }
+    Ok(args)
 }
 
 fn apply_full_pass_overrides(
@@ -203,6 +262,9 @@ fn smoke_config(
     args: &CliArgs,
 ) -> HybridAttentionSmokeTrainConfig {
     let mut config = HybridAttentionSmokeTrainConfig::new(corpus_source, output_dir, variant);
+    config.benchmark_name = args
+        .benchmark_profile
+        .map(|profile| profile.as_str().to_owned());
     config.execution_backend = args.backend.execution_backend();
     config.cuda_device_index = match args.backend {
         BackendSelection::Cuda => Some(args.cuda_device),
@@ -308,8 +370,37 @@ fn primitive_lane_note(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BenchmarkProfile {
+    CudaFaithfulSmallV1,
+}
+
+impl BenchmarkProfile {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "cuda-faithful-small-v1" => Ok(Self::CudaFaithfulSmallV1),
+            _ => Err(format!("unknown benchmark profile: {value}")),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CudaFaithfulSmallV1 => "cuda-faithful-small-v1",
+        }
+    }
+
+    fn note(self) -> &'static str {
+        match self {
+            Self::CudaFaithfulSmallV1 => {
+                "Benchmark profile pins the larger frozen 9-row FineWeb slice with full-train/full-eval pass semantics as the CUDA-faithful small proving surface."
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct CliArgs {
+    benchmark_profile: Option<BenchmarkProfile>,
     backend: BackendSelection,
     cuda_device: usize,
     corpus_paths: Vec<PathBuf>,
@@ -342,6 +433,7 @@ struct CliArgs {
 
 impl CliArgs {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
+        let mut benchmark_profile = None;
         let mut backend = BackendSelection::Cpu;
         let mut cuda_device = 0usize;
         let mut corpus_paths = Vec::new();
@@ -375,6 +467,12 @@ impl CliArgs {
 
         while let Some(arg) = iter.next() {
             match arg.as_str() {
+                "--benchmark-profile" => {
+                    benchmark_profile =
+                        Some(BenchmarkProfile::parse(&iter.next().ok_or_else(|| {
+                            "--benchmark-profile requires a value".to_owned()
+                        })?)?);
+                }
                 "--backend" => {
                     backend = BackendSelection::parse(
                         &iter
@@ -573,6 +671,7 @@ impl CliArgs {
         }
 
         Ok(Self {
+            benchmark_profile,
             backend,
             cuda_device,
             corpus_paths,
@@ -926,6 +1025,9 @@ fn render_table(report: &RenderedMatrixReport<'_>) -> String {
                     "  backend={}",
                     report.config.execution_backend.as_str(),
                 );
+                if let Some(benchmark_name) = &report.config.benchmark_name {
+                    let _ = writeln!(output, "  benchmark={benchmark_name}");
+                }
                 let _ = writeln!(
                     output,
                     "  initial_loss={:.4} final_loss={:.4} initial_ppl={:.2} final_ppl={:.2} steps={}",
@@ -1284,6 +1386,16 @@ fn run_isolated_variant(
         format!("failed to resolve current v3a matrix executable for isolation: {error}")
     })?);
     command
+        .args(
+            args.benchmark_profile
+                .map(|profile| {
+                    vec![
+                        "--benchmark-profile".to_owned(),
+                        profile.as_str().to_owned(),
+                    ]
+                })
+                .unwrap_or_default(),
+        )
         .arg("--backend")
         .arg(args.backend.as_str())
         .arg("--cuda-device")
@@ -1300,10 +1412,6 @@ fn run_isolated_variant(
         .arg(args.primitive_norm_profile.as_str())
         .arg("--primitive-wrapper-profile")
         .arg(args.primitive_wrapper_profile.as_str())
-        .arg("--steps")
-        .arg(args.steps.to_string())
-        .arg("--eval-batches")
-        .arg(args.eval_batches.to_string())
         .arg("--eval-holdout-every")
         .arg(args.eval_holdout_every.to_string())
         .arg("--batch-size")
@@ -1321,6 +1429,19 @@ fn run_isolated_variant(
         .arg("--output-dir")
         .arg(output_dir)
         .arg("--shared-process");
+
+    if args.full_train_pass {
+        command.arg("--full-train-pass");
+    } else {
+        command.arg("--steps").arg(args.steps.to_string());
+    }
+    if args.full_eval_pass {
+        command.arg("--full-eval-pass");
+    } else {
+        command
+            .arg("--eval-batches")
+            .arg(args.eval_batches.to_string());
+    }
 
     for corpus_path in &args.corpus_paths {
         command.arg("--corpus-path").arg(corpus_path);
@@ -1380,6 +1501,7 @@ fn usage() -> String {
         concat!(
             "Usage: cargo run --bin v3a-hybrid-attention-matrix -- [options]\n\n",
             "Options:\n",
+            "  --benchmark-profile <name>   One of: cuda-faithful-small-v1 (pins the larger frozen 9-row FineWeb full-pass CUDA-faithful surface)\n",
             "  --backend <cpu|metal|cuda>  Execution backend for this run (default: cpu)\n",
             "  --cuda-device <n>           CUDA device index when --backend cuda (default: 0)\n",
             "  --corpus-path <path>         Override the default frozen FineWeb canary corpus with raw byte-level files (repeatable)\n",

@@ -86,6 +86,8 @@ pub struct HybridAttentionCudaDeviceMemoryMetrics {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HybridAttentionSmokeTrainConfig {
+    #[serde(default)]
+    pub benchmark_name: Option<String>,
     pub corpus_source: ByteLevelSmokeCorpusSource,
     pub output_dir: PathBuf,
     pub variant: HybridAttentionVariantSpec,
@@ -110,6 +112,7 @@ impl HybridAttentionSmokeTrainConfig {
         variant: HybridAttentionVariantSpec,
     ) -> Self {
         Self {
+            benchmark_name: None,
             corpus_source,
             output_dir,
             variant,

@@ -23,6 +23,11 @@ Nothing in this checklist counts unless it is backed by:
 - [x] no baseline or `P2` claim relies only on terminal output or chat memory
 - [x] the default `v3a` benchmark surface is now the frozen FineWeb stage0
   canary, not mutable repo docs
+- [x] the CUDA-faithful small benchmark surface is now a named contract:
+  `cuda-faithful-small-v1`
+  - [x] Rust runner support exists via `--benchmark-profile`
+  - [x] Python native Mamba runner records the same benchmark name
+  - [x] RunPod helper scripts can select it without raw path/manual budget churn
 - [ ] contender-freeze decisions must be replayed on the frozen FineWeb canary
   surface before they are treated as final
   - [x] first longer-budget replay on frozen FineWeb canary is complete for

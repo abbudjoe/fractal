@@ -112,6 +112,12 @@ Why this changed:
 Going forward:
 
 * the frozen FineWeb canary is the default `v3a` proving surface
+* the named CUDA-faithful small proving surface is now
+  `cuda-faithful-small-v1`
+  * it pins the larger frozen FineWeb 9-row slice at
+    `experiments/stage0/assets/fineweb/stage0-local-bench-9row-v1/`
+  * it implies full-train-pass and full-eval-pass semantics
+  * it is the default surface for decision-bearing native-CUDA comparisons
 * the runner now supports `--backend cpu|metal` for local Path 1 work
 * recorded reports include the execution backend as part of the run contract
 * explicit `--corpus-path` overrides remain allowed for exploratory runs

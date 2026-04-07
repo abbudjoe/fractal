@@ -55,6 +55,8 @@ DEFAULT_EXPAND = 2
 DEFAULT_IS_MIMO = False
 DEFAULT_MIMO_RANK = 1
 DEFAULT_DTYPE = "bf16"
+DEFAULT_WARMUP_EVAL_BATCHES = 1
+DEFAULT_WARMUP_TRAIN_STEPS = 1
 DEFAULT_NOTE = (
     "Path 1 reference SSM hybrid baseline using official PyTorch Mamba3 blocks on the shared "
     "byte-level smoke lane through the upstream SISO runtime path"
@@ -80,9 +82,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-batches", type=int, default=DEFAULT_EVAL_BATCHES)
     parser.add_argument("--full-train-pass", action="store_true")
     parser.add_argument("--full-eval-pass", action="store_true")
+    parser.add_argument("--warmup-eval-batches", type=int, default=DEFAULT_WARMUP_EVAL_BATCHES)
+    parser.add_argument("--warmup-train-steps", type=int, default=DEFAULT_WARMUP_TRAIN_STEPS)
     parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
     parser.add_argument("--jsonl-train-path", type=Path, required=True)
     parser.add_argument("--jsonl-eval-path", type=Path, required=True)
+    parser.add_argument("--benchmark-name")
     parser.add_argument("--corpus-name", default="fineweb-stage0-canary")
     parser.add_argument("--corpus-text-field", default="text")
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -327,6 +332,33 @@ def evaluate_model(
     }
 
 
+def warmup_model(
+    model: HybridAttentionMamba3Model,
+    optimizer: "torch.optim.Optimizer",
+    train_batches: list[TokenBatch],
+    eval_batches: list[TokenBatch],
+    warmup_eval_batches: int,
+    warmup_train_steps: int,
+    autocast_dtype: "torch.dtype | None",
+) -> None:
+    if warmup_eval_batches > 0:
+        evaluate_model(model, eval_batches, warmup_eval_batches, autocast_dtype)
+    if warmup_train_steps > 0:
+        model.train()
+        for step in range(warmup_train_steps):
+            batch = train_batches[step % len(train_batches)]
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device_type="cuda", dtype=autocast_dtype, enabled=autocast_dtype is not None):
+                logits = model.forward_logits(batch.input_ids)
+                loss = F.cross_entropy(
+                    logits.reshape(-1, logits.shape[-1]),
+                    batch.target_ids.reshape(-1),
+                    ignore_index=BYTE_LEVEL_PAD_TOKEN,
+                )
+            loss.backward()
+        optimizer.zero_grad(set_to_none=True)
+
+
 def append_ledger_entry(path: Path, entry: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -379,6 +411,17 @@ def main() -> int:
 
     model = HybridAttentionMamba3Model(dtype_mode=args.dtype).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+
+    warmup_model(
+        model,
+        optimizer,
+        train_batches,
+        eval_batches,
+        max(0, min(args.warmup_eval_batches, len(eval_batches))),
+        max(0, args.warmup_train_steps),
+        autocast_dtype,
+    )
+    torch.cuda.synchronize(device)
 
     baseline_process_memory = process_peak_rss_bytes()
     torch.cuda.empty_cache()
@@ -439,6 +482,7 @@ def main() -> int:
         "note": DEFAULT_NOTE,
         "config": {
             "backend": args.backend,
+            "benchmark_name": args.benchmark_name,
             "cuda_device_index": args.cuda_device,
             "seed": args.seed,
             "seq_len": args.seq_len,
@@ -449,6 +493,8 @@ def main() -> int:
             "learning_rate": args.learning_rate,
             "run_label": args.run_label,
             "dtype": args.dtype,
+            "warmup_eval_batches": args.warmup_eval_batches,
+            "warmup_train_steps": args.warmup_train_steps,
             "corpus_name": args.corpus_name,
             "vocabulary": {
                 "pad_token": BYTE_LEVEL_PAD_TOKEN,

@@ -17,11 +17,22 @@ RUN_TIMEOUT_SECONDS="${RUN_TIMEOUT_SECONDS:-3600}"
 FULL_TRAIN_PASS="${FULL_TRAIN_PASS:-0}"
 FULL_EVAL_PASS="${FULL_EVAL_PASS:-0}"
 RUN_P20_PLAIN="${RUN_P20_PLAIN:-1}"
+BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-}"
 
 CORPUS_TRAIN_JSONL="${CORPUS_TRAIN_JSONL:-}"
 CORPUS_EVAL_JSONL="${CORPUS_EVAL_JSONL:-}"
 CORPUS_NAME="${CORPUS_NAME:-}"
 CORPUS_TEXT_FIELD="${CORPUS_TEXT_FIELD:-text}"
+
+if [[ "${BENCHMARK_PROFILE}" == "cuda-faithful-small-v1" ]]; then
+  if [[ -z "${CORPUS_TRAIN_JSONL}" && -z "${CORPUS_EVAL_JSONL}" ]]; then
+    CORPUS_TRAIN_JSONL="${REPO_ROOT}/experiments/stage0/assets/fineweb/stage0-local-bench-9row-v1/train.jsonl"
+    CORPUS_EVAL_JSONL="${REPO_ROOT}/experiments/stage0/assets/fineweb/stage0-local-bench-9row-v1/eval.jsonl"
+    CORPUS_NAME="${CORPUS_NAME:-fineweb-stage0-local-bench-9row-v1}"
+  fi
+  FULL_TRAIN_PASS=1
+  FULL_EVAL_PASS=1
+fi
 
 already_recorded() {
   local run_label="$1"
@@ -60,6 +71,10 @@ build_common_args() {
     --seed "${SEED}"
     --output table
   )
+
+  if [[ -n "${BENCHMARK_PROFILE}" ]]; then
+    COMMON_ARGS+=(--benchmark-profile "${BENCHMARK_PROFILE}")
+  fi
 
   if [[ "${FULL_TRAIN_PASS}" == "1" ]]; then
     COMMON_ARGS+=(--full-train-pass)
