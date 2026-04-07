@@ -16,8 +16,9 @@ use serde::{Deserialize, Serialize};
 use fractal_core::{
     build_attention_only_hybrid_attention_model, build_primitive_hybrid_attention_model,
     build_rust_mamba3_reference_hybrid_attention_model, error::FractalError,
-    AttentionOnlyHybridAttentionModel, HybridAttentionVariantKind, HybridAttentionVariantSpec,
-    PrimitiveHybridAttentionModel, RustMamba3ReferenceHybridAttentionModel,
+    read_cuda_memory_snapshot_for_device, AttentionOnlyHybridAttentionModel, CudaMemorySnapshot,
+    HybridAttentionVariantKind, HybridAttentionVariantSpec, PrimitiveHybridAttentionModel,
+    RustMamba3ReferenceHybridAttentionModel,
 };
 
 use crate::{
@@ -38,13 +39,14 @@ pub const DEFAULT_V3A_SMOKE_LEARNING_RATE: f64 = 1e-3;
 pub const DEFAULT_V3A_SMOKE_SEED: u64 = 42;
 
 pub const HYBRID_ATTENTION_RUNTIME_MEMORY_NOTE: &str =
-    "process memory metrics are sampled around train/eval phases using the platform-specific process-memory primitive; see process_memory_metric for the exact source";
+    "process memory metrics are sampled around train/eval phases using the platform-specific process-memory primitive; CUDA runs may additionally report device memory through cuda_device_memory";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HybridAttentionExecutionBackend {
     Cpu,
     Metal,
+    Cuda,
 }
 
 impl HybridAttentionExecutionBackend {
@@ -52,8 +54,34 @@ impl HybridAttentionExecutionBackend {
         match self {
             Self::Cpu => "cpu",
             Self::Metal => "metal",
+            Self::Cuda => "cuda",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HybridAttentionCudaMemoryMetricKind {
+    NvidiaSmiUsedMemory,
+}
+
+impl HybridAttentionCudaMemoryMetricKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NvidiaSmiUsedMemory => "nvidia_smi_used_memory",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HybridAttentionCudaDeviceMemoryMetrics {
+    pub device_index: usize,
+    pub memory_metric: HybridAttentionCudaMemoryMetricKind,
+    pub peak_used_bytes: u64,
+    pub peak_used_delta_bytes: u64,
+    #[serde(default)]
+    pub total_bytes: Option<u64>,
+    pub note: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,6 +90,8 @@ pub struct HybridAttentionSmokeTrainConfig {
     pub output_dir: PathBuf,
     pub variant: HybridAttentionVariantSpec,
     pub execution_backend: HybridAttentionExecutionBackend,
+    #[serde(default)]
+    pub cuda_device_index: Option<usize>,
     pub seq_len: usize,
     pub window_stride: usize,
     pub batch_size: usize,
@@ -84,6 +114,7 @@ impl HybridAttentionSmokeTrainConfig {
             output_dir,
             variant,
             execution_backend: HybridAttentionExecutionBackend::Cpu,
+            cuda_device_index: None,
             seq_len: DEFAULT_V3A_SMOKE_SEQ_LEN,
             window_stride: DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
             batch_size: DEFAULT_V3A_SMOKE_BATCH_SIZE,
@@ -116,6 +147,26 @@ impl HybridAttentionSmokeTrainConfig {
         if !(self.learning_rate.is_finite() && self.learning_rate > 0.0) {
             return Err(FractalError::InvalidConfig(
                 "hybrid_attention_smoke_train.learning_rate must be finite and greater than zero"
+                    .to_string(),
+            ));
+        }
+        if matches!(
+            self.execution_backend,
+            HybridAttentionExecutionBackend::Cuda
+        ) && self.cuda_device_index.is_none()
+        {
+            return Err(FractalError::InvalidConfig(
+                "hybrid_attention_smoke_train.execution_backend=cuda requires cuda_device_index"
+                    .to_string(),
+            ));
+        }
+        if !matches!(
+            self.execution_backend,
+            HybridAttentionExecutionBackend::Cuda
+        ) && self.cuda_device_index.is_some()
+        {
+            return Err(FractalError::InvalidConfig(
+                "hybrid_attention_smoke_train.cuda_device_index may only be set when execution_backend=cuda"
                     .to_string(),
             ));
         }
@@ -161,6 +212,8 @@ pub struct HybridAttentionRuntimeMetrics {
     pub peak_process_memory_bytes: u64,
     #[serde(default, alias = "peak_rss_delta_bytes")]
     pub peak_process_memory_delta_bytes: u64,
+    #[serde(default)]
+    pub cuda_device_memory: Option<HybridAttentionCudaDeviceMemoryMetrics>,
     pub memory_note: String,
 }
 
@@ -299,11 +352,23 @@ where
         .sum::<usize>();
     let baseline_process_memory = process_peak_memory_bytes();
     let mut peak_process_memory_bytes = baseline_process_memory;
+    let baseline_cuda_snapshot =
+        maybe_read_cuda_memory_snapshot(config.execution_backend, config.cuda_device_index);
+    let baseline_cuda_used_bytes = baseline_cuda_snapshot.map(cuda_snapshot_used_bytes);
+    let mut peak_cuda_used_bytes = baseline_cuda_used_bytes.unwrap_or(0);
+    let mut cuda_total_bytes = baseline_cuda_snapshot.map(cuda_snapshot_total_bytes);
+    let mut sampled_cuda_memory = baseline_cuda_snapshot.is_some();
     let total_start = Instant::now();
     let initial_eval_start = Instant::now();
     let initial_eval = evaluate_model(&model, &criterion, &eval_batches, config.eval_batches)?;
     let initial_eval_wall_time_ms = initial_eval_start.elapsed().as_secs_f64() * 1000.0;
     peak_process_memory_bytes = peak_process_memory_bytes.max(process_peak_memory_bytes());
+    sampled_cuda_memory |= update_cuda_memory_peak(
+        config.execution_backend,
+        config.cuda_device_index,
+        &mut peak_cuda_used_bytes,
+        &mut cuda_total_bytes,
+    );
 
     let mut model = model;
     let mut seen_tokens = 0usize;
@@ -324,12 +389,24 @@ where
             seen_tokens,
         });
         peak_process_memory_bytes = peak_process_memory_bytes.max(process_peak_memory_bytes());
+        sampled_cuda_memory |= update_cuda_memory_peak(
+            config.execution_backend,
+            config.cuda_device_index,
+            &mut peak_cuda_used_bytes,
+            &mut cuda_total_bytes,
+        );
     }
     let train_wall_time_ms = train_start.elapsed().as_secs_f64() * 1000.0;
     let final_eval_start = Instant::now();
     let final_eval = evaluate_model(&model, &criterion, &eval_batches, config.eval_batches)?;
     let final_eval_wall_time_ms = final_eval_start.elapsed().as_secs_f64() * 1000.0;
     peak_process_memory_bytes = peak_process_memory_bytes.max(process_peak_memory_bytes());
+    sampled_cuda_memory |= update_cuda_memory_peak(
+        config.execution_backend,
+        config.cuda_device_index,
+        &mut peak_cuda_used_bytes,
+        &mut cuda_total_bytes,
+    );
     let total_wall_time_ms = total_start.elapsed().as_secs_f64() * 1000.0;
     let runtime = HybridAttentionRuntimeMetrics {
         total_wall_time_ms,
@@ -347,6 +424,27 @@ where
         peak_process_memory_bytes,
         peak_process_memory_delta_bytes: peak_process_memory_bytes
             .saturating_sub(baseline_process_memory),
+        cuda_device_memory: if matches!(
+            config.execution_backend,
+            HybridAttentionExecutionBackend::Cuda
+        ) && sampled_cuda_memory
+        {
+            Some(HybridAttentionCudaDeviceMemoryMetrics {
+                device_index: config
+                    .cuda_device_index
+                    .expect("cuda execution backend validation should guarantee cuda_device_index"),
+                memory_metric: HybridAttentionCudaMemoryMetricKind::NvidiaSmiUsedMemory,
+                peak_used_bytes: peak_cuda_used_bytes,
+                peak_used_delta_bytes: baseline_cuda_used_bytes
+                    .map_or(0, |baseline| peak_cuda_used_bytes.saturating_sub(baseline)),
+                total_bytes: cuda_total_bytes,
+                note: cuda_device_memory_measurement_note(config.cuda_device_index.expect(
+                    "cuda execution backend validation should guarantee cuda_device_index",
+                )),
+            })
+        } else {
+            None
+        },
         memory_note: process_memory_measurement_note("around train/eval phases"),
     };
 
@@ -392,6 +490,46 @@ fn tokens_per_second(tokens: usize, wall_time_ms: f64) -> f64 {
     } else {
         tokens as f64 / (wall_time_ms / 1000.0)
     }
+}
+
+const MIB_TO_BYTES: u64 = 1024 * 1024;
+
+fn maybe_read_cuda_memory_snapshot(
+    backend: HybridAttentionExecutionBackend,
+    device_index: Option<usize>,
+) -> Option<CudaMemorySnapshot> {
+    if !matches!(backend, HybridAttentionExecutionBackend::Cuda) {
+        return None;
+    }
+    device_index.and_then(read_cuda_memory_snapshot_for_device)
+}
+
+fn update_cuda_memory_peak(
+    backend: HybridAttentionExecutionBackend,
+    device_index: Option<usize>,
+    peak_used_bytes: &mut u64,
+    total_bytes: &mut Option<u64>,
+) -> bool {
+    let Some(snapshot) = maybe_read_cuda_memory_snapshot(backend, device_index) else {
+        return false;
+    };
+    *peak_used_bytes = (*peak_used_bytes).max(cuda_snapshot_used_bytes(snapshot));
+    *total_bytes = Some(cuda_snapshot_total_bytes(snapshot));
+    true
+}
+
+fn cuda_snapshot_used_bytes(snapshot: CudaMemorySnapshot) -> u64 {
+    snapshot.used_mib as u64 * MIB_TO_BYTES
+}
+
+fn cuda_snapshot_total_bytes(snapshot: CudaMemorySnapshot) -> u64 {
+    snapshot.total_mib as u64 * MIB_TO_BYTES
+}
+
+fn cuda_device_memory_measurement_note(device_index: usize) -> String {
+    format!(
+        "CUDA device memory metrics are sampled around train/eval phases via nvidia-smi for device {device_index}; this tracks used device memory separately from process memory"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

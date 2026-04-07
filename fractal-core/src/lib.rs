@@ -51,6 +51,7 @@ pub use hybrid_attention::{
     AttentionOnlyHybridAttentionModel, HybridAttentionBaselineMatrix,
     HybridAttentionComparisonContract, HybridAttentionEfficiencyTarget, HybridAttentionLayerRole,
     HybridAttentionModelShape, HybridAttentionVariantKind, HybridAttentionVariantSpec,
+    HybridSequenceKernelContract, HybridSequenceScanMode, HybridSequenceStateLayout,
     P2InternalReadoutFactor, P2LatentWidthFactor, PrimitiveHybridAttentionModel,
     PrimitiveHybridNormMode, PrimitiveHybridPrimitive, PrimitiveHybridReadoutMode,
     PrimitiveHybridResidualMode, PrimitiveHybridWrapperSymmetryMode, ReferenceSsmFamily,
@@ -86,14 +87,16 @@ pub use projection::{
     ProjectionLayoutPolicy, StructuredProjection, StructuredProjectionConfig,
     StructuredProjectionRecord,
 };
+#[cfg(feature = "cuda")]
+pub use registry::cuda_device;
 pub use registry::{
     initialize_metal_runtime, is_valid_primitive_variant_name, load_weight_export_artifact,
-    load_weight_export_metadata, read_weight_export_metadata, resolve_precision_profile,
-    run_species_with_batches, CandleBf16Backend, CandleBf16TrainBackend, CandleF32Backend,
-    CandleF32TrainBackend, ComputeBackend, CpuBackend, CpuTrainBackend, ExecutionMode,
-    MetalBackend, MetalBf16Backend, MetalBf16TrainBackend, MetalF32Backend, MetalF32TrainBackend,
-    MetalTrainBackend, PrimitiveVariantName, ResolvedExecutablePrecisionProfile, SpeciesDefinition,
-    SpeciesId, TrainingBatchSet,
+    load_weight_export_metadata, read_cuda_memory_snapshot_for_device, read_weight_export_metadata,
+    resolve_precision_profile, run_species_with_batches, CandleBf16Backend, CandleBf16TrainBackend,
+    CandleF32Backend, CandleF32TrainBackend, ComputeBackend, CpuBackend, CpuTrainBackend,
+    ExecutionMode, MetalBackend, MetalBf16Backend, MetalBf16TrainBackend, MetalF32Backend,
+    MetalF32TrainBackend, MetalTrainBackend, PrimitiveVariantName,
+    ResolvedExecutablePrecisionProfile, SpeciesDefinition, SpeciesId, TrainingBatchSet,
 };
 pub use router::EarlyExitRouter;
 pub use state::{FractalState, StateLayout};

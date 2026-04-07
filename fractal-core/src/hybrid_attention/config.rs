@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{error::FractalError, registry::PrimitiveVariantName};
+use crate::{
+    error::FractalError, projection::ProjectionLayoutPolicy, registry::PrimitiveVariantName,
+};
 
 pub const PATH1_PHASE1_LOCAL_WINDOW_SIZE: usize = 256;
 
@@ -17,6 +19,25 @@ pub enum HybridAttentionVariantKind {
 pub enum ReferenceSsmFamily {
     Mamba3ProxyV1,
     Mamba3RustV1,
+}
+
+impl ReferenceSsmFamily {
+    pub const fn kernel_contract(self) -> HybridSequenceKernelContract {
+        match self {
+            Self::Mamba3ProxyV1 => HybridSequenceKernelContract {
+                projection_layout_policy: ProjectionLayoutPolicy::OutputByInput,
+                state_layout: HybridSequenceStateLayout::StructuredReferenceSsm,
+                scan_mode: HybridSequenceScanMode::SequentialStepLoop,
+                explicit_output_readout: true,
+            },
+            Self::Mamba3RustV1 => HybridSequenceKernelContract {
+                projection_layout_policy: ProjectionLayoutPolicy::OutputByInput,
+                state_layout: HybridSequenceStateLayout::StructuredReferenceSsm,
+                scan_mode: HybridSequenceScanMode::ChunkedSequentialStepLoop,
+                explicit_output_readout: true,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +98,70 @@ impl PrimitiveHybridPrimitive {
             | Self::P22WideLatentReadout => true,
         }
     }
+
+    pub const fn kernel_contract(self) -> HybridSequenceKernelContract {
+        match self {
+            Self::P1Contractive => HybridSequenceKernelContract {
+                projection_layout_policy: ProjectionLayoutPolicy::OutputByInput,
+                state_layout: HybridSequenceStateLayout::ModelWidthLatent,
+                scan_mode: HybridSequenceScanMode::SequentialStepLoop,
+                explicit_output_readout: false,
+            },
+            Self::P20RotaryStateOutput => HybridSequenceKernelContract {
+                projection_layout_policy: ProjectionLayoutPolicy::OutputByInput,
+                state_layout: HybridSequenceStateLayout::ModelWidthLatent,
+                scan_mode: HybridSequenceScanMode::SequentialStepLoop,
+                explicit_output_readout: false,
+            },
+            Self::P2RotaryReadout => HybridSequenceKernelContract {
+                projection_layout_policy: ProjectionLayoutPolicy::OutputByInput,
+                state_layout: HybridSequenceStateLayout::ModelWidthLatent,
+                scan_mode: HybridSequenceScanMode::SequentialStepLoop,
+                explicit_output_readout: true,
+            },
+            Self::P23RotaryCarryBlendReadout => HybridSequenceKernelContract {
+                projection_layout_policy: ProjectionLayoutPolicy::OutputByInput,
+                state_layout: HybridSequenceStateLayout::ModelWidthLatent,
+                scan_mode: HybridSequenceScanMode::SequentialStepLoop,
+                explicit_output_readout: true,
+            },
+            Self::P21WideLatent => HybridSequenceKernelContract {
+                projection_layout_policy: ProjectionLayoutPolicy::OutputByInput,
+                state_layout: HybridSequenceStateLayout::DoubleWidthLatent,
+                scan_mode: HybridSequenceScanMode::SequentialStepLoop,
+                explicit_output_readout: false,
+            },
+            Self::P22WideLatentReadout => HybridSequenceKernelContract {
+                projection_layout_policy: ProjectionLayoutPolicy::OutputByInput,
+                state_layout: HybridSequenceStateLayout::DoubleWidthLatent,
+                scan_mode: HybridSequenceScanMode::SequentialStepLoop,
+                explicit_output_readout: true,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HybridSequenceStateLayout {
+    ModelWidthLatent,
+    DoubleWidthLatent,
+    StructuredReferenceSsm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HybridSequenceScanMode {
+    SequentialStepLoop,
+    ChunkedSequentialStepLoop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HybridSequenceKernelContract {
+    pub projection_layout_policy: ProjectionLayoutPolicy,
+    pub state_layout: HybridSequenceStateLayout,
+    pub scan_mode: HybridSequenceScanMode,
+    pub explicit_output_readout: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -423,6 +508,18 @@ impl HybridAttentionVariantSpec {
     pub fn total_layers(&self) -> usize {
         self.layer_schedule.len()
     }
+
+    pub fn sequence_kernel_contract(&self) -> Option<HybridSequenceKernelContract> {
+        match self.kind {
+            HybridAttentionVariantKind::AttentionOnly => None,
+            HybridAttentionVariantKind::ReferenceSsmHybrid => self
+                .reference_ssm_family
+                .map(ReferenceSsmFamily::kernel_contract),
+            HybridAttentionVariantKind::PrimitiveHybrid => self
+                .primitive
+                .map(PrimitiveHybridPrimitive::kernel_contract),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -661,10 +758,12 @@ mod tests {
         phase1_p21_candidate_variant, phase1_p22_candidate_variant, phase1_p23_candidate_variant,
         phase1_p2_candidate_variant, phase1_p2_factor_candidate_variant,
         phase1_p2_interface_candidate_variant, primitive_from_p2_factors, HybridAttentionLayerRole,
-        HybridAttentionVariantKind, P2InternalReadoutFactor, P2LatentWidthFactor,
-        PrimitiveHybridNormMode, PrimitiveHybridPrimitive, PrimitiveHybridReadoutMode,
-        PrimitiveHybridResidualMode, PrimitiveHybridWrapperSymmetryMode,
+        HybridAttentionVariantKind, HybridSequenceScanMode, HybridSequenceStateLayout,
+        P2InternalReadoutFactor, P2LatentWidthFactor, PrimitiveHybridNormMode,
+        PrimitiveHybridPrimitive, PrimitiveHybridReadoutMode, PrimitiveHybridResidualMode,
+        PrimitiveHybridWrapperSymmetryMode, ReferenceSsmFamily,
     };
+    use crate::ProjectionLayoutPolicy;
 
     #[test]
     fn phase1_matrix_is_self_consistent() {
@@ -945,5 +1044,80 @@ mod tests {
                 .validate()
                 .expect("p2 interface candidate variant should validate");
         }
+    }
+
+    #[test]
+    fn all_path1_sequence_mixers_expose_output_by_input_kernel_contracts() {
+        for primitive in [
+            PrimitiveHybridPrimitive::P1Contractive,
+            PrimitiveHybridPrimitive::P20RotaryStateOutput,
+            PrimitiveHybridPrimitive::P2RotaryReadout,
+            PrimitiveHybridPrimitive::P23RotaryCarryBlendReadout,
+            PrimitiveHybridPrimitive::P21WideLatent,
+            PrimitiveHybridPrimitive::P22WideLatentReadout,
+        ] {
+            assert_eq!(
+                primitive.kernel_contract().projection_layout_policy,
+                ProjectionLayoutPolicy::OutputByInput
+            );
+        }
+        for family in [
+            ReferenceSsmFamily::Mamba3ProxyV1,
+            ReferenceSsmFamily::Mamba3RustV1,
+        ] {
+            assert_eq!(
+                family.kernel_contract().projection_layout_policy,
+                ProjectionLayoutPolicy::OutputByInput
+            );
+        }
+    }
+
+    #[test]
+    fn path1_kernel_contracts_make_scan_mode_and_state_layout_explicit() {
+        let base = PrimitiveHybridPrimitive::P2RotaryReadout.kernel_contract();
+        assert_eq!(base.scan_mode, HybridSequenceScanMode::SequentialStepLoop);
+        assert_eq!(
+            base.state_layout,
+            HybridSequenceStateLayout::ModelWidthLatent
+        );
+        assert!(base.explicit_output_readout);
+
+        let wide = PrimitiveHybridPrimitive::P22WideLatentReadout.kernel_contract();
+        assert_eq!(wide.scan_mode, HybridSequenceScanMode::SequentialStepLoop);
+        assert_eq!(
+            wide.state_layout,
+            HybridSequenceStateLayout::DoubleWidthLatent
+        );
+        assert!(wide.explicit_output_readout);
+
+        let rust_mamba = ReferenceSsmFamily::Mamba3RustV1.kernel_contract();
+        assert_eq!(
+            rust_mamba.scan_mode,
+            HybridSequenceScanMode::ChunkedSequentialStepLoop
+        );
+        assert_eq!(
+            rust_mamba.state_layout,
+            HybridSequenceStateLayout::StructuredReferenceSsm
+        );
+        assert!(rust_mamba.explicit_output_readout);
+    }
+
+    #[test]
+    fn variant_sequence_kernel_contract_matches_selected_lane() {
+        let matrix = phase1_hybrid_attention_baseline_matrix();
+        assert!(matrix.attention_only.sequence_kernel_contract().is_none());
+        assert_eq!(
+            matrix
+                .reference_ssm_hybrid
+                .sequence_kernel_contract()
+                .expect("reference SSM variant should expose a kernel contract"),
+            ReferenceSsmFamily::Mamba3RustV1.kernel_contract()
+        );
+        assert_eq!(
+            phase1_p23_candidate_variant()
+                .sequence_kernel_contract()
+                .expect("p2.3 candidate should expose a kernel contract"),
+            PrimitiveHybridPrimitive::P23RotaryCarryBlendReadout.kernel_contract()
+        );
     }
 }

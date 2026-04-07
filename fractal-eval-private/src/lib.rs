@@ -21,7 +21,8 @@ pub use hybrid_attention::{
 };
 pub use hybrid_attention_training::{
     run_attention_only_hybrid_attention_smoke_train, run_primitive_hybrid_attention_smoke_train,
-    run_reference_ssm_hybrid_attention_smoke_train, HybridAttentionExecutionBackend,
+    run_reference_ssm_hybrid_attention_smoke_train, HybridAttentionCudaDeviceMemoryMetrics,
+    HybridAttentionCudaMemoryMetricKind, HybridAttentionExecutionBackend,
     HybridAttentionMatrixVariantOutcome, HybridAttentionRuntimeMetrics,
     HybridAttentionSmokeTrainConfig, HybridAttentionSmokeTrainReport, DEFAULT_V3A_SMOKE_BATCH_SIZE,
     DEFAULT_V3A_SMOKE_EVAL_BATCHES, DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY,

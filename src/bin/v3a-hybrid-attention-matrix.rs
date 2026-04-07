@@ -5,6 +5,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(feature = "cuda")]
+use fractal_core::cuda_device;
 use fractal_core::{
     initialize_metal_runtime, phase1_hybrid_attention_baseline_matrix,
     phase1_p20_candidate_variant, phase1_p21_candidate_variant, phase1_p22_candidate_variant,
@@ -18,11 +20,12 @@ use fractal_eval_private::{
     default_v3a_fineweb_stage0_canary_corpus_source, resolve_requested_v3a_results_ledger_path,
     run_attention_only_hybrid_attention_smoke_train, run_primitive_hybrid_attention_smoke_train,
     run_reference_ssm_hybrid_attention_smoke_train, ByteLevelSmokeCorpusSource,
-    HybridAttentionExecutionBackend, HybridAttentionMatrixLedgerReport,
-    HybridAttentionMatrixVariantOutcome, HybridAttentionSmokeTrainConfig, V3aResultsLedgerEntry,
-    DEFAULT_V3A_SMOKE_BATCH_SIZE, DEFAULT_V3A_SMOKE_EVAL_BATCHES,
-    DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY, DEFAULT_V3A_SMOKE_LEARNING_RATE, DEFAULT_V3A_SMOKE_SEED,
-    DEFAULT_V3A_SMOKE_SEQ_LEN, DEFAULT_V3A_SMOKE_TRAIN_STEPS, DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
+    HybridAttentionCudaDeviceMemoryMetrics, HybridAttentionExecutionBackend,
+    HybridAttentionMatrixLedgerReport, HybridAttentionMatrixVariantOutcome,
+    HybridAttentionSmokeTrainConfig, V3aResultsLedgerEntry, DEFAULT_V3A_SMOKE_BATCH_SIZE,
+    DEFAULT_V3A_SMOKE_EVAL_BATCHES, DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY,
+    DEFAULT_V3A_SMOKE_LEARNING_RATE, DEFAULT_V3A_SMOKE_SEED, DEFAULT_V3A_SMOKE_SEQ_LEN,
+    DEFAULT_V3A_SMOKE_TRAIN_STEPS, DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
 };
 use serde::{Deserialize, Serialize};
 
@@ -201,6 +204,10 @@ fn smoke_config(
 ) -> HybridAttentionSmokeTrainConfig {
     let mut config = HybridAttentionSmokeTrainConfig::new(corpus_source, output_dir, variant);
     config.execution_backend = args.backend.execution_backend();
+    config.cuda_device_index = match args.backend {
+        BackendSelection::Cuda => Some(args.cuda_device),
+        BackendSelection::Cpu | BackendSelection::Metal => None,
+    };
     config.seq_len = args.seq_len;
     config.window_stride = args.window_stride.unwrap_or(args.seq_len);
     config.batch_size = args.batch_size;
@@ -304,6 +311,7 @@ fn primitive_lane_note(
 #[derive(Debug, Clone, PartialEq)]
 struct CliArgs {
     backend: BackendSelection,
+    cuda_device: usize,
     corpus_paths: Vec<PathBuf>,
     jsonl_train_path: Option<PathBuf>,
     jsonl_eval_path: Option<PathBuf>,
@@ -335,6 +343,7 @@ struct CliArgs {
 impl CliArgs {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut backend = BackendSelection::Cpu;
+        let mut cuda_device = 0usize;
         let mut corpus_paths = Vec::new();
         let mut jsonl_train_path = None;
         let mut jsonl_eval_path = None;
@@ -371,6 +380,13 @@ impl CliArgs {
                         &iter
                             .next()
                             .ok_or_else(|| "--backend requires a value".to_owned())?,
+                    )?;
+                }
+                "--cuda-device" => {
+                    cuda_device = parse_usize(
+                        iter.next()
+                            .ok_or_else(|| "--cuda-device requires a value".to_owned())?,
+                        "--cuda-device",
                     )?;
                 }
                 "--corpus-path" => {
@@ -558,6 +574,7 @@ impl CliArgs {
 
         Ok(Self {
             backend,
+            cuda_device,
             corpus_paths,
             jsonl_train_path,
             jsonl_eval_path,
@@ -592,6 +609,7 @@ impl CliArgs {
 enum BackendSelection {
     Cpu,
     Metal,
+    Cuda,
 }
 
 impl BackendSelection {
@@ -599,6 +617,7 @@ impl BackendSelection {
         match value {
             "cpu" => Ok(Self::Cpu),
             "metal" => Ok(Self::Metal),
+            "cuda" => Ok(Self::Cuda),
             _ => Err(format!("unknown backend selection: {value}")),
         }
     }
@@ -607,6 +626,7 @@ impl BackendSelection {
         match self {
             Self::Cpu => "cpu",
             Self::Metal => "metal",
+            Self::Cuda => "cuda",
         }
     }
 
@@ -614,6 +634,7 @@ impl BackendSelection {
         match self {
             Self::Cpu => HybridAttentionExecutionBackend::Cpu,
             Self::Metal => HybridAttentionExecutionBackend::Metal,
+            Self::Cuda => HybridAttentionExecutionBackend::Cuda,
         }
     }
 }
@@ -922,6 +943,9 @@ fn render_table(report: &RenderedMatrixReport<'_>) -> String {
                     report.runtime.process_memory_metric.as_str(),
                     report.runtime.peak_process_memory_delta_bytes as f64 / (1024.0 * 1024.0),
                 );
+                if let Some(cuda_memory) = &report.runtime.cuda_device_memory {
+                    write_cuda_memory_line(&mut output, cuda_memory);
+                }
                 let _ = writeln!(
                     output,
                     "  total_ms={:.1} train_ms={:.1} eval_ms={:.1}+{:.1}",
@@ -950,14 +974,32 @@ fn render_table(report: &RenderedMatrixReport<'_>) -> String {
     output
 }
 
+fn write_cuda_memory_line(
+    output: &mut String,
+    cuda_memory: &HybridAttentionCudaDeviceMemoryMetrics,
+) {
+    let _ = writeln!(
+        output,
+        "  cuda_device={} cuda_mem_metric={} cuda_peak_mb={:.2} cuda_delta_mb={:.2}",
+        cuda_memory.device_index,
+        cuda_memory.memory_metric.as_str(),
+        cuda_memory.peak_used_bytes as f64 / (1024.0 * 1024.0),
+        cuda_memory.peak_used_delta_bytes as f64 / (1024.0 * 1024.0),
+    );
+}
+
 fn parse_positive_usize(value: String, flag: &str) -> Result<usize, String> {
-    let parsed = value
-        .parse::<usize>()
-        .map_err(|error| format!("invalid {flag} value '{value}': {error}"))?;
+    let parsed = parse_usize(value, flag)?;
     if parsed == 0 {
         return Err(format!("{flag} must be greater than zero"));
     }
     Ok(parsed)
+}
+
+fn parse_usize(value: String, flag: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .map_err(|error| format!("invalid {flag} value '{value}': {error}"))
 }
 
 fn default_output_dir(repo_root: &Path) -> PathBuf {
@@ -1093,6 +1135,31 @@ fn run_selected_variants_in_process(
                 &device,
             )
         }
+        BackendSelection::Cuda => {
+            #[cfg(feature = "cuda")]
+            {
+                let device = cuda_device(args.cuda_device);
+                run_selected_variants_with_backend::<fractal_core::CandleF32TrainBackend>(
+                    args,
+                    corpus_source,
+                    output_dir,
+                    matrix,
+                    primitive_variant,
+                    &device,
+                )
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                let _ = corpus_source;
+                let _ = output_dir;
+                let _ = matrix;
+                let _ = primitive_variant;
+                Err(
+                    "cuda backend requested, but v3a-hybrid-attention-matrix was not built with --features cuda"
+                        .to_owned(),
+                )
+            }
+        }
     }
 }
 
@@ -1219,6 +1286,8 @@ fn run_isolated_variant(
     command
         .arg("--backend")
         .arg(args.backend.as_str())
+        .arg("--cuda-device")
+        .arg(args.cuda_device.to_string())
         .arg("--variant")
         .arg(variant.as_str())
         .arg("--primitive-profile")
@@ -1311,7 +1380,8 @@ fn usage() -> String {
         concat!(
             "Usage: cargo run --bin v3a-hybrid-attention-matrix -- [options]\n\n",
             "Options:\n",
-            "  --backend <cpu|metal>       Execution backend for this run (default: cpu)\n",
+            "  --backend <cpu|metal|cuda>  Execution backend for this run (default: cpu)\n",
+            "  --cuda-device <n>           CUDA device index when --backend cuda (default: 0)\n",
             "  --corpus-path <path>         Override the default frozen FineWeb canary corpus with raw byte-level files (repeatable)\n",
             "  --jsonl-train-path <path>    Use an explicit JSONL text train split instead of the default canary corpus\n",
             "  --jsonl-eval-path <path>     Use an explicit JSONL text eval split instead of the default canary corpus\n",

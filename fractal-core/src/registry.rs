@@ -2592,9 +2592,11 @@ fn emit_training_diagnostic(
     Ok(())
 }
 
-fn read_cuda_memory_snapshot() -> Option<CudaMemorySnapshot> {
+pub fn read_cuda_memory_snapshot_for_device(device_index: usize) -> Option<CudaMemorySnapshot> {
     let output = Command::new("nvidia-smi")
         .args([
+            "--id",
+            &device_index.to_string(),
             "--query-gpu=memory.used,memory.free,memory.total",
             "--format=csv,noheader,nounits",
         ])
@@ -2609,6 +2611,10 @@ fn read_cuda_memory_snapshot() -> Option<CudaMemorySnapshot> {
             .next()?
             .trim(),
     )
+}
+
+fn read_cuda_memory_snapshot() -> Option<CudaMemorySnapshot> {
+    read_cuda_memory_snapshot_for_device(0)
 }
 
 fn parse_cuda_memory_snapshot(line: &str) -> Option<CudaMemorySnapshot> {

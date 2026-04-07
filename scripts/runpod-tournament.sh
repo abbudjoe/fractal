@@ -3,10 +3,10 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: scripts/runpod-tournament.sh [wrapper options] -- [tournament args]
+Usage: scripts/runpod-tournament.sh [wrapper options] -- [command args]
 
 Create or reuse a Runpod pod, sync the current repo snapshot, bootstrap Rust/CMake if
-needed, and run the tournament example with the CUDA backend.
+needed, and run the selected Rust target with the CUDA backend.
 
 Wrapper options:
   --pod-id ID                     Reuse a specific existing pod by id.
@@ -25,6 +25,8 @@ Wrapper options:
   --timeout-seconds N             Wait timeout for pod + SSH readiness. Default: 900
   --poll-seconds N                Poll interval while waiting. Default: 5
   --run-timeout-seconds N         Bound remote tournament runtime with timeout(1).
+  --binary-kind KIND             Cargo target kind: example or bin. Default: example
+  --binary-name NAME             Cargo target name. Default: tournament
   --no-compile                    Reuse a cached remote binary and fail if it is missing.
   --stop-after-run                Always stop the pod after the command finishes.
   --keep-pod                      Never stop the pod automatically.
@@ -40,7 +42,7 @@ Notes:
     tree in `remote/` and a wrapper manifest in `metadata/wrapper-manifest.json`.
   - Wrapper manifests now record Experiment Interface v1-style identity:
     logical experiment id/name stay stable across retries, while each attempt gets a new run id.
-  - Tournament arguments after "--" are passed to the cached release example binary as:
+  - Command arguments after "--" are passed to the cached release binary as:
       <cached-binary> --backend cuda ...
 
 Examples:
@@ -53,6 +55,13 @@ Examples:
     --gpu-id "NVIDIA A100 80GB PCIe" \
     --keep-pod \
     -- --sequence first-run
+
+  scripts/runpod-tournament.sh \
+    --pod-name fractal-v3a \
+    --gpu-id "NVIDIA A100 80GB PCIe" \
+    --binary-kind bin \
+    --binary-name v3a-hybrid-attention-matrix \
+    -- --variant all --primitive-profile p2-3 --steps 16 --eval-batches 4
 EOF
 }
 
@@ -441,7 +450,7 @@ from typing import Any
     branch,
     commit_sha,
     pod_name,
-    *tournament_args,
+    *command_args,
 ) = sys.argv[1:]
 
 results_root = Path(results_root_raw)
@@ -839,7 +848,8 @@ manifest = {
     },
     "runtime": {
         "run_timeout_seconds": int(run_timeout_seconds),
-        "tournament_args": tournament_args,
+        "command_args": command_args,
+        "tournament_args": command_args,
         "backend": "cuda",
     },
     "experiment": experiment,
@@ -997,13 +1007,15 @@ PY
 
     write_local_wrapper_manifest "running" 0 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RUN_LOCAL_BRANCH" "$local_build_key" "$RUN_LOCAL_COMMIT_SHA"
 
-    log "running remote CUDA tournament"
+    log "running remote CUDA ${BINARY_KIND}:${BINARY_NAME}"
     "${SSH_BASE[@]}" bash -s -- \
         "$REMOTE_DIR" \
         "$STATE_DIR" \
         "$RUN_LOCAL_BRANCH" \
         "$RUN_LOCAL_COMMIT_SHA" \
         "$local_build_key" \
+        "$BINARY_KIND" \
+        "$BINARY_NAME" \
         "$NO_COMPILE" \
         "$RUN_TIMEOUT_SECONDS" \
         "$RUN_ID" \
@@ -1017,12 +1029,14 @@ state_dir="$2"
 local_branch="$3"
 local_commit_sha="$4"
 local_build_key="$5"
-no_compile="$6"
-run_timeout_seconds="$7"
-run_id="$8"
-pod_id="$9"
-experiment_context_b64="${10}"
-shift 10
+binary_kind="$6"
+binary_name="$7"
+no_compile="$8"
+run_timeout_seconds="$9"
+run_id="${10}"
+pod_id="${11}"
+experiment_context_b64="${12}"
+shift 12
 
 if [ -f "$HOME/.cargo/env" ]; then
     # shellcheck disable=SC1090
@@ -1047,7 +1061,7 @@ export FRACTAL_COMMIT_SHA="$local_commit_sha"
 export FRACTAL_WRAPPER_TIMEOUT_SECONDS="$run_timeout_seconds"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 binary_dir="$state_dir/bin"
-binary_path="$binary_dir/tournament"
+binary_path="$binary_dir/$binary_name"
 build_key_file="$state_dir/last-build-key.txt"
 remote_manifest="$state_dir/manifests/run-manifest.json"
 
@@ -1072,6 +1086,8 @@ write_manifest() {
         "$local_branch" \
         "$local_commit_sha" \
         "$local_build_key" \
+        "$binary_kind" \
+        "$binary_name" \
         "$run_timeout_seconds" \
         "$state_dir" \
         "$remote_dir" \
@@ -1090,11 +1106,13 @@ import sys
     local_branch,
     local_commit_sha,
     local_build_key,
+    binary_kind,
+    binary_name,
     run_timeout_seconds,
     state_dir,
     remote_dir,
     experiment_context_b64,
-    *tournament_args,
+    *command_args,
 ) = sys.argv[1:]
 
 experiment = json.loads(base64.b64decode(experiment_context_b64).decode("utf-8"))
@@ -1110,8 +1128,11 @@ manifest = {
     },
     "runtime": {
         "backend": "cuda",
+        "binary_kind": binary_kind,
+        "binary_name": binary_name,
         "run_timeout_seconds": int(run_timeout_seconds),
-        "tournament_args": tournament_args,
+        "command_args": command_args,
+        "tournament_args": command_args,
     },
     "paths": {
         "state_dir": state_dir,
@@ -1127,7 +1148,8 @@ path_obj.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 PY
 }
 
-write_manifest "running" 0 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$@"
+command_args=("$@")
+write_manifest "running" 0 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${command_args[@]}"
 
 cleanup_manifest() {
     local exit_code="$1"
@@ -1139,7 +1161,7 @@ cleanup_manifest() {
     fi
     write_manifest "$final_status" "$exit_code" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$@" || true
 }
-trap 'rc=$?; cleanup_manifest "$rc" "$@"' EXIT
+trap 'rc=$?; cleanup_manifest "$rc" "${command_args[@]}"' EXIT
 
 needs_build=1
 if [ -x "$binary_path" ] && [ -f "$build_key_file" ] && [ "$(cat "$build_key_file")" = "$local_build_key" ]; then
@@ -1164,9 +1186,14 @@ if [ "$needs_build" -eq 1 ]; then
     fi
     echo "[runpod-wrapper] using system bfd linker for remote cargo build" \
         | tee -a "$state_dir/logs/latest.log"
-    stdbuf -oL -eL cargo build --release --features cuda --example tournament \
+    stdbuf -oL -eL cargo build --release --features cuda --"$binary_kind" "$binary_name" \
         2>&1 | tee -a "$state_dir/logs/latest.log"
-    cp "$CARGO_TARGET_DIR/release/examples/tournament" "$binary_path"
+    if [ "$binary_kind" = "example" ]; then
+        built_binary_path="$CARGO_TARGET_DIR/release/examples/$binary_name"
+    else
+        built_binary_path="$CARGO_TARGET_DIR/release/$binary_name"
+    fi
+    cp "$built_binary_path" "$binary_path"
     chmod +x "$binary_path"
     printf '%s\n' "$local_build_key" > "$build_key_file"
 else
@@ -1235,6 +1262,8 @@ STATE_DIR=""
 TIMEOUT_SECONDS="900"
 POLL_SECONDS="5"
 RUN_TIMEOUT_SECONDS="0"
+BINARY_KIND="example"
+BINARY_NAME="tournament"
 NO_COMPILE=0
 STOP_MODE="auto"
 DRY_RUN=0
@@ -1324,6 +1353,14 @@ while [ $# -gt 0 ]; do
             RUN_TIMEOUT_SECONDS="$2"
             shift 2
             ;;
+        --binary-kind)
+            BINARY_KIND="$2"
+            shift 2
+            ;;
+        --binary-name)
+            BINARY_NAME="$2"
+            shift 2
+            ;;
         --no-compile)
             NO_COMPILE=1
             shift
@@ -1361,6 +1398,14 @@ require_cmd ssh
 require_cmd tar
 require_cmd git
 
+case "$BINARY_KIND" in
+    example|bin)
+        ;;
+    *)
+        die "invalid --binary-kind: $BINARY_KIND (expected example or bin)"
+        ;;
+esac
+
 trap cleanup EXIT
 
 resolve_ssh_key
@@ -1376,9 +1421,9 @@ if [ "$DRY_RUN" -eq 1 ]; then
         log "dry-run remote dir: $REMOTE_DIR"
     fi
     if [ "$NO_COMPILE" -eq 1 ]; then
-        log "dry-run tournament command: <cached-binary> --backend cuda $(quote_cmd "${TOURNAMENT_ARGS[@]}")"
+        log "dry-run command: <cached-binary> --backend cuda $(quote_cmd "${TOURNAMENT_ARGS[@]}")"
     else
-        log "dry-run tournament command: cargo build --release --features cuda --example tournament && <cached-binary> --backend cuda $(quote_cmd "${TOURNAMENT_ARGS[@]}")"
+        log "dry-run command: cargo build --release --features cuda --${BINARY_KIND} ${BINARY_NAME} && <cached-binary> --backend cuda $(quote_cmd "${TOURNAMENT_ARGS[@]}")"
     fi
     exit 0
 fi
