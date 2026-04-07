@@ -403,7 +403,7 @@ build_remote_tournament_args() {
     REMOTE_TOURNAMENT_ARGS=()
     local index=0
     local arg
-    local manifest_path
+    local raw_path
     local rewritten
     local has_output_dir=0
     local has_ledger_path=0
@@ -415,12 +415,20 @@ build_remote_tournament_args() {
         if [ "$arg" = "--ledger-path" ] && [ $((index + 1)) -lt "${#TOURNAMENT_ARGS[@]}" ]; then
             has_ledger_path=1
         fi
-        if [ "$arg" = "--experiment-manifest" ] && [ $((index + 1)) -lt "${#TOURNAMENT_ARGS[@]}" ]; then
-            manifest_path="${TOURNAMENT_ARGS[$((index + 1))]}"
-            if [ "${manifest_path#${REPO_ROOT}/}" != "$manifest_path" ]; then
-                rewritten="${REMOTE_DIR}/${manifest_path#${REPO_ROOT}/}"
+        if [[ "$arg" = "--experiment-manifest" \
+            || "$arg" = "--jsonl-train-path" \
+            || "$arg" = "--jsonl-eval-path" \
+            || "$arg" = "--corpus-path" \
+            || "$arg" = "--output-dir" \
+            || "$arg" = "--ledger-path" ]] \
+            && [ $((index + 1)) -lt "${#TOURNAMENT_ARGS[@]}" ]; then
+            raw_path="${TOURNAMENT_ARGS[$((index + 1))]}"
+            if [ "$raw_path" = "$REPO_ROOT" ]; then
+                rewritten="$REMOTE_DIR"
+            elif [ "${raw_path#${REPO_ROOT}/}" != "$raw_path" ]; then
+                rewritten="${REMOTE_DIR}/${raw_path#${REPO_ROOT}/}"
             else
-                rewritten="$manifest_path"
+                rewritten="$raw_path"
             fi
             REMOTE_TOURNAMENT_ARGS+=("$arg" "$rewritten")
             index=$((index + 2))

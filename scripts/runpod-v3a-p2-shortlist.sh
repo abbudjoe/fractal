@@ -28,7 +28,31 @@ already_recorded() {
   if [[ ! -d "${LOCAL_RESULTS_ROOT}" ]]; then
     return 1
   fi
-  rg -q "\"run_label\":\"${run_label}\"" "${LOCAL_RESULTS_ROOT}"
+  python3 - "${LOCAL_RESULTS_ROOT}" "${run_label}" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+target = sys.argv[2]
+
+for manifest_path in root.glob("**/metadata/wrapper-manifest.json"):
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except Exception:
+        continue
+    if manifest.get("status") != "success":
+        continue
+    runtime = manifest.get("runtime") or {}
+    command_args = runtime.get("command_args") or []
+    for index, value in enumerate(command_args):
+        if value == "--run-label" and index + 1 < len(command_args) and command_args[index + 1] == target:
+            sys.exit(0)
+
+sys.exit(1)
+PY
 }
 
 build_common_args() {
