@@ -1444,7 +1444,7 @@ PY
     else
         echo "[runpod-wrapper] reusing cached python environment" | tee -a "$state_dir/logs/latest.log"
     fi
-    run_command=("$python_exec" "$script_path" --backend cuda "$@")
+    run_command=("$python_exec" "$script_path" --backend cuda "${command_args[@]}")
 else
     needs_build=1
     if [ -x "$binary_path" ] && [ -f "$build_key_file" ] && [ "$(cat "$build_key_file")" = "$local_build_key" ]; then
@@ -1482,7 +1482,7 @@ else
     else
         echo "[runpod-wrapper] reusing cached release binary" | tee -a "$state_dir/logs/latest.log"
     fi
-    run_command=("$binary_path" --backend cuda "$@")
+    run_command=("$binary_path" --backend cuda "${command_args[@]}")
 fi
 
 if [ -n "$run_timeout_seconds" ] && [ "$run_timeout_seconds" -gt 0 ]; then
