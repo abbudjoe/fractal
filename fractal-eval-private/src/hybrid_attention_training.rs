@@ -146,6 +146,7 @@ pub struct HybridAttentionSmokeTrainConfig {
     pub eval_holdout_every: usize,
     pub learning_rate: f64,
     pub seed: u64,
+    pub data_seed: Option<u64>,
     pub vocabulary: ByteLevelVocabularyContract,
 }
 
@@ -171,6 +172,7 @@ impl HybridAttentionSmokeTrainConfig {
             eval_holdout_every: DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY,
             learning_rate: DEFAULT_V3A_SMOKE_LEARNING_RATE,
             seed: DEFAULT_V3A_SMOKE_SEED,
+            data_seed: None,
             vocabulary: ByteLevelVocabularyContract::default(),
         }
     }
@@ -431,6 +433,7 @@ where
         config.window_stride,
         config.eval_holdout_every,
         config.batch_size,
+        config.data_seed,
         device,
     )?;
     let criterion = CrossEntropyLossConfig::new()

@@ -1,4 +1,7 @@
 pub mod hybrid_attention;
+pub mod hybrid_attention_goe;
+pub mod hybrid_attention_mini_moe;
+pub mod hybrid_attention_scale_proxy;
 pub mod hybrid_attention_training;
 pub mod hybrid_prevalidation;
 pub mod hybrid_training;
@@ -18,6 +21,23 @@ pub use hybrid_attention::{
     resolve_requested_v3a_results_ledger_path, HybridAttentionMatrixConfig,
     HybridAttentionMatrixLedgerReport, HybridAttentionMatrixPlan, HybridAttentionRunnerLocation,
     V3aResultsLedgerEntry, V3aResultsLedgerKind, DEFAULT_V3A_RESULTS_LEDGER_PATH,
+};
+pub use hybrid_attention_goe::{
+    append_goe_results_ledger_entry, default_goe_results_ledger_path, read_goe_results_ledger,
+    resolve_requested_goe_results_ledger_path, run_attention_only_goe_smoke_train,
+    run_attention_only_recurrent_goe_smoke_train, run_reference_ssm_goe_smoke_train,
+    GoeResultsLedgerEntry, GoeResultsLedgerKind, GraphOfExpertsExperimentReport,
+    GraphOfExpertsExperimentVariantKind, GraphOfExpertsExperimentVariantSummary,
+    GraphOfExpertsRoutingSummary, GraphOfExpertsSmokeTrainConfig, GraphOfExpertsSmokeTrainReport,
+    RecurrentGraphOfExpertsSmokeTrainConfig, RecurrentGraphOfExpertsSmokeTrainReport,
+    DEFAULT_GOE_RESULTS_LEDGER_PATH,
+};
+pub use hybrid_attention_mini_moe::{run_mini_moe_smoke_train, MiniMoeSmokeTrainConfig, MiniMoeSmokeTrainReport};
+pub use hybrid_attention_scale_proxy::{
+    run_attention_only_recurrent_scale_proxy_smoke_train,
+    run_attention_only_scale_proxy_smoke_train, RecurrentScaleProxySmokeTrainConfig,
+    RecurrentScaleProxySmokeTrainReport, ScaleProxyRoutingSummary, ScaleProxySmokeTrainConfig,
+    ScaleProxySmokeTrainReport,
 };
 pub use hybrid_attention_training::{
     run_attention_only_hybrid_attention_smoke_train, run_primitive_hybrid_attention_smoke_train,

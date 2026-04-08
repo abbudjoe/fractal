@@ -11,6 +11,7 @@ use burn::{
     record::{BinFileRecorder, FullPrecisionSettings, Recorder},
     tensor::{backend::AutodiffBackend, backend::Backend, Int, Tensor, TensorData},
 };
+use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -598,12 +599,14 @@ pub(crate) fn load_byte_level_smoke_batches<B: Backend>(
     window_stride: usize,
     eval_holdout_every: usize,
     batch_size: usize,
+    data_seed: Option<u64>,
     device: &B::Device,
 ) -> Result<SmokeBatchSplit<B>, FractalError> {
     let corpus = load_byte_level_corpus(paths)?;
     let sequences = byte_sequences_from_corpus(&corpus.files, seq_len, window_stride)?;
-    let (train_sequences, eval_sequences) =
+    let (mut train_sequences, eval_sequences) =
         split_sequences_for_eval(sequences, eval_holdout_every)?;
+    maybe_shuffle_train_sequences(&mut train_sequences, data_seed);
     let train_batches = sequences_into_batches::<B>(train_sequences, batch_size, device)?;
     let eval_batches = sequences_into_batches::<B>(eval_sequences, batch_size, device)?;
     let total_sequences = train_batches
@@ -643,6 +646,7 @@ pub(crate) fn load_byte_level_smoke_batches_from_source<B: Backend>(
     window_stride: usize,
     eval_holdout_every: usize,
     batch_size: usize,
+    data_seed: Option<u64>,
     device: &B::Device,
 ) -> Result<SmokeBatchSplit<B>, FractalError> {
     source.validate()?;
@@ -653,6 +657,7 @@ pub(crate) fn load_byte_level_smoke_batches_from_source<B: Backend>(
             window_stride,
             eval_holdout_every,
             batch_size,
+            data_seed,
             device,
         ),
         ByteLevelSmokeCorpusSource::JsonlTextSplits {
@@ -667,6 +672,7 @@ pub(crate) fn load_byte_level_smoke_batches_from_source<B: Backend>(
             seq_len,
             window_stride,
             batch_size,
+            data_seed,
             device,
         ),
     }
@@ -714,12 +720,14 @@ fn load_byte_level_smoke_batches_from_jsonl_splits<B: Backend>(
     seq_len: usize,
     window_stride: usize,
     batch_size: usize,
+    data_seed: Option<u64>,
     device: &B::Device,
 ) -> Result<SmokeBatchSplit<B>, FractalError> {
     let train_documents = load_jsonl_text_documents(train_path, text_field)?;
     let eval_documents = load_jsonl_text_documents(eval_path, text_field)?;
-    let train_sequences = byte_sequences_from_corpus(&train_documents, seq_len, window_stride)?;
+    let mut train_sequences = byte_sequences_from_corpus(&train_documents, seq_len, window_stride)?;
     let eval_sequences = byte_sequences_from_corpus(&eval_documents, seq_len, window_stride)?;
+    maybe_shuffle_train_sequences(&mut train_sequences, data_seed);
     let train_batches = sequences_into_batches::<B>(train_sequences, batch_size, device)?;
     let eval_batches = sequences_into_batches::<B>(eval_sequences, batch_size, device)?;
     let total_sequences = train_batches
@@ -756,6 +764,14 @@ fn load_byte_level_smoke_batches_from_jsonl_splits<B: Backend>(
         train_batches,
         eval_batches,
     ))
+}
+
+fn maybe_shuffle_train_sequences(sequences: &mut [ByteSequence], data_seed: Option<u64>) {
+    let Some(data_seed) = data_seed else {
+        return;
+    };
+    let mut rng = StdRng::seed_from_u64(data_seed);
+    sequences.shuffle(&mut rng);
 }
 
 fn load_jsonl_text_documents(path: &Path, text_field: &str) -> Result<Vec<Vec<u8>>, FractalError> {
@@ -1165,9 +1181,10 @@ mod tests {
         );
 
         let device = <TestBackend as Backend>::Device::default();
-        let (corpus, train_batches, eval_batches) =
-            load_byte_level_smoke_batches_from_source::<TestBackend>(&source, 8, 8, 10, 1, &device)
-                .unwrap();
+        let (corpus, train_batches, eval_batches) = load_byte_level_smoke_batches_from_source::<
+            TestBackend,
+        >(&source, 8, 8, 10, 1, None, &device)
+        .unwrap();
 
         assert_eq!(corpus.files, vec![train_path.clone(), eval_path.clone()]);
         assert!(corpus.train_sequences > 0);
@@ -1190,6 +1207,70 @@ mod tests {
                 .sum::<usize>(),
             corpus.eval_sequences
         );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn data_seed_shuffles_train_order_only() {
+        let root = unique_temp_dir("v2-jsonl-smoke-data-seed");
+        fs::create_dir_all(&root).unwrap();
+        let train_path = root.join("train.jsonl");
+        let eval_path = root.join("eval.jsonl");
+        fs::write(
+            &train_path,
+            concat!(
+                "{\"text\":\"abcdefghijklmnop\\n\"}\n",
+                "{\"text\":\"qrstuvwxyz012345\\n\"}\n"
+            ),
+        )
+        .unwrap();
+        fs::write(&eval_path, "{\"text\":\"6789ABCDEFGHIJKL\\n\"}\n").unwrap();
+        let source = ByteLevelSmokeCorpusSource::jsonl_text_splits(
+            "jsonl-smoke-seeded",
+            &train_path,
+            &eval_path,
+            "text",
+        );
+
+        let device = <TestBackend as Backend>::Device::default();
+        let (_, train_fixed, eval_fixed) =
+            load_byte_level_smoke_batches_from_source::<TestBackend>(
+                &source, 4, 4, 10, 1, None, &device,
+            )
+            .unwrap();
+        let (_, train_shuffled, eval_shuffled) = load_byte_level_smoke_batches_from_source::<
+            TestBackend,
+        >(&source, 4, 4, 10, 1, Some(7), &device)
+        .unwrap();
+
+        let train_fixed_first = train_fixed[0]
+            .input_ids
+            .clone()
+            .to_data()
+            .to_vec::<i64>()
+            .unwrap();
+        let train_shuffled_first = train_shuffled[0]
+            .input_ids
+            .clone()
+            .to_data()
+            .to_vec::<i64>()
+            .unwrap();
+        let eval_fixed_first = eval_fixed[0]
+            .input_ids
+            .clone()
+            .to_data()
+            .to_vec::<i64>()
+            .unwrap();
+        let eval_shuffled_first = eval_shuffled[0]
+            .input_ids
+            .clone()
+            .to_data()
+            .to_vec::<i64>()
+            .unwrap();
+
+        assert_ne!(train_fixed_first, train_shuffled_first);
+        assert_eq!(eval_fixed_first, eval_shuffled_first);
 
         fs::remove_dir_all(root).unwrap();
     }

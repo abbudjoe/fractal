@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DREEGMOR Mini-MoE Architecture Walkthrough</title>
+  <style>
+    :root {
+      --bg: #f5f1e8;
+      --paper: #fffaf0;
+      --ink: #1f1a16;
+      --muted: #6a625c;
+      --line: #ccbda9;
+      --accent: #d46a2f;
+      --accent-soft: #f3c9a7;
+      --shared: #dbe8f3;
+      --shared-stroke: #6c8ead;
+      --moe: #f8e5b5;
+      --moe-stroke: #b8922d;
+      --router: #f7d8d8;
+      --router-stroke: #b76060;
+      --expert: #dff1dd;
+      --expert-stroke: #5e9d67;
+      --state: #e6dcf8;
+      --state-stroke: #8160b2;
+      --shadow: 0 12px 36px rgba(36, 27, 18, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at top left, rgba(212, 106, 47, 0.08), transparent 24%),
+        radial-gradient(circle at top right, rgba(94, 157, 103, 0.08), transparent 20%),
+        linear-gradient(180deg, #f8f2e8 0%, #f3ede4 100%);
+      color: var(--ink);
+      font-family: "Avenir Next", "Segoe UI", Helvetica, Arial, sans-serif;
+      line-height: 1.45;
+    }
+
+    main {
+      width: min(1200px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 32px 0 56px;
+    }
+
+    header {
+      margin-bottom: 24px;
+      padding: 28px 28px 20px;
+      background: rgba(255, 250, 240, 0.82);
+      border: 1px solid rgba(204, 189, 169, 0.9);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+    }
+
+    h1, h2, h3 {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+    }
+
+    h1 {
+      font-size: clamp(2rem, 4vw, 3.4rem);
+      margin-bottom: 10px;
+    }
+
+    h2 {
+      font-size: 1.45rem;
+      margin-bottom: 8px;
+    }
+
+    p {
+      margin: 0;
+    }
+
+    .lede {
+      color: var(--muted);
+      max-width: 78ch;
+      font-size: 1.04rem;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    button {
+      appearance: none;
+      border: 1px solid rgba(124, 103, 83, 0.25);
+      border-radius: 999px;
+      background: white;
+      color: var(--ink);
+      padding: 10px 14px;
+      font: inherit;
+      font-size: 0.95rem;
+      cursor: pointer;
+      transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+      box-shadow: 0 4px 10px rgba(31, 26, 22, 0.06);
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      border-color: rgba(212, 106, 47, 0.45);
+      box-shadow: 0 8px 16px rgba(31, 26, 22, 0.08);
+    }
+
+    .sample-string {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    .sample-token,
+    .route-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(31, 26, 22, 0.12);
+      background: rgba(255, 255, 255, 0.7);
+      font-size: 0.94rem;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+    }
+
+    .cards {
+      display: grid;
+      gap: 18px;
+    }
+
+    .card {
+      background: rgba(255, 250, 240, 0.88);
+      border: 1px solid rgba(204, 189, 169, 0.9);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .card-header {
+      padding: 22px 24px 14px;
+    }
+
+    .card-header p {
+      margin-top: 6px;
+      color: var(--muted);
+      max-width: 84ch;
+    }
+
+    .diagram-wrap {
+      padding: 0 12px 14px;
+    }
+
+    svg {
+      width: 100%;
+      height: auto;
+      display: block;
+      border-radius: 18px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.9), rgba(252,247,239,0.95));
+    }
+
+    .legend-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+      padding: 0 24px 22px;
+    }
+
+    .legend-card {
+      border: 1px solid rgba(204, 189, 169, 0.8);
+      border-radius: 18px;
+      padding: 14px 16px;
+      background: rgba(255, 255, 255, 0.65);
+    }
+
+    .legend-card h3 {
+      font-size: 1rem;
+      margin-bottom: 10px;
+    }
+
+    .route-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .caption {
+      padding: 0 24px 22px;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .footer-note {
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .node-label {
+      font-size: 14px;
+      fill: var(--ink);
+      font-weight: 600;
+    }
+
+    .node-subtitle {
+      font-size: 11px;
+      fill: var(--muted);
+      letter-spacing: 0.02em;
+    }
+
+    .box {
+      stroke-width: 2;
+      rx: 16;
+      ry: 16;
+    }
+
+    .box.shared {
+      fill: var(--shared);
+      stroke: var(--shared-stroke);
+    }
+
+    .box.moe {
+      fill: var(--moe);
+      stroke: var(--moe-stroke);
+    }
+
+    .box.router {
+      fill: var(--router);
+      stroke: var(--router-stroke);
+    }
+
+    .box.expert {
+      fill: var(--expert);
+      stroke: var(--expert-stroke);
+    }
+
+    .box.state {
+      fill: var(--state);
+      stroke: var(--state-stroke);
+    }
+
+    .flow-line {
+      fill: none;
+      stroke: rgba(106, 98, 92, 0.44);
+      stroke-width: 3.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .flow-line.branch {
+      stroke-width: 3;
+      stroke-dasharray: 0;
+    }
+
+    .flow-line.guide {
+      stroke: rgba(106, 98, 92, 0.24);
+      stroke-dasharray: 8 8;
+    }
+
+    .token-layer .token text {
+      font-size: 12px;
+      font-weight: 700;
+      fill: #fff;
+      text-anchor: middle;
+      dominant-baseline: middle;
+      pointer-events: none;
+    }
+
+    .token-layer .token rect {
+      rx: 12;
+      ry: 12;
+      filter: drop-shadow(0 4px 6px rgba(31, 26, 22, 0.16));
+    }
+
+    .pill-e1 { background: #5e9d67; color: #fff; }
+    .pill-e2 { background: #3f7cac; color: #fff; }
+    .pill-e3 { background: #b76060; color: #fff; }
+    .pill-e4 { background: #8f69b5; color: #fff; }
+    .pill-shared { background: #7c736b; color: #fff; }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 32px;
+      height: 24px;
+      padding: 0 8px;
+      border-radius: 999px;
+      color: white;
+      font-size: 0.8rem;
+      font-weight: 700;
+    }
+
+    @media (max-width: 800px) {
+      main {
+        width: min(100vw - 20px, 1200px);
+        padding-top: 20px;
+      }
+
+      header,
+      .card-header,
+      .caption,
+      .legend-grid {
+        padding-left: 16px;
+        padding-right: 16px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>DREEGMOR Mini-MoE Walkthrough</h1>
+      <p class="lede">
+        This page turns the architectures we discussed into animated token-flow diagrams. The sample
+        token string is illustrative only. The goal is to make the structural differences visible
+        before we commit to the next model family.
+      </p>
+      <div class="sample-string" aria-label="Sample token string">
+        <span class="sample-token"><span class="badge pill-shared">t1</span> the</span>
+        <span class="sample-token"><span class="badge pill-shared">t2</span> router</span>
+        <span class="sample-token"><span class="badge pill-shared">t3</span> refines</span>
+        <span class="sample-token"><span class="badge pill-shared">t4</span> expert</span>
+        <span class="sample-token"><span class="badge pill-shared">t5</span> choice</span>
+      </div>
+      <div class="controls">
+        <button id="play">Play</button>
+        <button id="pause">Pause</button>
+        <button id="restart">Restart</button>
+      </div>
+      <p class="footer-note">
+        Reading order: dense baseline, explicit block seam, one-shot MoE block, recurrent MoE block.
+      </p>
+    </header>
+
+    <section class="cards">
+      <article class="card">
+        <div class="card-header">
+          <h2>1. Dense A Baseline</h2>
+          <p>
+            Every token follows the same shared path through the entire stack. There is no routing
+            decision, no expert selection, and no conditional computation.
+          </p>
+        </div>
+        <div class="diagram-wrap">
+          <svg id="diagram-dense" viewBox="0 0 1180 240" role="img" aria-label="Dense A baseline diagram"></svg>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-header">
+          <h2>2. Explicit Block Seam</h2>
+          <p>
+            This is the reusable block abstraction we need in Rust: shared attention path, then a
+            pluggable FFN slot. The FFN slot is where dense FFN, one-shot MoE FFN, and recurrent
+            MoE FFN can differ without rewriting the rest of the block.
+          </p>
+        </div>
+        <div class="diagram-wrap">
+          <svg id="diagram-block" viewBox="0 0 1180 260" role="img" aria-label="Transformer block with pluggable FFN seam"></svg>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-header">
+          <h2>3. Reference Mini-MoE: One-Shot Router</h2>
+          <p>
+            Tokens reach the FFN seam, the router scores experts once, and each token takes a sparse
+            top-1 expert path before the block recombines.
+          </p>
+        </div>
+        <div class="diagram-wrap">
+          <svg id="diagram-oneshot" viewBox="0 0 1180 420" role="img" aria-label="One-shot MoE FFN block"></svg>
+        </div>
+        <div class="legend-grid">
+          <div class="legend-card">
+            <h3>Example top-1 assignments</h3>
+            <div class="route-list">
+              <span class="route-chip"><span class="badge pill-e1">E1</span> the</span>
+              <span class="route-chip"><span class="badge pill-e2">E2</span> router</span>
+              <span class="route-chip"><span class="badge pill-e3">E3</span> refines</span>
+              <span class="route-chip"><span class="badge pill-e2">E2</span> expert</span>
+              <span class="route-chip"><span class="badge pill-e4">E4</span> choice</span>
+            </div>
+          </div>
+          <div class="legend-card">
+            <h3>What stays shared</h3>
+            <div class="route-list">
+              <span class="route-chip">attention path</span>
+              <span class="route-chip">residual seam</span>
+              <span class="route-chip">block output</span>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-header">
+          <h2>4. Thesis Mini-MoE: Recurrent Router</h2>
+          <p>
+            The recurrent router refines the routing decision over multiple rounds before the final
+            top-1 expert path is chosen. The experts are still feedforward. The recurrence lives in
+            the controller, not in the expert FFNs themselves.
+          </p>
+        </div>
+        <div class="diagram-wrap">
+          <svg id="diagram-recurrent" viewBox="0 0 1180 460" role="img" aria-label="Recurrent router MoE FFN block"></svg>
+        </div>
+        <div class="legend-grid">
+          <div class="legend-card">
+            <h3>Round 1 draft routes</h3>
+            <div class="route-list">
+              <span class="route-chip"><span class="badge pill-e1">E1</span> the</span>
+              <span class="route-chip"><span class="badge pill-e2">E2</span> router</span>
+              <span class="route-chip"><span class="badge pill-e2">E2</span> refines</span>
+              <span class="route-chip"><span class="badge pill-e4">E4</span> expert</span>
+              <span class="route-chip"><span class="badge pill-e4">E4</span> choice</span>
+            </div>
+          </div>
+          <div class="legend-card">
+            <h3>Round 2 final routes</h3>
+            <div class="route-list">
+              <span class="route-chip"><span class="badge pill-e1">E1</span> the</span>
+              <span class="route-chip"><span class="badge pill-e2">E2</span> router</span>
+              <span class="route-chip"><span class="badge pill-e3">E3</span> refines</span>
+              <span class="route-chip"><span class="badge pill-e2">E2</span> expert</span>
+              <span class="route-chip"><span class="badge pill-e4">E4</span> choice</span>
+            </div>
+          </div>
+        </div>
+        <p class="caption">
+          In this illustration, <strong>refines</strong> and <strong>expert</strong> change assignments
+          between routing rounds. That is the architectural promise of recurrent routing: more than one
+          chance to decide before committing to an expert.
+        </p>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const tokenPalette = {
+      e1: "#5e9d67",
+      e2: "#3f7cac",
+      e3: "#b76060",
+      e4: "#8f69b5",
+      shared: "#7c736b",
+      accent: "#d46a2f",
+    };
+
+    function svgEl(name, attrs = {}) {
+      const el = document.createElementNS("http://www.w3.org/2000/svg", name);
+      Object.entries(attrs).forEach(([key, value]) => el.setAttribute(key, value));
+      return el;
+    }
+
+    function addText(svg, x, y, lines, className = "node-label") {
+      const text = svgEl("text", { x, y, class: className, "text-anchor": "middle" });
+      lines.forEach((line, index) => {
+        const tspan = svgEl("tspan", { x, dy: index === 0 ? 0 : 16 });
+        tspan.textContent = line;
+        text.appendChild(tspan);
+      });
+      svg.appendChild(text);
+      return text;
+    }
+
+    function addBox(svg, { x, y, w, h, kind, title, subtitle }) {
+      svg.appendChild(svgEl("rect", { x, y, width: w, height: h, class: `box ${kind}` }));
+      addText(svg, x + w / 2, y + h / 2 - 6, Array.isArray(title) ? title : [title]);
+      if (subtitle) {
+        addText(svg, x + w / 2, y + h / 2 + 20, [subtitle], "node-subtitle");
+      }
+    }
+
+    function addPath(svg, d, id, classes = "flow-line") {
+      const path = svgEl("path", { d, id, class: classes });
+      svg.appendChild(path);
+      return path;
+    }
+
+    function addArrow(svg, x1, y1, x2, y2, color = "rgba(106, 98, 92, 0.44)") {
+      const group = svgEl("g");
+      group.appendChild(svgEl("line", {
+        x1, y1, x2, y2,
+        stroke: color,
+        "stroke-width": 2,
+        "stroke-linecap": "round"
+      }));
+      const angle = Math.atan2(y2 - y1, x2 - x1);
+      const size = 8;
+      const p1x = x2 - size * Math.cos(angle - Math.PI / 6);
+      const p1y = y2 - size * Math.sin(angle - Math.PI / 6);
+      const p2x = x2 - size * Math.cos(angle + Math.PI / 6);
+      const p2y = y2 - size * Math.sin(angle + Math.PI / 6);
+      group.appendChild(svgEl("path", {
+        d: `M ${x2} ${y2} L ${p1x} ${p1y} L ${p2x} ${p2y} Z`,
+        fill: color
+      }));
+      svg.appendChild(group);
+    }
+
+    function createTokenGroup(svg, label, color) {
+      const group = svgEl("g", { class: "token" });
+      const width = Math.max(38, label.length * 9 + 18);
+      const rect = svgEl("rect", {
+        x: -width / 2,
+        y: -13,
+        width,
+        height: 26,
+        fill: color,
+        stroke: "rgba(255,255,255,0.5)",
+        "stroke-width": 1.2
+      });
+      const text = svgEl("text");
+      text.textContent = label;
+      group.appendChild(rect);
+      group.appendChild(text);
+      svg.querySelector(".token-layer").appendChild(group);
+      return group;
+    }
+
+    function buildDenseDiagram() {
+      const svg = document.getElementById("diagram-dense");
+      svg.innerHTML = '<g class="token-layer"></g>';
+      const y = 125;
+      addBox(svg, { x: 26, y: 82, w: 110, h: 86, kind: "shared", title: "Embedding", subtitle: "shared" });
+      for (let i = 0; i < 8; i += 1) {
+        addBox(svg, {
+          x: 160 + i * 110,
+          y: 82,
+          w: 88,
+          h: 86,
+          kind: "shared",
+          title: [`Block ${i + 1}`],
+          subtitle: "attention + FFN"
+        });
+      }
+      addBox(svg, { x: 1070, y: 82, w: 84, h: 86, kind: "shared", title: ["LM head"], subtitle: "shared" });
+      addPath(svg, "M 52 125 H 1120", "dense-flow", "flow-line");
+      return {
+        svg,
+        tokens: [
+          { label: "the", color: tokenPalette.shared, pathId: "dense-flow", duration: 13.2, offset: 0.0 },
+          { label: "router", color: tokenPalette.shared, pathId: "dense-flow", duration: 13.2, offset: 2.2 },
+          { label: "refines", color: tokenPalette.shared, pathId: "dense-flow", duration: 13.2, offset: 4.4 },
+          { label: "expert", color: tokenPalette.shared, pathId: "dense-flow", duration: 13.2, offset: 6.6 },
+          { label: "choice", color: tokenPalette.shared, pathId: "dense-flow", duration: 13.2, offset: 8.8 },
+        ]
+      };
+    }
+
+    function buildBlockDiagram() {
+      const svg = document.getElementById("diagram-block");
+      svg.innerHTML = '<g class="token-layer"></g>';
+      addBox(svg, { x: 26, y: 90, w: 128, h: 92, kind: "shared", title: ["Pre-attention", "norm"], subtitle: "shared" });
+      addBox(svg, { x: 186, y: 90, w: 150, h: 92, kind: "shared", title: "Attention", subtitle: "shared path" });
+      addBox(svg, { x: 370, y: 90, w: 130, h: 92, kind: "shared", title: ["Residual", "add"], subtitle: "shared" });
+      addBox(svg, { x: 536, y: 90, w: 128, h: 92, kind: "shared", title: ["Pre-FFN", "norm"], subtitle: "shared seam" });
+      addBox(svg, { x: 700, y: 76, w: 220, h: 120, kind: "moe", title: ["Pluggable FFN", "module"], subtitle: "dense or MoE" });
+      addBox(svg, { x: 956, y: 90, w: 130, h: 92, kind: "shared", title: ["Residual", "add"], subtitle: "shared" });
+      addPath(svg, "M 38 136 H 1088", "block-flow", "flow-line");
+      return {
+        svg,
+        tokens: [
+          { label: "the", color: tokenPalette.accent, pathId: "block-flow", duration: 9.2, offset: 0.0 },
+          { label: "router", color: tokenPalette.accent, pathId: "block-flow", duration: 9.2, offset: 1.8 },
+          { label: "refines", color: tokenPalette.accent, pathId: "block-flow", duration: 9.2, offset: 3.6 },
+        ]
+      };
+    }
+
+    function buildOneShotDiagram() {
+      const svg = document.getElementById("diagram-oneshot");
+      svg.innerHTML = '<g class="token-layer"></g>';
+
+      addBox(svg, { x: 28, y: 154, w: 188, h: 96, kind: "shared", title: ["Attention path", "and FFN seam"], subtitle: "shared" });
+      addBox(svg, { x: 270, y: 154, w: 150, h: 96, kind: "router", title: ["One-shot", "router"], subtitle: "top-1 scores" });
+      addBox(svg, { x: 946, y: 154, w: 180, h: 96, kind: "moe", title: ["Sparse mix", "and block output"], subtitle: "shared again" });
+
+      addBox(svg, { x: 566, y: 24,  w: 188, h: 72, kind: "expert", title: "Expert FFN 1", subtitle: "E1" });
+      addBox(svg, { x: 566, y: 112, w: 188, h: 72, kind: "expert", title: "Expert FFN 2", subtitle: "E2" });
+      addBox(svg, { x: 566, y: 224, w: 188, h: 72, kind: "expert", title: "Expert FFN 3", subtitle: "E3" });
+      addBox(svg, { x: 566, y: 312, w: 188, h: 72, kind: "expert", title: "Expert FFN 4", subtitle: "E4" });
+
+      addPath(svg, "M 62 202 H 420", "oneshot-base", "flow-line guide");
+      addArrow(svg, 420, 202, 420, 202);
+      addArrow(svg, 790, 60, 946, 202);
+      addArrow(svg, 790, 148, 946, 202);
+      addArrow(svg, 790, 260, 946, 202);
+      addArrow(svg, 790, 348, 946, 202);
+
+      addPath(svg, "M 62 202 H 420 C 490 202, 500 60, 566 60 H 754 C 832 60, 852 202, 946 202 H 1110",
+        "oneshot-e1", "flow-line branch");
+      addPath(svg, "M 62 202 H 420 C 492 202, 506 148, 566 148 H 754 C 832 148, 852 202, 946 202 H 1110",
+        "oneshot-e2", "flow-line branch");
+      addPath(svg, "M 62 202 H 420 C 492 202, 506 260, 566 260 H 754 C 832 260, 852 202, 946 202 H 1110",
+        "oneshot-e3", "flow-line branch");
+      addPath(svg, "M 62 202 H 420 C 490 202, 500 348, 566 348 H 754 C 832 348, 852 202, 946 202 H 1110",
+        "oneshot-e4", "flow-line branch");
+
+      return {
+        svg,
+        tokens: [
+          { label: "the", color: tokenPalette.e1, pathId: "oneshot-e1", duration: 11.2, offset: 0.0 },
+          { label: "router", color: tokenPalette.e2, pathId: "oneshot-e2", duration: 11.2, offset: 1.6 },
+          { label: "refines", color: tokenPalette.e3, pathId: "oneshot-e3", duration: 11.2, offset: 3.2 },
+          { label: "expert", color: tokenPalette.e2, pathId: "oneshot-e2", duration: 11.2, offset: 4.8 },
+          { label: "choice", color: tokenPalette.e4, pathId: "oneshot-e4", duration: 11.2, offset: 6.4 },
+        ]
+      };
+    }
+
+    function buildRecurrentDiagram() {
+      const svg = document.getElementById("diagram-recurrent");
+      svg.innerHTML = '<g class="token-layer"></g>';
+
+      addBox(svg, { x: 28, y: 184, w: 180, h: 96, kind: "shared", title: ["Attention path", "and FFN seam"], subtitle: "shared" });
+      addBox(svg, { x: 258, y: 184, w: 150, h: 96, kind: "router", title: ["Router", "round 1"], subtitle: "draft routes" });
+      addBox(svg, { x: 470, y: 54, w: 180, h: 92, kind: "state", title: ["Controller", "state update"], subtitle: "recurrent state" });
+      addBox(svg, { x: 700, y: 184, w: 150, h: 96, kind: "router", title: ["Router", "round 2"], subtitle: "final routes" });
+      addBox(svg, { x: 964, y: 184, w: 166, h: 96, kind: "moe", title: ["Sparse mix", "and block output"], subtitle: "shared again" });
+
+      addBox(svg, { x: 730, y: 12,  w: 180, h: 68, kind: "expert", title: "Expert FFN 1", subtitle: "E1" });
+      addBox(svg, { x: 730, y: 98,  w: 180, h: 68, kind: "expert", title: "Expert FFN 2", subtitle: "E2" });
+      addBox(svg, { x: 730, y: 294, w: 180, h: 68, kind: "expert", title: "Expert FFN 3", subtitle: "E3" });
+      addBox(svg, { x: 730, y: 380, w: 180, h: 68, kind: "expert", title: "Expert FFN 4", subtitle: "E4" });
+
+      addPath(svg, "M 58 232 H 408", "recurrent-common", "flow-line guide");
+      addArrow(svg, 408, 232, 470, 100);
+      addArrow(svg, 650, 100, 700, 232);
+
+      addPath(svg, "M 58 232 H 408 C 448 232, 454 100, 470 100 H 650 C 680 100, 692 46, 730 46 H 910 C 946 46, 952 232, 964 232 H 1110",
+        "recurrent-e1", "flow-line branch");
+      addPath(svg, "M 58 232 H 408 C 448 232, 454 100, 470 100 H 650 C 680 100, 692 132, 730 132 H 910 C 946 132, 952 232, 964 232 H 1110",
+        "recurrent-e2", "flow-line branch");
+      addPath(svg, "M 58 232 H 408 C 448 232, 454 100, 470 100 H 650 C 680 100, 692 328, 730 328 H 910 C 946 328, 952 232, 964 232 H 1110",
+        "recurrent-e3", "flow-line branch");
+      addPath(svg, "M 58 232 H 408 C 448 232, 454 100, 470 100 H 650 C 680 100, 692 414, 730 414 H 910 C 946 414, 952 232, 964 232 H 1110",
+        "recurrent-e4", "flow-line branch");
+
+      return {
+        svg,
+        tokens: [
+          { label: "the", color: tokenPalette.e1, pathId: "recurrent-e1", duration: 12.4, offset: 0.0 },
+          { label: "router", color: tokenPalette.e2, pathId: "recurrent-e2", duration: 12.4, offset: 1.8 },
+          { label: "refines", color: tokenPalette.e3, pathId: "recurrent-e3", duration: 12.4, offset: 3.6 },
+          { label: "expert", color: tokenPalette.e2, pathId: "recurrent-e2", duration: 12.4, offset: 5.4 },
+          { label: "choice", color: tokenPalette.e4, pathId: "recurrent-e4", duration: 12.4, offset: 7.2 },
+        ]
+      };
+    }
+
+    const diagrams = [
+      buildDenseDiagram(),
+      buildBlockDiagram(),
+      buildOneShotDiagram(),
+      buildRecurrentDiagram(),
+    ];
+
+    diagrams.forEach((diagram) => {
+      diagram.tokenInstances = diagram.tokens.map((token) => {
+        const node = createTokenGroup(diagram.svg, token.label, token.color);
+        const path = diagram.svg.querySelector(`#${token.pathId}`);
+        return {
+          ...token,
+          node,
+          path,
+          length: path.getTotalLength()
+        };
+      });
+    });
+
+    let running = true;
+    let simSeconds = 0;
+    let lastTs = 0;
+
+    function updateTokens() {
+      diagrams.forEach((diagram) => {
+        diagram.tokenInstances.forEach((token) => {
+          const progress = ((simSeconds + token.offset) % token.duration) / token.duration;
+          const point = token.path.getPointAtLength(token.length * progress);
+          token.node.setAttribute("transform", `translate(${point.x}, ${point.y})`);
+        });
+      });
+    }
+
+    function frame(ts) {
+      if (!lastTs) {
+        lastTs = ts;
+      }
+      const dt = (ts - lastTs) / 1000;
+      lastTs = ts;
+      if (running) {
+        simSeconds += dt;
+      }
+      updateTokens();
+      requestAnimationFrame(frame);
+    }
+
+    document.getElementById("play").addEventListener("click", () => {
+      running = true;
+    });
+
+    document.getElementById("pause").addEventListener("click", () => {
+      running = false;
+    });
+
+    document.getElementById("restart").addEventListener("click", () => {
+      simSeconds = 0;
+      running = true;
+      updateTokens();
+    });
+
+    updateTokens();
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>

@@ -12,5 +12,6 @@ path = "src/lib.rs"
 burn = { workspace = true }
 fractal-core = { path = "../fractal-core" }
 libc = "0.2"
+rand.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

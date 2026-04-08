@@ -7,11 +7,12 @@ use burn::{
         },
         Embedding, EmbeddingConfig, Initializer, LayerNorm, LayerNormConfig,
     },
-    tensor::{backend::Backend, Bool, Int, Tensor, TensorData},
+    tensor::{backend::Backend, Int, Tensor, TensorData},
 };
 use serde::{Deserialize, Serialize};
 
 use super::mamba3_baseline::{SimpleRmsNorm, DEFAULT_RUST_MAMBA3_NORM_EPS};
+use super::common::local_causal_mask;
 
 use crate::{
     error::FractalError,
@@ -1544,27 +1545,6 @@ pub fn build_reference_ssm_hybrid_attention_model<B: Backend>(
     ReferenceSsmHybridAttentionModel::new(shape, &variant.layer_schedule, device)
 }
 
-fn local_causal_mask<B: Backend>(
-    batch_size: usize,
-    seq_len: usize,
-    local_window: usize,
-    device: &B::Device,
-) -> Tensor<B, 3, Bool> {
-    let mut data = Vec::with_capacity(batch_size * seq_len * seq_len);
-    for _ in 0..batch_size {
-        for query in 0..seq_len {
-            let earliest_visible = query.saturating_sub(local_window.saturating_sub(1));
-            for key in 0..seq_len {
-                data.push(key < earliest_visible || key > query);
-            }
-        }
-    }
-    Tensor::from_data(
-        TensorData::new(data, [batch_size, seq_len, seq_len]),
-        device,
-    )
-}
-
 fn zero_flat_state<B: Backend>(
     batch_size: usize,
     d_model: usize,
@@ -1610,11 +1590,12 @@ mod tests {
 
     use super::{
         build_attention_only_hybrid_attention_model, build_primitive_hybrid_attention_model,
-        build_reference_ssm_hybrid_attention_model, local_causal_mask, rotate_state_pairs,
+        build_reference_ssm_hybrid_attention_model, rotate_state_pairs,
         zero_flat_state, P20RotaryStateOutputSequenceMixer, P21WideLatentSequenceMixer,
         P22WideLatentReadoutSequenceMixer, P23RotaryCarryBlendReadoutSequenceMixer,
         P2RotaryReadoutSequenceMixer,
     };
+    use super::super::common::local_causal_mask;
     use crate::{
         phase1_hybrid_attention_baseline_matrix, phase1_p20_candidate_variant,
         phase1_p21_candidate_variant, phase1_p22_candidate_variant, phase1_p23_candidate_variant,

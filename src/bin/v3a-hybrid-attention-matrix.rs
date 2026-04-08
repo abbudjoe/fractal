@@ -294,6 +294,7 @@ fn smoke_config(
     config.eval_holdout_every = args.eval_holdout_every;
     config.learning_rate = args.learning_rate;
     config.seed = args.seed;
+    config.data_seed = args.data_seed;
     config
 }
 
@@ -450,6 +451,7 @@ struct CliArgs {
     eval_holdout_every: usize,
     learning_rate: f64,
     seed: u64,
+    data_seed: Option<u64>,
     variant: VariantSelection,
     primitive_profile: PrimitiveProfile,
     reference_ssm_profile: ReferenceSsmProfile,
@@ -485,6 +487,7 @@ impl CliArgs {
         let mut eval_holdout_every = DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY;
         let mut learning_rate = DEFAULT_V3A_SMOKE_LEARNING_RATE;
         let mut seed = DEFAULT_V3A_SMOKE_SEED;
+        let mut data_seed = None;
         let mut variant = VariantSelection::All;
         let mut primitive_profile = PrimitiveProfile::P1;
         let mut reference_ssm_profile = ReferenceSsmProfile::RustMimoReference;
@@ -623,6 +626,14 @@ impl CliArgs {
                         .parse::<u64>()
                         .map_err(|error| format!("invalid --seed value '{value}': {error}"))?;
                 }
+                "--data-seed" => {
+                    let value = iter
+                        .next()
+                        .ok_or_else(|| "--data-seed requires a value".to_owned())?;
+                    data_seed = Some(value.parse::<u64>().map_err(|error| {
+                        format!("invalid --data-seed value '{value}': {error}")
+                    })?);
+                }
                 "--variant" => {
                     variant = VariantSelection::parse(
                         &iter
@@ -738,6 +749,7 @@ impl CliArgs {
             eval_holdout_every,
             learning_rate,
             seed,
+            data_seed,
             variant,
             primitive_profile,
             reference_ssm_profile,
@@ -1594,6 +1606,11 @@ fn run_isolated_variant(
         .arg(args.learning_rate.to_string())
         .arg("--seed")
         .arg(args.seed.to_string())
+        .args(
+            args.data_seed
+                .map(|seed| vec!["--data-seed".to_string(), seed.to_string()])
+                .unwrap_or_default(),
+        )
         .arg("--output")
         .arg("json")
         .arg("--output-dir")
@@ -1690,7 +1707,8 @@ fn usage() -> String {
             "  --full-eval-pass             Derive --eval-batches from the full eval split for the selected corpus\n",
             "  --eval-holdout-every <n>     Hold out every nth sequence for eval when using raw file corpora (default: {holdout})\n",
             "  --learning-rate <value>      Learning rate (default: {lr})\n",
-            "  --seed <n>                   Random seed for model initialization (default: {seed})\n",
+            "  --seed <n>                   Model/init RNG seed (default: {seed})\n",
+            "  --data-seed <n>              Optional train-order shuffle seed (default: fixed order)\n",
             "  --variant <name>             One of: all, attention-only, reference-ssm-hybrid, primitive-hybrid (default: all)\n",
             "  --reference-ssm-profile      One of: rust-mimo-reference, rust-siso-reference, rust-siso-runtime (default: rust-mimo-reference)\n",
             "  --primitive-profile <name>   One of: p1, p2-0, p2, p2-1, p2-2, p2-3 (default: p1)\n",
