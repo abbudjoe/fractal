@@ -1,0 +1,87 @@
+from __future__ import annotations
+
+import unittest
+
+from python.specs.mini_moe import (
+    MiniMoeArchitectureSpec,
+    MiniMoeBackboneSpec,
+    MiniMoeDispatchSpec,
+    MiniMoeLayerSchedule,
+    MiniMoeLayerScheduleKind,
+    MiniMoeObservabilitySpec,
+    MiniMoeRouterSpec,
+    MiniMoeRuntimeSpec,
+    MiniMoeStackSpec,
+    MiniMoeSurfaceSpec,
+    OneShotRouterSpec,
+)
+from python.specs.path1 import (
+    PrimitiveNormMode,
+    PrimitiveProfile,
+    PrimitiveReadoutMode,
+    PrimitiveResidualMode,
+    PrimitiveWrapperMode,
+    ReferenceSsmProfile,
+    phase1_baseline_matrix,
+    phase1_primitive_variant,
+    phase1_reference_ssm_variant,
+)
+
+
+class Path1SpecTests(unittest.TestCase):
+    def test_baseline_matrix_validates(self) -> None:
+        matrix = phase1_baseline_matrix(
+            reference_profile=ReferenceSsmProfile.MAMBA3_SISO_RUNTIME,
+            primitive_profile=PrimitiveProfile.P23,
+            residual_mode=PrimitiveResidualMode.GATED,
+            readout_mode=PrimitiveReadoutMode.PROJECTED_NORM,
+            norm_mode=PrimitiveNormMode.RESIDUAL_RENORM,
+            wrapper_mode=PrimitiveWrapperMode.STANDARD,
+        )
+        matrix.validate()
+        self.assertEqual(matrix.reference_ssm_hybrid.reference_ssm_profile, ReferenceSsmProfile.MAMBA3_SISO_RUNTIME)
+        self.assertEqual(matrix.primitive_hybrid.primitive_profile, PrimitiveProfile.P23)
+
+    def test_primitive_variant_requires_wrapper_modes(self) -> None:
+        variant = phase1_primitive_variant()
+        variant.validate()
+
+    def test_reference_variant_tracks_profile(self) -> None:
+        variant = phase1_reference_ssm_variant(profile=ReferenceSsmProfile.MAMBA3_MIMO_REFERENCE)
+        variant.validate()
+        self.assertTrue(variant.reference_ssm_profile.is_mimo)
+
+
+class MiniMoeSpecTests(unittest.TestCase):
+    def test_mini_moe_surface_resolves_all_layers(self) -> None:
+        surface = MiniMoeSurfaceSpec(
+            architecture=MiniMoeArchitectureSpec(
+                schema_version=1,
+                preset=None,
+                label="phase1-mini-moe-reference",
+                backbone=MiniMoeBackboneSpec(
+                    vocab_size=257,
+                    hidden_dim=128,
+                    head_count=4,
+                    total_layers=8,
+                    local_window=256,
+                    ffn_multiplier=4,
+                ),
+                moe=MiniMoeStackSpec(
+                    experts_per_block=4,
+                    active_experts_per_token=1,
+                    moe_layer_schedule=MiniMoeLayerSchedule(kind=MiniMoeLayerScheduleKind.ALL_LAYERS),
+                    expert_ffn_multiplier=4,
+                    load_balance_loss_weight=0.01,
+                ),
+                router=MiniMoeRouterSpec(kind="one_shot", one_shot=OneShotRouterSpec()),
+            ),
+            runtime=MiniMoeRuntimeSpec(dispatch=MiniMoeDispatchSpec()),
+            observability=MiniMoeObservabilitySpec(),
+        )
+        surface.validate()
+        self.assertEqual(surface.architecture.resolved_layout().moe_layers, tuple(range(8)))
+
+
+if __name__ == "__main__":
+    unittest.main()
