@@ -46,7 +46,9 @@ VENV_DIR=""
 TORCH_INDEX_URL=""
 TORCH_VERSION=""
 TRITON_VERSION="3.6.0"
-CAUSAL_CONV1D_REQUIREMENT="causal-conv1d>=1.5.0"
+CAUSAL_CONV1D_REPO="https://github.com/Dao-AILab/causal-conv1d.git"
+CAUSAL_CONV1D_GIT_REF="v1.6.1"
+MAMBA_REPO="https://github.com/state-spaces/mamba.git"
 CUDA_ARCH_LIST_OVERRIDE="${TORCH_CUDA_ARCH_LIST:-}"
 FORCE_RECREATE=0
 
@@ -169,11 +171,28 @@ fi
 
 python -m pip install --no-build-isolation -r "${REQUIREMENTS_FILE}"
 
+CUDA_ARCH_LIST="${CUDA_ARCH_LIST_OVERRIDE}"
+if [[ -z "${CUDA_ARCH_LIST}" ]] && command -v nvidia-smi >/dev/null 2>&1; then
+  CUDA_ARCH_LIST="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)"
+fi
+
+patch_cuda_setup_arch() {
+  local source_dir="$1"
+  if [[ -z "${CUDA_ARCH_LIST}" ]]; then
+    return 0
+  fi
+  python "${REPO_ROOT}/python/runtime/cuda_setup_patch.py" \
+    "${source_dir}/setup.py" \
+    --arch "${CUDA_ARCH_LIST}"
+}
+
+if [[ -n "${CUDA_ARCH_LIST}" ]]; then
+  export TORCH_CUDA_ARCH_LIST="${CUDA_ARCH_LIST}"
+fi
+
 if [[ "${INSTALL_MODE}" == "official-mamba3" ]]; then
   echo "installing triton ${TRITON_VERSION} for official mamba runtime compatibility"
   python -m pip install --no-build-isolation "triton==${TRITON_VERSION}"
-  echo "installing ${CAUSAL_CONV1D_REQUIREMENT} without dependency rewrites"
-  python -m pip install --no-build-isolation --no-deps "${CAUSAL_CONV1D_REQUIREMENT}"
 fi
 
 if [[ "${INSTALL_MODE}" == "requirements-only" ]]; then
@@ -181,49 +200,22 @@ if [[ "${INSTALL_MODE}" == "requirements-only" ]]; then
   exit 0
 fi
 
-CUDA_ARCH_LIST="${CUDA_ARCH_LIST_OVERRIDE}"
-if [[ -z "${CUDA_ARCH_LIST}" ]] && command -v nvidia-smi >/dev/null 2>&1; then
-  CUDA_ARCH_LIST="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)"
-fi
-
+causal_src_dir="$(mktemp -d)"
 mamba_src_dir="$(mktemp -d)"
-trap 'rm -rf "${mamba_src_dir}"' EXIT
+trap 'rm -rf "${causal_src_dir}" "${mamba_src_dir}"' EXIT
 
-git clone --depth 1 https://github.com/state-spaces/mamba.git "${mamba_src_dir}"
+git clone --depth 1 --branch "${CAUSAL_CONV1D_GIT_REF}" "${CAUSAL_CONV1D_REPO}" "${causal_src_dir}"
+if [[ -n "${CUDA_ARCH_LIST}" ]]; then
+  patch_cuda_setup_arch "${causal_src_dir}"
+fi
+echo "installing causal-conv1d ${CAUSAL_CONV1D_GIT_REF} from source without dependency rewrites"
+CAUSAL_CONV1D_FORCE_BUILD=TRUE \
+python -m pip install --no-build-isolation --no-deps --no-cache-dir "${causal_src_dir}"
+
+git clone --depth 1 "${MAMBA_REPO}" "${mamba_src_dir}"
 
 if [[ -n "${CUDA_ARCH_LIST}" ]]; then
-  patch_script_path="${mamba_src_dir}/.patch_setup_arch.py"
-  cat >"${patch_script_path}" <<'PY'
-import os
-import pathlib
-import sys
-
-setup_path = pathlib.Path(sys.argv[1])
-arch = os.environ["CUDA_ARCH_LIST"].strip()
-major, minor = arch.split(".", 1)
-sm = f"{major}{minor}"
-lines = setup_path.read_text(encoding="utf-8").splitlines()
-start = None
-end = None
-for index, line in enumerate(lines):
-    if 'cc_flag.append("-gencode")' in line and start is None:
-        start = index
-    if start is not None and line.startswith("    # HACK:"):
-        end = index
-        break
-if start is None or end is None or end <= start:
-    raise SystemExit(f"failed to locate CUDA arch block in {setup_path}")
-replacement = [
-    '        cc_flag.append("-gencode")',
-    f'        cc_flag.append("arch=compute_{sm},code=sm_{sm}")',
-    "",
-]
-patched = lines[:start] + replacement + lines[end:]
-setup_path.write_text("\n".join(patched) + "\n", encoding="utf-8")
-print(f"patched {setup_path} to build only sm_{sm}")
-PY
-  CUDA_ARCH_LIST="${CUDA_ARCH_LIST}" python "${patch_script_path}" "${mamba_src_dir}/setup.py"
-  export TORCH_CUDA_ARCH_LIST="${CUDA_ARCH_LIST}"
+  patch_cuda_setup_arch "${mamba_src_dir}"
 fi
 
 MAMBA_FORCE_BUILD=TRUE \
