@@ -1374,72 +1374,25 @@ if [ "$binary_kind" = "python" ]; then
     if [ "$needs_bootstrap" -eq 1 ]; then
         echo "[runpod-wrapper] bootstrapping python environment" | tee -a "$state_dir/logs/latest.log"
         rm -rf "$python_venv_dir"
-        python3 -m venv --system-site-packages "$python_venv_dir"
-        # shellcheck disable=SC1091
-        . "$python_venv_dir/bin/activate"
-        python -m pip install --upgrade pip setuptools wheel >/dev/null
-        if [ -n "${requirements_path:-}" ]; then
-            python -m pip install --no-build-isolation -r "$requirements_path" \
-                2>&1 | tee -a "$state_dir/logs/latest.log"
+        bootstrap_script_path="$remote_dir/scripts/bootstrap_v3a_python_mamba3_cuda_env.sh"
+        if [ ! -f "$bootstrap_script_path" ]; then
+            echo "python bootstrap script not found at $bootstrap_script_path" >&2
+            exit 1
         fi
-        case "$python_install_mode" in
-            requirements-only)
-                ;;
-            official-mamba3)
-                if [ -n "$cuda_arch_list" ]; then
-                    echo "[runpod-wrapper] constraining official mamba build to CUDA arch ${cuda_arch_list}" | tee -a "$state_dir/logs/latest.log"
-                    mamba_src_dir="$(mktemp -d)"
-                    git clone --depth 1 https://github.com/state-spaces/mamba.git "$mamba_src_dir" \
-                        2>&1 | tee -a "$state_dir/logs/latest.log"
-                    patch_script_path="$mamba_src_dir/.patch_setup_arch.py"
-                    cat >"$patch_script_path" <<'PY'
-import os
-import pathlib
-import sys
-
-setup_path = pathlib.Path(sys.argv[1])
-arch = os.environ["CUDA_ARCH_LIST"].strip()
-major, minor = arch.split(".", 1)
-sm = f"{major}{minor}"
-lines = setup_path.read_text(encoding="utf-8").splitlines()
-start = None
-end = None
-for index, line in enumerate(lines):
-    if 'cc_flag.append("-gencode")' in line and start is None:
-        start = index
-    if start is not None and line.startswith("    # HACK:"):
-        end = index
-        break
-if start is None or end is None or end <= start:
-    raise SystemExit(f"failed to locate CUDA arch block in {setup_path}")
-replacement = [
-    '        cc_flag.append("-gencode")',
-    f'        cc_flag.append("arch=compute_{sm},code=sm_{sm}")',
-    "",
-]
-patched = lines[:start] + replacement + lines[end:]
-setup_path.write_text("\n".join(patched) + "\n", encoding="utf-8")
-print(f"patched {setup_path} to build only sm_{sm}")
-PY
-                    CUDA_ARCH_LIST="$cuda_arch_list" python "$patch_script_path" "$mamba_src_dir/setup.py" \
-                        2>&1 | tee -a "$state_dir/logs/latest.log"
-                    TORCH_CUDA_ARCH_LIST="$cuda_arch_list" \
-                    MAMBA_FORCE_BUILD=TRUE \
-                    python -m pip install --no-build-isolation --no-deps --no-cache-dir \
-                        "$mamba_src_dir" \
-                        2>&1 | tee -a "$state_dir/logs/latest.log"
-                    rm -rf "$mamba_src_dir"
-                else
-                    MAMBA_FORCE_BUILD=TRUE python -m pip install --no-build-isolation --no-deps --no-cache-dir \
-                        git+https://github.com/state-spaces/mamba.git \
-                        2>&1 | tee -a "$state_dir/logs/latest.log"
-                fi
-                ;;
-            *)
-                echo "unsupported python install mode: $python_install_mode" >&2
-                exit 1
-                ;;
-        esac
+        bootstrap_args=(
+            "$bootstrap_script_path"
+            --venv-dir "$python_venv_dir"
+            --python python3
+            --install-mode "$python_install_mode"
+        )
+        if [ -n "${requirements_path:-}" ]; then
+            bootstrap_args+=(--requirements "$requirements_path")
+        fi
+        if [ -n "$cuda_arch_list" ]; then
+            echo "[runpod-wrapper] constraining official mamba build to CUDA arch ${cuda_arch_list}" | tee -a "$state_dir/logs/latest.log"
+            bootstrap_args+=(--cuda-arch-list "$cuda_arch_list")
+        fi
+        bash "${bootstrap_args[@]}" 2>&1 | tee -a "$state_dir/logs/latest.log"
         printf '%s\n' "$bootstrap_spec" > "$python_bootstrap_stamp"
     else
         echo "[runpod-wrapper] reusing cached python environment" | tee -a "$state_dir/logs/latest.log"
