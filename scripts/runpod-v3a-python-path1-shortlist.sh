@@ -16,6 +16,7 @@ GPU_ID="${GPU_ID:-NVIDIA GeForce RTX 4090}"
 RUN_TIMEOUT_SECONDS="${RUN_TIMEOUT_SECONDS:-14400}"
 CUDA_DEVICE="${CUDA_DEVICE:-0}"
 DTYPE="${DTYPE:-bf16}"
+PYTHON_INSTALL_MODE="${PYTHON_INSTALL_MODE:-official-mamba3}"
 BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-cuda-faithful-small-v1}"
 WARMUP_EVAL_BATCHES="${WARMUP_EVAL_BATCHES:-1}"
 WARMUP_TRAIN_STEPS="${WARMUP_TRAIN_STEPS:-1}"
@@ -60,12 +61,18 @@ COMMON_ARGS=(
   --backend cuda
   --cuda-device "${CUDA_DEVICE}"
   --dtype "${DTYPE}"
+  --env-kind "${PYTHON_INSTALL_MODE}"
   --seed "${SEED}"
   --warmup-eval-batches "${WARMUP_EVAL_BATCHES}"
   --warmup-train-steps "${WARMUP_TRAIN_STEPS}"
   --benchmark-profile "${BENCHMARK_PROFILE}"
   --output table
 )
+
+LABEL_SUFFIX=""
+if [[ "${PYTHON_INSTALL_MODE}" != "official-mamba3" ]]; then
+  LABEL_SUFFIX="-env-${PYTHON_INSTALL_MODE}"
+fi
 
 if [[ "${BENCHMARK_PROFILE}" == "cuda-faithful-small-v1" ]]; then
   COMMON_ARGS+=(--full-train-pass --full-eval-pass)
@@ -92,34 +99,39 @@ run_lane() {
     --binary-kind python \
     --binary-name scripts/v3a_python_path1.py \
     --python-requirements scripts/requirements-v3a-python-mamba3.txt \
-    --python-install-mode official-mamba3 \
+    --python-install-mode "${PYTHON_INSTALL_MODE}" \
     --run-timeout-seconds "${RUN_TIMEOUT_SECONDS}" \
     "${lifecycle_flag}" \
     -- \
     "${expected_args[@]}"
 }
 
+if [[ "${PYTHON_INSTALL_MODE}" == "compile-safe" ]]; then
+  echo "compile-safe mode does not provide official mamba; use a compile-specific runner instead of the shortlist"
+  exit 1
+fi
+
 run_lane \
   --keep-pod \
-  "${LABEL_PREFIX}-s${SEED}-attention-only" \
+  "${LABEL_PREFIX}-s${SEED}-attention-only${LABEL_SUFFIX}" \
   --variant attention-only
 
 run_lane \
   --keep-pod \
-  "${LABEL_PREFIX}-s${SEED}-reference-ssm-hybrid" \
+  "${LABEL_PREFIX}-s${SEED}-reference-ssm-hybrid${LABEL_SUFFIX}" \
   --variant reference-ssm-hybrid \
   --reference-ssm-profile mamba3-siso-runtime
 
 run_lane \
   --keep-pod \
-  "${LABEL_PREFIX}-s${SEED}-p2-incumbent-runtime" \
+  "${LABEL_PREFIX}-s${SEED}-p2-incumbent-runtime${LABEL_SUFFIX}" \
   --variant primitive-hybrid \
   --primitive-profile p2 \
   --primitive-execution-profile runtime
 
 run_lane \
   --keep-pod \
-  "${LABEL_PREFIX}-s${SEED}-p2-3-gated-projected-norm-residual-renorm-standard-runtime" \
+  "${LABEL_PREFIX}-s${SEED}-p2-3-gated-projected-norm-residual-renorm-standard-runtime${LABEL_SUFFIX}" \
   --variant primitive-hybrid \
   --primitive-profile p2-3 \
   --primitive-execution-profile runtime \
@@ -136,7 +148,7 @@ run_lane \
       printf '%s' --stop-after-run
     fi
   )" \
-  "${LABEL_PREFIX}-s${SEED}-p2-0-scaled-projected-pre-norm-only-standard-runtime" \
+  "${LABEL_PREFIX}-s${SEED}-p2-0-scaled-projected-pre-norm-only-standard-runtime${LABEL_SUFFIX}" \
   --variant primitive-hybrid \
   --primitive-profile p2-0 \
   --primitive-execution-profile runtime \
@@ -148,7 +160,7 @@ run_lane \
 if [[ "${RUN_P20_PLAIN}" == "1" ]]; then
   run_lane \
     --stop-after-run \
-    "${LABEL_PREFIX}-s${SEED}-p2-0-plain-projected-pre-norm-only-standard-runtime" \
+    "${LABEL_PREFIX}-s${SEED}-p2-0-plain-projected-pre-norm-only-standard-runtime${LABEL_SUFFIX}" \
     --variant primitive-hybrid \
     --primitive-profile p2-0 \
     --primitive-execution-profile runtime \

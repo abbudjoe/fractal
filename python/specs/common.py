@@ -86,6 +86,7 @@ class DeviceRuntimeSpec:
     backend: str = "cuda"
     cuda_device: int = 0
     dtype: str = "bf16"
+    env_kind: str | None = None
     compile_mode: str | None = None
 
     def validate(self) -> None:
@@ -100,6 +101,10 @@ class DeviceRuntimeSpec:
             )
         if self.backend == "cpu" and self.dtype == "bf16":
             raise ValidationError("runtime.dtype=bf16 is only supported for backend=cuda")
+        if self.env_kind not in {None, "requirements-only", "official-mamba3", "compile-safe"}:
+            raise ValidationError(
+                "runtime.env_kind must be one of requirements-only|official-mamba3|compile-safe or omitted"
+            )
         if self.compile_mode not in {None, "default", "reduce-overhead", "max-autotune"}:
             raise ValidationError(
                 "runtime.compile_mode must be one of default|reduce-overhead|max-autotune or omitted"

@@ -15,6 +15,7 @@ RUN_TIMEOUT_SECONDS="${RUN_TIMEOUT_SECONDS:-14400}"
 CUDA_DEVICE="${CUDA_DEVICE:-0}"
 DTYPE="${DTYPE:-bf16}"
 COMPILE_MODE="${COMPILE_MODE:-}"
+PYTHON_INSTALL_MODE="${PYTHON_INSTALL_MODE:-official-mamba3}"
 BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-cuda-faithful-small-v1}"
 WARMUP_EVAL_BATCHES="${WARMUP_EVAL_BATCHES:-1}"
 WARMUP_TRAIN_STEPS="${WARMUP_TRAIN_STEPS:-1}"
@@ -59,6 +60,7 @@ COMMON_ARGS=(
   --backend cuda
   --cuda-device "${CUDA_DEVICE}"
   --dtype "${DTYPE}"
+  --env-kind "${PYTHON_INSTALL_MODE}"
   --seed "${SEED}"
   --warmup-eval-batches "${WARMUP_EVAL_BATCHES}"
   --warmup-train-steps "${WARMUP_TRAIN_STEPS}"
@@ -68,9 +70,12 @@ COMMON_ARGS=(
 )
 
 LABEL_SUFFIX=""
+if [[ "${PYTHON_INSTALL_MODE}" != "official-mamba3" ]]; then
+  LABEL_SUFFIX="${LABEL_SUFFIX}-env-${PYTHON_INSTALL_MODE}"
+fi
 if [[ -n "${COMPILE_MODE}" ]]; then
   COMMON_ARGS+=(--compile-mode "${COMPILE_MODE}")
-  LABEL_SUFFIX="-compile-${COMPILE_MODE}"
+  LABEL_SUFFIX="${LABEL_SUFFIX}-compile-${COMPILE_MODE}"
 fi
 
 run_lane() {
@@ -92,12 +97,17 @@ run_lane() {
     --binary-kind python \
     --binary-name scripts/v3a_python_path1_profile.py \
     --python-requirements scripts/requirements-v3a-python-mamba3.txt \
-    --python-install-mode official-mamba3 \
+    --python-install-mode "${PYTHON_INSTALL_MODE}" \
     --run-timeout-seconds "${RUN_TIMEOUT_SECONDS}" \
     "${lifecycle_flag}" \
     -- \
     "${expected_args[@]}"
 }
+
+if [[ "${PYTHON_INSTALL_MODE}" == "compile-safe" ]]; then
+  echo "compile-safe mode does not provide official mamba; use a compile-specific profile runner instead of the trio profile"
+  exit 1
+fi
 
 run_lane \
   --keep-pod \

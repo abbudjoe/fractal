@@ -85,6 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cuda-device", type=int, default=0)
     parser.add_argument("--dtype", default="bf16", choices=["bf16", "fp32"])
     parser.add_argument(
+        "--env-kind",
+        choices=["requirements-only", "official-mamba3", "compile-safe"],
+    )
+    parser.add_argument(
         "--compile-mode",
         choices=["default", "reduce-overhead", "max-autotune"],
     )
@@ -221,6 +225,7 @@ def build_request_from_args(
             backend=args.backend,
             cuda_device=args.cuda_device,
             dtype=args.dtype,
+            env_kind=args.env_kind,
             compile_mode=args.compile_mode,
         ),
     )

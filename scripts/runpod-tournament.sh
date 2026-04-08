@@ -28,7 +28,7 @@ Wrapper options:
   --binary-kind KIND             Execution kind: example, bin, or python. Default: example
   --binary-name NAME             Cargo target name or repo-relative Python script path. Default: tournament
   --python-requirements FILE     Repo-relative or local repo-root-backed requirements file for python runs
-  --python-install-mode MODE     Python bootstrap mode: requirements-only or official-mamba3. Default: requirements-only
+  --python-install-mode MODE     Python bootstrap mode: requirements-only, compile-safe, or official-mamba3. Default: requirements-only
   --no-compile                    Reuse a cached remote binary and fail if it is missing.
   --stop-after-run                Always stop the pod after the command finishes.
   --keep-pod                      Never stop the pod automatically.
@@ -1370,6 +1370,8 @@ if [ "$binary_kind" = "python" ]; then
     bootstrap_spec="python-kind:${binary_name}|install:${python_install_mode}"
     if [ "$python_install_mode" = "official-mamba3" ]; then
         bootstrap_spec="${bootstrap_spec}|official-mamba3-bootstrap:v5"
+    elif [ "$python_install_mode" = "compile-safe" ]; then
+        bootstrap_spec="${bootstrap_spec}|compile-safe-bootstrap:v1"
     fi
     if [ -n "$python_requirements_file" ]; then
         requirements_path="$python_requirements_file"
@@ -1416,7 +1418,7 @@ if [ "$binary_kind" = "python" ]; then
             bootstrap_args+=(--requirements "$requirements_path")
         fi
         if [ -n "$cuda_arch_list" ]; then
-            echo "[runpod-wrapper] constraining official mamba build to CUDA arch ${cuda_arch_list}" | tee -a "$state_dir/logs/latest.log"
+            echo "[runpod-wrapper] passing CUDA arch hint ${cuda_arch_list} to python bootstrap" | tee -a "$state_dir/logs/latest.log"
             bootstrap_args+=(--cuda-arch-list "$cuda_arch_list")
         fi
         bash "${bootstrap_args[@]}" 2>&1 | tee -a "$state_dir/logs/latest.log"
@@ -1690,10 +1692,10 @@ if [ "$BINARY_KIND" != "python" ] && [ "$PYTHON_INSTALL_MODE" != "requirements-o
 fi
 
 case "$PYTHON_INSTALL_MODE" in
-    requirements-only|official-mamba3)
+    requirements-only|compile-safe|official-mamba3)
         ;;
     *)
-        die "invalid --python-install-mode: $PYTHON_INSTALL_MODE (expected requirements-only or official-mamba3)"
+        die "invalid --python-install-mode: $PYTHON_INSTALL_MODE (expected requirements-only, compile-safe, or official-mamba3)"
         ;;
 esac
 

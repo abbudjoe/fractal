@@ -54,6 +54,7 @@ class Path1ProfileReport:
     implementation_kind: str
     device: str
     dtype: str
+    env_kind: str | None
     compile_mode: str | None
     train_loss: float
     sort_by: str
@@ -73,6 +74,7 @@ class Path1ProfileReport:
             "implementation_kind": self.implementation_kind,
             "device": self.device,
             "dtype": self.dtype,
+            "env_kind": self.env_kind,
             "compile_mode": self.compile_mode,
             "train_loss": self.train_loss,
             "sort_by": self.sort_by,
@@ -257,6 +259,7 @@ def profile_path1_request(
         implementation_kind=request.manifest.implementation_kind,
         device=str(device),
         dtype=request.manifest.runtime.dtype,
+        env_kind=request.manifest.runtime.env_kind,
         compile_mode=request.manifest.runtime.compile_mode,
         train_loss=float(loss.detach().float().item()),
         sort_by=sort_by,

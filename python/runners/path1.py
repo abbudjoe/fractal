@@ -44,6 +44,7 @@ def _config_payload(request: Path1RunnerRequest, train_steps: int, eval_batches:
     return {
         "backend": request.manifest.runtime.backend,
         "compile_mode": request.manifest.runtime.compile_mode,
+        "env_kind": request.manifest.runtime.env_kind,
         "benchmark_name": request.manifest.benchmark_name,
         "seed": request.manifest.seed_spec.model_seed,
         "data_seed": request.manifest.seed_spec.data_seed,

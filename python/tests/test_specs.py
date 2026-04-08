@@ -36,6 +36,11 @@ class Path1SpecTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             DeviceRuntimeSpec(backend="cuda", dtype="bf16", compile_mode="made-up-mode").validate()
 
+    def test_runtime_spec_accepts_env_kinds(self) -> None:
+        DeviceRuntimeSpec(backend="cuda", dtype="bf16", env_kind="compile-safe").validate()
+        with self.assertRaises(ValidationError):
+            DeviceRuntimeSpec(backend="cuda", dtype="bf16", env_kind="mystery-env").validate()
+
     def test_baseline_matrix_validates(self) -> None:
         matrix = phase1_baseline_matrix(
             reference_profile=ReferenceSsmProfile.MAMBA3_SISO_RUNTIME,

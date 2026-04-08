@@ -7,18 +7,23 @@ WRAPPER="${REPO_ROOT}/scripts/runpod-tournament.sh"
 LOCAL_RESULTS_ROOT="${REPO_ROOT}/.runpod-local-logs/runpod-results"
 
 SEED="${1:-42}"
-LABEL_PREFIX="${2:-v3a-python-path1-trio}"
+LABEL_PREFIX="${2:-v3a-python-path1-compile-duo}"
 
 POD_NAME="${POD_NAME:-fractal-v3a}"
 GPU_ID="${GPU_ID:-NVIDIA GeForce RTX 4090}"
 RUN_TIMEOUT_SECONDS="${RUN_TIMEOUT_SECONDS:-14400}"
 CUDA_DEVICE="${CUDA_DEVICE:-0}"
 DTYPE="${DTYPE:-bf16}"
-COMPILE_MODE="${COMPILE_MODE:-}"
-PYTHON_INSTALL_MODE="${PYTHON_INSTALL_MODE:-official-mamba3}"
+COMPILE_MODE="${COMPILE_MODE:-reduce-overhead}"
+PYTHON_INSTALL_MODE="${PYTHON_INSTALL_MODE:-compile-safe}"
 BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-cuda-faithful-small-v1}"
 WARMUP_EVAL_BATCHES="${WARMUP_EVAL_BATCHES:-1}"
 WARMUP_TRAIN_STEPS="${WARMUP_TRAIN_STEPS:-1}"
+
+if [[ "${PYTHON_INSTALL_MODE}" != "compile-safe" ]]; then
+  echo "compile duo expects PYTHON_INSTALL_MODE=compile-safe"
+  exit 1
+fi
 
 already_recorded() {
   local run_label="$1"
@@ -60,6 +65,7 @@ COMMON_ARGS=(
   --cuda-device "${CUDA_DEVICE}"
   --dtype "${DTYPE}"
   --env-kind "${PYTHON_INSTALL_MODE}"
+  --compile-mode "${COMPILE_MODE}"
   --seed "${SEED}"
   --warmup-eval-batches "${WARMUP_EVAL_BATCHES}"
   --warmup-train-steps "${WARMUP_TRAIN_STEPS}"
@@ -69,14 +75,7 @@ COMMON_ARGS=(
   --full-eval-pass
 )
 
-LABEL_SUFFIX=""
-if [[ "${PYTHON_INSTALL_MODE}" != "official-mamba3" ]]; then
-  LABEL_SUFFIX="${LABEL_SUFFIX}-env-${PYTHON_INSTALL_MODE}"
-fi
-if [[ -n "${COMPILE_MODE}" ]]; then
-  COMMON_ARGS+=(--compile-mode "${COMPILE_MODE}")
-  LABEL_SUFFIX="${LABEL_SUFFIX}-compile-${COMPILE_MODE}"
-fi
+LABEL_SUFFIX="-env-${PYTHON_INSTALL_MODE}-compile-${COMPILE_MODE}"
 
 run_lane() {
   local lifecycle_flag="$1"
@@ -104,21 +103,10 @@ run_lane() {
     "${expected_args[@]}"
 }
 
-if [[ "${PYTHON_INSTALL_MODE}" == "compile-safe" ]]; then
-  echo "compile-safe mode does not provide official mamba; use the compile-specific runner instead of trio"
-  exit 1
-fi
-
 run_lane \
   --keep-pod \
   "${LABEL_PREFIX}-s${SEED}-attention-only${LABEL_SUFFIX}" \
   --variant attention-only
-
-run_lane \
-  --keep-pod \
-  "${LABEL_PREFIX}-s${SEED}-reference-ssm-hybrid${LABEL_SUFFIX}" \
-  --variant reference-ssm-hybrid \
-  --reference-ssm-profile mamba3-siso-runtime
 
 run_lane \
   --stop-after-run \
@@ -131,4 +119,4 @@ run_lane \
   --primitive-norm-profile pre-norm-only \
   --primitive-wrapper-profile standard
 
-echo "completed runpod v3a python path1 trio seed ${SEED}"
+echo "completed runpod v3a python path1 compile duo seed ${SEED}"

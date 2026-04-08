@@ -82,6 +82,15 @@ with:
 
 That path now uses the same bootstrap script as the local Linux/CUDA recipe.
 
+For compile-focused Path 1 runs that use `torch.compile` on `A` or `A+P`
+without native `mamba_ssm`, use:
+
+* `--python-install-mode compile-safe`
+
+That keeps Torch on its compatible bundled Triton path instead of upgrading the
+environment to the newer Triton level required by the official native Mamba
+stack.
+
 ## Why This Exists
 
 Before this change, the RunPod wrapper had its own inline `mamba_ssm` bootstrap
@@ -102,3 +111,16 @@ The current working native Mamba bring-up in this repo is pinned around:
 This is intentionally explicit in the bootstrap script so the env does not
 silently fall back to the Torch-bundled Triton runtime or drift to a different
 CUDA toolchain.
+
+## Compile-Safe Contract
+
+The compile-safe Path 1 env is intentionally different:
+
+* `torch 2.4.1` from `cu124`
+* Torch-bundled `triton 3.0.0`
+* shared Python research requirements
+* no `causal-conv1d` native build
+* no `mamba_ssm` install
+
+This env exists so `torch.compile` runs for `A` and `A+P` can be evaluated
+without colliding with the Triton level required by native official Mamba.
