@@ -409,6 +409,7 @@ build_remote_tournament_args() {
     local rewritten
     local has_output_dir=0
     local has_ledger_path=0
+    local has_profile_output_dir=0
     while [ "$index" -lt "${#TOURNAMENT_ARGS[@]}" ]; do
         arg="${TOURNAMENT_ARGS[$index]}"
         if [ "$arg" = "--output-dir" ] && [ $((index + 1)) -lt "${#TOURNAMENT_ARGS[@]}" ]; then
@@ -417,12 +418,16 @@ build_remote_tournament_args() {
         if [ "$arg" = "--ledger-path" ] && [ $((index + 1)) -lt "${#TOURNAMENT_ARGS[@]}" ]; then
             has_ledger_path=1
         fi
+        if [ "$arg" = "--profile-output-dir" ] && [ $((index + 1)) -lt "${#TOURNAMENT_ARGS[@]}" ]; then
+            has_profile_output_dir=1
+        fi
         if [[ "$arg" = "--experiment-manifest" \
             || "$arg" = "--jsonl-train-path" \
             || "$arg" = "--jsonl-eval-path" \
             || "$arg" = "--corpus-path" \
             || "$arg" = "--output-dir" \
-            || "$arg" = "--ledger-path" ]] \
+            || "$arg" = "--ledger-path" \
+            || "$arg" = "--profile-output-dir" ]] \
             && [ $((index + 1)) -lt "${#TOURNAMENT_ARGS[@]}" ]; then
             raw_path="${TOURNAMENT_ARGS[$((index + 1))]}"
             if [ "$raw_path" = "$REPO_ROOT" ]; then
@@ -479,6 +484,14 @@ build_remote_tournament_args() {
             REMOTE_TOURNAMENT_ARGS+=(
                 "--ledger-path"
                 "${STATE_DIR}/artifacts/v3a-python-path1-results-ledger.jsonl"
+            )
+        fi
+    fi
+    if [ "$BINARY_KIND" = "python" ] && [ "$BINARY_NAME" = "scripts/v3a_python_path1_profile.py" ]; then
+        if [ "$has_profile_output_dir" -eq 0 ]; then
+            REMOTE_TOURNAMENT_ARGS+=(
+                "--profile-output-dir"
+                "${STATE_DIR}/artifacts/v3a-python-path1-profile/${RUN_ID}"
             )
         fi
     fi

@@ -29,6 +29,17 @@ class ProfileEventSummary:
 
 
 @dataclass(frozen=True)
+class ProfileDerivedSummary:
+    metric_name: str
+    dominant_named_event: str | None
+    dominant_named_event_share: float
+    scan_runtime_vs_prepare_runtime_ratio: float | None
+    attention_vs_primitive_ratio: float | None
+    native_mamba_share: float
+    named_region_totals: dict[str, float]
+
+
+@dataclass(frozen=True)
 class Path1ProfileReport:
     run_label: str
     variant_label: str
@@ -41,6 +52,7 @@ class Path1ProfileReport:
     row_limit: int
     profile_table: str
     named_events: list[ProfileEventSummary]
+    derived_summary: ProfileDerivedSummary
     output_dir: str
     profile_json_path: str
     profile_table_path: str
@@ -68,6 +80,15 @@ class Path1ProfileReport:
                 }
                 for event in self.named_events
             ],
+            "derived_summary": {
+                "metric_name": self.derived_summary.metric_name,
+                "dominant_named_event": self.derived_summary.dominant_named_event,
+                "dominant_named_event_share": self.derived_summary.dominant_named_event_share,
+                "scan_runtime_vs_prepare_runtime_ratio": self.derived_summary.scan_runtime_vs_prepare_runtime_ratio,
+                "attention_vs_primitive_ratio": self.derived_summary.attention_vs_primitive_ratio,
+                "native_mamba_share": self.derived_summary.native_mamba_share,
+                "named_region_totals": self.derived_summary.named_region_totals,
+            },
             "output_dir": self.output_dir,
             "profile_json_path": self.profile_json_path,
             "profile_table_path": self.profile_table_path,
@@ -90,6 +111,58 @@ def _named_event_summaries(key_averages: list[Any]) -> list[ProfileEventSummary]
             )
         )
     return summaries
+
+
+def _event_metric(event: ProfileEventSummary, device_type: str) -> float:
+    if device_type == "cuda":
+        return event.self_cuda_time_total_us
+    return event.self_cpu_time_total_us
+
+
+def _ratio_or_none(numerator: float, denominator: float) -> float | None:
+    if denominator <= 0.0:
+        return None
+    return numerator / denominator
+
+
+def _derived_summary(named_events: list[ProfileEventSummary], device_type: str) -> ProfileDerivedSummary:
+    metric_name = "self_cuda_time_total_us" if device_type == "cuda" else "self_cpu_time_total_us"
+    totals: dict[str, float] = {}
+    total_named = 0.0
+    dominant_event: str | None = None
+    dominant_value = 0.0
+
+    for event in named_events:
+        value = _event_metric(event, device_type)
+        total_named += value
+        if value > dominant_value:
+            dominant_value = value
+            dominant_event = event.key
+        if event.key.startswith("path1.attention."):
+            totals["attention"] = totals.get("attention", 0.0) + value
+        elif event.key.startswith("path1.reference_ssm."):
+            totals["reference_ssm"] = totals.get("reference_ssm", 0.0) + value
+        elif event.key.startswith("path1.primitive."):
+            totals["primitive"] = totals.get("primitive", 0.0) + value
+        else:
+            totals["other"] = totals.get("other", 0.0) + value
+        totals[event.key] = value
+
+    scan_runtime = totals.get("path1.primitive.scan_runtime", 0.0)
+    prepare_runtime = totals.get("path1.primitive.prepare_runtime_plan", 0.0)
+    attention_total = totals.get("attention", 0.0)
+    primitive_total = totals.get("primitive", 0.0)
+    native_mamba = totals.get("path1.reference_ssm.native_mamba3", 0.0)
+
+    return ProfileDerivedSummary(
+        metric_name=metric_name,
+        dominant_named_event=dominant_event,
+        dominant_named_event_share=0.0 if total_named <= 0.0 else dominant_value / total_named,
+        scan_runtime_vs_prepare_runtime_ratio=_ratio_or_none(scan_runtime, prepare_runtime),
+        attention_vs_primitive_ratio=_ratio_or_none(attention_total, primitive_total),
+        native_mamba_share=0.0 if total_named <= 0.0 else native_mamba / total_named,
+        named_region_totals=totals,
+    )
 
 
 def profile_path1_request(
@@ -179,6 +252,7 @@ def profile_path1_request(
         row_limit=row_limit,
         profile_table=profile_table,
         named_events=named_events,
+        derived_summary=_derived_summary(named_events, device.type),
         output_dir=repo_relative(output_dir),
         profile_json_path=repo_relative(profile_json_path),
         profile_table_path=repo_relative(profile_table_path),
@@ -213,6 +287,15 @@ def cli_main(argv: Sequence[str] | None = None, *, repo_root: Path) -> int:
                 "profile_json_path": report.profile_json_path,
                 "profile_table_path": report.profile_table_path,
                 "named_events": [event.__dict__ for event in report.named_events],
+                "derived_summary": {
+                    "metric_name": report.derived_summary.metric_name,
+                    "dominant_named_event": report.derived_summary.dominant_named_event,
+                    "dominant_named_event_share": report.derived_summary.dominant_named_event_share,
+                    "scan_runtime_vs_prepare_runtime_ratio": report.derived_summary.scan_runtime_vs_prepare_runtime_ratio,
+                    "attention_vs_primitive_ratio": report.derived_summary.attention_vs_primitive_ratio,
+                    "native_mamba_share": report.derived_summary.native_mamba_share,
+                    "named_region_totals": report.derived_summary.named_region_totals,
+                },
             },
             indent=2,
             sort_keys=True,

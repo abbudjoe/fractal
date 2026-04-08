@@ -320,17 +320,27 @@ class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer
             device=device,
             dtype=dtype,
         )
-        for position in range(seq_len):
+        update_gates = runtime_plan.update_gates.unbind(dim=1)
+        retain_gates = runtime_plan.retain_gates.unbind(dim=1)
+        angle_cos = runtime_plan.angle_cos.unbind(dim=1)
+        angle_sin = runtime_plan.angle_sin.unbind(dim=1)
+        candidates = runtime_plan.candidates.unbind(dim=1)
+        output_gates = runtime_plan.output_gates.unbind(dim=1)
+        for position, (
+            update_gate,
+            retain_gate,
+            cos,
+            sin,
+            candidate,
+            output_gate,
+        ) in enumerate(zip(update_gates, retain_gates, angle_cos, angle_sin, candidates, output_gates)):
             transformed_state = _rotate_state_pairs_with_trig(
                 self.state_transform_projection(state),
-                cos=runtime_plan.angle_cos[:, position, :],
-                sin=runtime_plan.angle_sin[:, position, :],
+                cos=cos,
+                sin=sin,
             )
-            state = (
-                runtime_plan.update_gates[:, position, :] * transformed_state
-                + runtime_plan.retain_gates[:, position, :] * runtime_plan.candidates[:, position, :]
-            )
-            outputs[:, position, :] = runtime_plan.output_gates[:, position, :] * state
+            state = update_gate * transformed_state + retain_gate * candidate
+            outputs[:, position, :] = output_gate * state
         return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
 
     def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
