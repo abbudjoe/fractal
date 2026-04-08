@@ -52,8 +52,9 @@ That will:
 3. install the Triton API level currently required by the working native
    `mamba_ssm` path
 4. install the shared Python requirements
-5. install official `mamba_ssm` from source with `MAMBA_FORCE_BUILD=TRUE`
-6. constrain the build to the detected GPU compute capability when available
+5. install `causal-conv1d` without letting pip rewrite the Torch/Triton pair
+6. install official `mamba_ssm` from source with `MAMBA_FORCE_BUILD=TRUE`
+7. constrain the build to the detected GPU compute capability when available
 
 ## Optional Torch Pin
 
@@ -93,6 +94,7 @@ The current working native Mamba bring-up in this repo is pinned around:
 
 * `torch 2.4.1` from `cu124`
 * `triton 3.6.0`
+* `causal-conv1d` installed with `--no-deps`
 * official `mamba_ssm` built from source with `--no-build-isolation`
 
 This is intentionally explicit in the bootstrap script so the env does not

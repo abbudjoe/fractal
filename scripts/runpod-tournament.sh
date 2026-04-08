@@ -1356,7 +1356,7 @@ if [ "$binary_kind" = "python" ]; then
     python_exec="$python_venv_dir/bin/python"
     bootstrap_spec="python-kind:${binary_name}|install:${python_install_mode}"
     if [ "$python_install_mode" = "official-mamba3" ]; then
-        bootstrap_spec="${bootstrap_spec}|official-mamba3-bootstrap:v4"
+        bootstrap_spec="${bootstrap_spec}|official-mamba3-bootstrap:v5"
     fi
     if [ -n "$python_requirements_file" ]; then
         requirements_path="$python_requirements_file"

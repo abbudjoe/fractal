@@ -46,6 +46,7 @@ VENV_DIR=""
 TORCH_INDEX_URL=""
 TORCH_VERSION=""
 TRITON_VERSION="3.6.0"
+CAUSAL_CONV1D_REQUIREMENT="causal-conv1d>=1.5.0"
 CUDA_ARCH_LIST_OVERRIDE="${TORCH_CUDA_ARCH_LIST:-}"
 FORCE_RECREATE=0
 
@@ -166,12 +167,14 @@ if [[ -n "${TORCH_VERSION}" ]]; then
   fi
 fi
 
+python -m pip install --no-build-isolation -r "${REQUIREMENTS_FILE}"
+
 if [[ "${INSTALL_MODE}" == "official-mamba3" ]]; then
   echo "installing triton ${TRITON_VERSION} for official mamba runtime compatibility"
   python -m pip install --no-build-isolation "triton==${TRITON_VERSION}"
+  echo "installing ${CAUSAL_CONV1D_REQUIREMENT} without dependency rewrites"
+  python -m pip install --no-build-isolation --no-deps "${CAUSAL_CONV1D_REQUIREMENT}"
 fi
-
-python -m pip install --no-build-isolation -r "${REQUIREMENTS_FILE}"
 
 if [[ "${INSTALL_MODE}" == "requirements-only" ]]; then
   echo "bootstrapped requirements-only env at ${VENV_DIR}"
