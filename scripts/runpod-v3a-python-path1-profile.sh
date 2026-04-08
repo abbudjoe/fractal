@@ -14,6 +14,7 @@ GPU_ID="${GPU_ID:-NVIDIA GeForce RTX 4090}"
 RUN_TIMEOUT_SECONDS="${RUN_TIMEOUT_SECONDS:-14400}"
 CUDA_DEVICE="${CUDA_DEVICE:-0}"
 DTYPE="${DTYPE:-bf16}"
+COMPILE_MODE="${COMPILE_MODE:-}"
 BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-cuda-faithful-small-v1}"
 WARMUP_EVAL_BATCHES="${WARMUP_EVAL_BATCHES:-1}"
 WARMUP_TRAIN_STEPS="${WARMUP_TRAIN_STEPS:-1}"
@@ -66,6 +67,12 @@ COMMON_ARGS=(
   --profile-row-limit "${PROFILE_ROW_LIMIT}"
 )
 
+LABEL_SUFFIX=""
+if [[ -n "${COMPILE_MODE}" ]]; then
+  COMMON_ARGS+=(--compile-mode "${COMPILE_MODE}")
+  LABEL_SUFFIX="-compile-${COMPILE_MODE}"
+fi
+
 run_lane() {
   local lifecycle_flag="$1"
   shift
@@ -94,18 +101,18 @@ run_lane() {
 
 run_lane \
   --keep-pod \
-  "${LABEL_PREFIX}-s${SEED}-attention-only" \
+  "${LABEL_PREFIX}-s${SEED}-attention-only${LABEL_SUFFIX}" \
   --variant attention-only
 
 run_lane \
   --keep-pod \
-  "${LABEL_PREFIX}-s${SEED}-reference-ssm-hybrid" \
+  "${LABEL_PREFIX}-s${SEED}-reference-ssm-hybrid${LABEL_SUFFIX}" \
   --variant reference-ssm-hybrid \
   --reference-ssm-profile mamba3-siso-runtime
 
 run_lane \
   --stop-after-run \
-  "${LABEL_PREFIX}-s${SEED}-p2-0-scaled-projected-pre-norm-only-standard-runtime" \
+  "${LABEL_PREFIX}-s${SEED}-p2-0-scaled-projected-pre-norm-only-standard-runtime${LABEL_SUFFIX}" \
   --variant primitive-hybrid \
   --primitive-profile p2-0 \
   --primitive-execution-profile runtime \

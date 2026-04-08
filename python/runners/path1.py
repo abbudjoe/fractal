@@ -10,7 +10,14 @@ from python.data.byte_corpus import load_byte_corpus
 from python.models.path1 import build_path1_model
 from python.reporting.render import render_path1_table
 from python.reporting.schema import BenchmarkReport, append_ledger_entry, write_report
-from python.runtime import configure_reproducibility, resolve_autocast_dtype, resolve_torch_device, run_training_benchmark, warmup_model
+from python.runtime import (
+    apply_runtime_policy,
+    configure_reproducibility,
+    resolve_autocast_dtype,
+    resolve_torch_device,
+    run_training_benchmark,
+    warmup_model,
+)
 from python.specs.common import BenchmarkRunManifest, repo_relative, to_jsonable
 from python.specs.path1 import BYTE_LEVEL_PAD_TOKEN, Path1VariantSpec
 
@@ -36,6 +43,7 @@ def _config_payload(request: Path1RunnerRequest, train_steps: int, eval_batches:
     variant = request.variant
     return {
         "backend": request.manifest.runtime.backend,
+        "compile_mode": request.manifest.runtime.compile_mode,
         "benchmark_name": request.manifest.benchmark_name,
         "seed": request.manifest.seed_spec.model_seed,
         "data_seed": request.manifest.seed_spec.data_seed,
@@ -76,6 +84,7 @@ def run_path1_variant(request: Path1RunnerRequest) -> BenchmarkReport:
     eval_batch_count = len(corpus.eval_batches) if request.manifest.budget.full_eval_pass else request.manifest.budget.eval_batches
 
     model = build_path1_model(request.variant, dtype_mode=request.manifest.runtime.dtype).to(device)
+    model = apply_runtime_policy(model, request.manifest.runtime)
     optimizer = torch.optim.Adam(model.parameters(), lr=request.manifest.budget.learning_rate)
     warmup_model(
         model,

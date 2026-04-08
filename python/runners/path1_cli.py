@@ -84,6 +84,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backend", default="cuda", choices=["cpu", "cuda"])
     parser.add_argument("--cuda-device", type=int, default=0)
     parser.add_argument("--dtype", default="bf16", choices=["bf16", "fp32"])
+    parser.add_argument(
+        "--compile-mode",
+        choices=["default", "reduce-overhead", "max-autotune"],
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--data-seed", type=int)
     parser.add_argument("--seq-len", type=int, default=32)
@@ -217,6 +221,7 @@ def build_request_from_args(
             backend=args.backend,
             cuda_device=args.cuda_device,
             dtype=args.dtype,
+            compile_mode=args.compile_mode,
         ),
     )
     return Path1RunnerRequest(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from python.specs.common import DeviceRuntimeSpec, ValidationError
 from python.specs.mini_moe import (
     MiniMoeArchitectureSpec,
     MiniMoeBackboneSpec,
@@ -30,6 +31,11 @@ from python.specs.path1 import (
 
 
 class Path1SpecTests(unittest.TestCase):
+    def test_runtime_spec_accepts_compile_modes(self) -> None:
+        DeviceRuntimeSpec(backend="cuda", dtype="bf16", compile_mode="reduce-overhead").validate()
+        with self.assertRaises(ValidationError):
+            DeviceRuntimeSpec(backend="cuda", dtype="bf16", compile_mode="made-up-mode").validate()
+
     def test_baseline_matrix_validates(self) -> None:
         matrix = phase1_baseline_matrix(
             reference_profile=ReferenceSsmProfile.MAMBA3_SISO_RUNTIME,

@@ -86,6 +86,7 @@ class DeviceRuntimeSpec:
     backend: str = "cuda"
     cuda_device: int = 0
     dtype: str = "bf16"
+    compile_mode: str | None = None
 
     def validate(self) -> None:
         if self.backend not in {"cpu", "cuda"}:
@@ -99,6 +100,10 @@ class DeviceRuntimeSpec:
             )
         if self.backend == "cpu" and self.dtype == "bf16":
             raise ValidationError("runtime.dtype=bf16 is only supported for backend=cuda")
+        if self.compile_mode not in {None, "default", "reduce-overhead", "max-autotune"}:
+            raise ValidationError(
+                "runtime.compile_mode must be one of default|reduce-overhead|max-autotune or omitted"
+            )
 
 
 @dataclass(frozen=True)
@@ -142,4 +147,3 @@ def to_jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [to_jsonable(item) for item in value]
     return value
-

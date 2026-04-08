@@ -11,7 +11,14 @@ from torch.profiler import ProfilerActivity, profile
 
 from python.data.byte_corpus import load_byte_corpus
 from python.models.path1 import build_path1_model
-from python.runtime import configure_reproducibility, materialize_batch, resolve_autocast_dtype, resolve_torch_device, warmup_model
+from python.runtime import (
+    apply_runtime_policy,
+    configure_reproducibility,
+    materialize_batch,
+    resolve_autocast_dtype,
+    resolve_torch_device,
+    warmup_model,
+)
 from python.runners.path1 import Path1RunnerRequest
 from python.runners.path1_cli import build_parser, build_request_from_args
 from python.specs.common import ValidationError, repo_relative
@@ -47,6 +54,7 @@ class Path1ProfileReport:
     implementation_kind: str
     device: str
     dtype: str
+    compile_mode: str | None
     train_loss: float
     sort_by: str
     row_limit: int
@@ -65,6 +73,7 @@ class Path1ProfileReport:
             "implementation_kind": self.implementation_kind,
             "device": self.device,
             "dtype": self.dtype,
+            "compile_mode": self.compile_mode,
             "train_loss": self.train_loss,
             "sort_by": self.sort_by,
             "row_limit": self.row_limit,
@@ -187,6 +196,7 @@ def profile_path1_request(
         pin_memory=request.manifest.runtime.backend == "cuda",
     )
     model = build_path1_model(request.variant, dtype_mode=request.manifest.runtime.dtype).to(device)
+    model = apply_runtime_policy(model, request.manifest.runtime)
     optimizer = torch.optim.Adam(model.parameters(), lr=request.manifest.budget.learning_rate)
     warmup_model(
         model,
@@ -247,6 +257,7 @@ def profile_path1_request(
         implementation_kind=request.manifest.implementation_kind,
         device=str(device),
         dtype=request.manifest.runtime.dtype,
+        compile_mode=request.manifest.runtime.compile_mode,
         train_loss=float(loss.detach().float().item()),
         sort_by=sort_by,
         row_limit=row_limit,

@@ -14,6 +14,7 @@ GPU_ID="${GPU_ID:-NVIDIA GeForce RTX 4090}"
 RUN_TIMEOUT_SECONDS="${RUN_TIMEOUT_SECONDS:-14400}"
 CUDA_DEVICE="${CUDA_DEVICE:-0}"
 DTYPE="${DTYPE:-bf16}"
+COMPILE_MODE="${COMPILE_MODE:-}"
 BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-cuda-faithful-small-v1}"
 WARMUP_EVAL_BATCHES="${WARMUP_EVAL_BATCHES:-1}"
 WARMUP_TRAIN_STEPS="${WARMUP_TRAIN_STEPS:-1}"
@@ -66,6 +67,12 @@ COMMON_ARGS=(
   --output table
 )
 
+LABEL_SUFFIX=""
+if [[ -n "${COMPILE_MODE}" ]]; then
+  COMMON_ARGS+=(--compile-mode "${COMPILE_MODE}")
+  LABEL_SUFFIX="-compile-${COMPILE_MODE}"
+fi
+
 if [[ "${BENCHMARK_PROFILE}" == "cuda-faithful-small-v1" ]]; then
   COMMON_ARGS+=(--full-train-pass --full-eval-pass)
 else
@@ -75,7 +82,7 @@ fi
 run_python_path1() {
   local variant="$1"
   shift
-  local run_label="${LABEL_PREFIX}-s${SEED}-${variant}"
+  local run_label="${LABEL_PREFIX}-s${SEED}-${variant}${LABEL_SUFFIX}"
   local expected_args=("${COMMON_ARGS[@]}" --variant "${variant}" "$@" --run-label "${run_label}")
   if already_recorded "${run_label}" "${expected_args[@]}"; then
     echo "skip ${run_label}"
