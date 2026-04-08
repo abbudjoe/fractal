@@ -16,6 +16,7 @@ from python.models.common import (
     rotate_state_pairs,
 )
 from python.specs.path1 import (
+    PrimitiveExecutionProfile,
     PrimitiveNormMode,
     PrimitiveProfile,
     PrimitiveReadoutMode,
@@ -61,6 +62,26 @@ class SequencePrimitive(nn.Module):
         return SequencePrimitiveScanResult(emitted_outputs=torch.cat(outputs, dim=1), final_state=state)
 
 
+def _resolve_initial_state(
+    primitive: SequencePrimitive,
+    inputs: torch.Tensor,
+    initial_state: torch.Tensor | None,
+) -> torch.Tensor:
+    if initial_state is not None:
+        return initial_state
+    return primitive.init_state(inputs.shape[0], inputs.device, inputs.dtype)
+
+
+def _allocate_emitted_outputs(inputs: torch.Tensor, width: int) -> torch.Tensor:
+    return torch.empty(
+        inputs.shape[0],
+        inputs.shape[1],
+        width,
+        device=inputs.device,
+        dtype=inputs.dtype,
+    )
+
+
 class ContractiveSequenceMixer(SequencePrimitive):
     def __init__(self, d_model: int) -> None:
         super().__init__()
@@ -75,6 +96,20 @@ class ContractiveSequenceMixer(SequencePrimitive):
         mix = self.state_projection(state) + self.input_projection(inputs)
         next_state = gate * mix + one_minus(gate) * state
         return SequencePrimitiveStepResult(next_state=next_state, emitted_output=next_state)
+
+
+class ContractiveRuntimeSequenceMixer(ContractiveSequenceMixer):
+    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
+        state = _resolve_initial_state(self, inputs, initial_state)
+        gates = gated_sigmoid(self.gate_projection(inputs))
+        projected_inputs = self.input_projection(inputs)
+        outputs = _allocate_emitted_outputs(inputs, self.d_model)
+        for position in range(inputs.shape[1]):
+            gate = gates[:, position, :]
+            mix = self.state_projection(state) + projected_inputs[:, position, :]
+            state = gate * mix + one_minus(gate) * state
+            outputs[:, position, :] = state
+        return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
 
 
 class P20RotaryStateOutputSequenceMixer(SequencePrimitive):
@@ -102,6 +137,26 @@ class P20RotaryStateOutputSequenceMixer(SequencePrimitive):
         return SequencePrimitiveStepResult(next_state=next_state, emitted_output=emitted_output)
 
 
+class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer):
+    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
+        state = _resolve_initial_state(self, inputs, initial_state)
+        update_gates = gated_sigmoid(self.update_gate_projection(inputs))
+        angles = self.angle_projection(inputs)
+        candidates = torch.tanh(self.candidate_projection(inputs))
+        output_gates = gated_sigmoid(self.output_gate_projection(inputs))
+        outputs = _allocate_emitted_outputs(inputs, self.d_model)
+        for position in range(inputs.shape[1]):
+            transformed_state = rotate_state_pairs(
+                self.state_transform_projection(state),
+                angles[:, position, :],
+            )
+            state = update_gates[:, position, :] * transformed_state + one_minus(
+                update_gates[:, position, :]
+            ) * candidates[:, position, :]
+            outputs[:, position, :] = output_gates[:, position, :] * state
+        return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
+
+
 class P2RotaryReadoutSequenceMixer(SequencePrimitive):
     def __init__(self, d_model: int) -> None:
         super().__init__()
@@ -126,6 +181,26 @@ class P2RotaryReadoutSequenceMixer(SequencePrimitive):
         next_state = update_gate * transformed_state + one_minus(update_gate) * candidate
         emitted_output = gated_sigmoid(self.output_gate_projection(inputs)) * self.output_projection(next_state)
         return SequencePrimitiveStepResult(next_state=next_state, emitted_output=emitted_output)
+
+
+class P2RotaryReadoutRuntimeSequenceMixer(P2RotaryReadoutSequenceMixer):
+    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
+        state = _resolve_initial_state(self, inputs, initial_state)
+        update_gates = gated_sigmoid(self.update_gate_projection(inputs))
+        angles = self.angle_projection(inputs)
+        candidates = torch.tanh(self.candidate_projection(inputs))
+        output_gates = gated_sigmoid(self.output_gate_projection(inputs))
+        outputs = _allocate_emitted_outputs(inputs, self.d_model)
+        for position in range(inputs.shape[1]):
+            transformed_state = rotate_state_pairs(
+                self.state_transform_projection(state),
+                angles[:, position, :],
+            )
+            state = update_gates[:, position, :] * transformed_state + one_minus(
+                update_gates[:, position, :]
+            ) * candidates[:, position, :]
+            outputs[:, position, :] = output_gates[:, position, :] * self.output_projection(state)
+        return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
 
 
 class P23RotaryCarryBlendReadoutSequenceMixer(SequencePrimitive):
@@ -159,6 +234,31 @@ class P23RotaryCarryBlendReadoutSequenceMixer(SequencePrimitive):
         return SequencePrimitiveStepResult(next_state=next_state, emitted_output=emitted_output)
 
 
+class P23RotaryCarryBlendReadoutRuntimeSequenceMixer(P23RotaryCarryBlendReadoutSequenceMixer):
+    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
+        state = _resolve_initial_state(self, inputs, initial_state)
+        update_gates = gated_sigmoid(self.update_gate_projection(inputs))
+        dynamics_mix_gates = gated_sigmoid(self.dynamics_mix_gate_projection(inputs))
+        angles = self.angle_projection(inputs)
+        candidates = torch.tanh(self.candidate_projection(inputs))
+        output_gates = gated_sigmoid(self.output_gate_projection(inputs))
+        outputs = _allocate_emitted_outputs(inputs, self.d_model)
+        for position in range(inputs.shape[1]):
+            rotated_state = rotate_state_pairs(
+                self.state_transform_projection(state),
+                angles[:, position, :],
+            )
+            carried_state = torch.tanh(self.carry_state_projection(state))
+            transformed_state = dynamics_mix_gates[:, position, :] * rotated_state + one_minus(
+                dynamics_mix_gates[:, position, :]
+            ) * carried_state
+            state = update_gates[:, position, :] * transformed_state + one_minus(
+                update_gates[:, position, :]
+            ) * candidates[:, position, :]
+            outputs[:, position, :] = output_gates[:, position, :] * self.output_projection(state)
+        return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
+
+
 class P21WideLatentSequenceMixer(SequencePrimitive):
     def __init__(self, d_model: int) -> None:
         super().__init__()
@@ -181,6 +281,26 @@ class P21WideLatentSequenceMixer(SequencePrimitive):
         readout = leading_state_slice(next_state, self.d_model)
         emitted_output = gated_sigmoid(self.output_gate_projection(inputs)) * readout
         return SequencePrimitiveStepResult(next_state=next_state, emitted_output=emitted_output)
+
+
+class P21WideLatentRuntimeSequenceMixer(P21WideLatentSequenceMixer):
+    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
+        state = _resolve_initial_state(self, inputs, initial_state)
+        update_gates = gated_sigmoid(self.update_gate_projection(inputs))
+        angles = self.angle_projection(inputs)
+        candidates = torch.tanh(self.candidate_projection(inputs))
+        output_gates = gated_sigmoid(self.output_gate_projection(inputs))
+        outputs = _allocate_emitted_outputs(inputs, self.d_model)
+        for position in range(inputs.shape[1]):
+            transformed_state = rotate_state_pairs(
+                self.state_transform_projection(state),
+                angles[:, position, :],
+            )
+            state = update_gates[:, position, :] * transformed_state + one_minus(
+                update_gates[:, position, :]
+            ) * candidates[:, position, :]
+            outputs[:, position, :] = output_gates[:, position, :] * leading_state_slice(state, self.d_model)
+        return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
 
 
 class P22WideLatentReadoutSequenceMixer(SequencePrimitive):
@@ -207,7 +327,46 @@ class P22WideLatentReadoutSequenceMixer(SequencePrimitive):
         return SequencePrimitiveStepResult(next_state=next_state, emitted_output=emitted_output)
 
 
-def build_sequence_primitive(profile: PrimitiveProfile, d_model: int) -> SequencePrimitive:
+class P22WideLatentReadoutRuntimeSequenceMixer(P22WideLatentReadoutSequenceMixer):
+    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
+        state = _resolve_initial_state(self, inputs, initial_state)
+        update_gates = gated_sigmoid(self.update_gate_projection(inputs))
+        angles = self.angle_projection(inputs)
+        candidates = torch.tanh(self.candidate_projection(inputs))
+        output_gates = gated_sigmoid(self.output_gate_projection(inputs))
+        outputs = _allocate_emitted_outputs(inputs, self.d_model)
+        for position in range(inputs.shape[1]):
+            transformed_state = rotate_state_pairs(
+                self.state_transform_projection(state),
+                angles[:, position, :],
+            )
+            state = update_gates[:, position, :] * transformed_state + one_minus(
+                update_gates[:, position, :]
+            ) * candidates[:, position, :]
+            outputs[:, position, :] = output_gates[:, position, :] * self.output_projection(state)
+        return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
+
+
+def build_sequence_primitive(
+    profile: PrimitiveProfile,
+    d_model: int,
+    execution_profile: PrimitiveExecutionProfile,
+) -> SequencePrimitive:
+    if execution_profile is PrimitiveExecutionProfile.RUNTIME:
+        if profile is PrimitiveProfile.P1:
+            return ContractiveRuntimeSequenceMixer(d_model)
+        if profile is PrimitiveProfile.P20:
+            return P20RotaryStateOutputRuntimeSequenceMixer(d_model)
+        if profile is PrimitiveProfile.P2:
+            return P2RotaryReadoutRuntimeSequenceMixer(d_model)
+        if profile is PrimitiveProfile.P23:
+            return P23RotaryCarryBlendReadoutRuntimeSequenceMixer(d_model)
+        if profile is PrimitiveProfile.P21:
+            return P21WideLatentRuntimeSequenceMixer(d_model)
+        if profile is PrimitiveProfile.P22:
+            return P22WideLatentReadoutRuntimeSequenceMixer(d_model)
+        raise ValueError(f"unsupported primitive runtime profile: {profile}")
+
     if profile is PrimitiveProfile.P1:
         return ContractiveSequenceMixer(d_model)
     if profile is PrimitiveProfile.P20:
@@ -230,6 +389,7 @@ class PrimitiveMixerBlock(nn.Module):
         d_ff: int,
         *,
         primitive_profile: PrimitiveProfile,
+        execution_profile: PrimitiveExecutionProfile,
         residual_mode: PrimitiveResidualMode,
         readout_mode: PrimitiveReadoutMode,
         norm_mode: PrimitiveNormMode,
@@ -238,11 +398,12 @@ class PrimitiveMixerBlock(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.primitive_profile = primitive_profile
+        self.execution_profile = execution_profile
         self.residual_mode = residual_mode
         self.readout_mode = readout_mode
         self.norm_mode = norm_mode
         self.wrapper_mode = wrapper_mode
-        self.primitive = build_sequence_primitive(primitive_profile, d_model)
+        self.primitive = build_sequence_primitive(primitive_profile, d_model, execution_profile)
         self.input_norm = nn.LayerNorm(d_model) if wrapper_mode is PrimitiveWrapperMode.STANDARD else None
         self.output_norm = nn.LayerNorm(d_model) if wrapper_mode is PrimitiveWrapperMode.STANDARD else None
         self.input_rms_norm = SimpleRmsNorm(d_model) if wrapper_mode is PrimitiveWrapperMode.MAMBA_RMS else None
@@ -288,4 +449,3 @@ class PrimitiveMixerBlock(nn.Module):
         else:
             ff_input = self.output_rms_norm(residual)
         return residual + self.feedforward(ff_input)
-

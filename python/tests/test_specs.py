@@ -16,6 +16,7 @@ from python.specs.mini_moe import (
     OneShotRouterSpec,
 )
 from python.specs.path1 import (
+    PrimitiveExecutionProfile,
     PrimitiveNormMode,
     PrimitiveProfile,
     PrimitiveReadoutMode,
@@ -55,6 +56,7 @@ class Path1SpecTests(unittest.TestCase):
     def test_primitive_variant_label_includes_wrapper_identity(self) -> None:
         variant_a = phase1_primitive_variant(
             primitive_profile=PrimitiveProfile.P23,
+            execution_profile=PrimitiveExecutionProfile.RUNTIME,
             residual_mode=PrimitiveResidualMode.GATED,
             readout_mode=PrimitiveReadoutMode.PROJECTED_NORM,
             norm_mode=PrimitiveNormMode.RESIDUAL_RENORM,
@@ -62,12 +64,14 @@ class Path1SpecTests(unittest.TestCase):
         )
         variant_b = phase1_primitive_variant(
             primitive_profile=PrimitiveProfile.P23,
+            execution_profile=PrimitiveExecutionProfile.REFERENCE,
             residual_mode=PrimitiveResidualMode.PLAIN,
             readout_mode=PrimitiveReadoutMode.PROJECTED,
             norm_mode=PrimitiveNormMode.PRE_NORM_ONLY,
             wrapper_mode=PrimitiveWrapperMode.MAMBA_RMS,
         )
         self.assertNotEqual(variant_a.label, variant_b.label)
+        self.assertIn("runtime", variant_a.label)
         self.assertIn("gated", variant_a.label)
         self.assertIn("projected-norm", variant_a.label)
 

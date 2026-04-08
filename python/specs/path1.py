@@ -83,6 +83,11 @@ class PrimitiveWrapperMode(StringEnum):
     MAMBA_RMS = "mamba-rms"
 
 
+class PrimitiveExecutionProfile(StringEnum):
+    REFERENCE = "reference"
+    RUNTIME = "runtime"
+
+
 @dataclass(frozen=True)
 class Path1ModelShape:
     vocab_size: int = BYTE_LEVEL_VOCAB_SIZE
@@ -124,6 +129,7 @@ class Path1VariantSpec:
     primitive_readout_mode: PrimitiveReadoutMode | None = None
     primitive_norm_mode: PrimitiveNormMode | None = None
     primitive_wrapper_mode: PrimitiveWrapperMode | None = None
+    primitive_execution_profile: PrimitiveExecutionProfile | None = None
     final_norm_kind: str = "identity"
 
     def validate(self) -> None:
@@ -151,6 +157,7 @@ class Path1VariantSpec:
                     self.primitive_readout_mode,
                     self.primitive_norm_mode,
                     self.primitive_wrapper_mode,
+                    self.primitive_execution_profile,
                 )
             ):
                 raise ValidationError("attention-only variant must not set reference or primitive options")
@@ -175,10 +182,11 @@ class Path1VariantSpec:
                     self.primitive_readout_mode,
                     self.primitive_norm_mode,
                     self.primitive_wrapper_mode,
+                    self.primitive_execution_profile,
                 )
             ):
                 raise ValidationError(
-                    "primitive-hybrid variant must set primitive residual/readout/norm/wrapper modes"
+                    "primitive-hybrid variant must set primitive residual/readout/norm/wrapper/execution modes"
                 )
         else:
             raise ValidationError(f"unsupported path1 variant kind: {self.kind}")
@@ -246,6 +254,7 @@ def phase1_reference_ssm_variant(
 def phase1_primitive_variant(
     shape: Path1ModelShape = DEFAULT_PATH1_MODEL_SHAPE,
     primitive_profile: PrimitiveProfile = PrimitiveProfile.P1,
+    execution_profile: PrimitiveExecutionProfile = PrimitiveExecutionProfile.REFERENCE,
     residual_mode: PrimitiveResidualMode = PrimitiveResidualMode.PLAIN,
     readout_mode: PrimitiveReadoutMode = PrimitiveReadoutMode.DIRECT,
     norm_mode: PrimitiveNormMode = PrimitiveNormMode.PRE_NORM_ONLY,
@@ -256,6 +265,7 @@ def phase1_primitive_variant(
         label=_variant_label(
             "primitive-hybrid",
             primitive_profile.value,
+            execution_profile.value,
             residual_mode.value,
             readout_mode.value,
             norm_mode.value,
@@ -268,6 +278,7 @@ def phase1_primitive_variant(
         primitive_readout_mode=readout_mode,
         primitive_norm_mode=norm_mode,
         primitive_wrapper_mode=wrapper_mode,
+        primitive_execution_profile=execution_profile,
     )
 
 
@@ -275,6 +286,7 @@ def phase1_baseline_matrix(
     shape: Path1ModelShape = DEFAULT_PATH1_MODEL_SHAPE,
     reference_profile: ReferenceSsmProfile = ReferenceSsmProfile.MAMBA3_SISO_RUNTIME,
     primitive_profile: PrimitiveProfile = PrimitiveProfile.P1,
+    primitive_execution_profile: PrimitiveExecutionProfile = PrimitiveExecutionProfile.REFERENCE,
     residual_mode: PrimitiveResidualMode = PrimitiveResidualMode.PLAIN,
     readout_mode: PrimitiveReadoutMode = PrimitiveReadoutMode.DIRECT,
     norm_mode: PrimitiveNormMode = PrimitiveNormMode.PRE_NORM_ONLY,
@@ -286,6 +298,7 @@ def phase1_baseline_matrix(
         primitive_hybrid=phase1_primitive_variant(
             shape,
             primitive_profile=primitive_profile,
+            execution_profile=primitive_execution_profile,
             residual_mode=residual_mode,
             readout_mode=readout_mode,
             norm_mode=norm_mode,

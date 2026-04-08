@@ -28,6 +28,7 @@ from .path1 import (
     Path1ModelShape,
     Path1VariantKind,
     Path1VariantSpec,
+    PrimitiveExecutionProfile,
     PrimitiveNormMode,
     PrimitiveProfile,
     PrimitiveReadoutMode,

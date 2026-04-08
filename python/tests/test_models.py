@@ -11,6 +11,7 @@ from python.models.mini_moe import (
     SparseTopKDispatcher,
 )
 from python.models.mini_moe import MiniMoeBackboneModel
+from python.models.primitives import build_sequence_primitive
 from python.models.path1 import build_path1_model
 from python.models.reference_ssm import resolve_reference_ssm_config
 from python.specs.mini_moe import (
@@ -29,6 +30,7 @@ from python.specs.mini_moe import (
     OneShotRouterSpec,
 )
 from python.specs.path1 import (
+    PrimitiveExecutionProfile,
     PrimitiveNormMode,
     PrimitiveProfile,
     PrimitiveReadoutMode,
@@ -51,6 +53,7 @@ class Path1ModelTests(unittest.TestCase):
     def test_primitive_forward_cpu(self) -> None:
         variant = phase1_primitive_variant(
             primitive_profile=PrimitiveProfile.P23,
+            execution_profile=PrimitiveExecutionProfile.REFERENCE,
             residual_mode=PrimitiveResidualMode.GATED,
             readout_mode=PrimitiveReadoutMode.PROJECTED_NORM,
             norm_mode=PrimitiveNormMode.RESIDUAL_RENORM,
@@ -62,6 +65,28 @@ class Path1ModelTests(unittest.TestCase):
         self.assertEqual(tuple(logits.shape), (2, 8, 257))
         self.assertIn("gated", model.model_label)
         self.assertIn("projected_norm", model.model_label)
+
+    def test_runtime_primitive_matches_reference_math_for_p20(self) -> None:
+        reference = build_sequence_primitive(
+            PrimitiveProfile.P20,
+            16,
+            PrimitiveExecutionProfile.REFERENCE,
+        )
+        runtime = build_sequence_primitive(
+            PrimitiveProfile.P20,
+            16,
+            PrimitiveExecutionProfile.RUNTIME,
+        )
+        runtime.load_state_dict(reference.state_dict())
+        inputs = torch.randn(2, 5, 16)
+        reference_result = reference.scan(inputs)
+        runtime_result = runtime.scan(inputs)
+        self.assertTrue(
+            torch.allclose(reference_result.emitted_outputs, runtime_result.emitted_outputs, atol=1.0e-5, rtol=1.0e-5)
+        )
+        self.assertTrue(
+            torch.allclose(reference_result.final_state, runtime_result.final_state, atol=1.0e-5, rtol=1.0e-5)
+        )
 
     def test_reference_ssm_boundary_is_explicit(self) -> None:
         has_official_mamba = importlib.util.find_spec("mamba_ssm") is not None

@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from python.models.common import PositionWiseFeedForward
-from python.models.transformer import LocalCausalTransformerBlock, local_causal_mask
+from python.models.transformer import LocalCausalTransformerBlock, local_causal_attention_bias
 from python.specs.mini_moe import MiniMoeDispatchMode, MiniMoeSurfaceSpec, ResolvedDispatchContract
 
 
@@ -199,10 +199,11 @@ class MiniMoeBackboneModel(nn.Module):
 
     def forward_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
         hidden = self.embedding(input_ids)
-        mask = local_causal_mask(
+        mask = local_causal_attention_bias(
             input_ids.shape[1],
             self.surface_spec.architecture.backbone.local_window,
             input_ids.device,
+            hidden.dtype,
         )
         for block in self.blocks:
             hidden = block(hidden, mask)

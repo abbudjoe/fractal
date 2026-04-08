@@ -6,7 +6,7 @@ import torch.nn as nn
 from python.models.common import SimpleRmsNorm
 from python.models.primitives import PrimitiveMixerBlock
 from python.models.reference_ssm import ReferenceSsmHybridBlock
-from python.models.transformer import LocalCausalTransformerBlock, local_causal_mask
+from python.models.transformer import LocalCausalTransformerBlock, local_causal_attention_bias
 from python.specs.path1 import (
     BYTE_LEVEL_PAD_TOKEN,
     HybridAttentionLayerRole,
@@ -50,6 +50,7 @@ class Path1HybridLanguageModel(nn.Module):
                         variant.shape.d_model,
                         variant.shape.d_ff,
                         primitive_profile=variant.primitive_profile,
+                        execution_profile=variant.primitive_execution_profile,
                         residual_mode=variant.primitive_residual_mode,
                         readout_mode=variant.primitive_readout_mode,
                         norm_mode=variant.primitive_norm_mode,
@@ -67,7 +68,12 @@ class Path1HybridLanguageModel(nn.Module):
 
     def forward_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
         hidden = self.embedding(input_ids)
-        mask = local_causal_mask(input_ids.shape[1], self.variant.shape.local_window, input_ids.device)
+        mask = local_causal_attention_bias(
+            input_ids.shape[1],
+            self.variant.shape.local_window,
+            input_ids.device,
+            hidden.dtype,
+        )
         for block in self.blocks:
             hidden = block(hidden, mask)
         hidden = self.final_norm(hidden)
