@@ -20,6 +20,7 @@ class ResolvedReferenceSsmConfig:
     chunk_size: int = 16
     is_outproj_norm: bool = False
     profile: ReferenceSsmProfile = ReferenceSsmProfile.MAMBA3_SISO_RUNTIME
+    runtime_oriented: bool = False
 
 
 def resolve_reference_ssm_config(
@@ -28,7 +29,10 @@ def resolve_reference_ssm_config(
     profile: ReferenceSsmProfile,
     dtype_mode: str,
 ) -> ResolvedReferenceSsmConfig:
-    chunk_size = 16 if dtype_mode == "bf16" else 8
+    if profile is ReferenceSsmProfile.MAMBA3_SISO_REFERENCE:
+        chunk_size = 1
+    else:
+        chunk_size = 16 if dtype_mode == "bf16" else 8
     return ResolvedReferenceSsmConfig(
         d_model=d_model,
         head_count=head_count,
@@ -36,6 +40,7 @@ def resolve_reference_ssm_config(
         mimo_rank=profile.mimo_rank,
         chunk_size=chunk_size,
         profile=profile,
+        runtime_oriented=profile.runtime_oriented,
     )
 
 
@@ -85,4 +90,3 @@ class ReferenceSsmHybridBlock(nn.Module):
         mixed = self.mixer(self.input_norm(hidden), attn_mask)
         residual = hidden + mixed
         return residual + self.feedforward(self.output_norm(residual))
-

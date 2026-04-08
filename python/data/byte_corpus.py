@@ -16,6 +16,15 @@ class TokenBatch:
     target_ids: torch.Tensor
     token_count: int
 
+    def to_device(self, device: torch.device) -> "TokenBatch":
+        if self.input_ids.device == device and self.target_ids.device == device:
+            return self
+        return TokenBatch(
+            input_ids=self.input_ids.to(device=device, non_blocking=True),
+            target_ids=self.target_ids.to(device=device, non_blocking=True),
+            token_count=self.token_count,
+        )
+
 
 @dataclass(frozen=True)
 class ByteCorpusBundle:
@@ -73,7 +82,8 @@ def byte_sequences_from_documents(
 def sequences_into_batches(
     sequences: list[tuple[list[int], list[int]]],
     batch_size: int,
-    device: torch.device,
+    *,
+    pin_memory: bool = False,
 ) -> list[TokenBatch]:
     batches: list[TokenBatch] = []
     seq_len = len(sequences[0][0])
@@ -81,8 +91,11 @@ def sequences_into_batches(
         chunk = sequences[start : start + batch_size]
         input_flat = [token for inputs, _ in chunk for token in inputs]
         target_flat = [token for _, targets in chunk for token in targets]
-        input_ids = torch.tensor(input_flat, dtype=torch.long, device=device).reshape(len(chunk), seq_len)
-        target_ids = torch.tensor(target_flat, dtype=torch.long, device=device).reshape(len(chunk), seq_len)
+        input_ids = torch.tensor(input_flat, dtype=torch.long).reshape(len(chunk), seq_len)
+        target_ids = torch.tensor(target_flat, dtype=torch.long).reshape(len(chunk), seq_len)
+        if pin_memory:
+            input_ids = input_ids.pin_memory()
+            target_ids = target_ids.pin_memory()
         batches.append(TokenBatch(input_ids=input_ids, target_ids=target_ids, token_count=len(chunk) * seq_len))
     return batches
 
@@ -93,9 +106,9 @@ def load_byte_corpus(
     seq_len: int,
     window_stride: int,
     batch_size: int,
-    device: torch.device,
     data_seed: int | None,
     shuffle_train: bool = False,
+    pin_memory: bool = False,
 ) -> ByteCorpusBundle:
     corpus_spec.validate()
     train_docs = load_jsonl_text_documents(corpus_spec.train_path, corpus_spec.text_field)
@@ -104,8 +117,8 @@ def load_byte_corpus(
     eval_sequences = byte_sequences_from_documents(eval_docs, seq_len, window_stride)
     if shuffle_train and data_seed is not None:
         random.Random(data_seed).shuffle(train_sequences)
-    train_batches = sequences_into_batches(train_sequences, batch_size, device)
-    eval_batches = sequences_into_batches(eval_sequences, batch_size, device)
+    train_batches = sequences_into_batches(train_sequences, batch_size, pin_memory=pin_memory)
+    eval_batches = sequences_into_batches(eval_sequences, batch_size, pin_memory=pin_memory)
     total_bytes = sum(len(doc) for doc in train_docs) + sum(len(doc) for doc in eval_docs)
     corpus_stats = {
         "files": [repo_relative(corpus_spec.train_path), repo_relative(corpus_spec.eval_path)],
@@ -122,4 +135,3 @@ def load_byte_corpus(
         "shuffle_train": shuffle_train,
     }
     return ByteCorpusBundle(corpus_stats=corpus_stats, train_batches=train_batches, eval_batches=eval_batches)
-

@@ -50,6 +50,26 @@ class Path1SpecTests(unittest.TestCase):
         variant = phase1_reference_ssm_variant(profile=ReferenceSsmProfile.MAMBA3_MIMO_REFERENCE)
         variant.validate()
         self.assertTrue(variant.reference_ssm_profile.is_mimo)
+        self.assertEqual(variant.label, "reference-ssm-hybrid-mamba3-mimo-reference")
+
+    def test_primitive_variant_label_includes_wrapper_identity(self) -> None:
+        variant_a = phase1_primitive_variant(
+            primitive_profile=PrimitiveProfile.P23,
+            residual_mode=PrimitiveResidualMode.GATED,
+            readout_mode=PrimitiveReadoutMode.PROJECTED_NORM,
+            norm_mode=PrimitiveNormMode.RESIDUAL_RENORM,
+            wrapper_mode=PrimitiveWrapperMode.STANDARD,
+        )
+        variant_b = phase1_primitive_variant(
+            primitive_profile=PrimitiveProfile.P23,
+            residual_mode=PrimitiveResidualMode.PLAIN,
+            readout_mode=PrimitiveReadoutMode.PROJECTED,
+            norm_mode=PrimitiveNormMode.PRE_NORM_ONLY,
+            wrapper_mode=PrimitiveWrapperMode.MAMBA_RMS,
+        )
+        self.assertNotEqual(variant_a.label, variant_b.label)
+        self.assertIn("gated", variant_a.label)
+        self.assertIn("projected-norm", variant_a.label)
 
 
 class MiniMoeSpecTests(unittest.TestCase):

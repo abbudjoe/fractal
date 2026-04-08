@@ -13,9 +13,7 @@ from python.specs.mini_moe import MiniMoeDispatchMode, MiniMoeSurfaceSpec, Resol
 
 @dataclass(frozen=True)
 class RoutePlan:
-    expert_indices: torch.Tensor
-    expert_weights: torch.Tensor
-    router_logits: torch.Tensor
+    expert_logits: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -41,16 +39,12 @@ class MiniMoeRouter(nn.Module):
 
 
 class OneShotTopKRouter(MiniMoeRouter):
-    def __init__(self, hidden_dim: int, experts_per_block: int, active_experts_per_token: int) -> None:
+    def __init__(self, hidden_dim: int, experts_per_block: int) -> None:
         super().__init__()
         self.projection = nn.Linear(hidden_dim, experts_per_block)
-        self.active_experts_per_token = active_experts_per_token
 
     def plan(self, hidden: torch.Tensor) -> RoutePlan:
-        logits = self.projection(hidden)
-        top_values, top_indices = torch.topk(logits, k=self.active_experts_per_token, dim=-1)
-        weights = torch.softmax(top_values, dim=-1)
-        return RoutePlan(expert_indices=top_indices, expert_weights=weights, router_logits=logits)
+        return RoutePlan(expert_logits=self.projection(hidden))
 
 
 class MiniMoeDispatcher(nn.Module):
@@ -75,29 +69,33 @@ class SparseTopKDispatcher(MiniMoeDispatcher):
         experts: nn.ModuleList,
     ) -> tuple[torch.Tensor, DispatchObservation]:
         expert_outputs = torch.stack([expert(hidden) for expert in experts], dim=-2)
+        route_probs = torch.softmax(route_plan.expert_logits, dim=-1)
+        top2 = torch.topk(route_probs, k=min(2, route_probs.shape[-1]), dim=-1).values
         if self.contract.mode is MiniMoeDispatchMode.DENSE_DEBUG:
-            dense_weights = torch.softmax(route_plan.router_logits, dim=-1)
-            mixed = torch.sum(expert_outputs * dense_weights.unsqueeze(-1), dim=-2)
-            top2 = torch.topk(dense_weights, k=min(2, dense_weights.shape[-1]), dim=-1).values
+            mixed = torch.sum(expert_outputs * route_probs.unsqueeze(-1), dim=-2)
             observation = DispatchObservation(
-                active_expert_count=dense_weights.shape[-1],
+                active_expert_count=route_probs.shape[-1],
                 route_entropy=float(
-                    (-dense_weights * dense_weights.clamp_min(1.0e-9).log()).sum(dim=-1).mean().item()
+                    (-route_probs * route_probs.clamp_min(1.0e-9).log()).sum(dim=-1).mean().item()
                 ),
                 winner_margin=float((top2[..., 0] - top2[..., -1]).mean().item()),
             )
             return mixed, observation
 
-        gather_index = route_plan.expert_indices.unsqueeze(-1).expand(
-            *route_plan.expert_indices.shape,
+        top_values, top_indices = torch.topk(
+            route_plan.expert_logits,
+            k=self.contract.active_experts_per_token,
+            dim=-1,
+        )
+        dispatch_weights = torch.softmax(top_values, dim=-1)
+        gather_index = top_indices.unsqueeze(-1).expand(
+            *top_indices.shape,
             hidden.shape[-1],
         )
         selected_outputs = torch.gather(expert_outputs, -2, gather_index)
-        mixed = torch.sum(selected_outputs * route_plan.expert_weights.unsqueeze(-1), dim=-2)
-        route_probs = torch.softmax(route_plan.router_logits, dim=-1)
-        top2 = torch.topk(route_probs, k=min(2, route_probs.shape[-1]), dim=-1).values
+        mixed = torch.sum(selected_outputs * dispatch_weights.unsqueeze(-1), dim=-2)
         observation = DispatchObservation(
-            active_expert_count=int(route_plan.expert_indices.shape[-1]),
+            active_expert_count=int(top_indices.shape[-1]),
             route_entropy=float(
                 (-route_probs * route_probs.clamp_min(1.0e-9).log()).sum(dim=-1).mean().item()
             ),
@@ -178,7 +176,6 @@ class MiniMoeBackboneModel(nn.Module):
                     router=OneShotTopKRouter(
                         hidden_dim=surface_spec.architecture.backbone.hidden_dim,
                         experts_per_block=surface_spec.architecture.moe.experts_per_block,
-                        active_experts_per_token=surface_spec.architecture.moe.active_experts_per_token,
                     ),
                     dispatcher=SparseTopKDispatcher(dispatch_contract),
                     observability_sink=sink,
@@ -210,4 +207,3 @@ class MiniMoeBackboneModel(nn.Module):
         for block in self.blocks:
             hidden = block(hidden, mask)
         return self.output(hidden)
-

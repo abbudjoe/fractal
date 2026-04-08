@@ -68,9 +68,9 @@ def run_path1_variant(request: Path1RunnerRequest) -> BenchmarkReport:
         seq_len=request.manifest.budget.seq_len,
         window_stride=request.manifest.budget.window_stride,
         batch_size=request.manifest.budget.batch_size,
-        device=device,
         data_seed=request.manifest.seed_spec.data_seed,
-        shuffle_train=False,
+        shuffle_train=request.manifest.seed_spec.data_seed is not None,
+        pin_memory=request.manifest.runtime.backend == "cuda",
     )
     train_steps = len(corpus.train_batches) if request.manifest.budget.full_train_pass else request.manifest.budget.train_steps
     eval_batch_count = len(corpus.eval_batches) if request.manifest.budget.full_eval_pass else request.manifest.budget.eval_batches
@@ -86,6 +86,7 @@ def run_path1_variant(request: Path1RunnerRequest) -> BenchmarkReport:
         request.manifest.budget.warmup_train_steps,
         autocast_dtype,
         pad_token=BYTE_LEVEL_PAD_TOKEN,
+        device=device,
         device_type=device.type,
     )
     if device.type == "cuda":

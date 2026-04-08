@@ -17,6 +17,10 @@ class LanguageModelProtocol(Protocol):
         ...
 
 
+def materialize_batch(batch: TokenBatch, device: torch.device) -> TokenBatch:
+    return batch.to_device(device)
+
+
 def process_peak_rss_bytes() -> int:
     return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
 
@@ -33,6 +37,7 @@ def evaluate_model(
     autocast_dtype: torch.dtype | None,
     *,
     pad_token: int,
+    device: torch.device,
     device_type: str,
 ) -> EvalSummary:
     selected = batches[: min(eval_batches, len(batches))]
@@ -41,11 +46,12 @@ def evaluate_model(
     model.eval()
     with torch.no_grad():
         for batch in selected:
+            batch_on_device = materialize_batch(batch, device)
             with torch.autocast(device_type=device_type, dtype=autocast_dtype, enabled=autocast_dtype is not None):
-                logits = model.forward_logits(batch.input_ids)
+                logits = model.forward_logits(batch_on_device.input_ids)
                 loss = F.cross_entropy(
                     logits.reshape(-1, logits.shape[-1]),
-                    batch.target_ids.reshape(-1),
+                    batch_on_device.target_ids.reshape(-1),
                     ignore_index=pad_token,
                 )
             total_loss += float(loss.detach().float().item())
@@ -64,6 +70,7 @@ def warmup_model(
     autocast_dtype: torch.dtype | None,
     *,
     pad_token: int,
+    device: torch.device,
     device_type: str,
 ) -> None:
     if warmup_eval_batches > 0:
@@ -73,12 +80,13 @@ def warmup_model(
             warmup_eval_batches,
             autocast_dtype,
             pad_token=pad_token,
+            device=device,
             device_type=device_type,
         )
     if warmup_train_steps > 0:
         model.train()
         for step in range(warmup_train_steps):
-            batch = train_batches[step % len(train_batches)]
+            batch = materialize_batch(train_batches[step % len(train_batches)], device)
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device_type, dtype=autocast_dtype, enabled=autocast_dtype is not None):
                 logits = model.forward_logits(batch.input_ids)
@@ -125,6 +133,7 @@ def run_training_benchmark(
         eval_batch_count,
         autocast_dtype,
         pad_token=pad_token,
+        device=device,
         device_type=device_type,
     )
     if device_type == "cuda":
@@ -137,7 +146,7 @@ def run_training_benchmark(
     model.train()
     train_start = time.perf_counter()
     for step in range(train_steps):
-        batch = train_batches[step % len(train_batches)]
+        batch = materialize_batch(train_batches[step % len(train_batches)], device)
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device_type, dtype=autocast_dtype, enabled=autocast_dtype is not None):
             logits = model.forward_logits(batch.input_ids)
@@ -171,6 +180,7 @@ def run_training_benchmark(
         eval_batch_count,
         autocast_dtype,
         pad_token=pad_token,
+        device=device,
         device_type=device_type,
     )
     if device_type == "cuda":
@@ -220,4 +230,3 @@ def run_training_benchmark(
         runtime=runtime,
         train_steps=train_step_reports,
     )
-

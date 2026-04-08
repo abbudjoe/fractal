@@ -9,9 +9,7 @@ from python.models.reference_ssm import ReferenceSsmHybridBlock
 from python.models.transformer import LocalCausalTransformerBlock, local_causal_mask
 from python.specs.path1 import (
     BYTE_LEVEL_PAD_TOKEN,
-    BYTE_LEVEL_VOCAB_SIZE,
     HybridAttentionLayerRole,
-    Path1VariantKind,
     Path1VariantSpec,
 )
 
@@ -65,12 +63,7 @@ class Path1HybridLanguageModel(nn.Module):
 
     @property
     def model_label(self) -> str:
-        if self.variant.kind is Path1VariantKind.REFERENCE_SSM_HYBRID:
-            profile = self.variant.reference_ssm_profile.value
-            return f"path1_reference_ssm_{profile}"
-        if self.variant.kind is Path1VariantKind.PRIMITIVE_HYBRID:
-            return f"path1_primitive_{self.variant.primitive_profile.value}"
-        return "path1_attention_only"
+        return f"path1_{self.variant.label.replace('-', '_')}"
 
     def forward_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
         hidden = self.embedding(input_ids)
@@ -83,4 +76,3 @@ class Path1HybridLanguageModel(nn.Module):
 
 def build_path1_model(variant: Path1VariantSpec, *, dtype_mode: str) -> Path1HybridLanguageModel:
     return Path1HybridLanguageModel(variant, dtype_mode=dtype_mode)
-

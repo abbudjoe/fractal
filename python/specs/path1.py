@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from typing import Sequence
+from dataclasses import dataclass
 
 from .common import StringEnum, ValidationError, ensure_positive
 
@@ -216,6 +215,10 @@ def _alternating_schedule(total_layers: int, odd_role: HybridAttentionLayerRole)
     )
 
 
+def _variant_label(*parts: str) -> str:
+    return "-".join(part for part in parts if part)
+
+
 def phase1_attention_only_variant(shape: Path1ModelShape = DEFAULT_PATH1_MODEL_SHAPE) -> Path1VariantSpec:
     return Path1VariantSpec(
         kind=Path1VariantKind.ATTENTION_ONLY,
@@ -232,7 +235,7 @@ def phase1_reference_ssm_variant(
     final_norm = "rmsnorm" if profile in {ReferenceSsmProfile.MAMBA3_SISO_REFERENCE, ReferenceSsmProfile.MAMBA3_SISO_RUNTIME} else "identity"
     return Path1VariantSpec(
         kind=Path1VariantKind.REFERENCE_SSM_HYBRID,
-        label="reference-ssm-hybrid",
+        label=_variant_label("reference-ssm-hybrid", profile.value),
         shape=shape,
         layer_schedule=_alternating_schedule(shape.total_layers, HybridAttentionLayerRole.REFERENCE_SSM),
         reference_ssm_profile=profile,
@@ -250,7 +253,14 @@ def phase1_primitive_variant(
 ) -> Path1VariantSpec:
     return Path1VariantSpec(
         kind=Path1VariantKind.PRIMITIVE_HYBRID,
-        label=f"primitive-hybrid-{primitive_profile.value}",
+        label=_variant_label(
+            "primitive-hybrid",
+            primitive_profile.value,
+            residual_mode.value,
+            readout_mode.value,
+            norm_mode.value,
+            wrapper_mode.value,
+        ),
         shape=shape,
         layer_schedule=_alternating_schedule(shape.total_layers, HybridAttentionLayerRole.PRIMITIVE),
         primitive_profile=primitive_profile,
@@ -284,4 +294,3 @@ def phase1_baseline_matrix(
     )
     matrix.validate()
     return matrix
-
