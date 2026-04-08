@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Thought-Channel Hybrid • Fractal Visualization</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <script>
+        document.addEventListener("DOMContentLoaded", () => {
+            mermaid.initialize({
+                startOnLoad: true,
+                theme: "base",
+                flowchart: {
+                    curve: "basis",
+                    htmlLabels: false
+                },
+                themeVariables: {
+                    background: "#091224",
+                    primaryColor: "#11203f",
+                    primaryTextColor: "#e7eefc",
+                    primaryBorderColor: "#6de7ff",
+                    secondaryColor: "#0f1a33",
+                    secondaryTextColor: "#e7eefc",
+                    secondaryBorderColor: "#8ea1c6",
+                    tertiaryColor: "#10162a",
+                    tertiaryTextColor: "#e7eefc",
+                    tertiaryBorderColor: "#7f6bff",
+                    lineColor: "#8ea1c6",
+                    clusterBkg: "#0c1630",
+                    clusterBorder: "#7f6bff",
+                    fontFamily: "Inter, Avenir Next, Segoe UI, sans-serif"
+                }
+            });
+        });
+    </script>
+</head>
+<body>
+    <div class="page-shell">
+        <header class="hero">
+            <div>
+                <div class="eyebrow">
+                    <span class="pulse-dot"></span>
+                    Native Search Variant
+                </div>
+                <h1 class="title">Thought-Channel Hybrid</h1>
+                <p class="subtitle">
+                    A block diagram for a search-native hybrid: shared transformer attention for
+                    exact token interaction, plus multiple fully active thought channels that keep
+                    separate latent hypotheses alive inside recurrent or state-space workspaces.
+                </p>
+            </div>
+            <nav class="nav-cluster">
+                <a class="nav-link" href="./index.html">Home</a>
+                <a class="nav-link" href="./gpt.html">GPT / Transformer</a>
+                <a class="nav-link" href="./hybrid.html">Hybrid / Jamba</a>
+                <a class="nav-link" href="./fractal-v1.html">Fractal v1</a>
+                <a class="nav-link" href="./fractal-v2.html">Fractal v2</a>
+                <a class="nav-link" href="./native-internal-search.html">Native Internal Search</a>
+                <a class="nav-link" href="./v3a-hybrid-attention.html">v3a Hybrid Attention</a>
+                <a class="nav-link active" href="./thought-channel-hybrid.html">Thought-Channel Hybrid</a>
+            </nav>
+        </header>
+
+        <div class="dashboard">
+            <aside class="panel sidebar">
+                <section class="section">
+                    <h2>Core Idea</h2>
+                    <p>
+                        Keep attention where it is best: exact binding, retrieval, and final answer
+                        formation. Put iterative search into separate always-on latent channels that
+                        can refine competing hypotheses without serializing every branch into tokens.
+                    </p>
+                </section>
+
+                <section class="section">
+                    <h2>Why Hybrid</h2>
+                    <ul>
+                        <li>Attention handles exact token interaction and context retrieval.</li>
+                        <li>SSM or recurrent workspaces hold per-channel working memory cheaply.</li>
+                        <li>Shared trunk compute is reused across all hypotheses.</li>
+                        <li>Cross-channel attention is paid periodically, not everywhere.</li>
+                    </ul>
+                </section>
+
+                <section class="section">
+                    <h2>Not Standard MoE</h2>
+                    <ul>
+                        <li>All thought channels stay active rather than sparsely gating a few experts.</li>
+                        <li>The key primitive is separate hypothesis state, not only specialization.</li>
+                        <li>Score, prune, merge, and halt become first-class runtime operations.</li>
+                    </ul>
+                </section>
+            </aside>
+
+            <main class="panel main-stage">
+                <section class="diagram-panel">
+                    <div class="tag-row">
+                        <span class="tag-pill">Shared Attention Trunk</span>
+                        <span class="tag-pill">K Active Channels</span>
+                        <span class="tag-pill">SSM / Recurrent Workspace</span>
+                        <span class="tag-pill">Compare / Prune / Merge</span>
+                        <span class="tag-pill">Adaptive Halt</span>
+                    </div>
+
+                    <div>
+                        <h2>Block Diagram</h2>
+                        <p>
+                            This is the middle path between a plain external GoT harness and a fully
+                            graph-native latent model: a dense shared backbone plus explicit
+                            multi-hypothesis channels with internal search control.
+                        </p>
+                    </div>
+
+                    <div class="diagram-shell">
+<pre class="mermaid">flowchart TD
+    Input["Input tokens"] --> Embed["Tokenizer + embeddings"]
+    Embed --> Shared["Shared transformer trunk\nexact token interaction"]
+    Shared --> Seed["Seed / refresh K thought channels"]
+
+    subgraph Channels["Thought channels (all active)"]
+        direction TB
+        C1["Channel 1\nSSM / recurrent workspace"]
+        C2["Channel 2\nSSM / recurrent workspace"]
+        CK["Channel K\nSSM / recurrent workspace"]
+    end
+
+    Seed --> C1
+    Seed --> C2
+    Seed --> CK
+
+    C1 --> Expand["Channel-local expand / refine"]
+    C2 --> Expand
+    CK --> Expand
+
+    Expand --> Retrieve["Selective retrieval via shared attention\nfrom token context or memory"]
+    Shared --> Retrieve
+    Retrieve --> Compare["Cross-channel compare / merge attention"]
+    Compare --> Score["Score / prune / retain controller"]
+    Score --> Halt{"halt?"}
+
+    Halt -- no --> Seed
+    Halt -- yes --> Synthesis["Synthesis head\ncollapse frontier to final answer state"]
+    Synthesis --> LM["LM head"]
+    LM --> Output["Next-token distribution"]
+
+    Budget["Compute budget / channel budget"] --> Score
+    Score --> Channels</pre>
+                    </div>
+                </section>
+
+                <section class="note-grid">
+                    <article class="note-card">
+                        <h3>Why It Could Beat An External Harness</h3>
+                        <ul>
+                            <li>Hypotheses stay latent instead of being re-serialized into text.</li>
+                            <li>The shared attention trunk can serve all channels at once.</li>
+                            <li>Per-channel refinement can be much cheaper than full model re-entry.</li>
+                            <li>Compare and merge happen over richer internal state than text traces allow.</li>
+                        </ul>
+                    </article>
+
+                    <article class="note-card">
+                        <h3>Main Risks</h3>
+                        <ul>
+                            <li>Channels may interfere or collapse into near-duplicates.</li>
+                            <li>Scoring and pruning may be unstable without strong training signals.</li>
+                            <li>The controller may waste compute on latent churn instead of useful search.</li>
+                            <li>Interpretability becomes harder than in an external explicit GoT harness.</li>
+                        </ul>
+                    </article>
+                </section>
+            </main>
+        </div>
+    </div>
+</body>
+</html>

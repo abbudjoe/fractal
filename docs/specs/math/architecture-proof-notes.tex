@@ -1,0 +1,725 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue,
+  citecolor=blue
+}
+
+\title{Architecture Proof Notes for Modern LLM Families}
+\author{Fractal Research Notes}
+\date{\today}
+
+\newtheorem{definition}{Definition}[section]
+\newtheorem{lemma}[definition]{Lemma}
+\newtheorem{theorem}[definition]{Theorem}
+\newtheorem{proposition}[definition]{Proposition}
+\newtheorem{conjecture}[definition]{Conjecture}
+\newtheorem{remark}[definition]{Remark}
+
+\newcommand{\Softmax}{\operatorname{Softmax}}
+\newcommand{\Attn}{\operatorname{Attn}}
+\newcommand{\diag}{\operatorname{diag}}
+\newcommand{\R}{\mathbb{R}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+These notes collect the smallest clean theorem surface for four architecture
+families:
+\begin{enumerate}
+  \item standard decoder-only language models,
+  \item modern sub-variants including sparse mixture-of-experts, linear
+    attention, and hybrid recurrent-attention stacks such as Kimi Linear,
+  \item the current \texttt{A + P2} contender family,
+  \item a speculative Graph-of-Experts / thought-channel family for bounded
+    internal search.
+\end{enumerate}
+
+The aim is not to prove empirical superiority.
+The aim is to isolate claims that are actually provable:
+causality, incremental equivalence, reduction to simpler cases, strict
+structural generalization where valid, and asymptotic or control-plane bounds.
+\end{abstract}
+
+\section{Proof Discipline and Common Machine}
+
+\begin{remark}
+Every formal statement in this note should be interpreted as exactly one of:
+\emph{definition}, \emph{lemma}, \emph{theorem}, \emph{proposition}, or
+\emph{conjecture}. If benchmark evidence is required, the statement is not a
+theorem.
+\end{remark}
+
+Let the input token sequence be
+\[
+  x_1, x_2, \dots, x_T.
+\]
+At step $t$, define:
+\begin{itemize}
+  \item $h_t$: active latent state,
+  \item $M_t$: memory object,
+  \item $c_t$: control object,
+  \item $y_t$: emitted token representation used by the output head.
+\end{itemize}
+
+We place all families inside the generic causal machine
+\begin{align}
+  (h_t, M_t, c_t) &= U_\theta(h_{t-1}, M_{t-1}, c_{t-1}, x_t), \\
+  y_t &= R_\theta(h_t, M_t, c_t, x_t), \\
+  p_\theta(x_{t+1}\mid x_{\le t}) &= \Softmax(W y_t).
+\end{align}
+
+What varies across architectures is:
+\begin{itemize}
+  \item what $M_t$ stores,
+  \item what $c_t$ controls,
+  \item whether $U_\theta$ is attention-dominant, recurrent-dominant, hybrid,
+    or search-native,
+  \item how much exact token interaction is available inside $U_\theta$.
+\end{itemize}
+
+\subsection{Shared Symbols}
+
+\begin{itemize}
+  \item $T$: sequence length,
+  \item $d$: model width,
+  \item $w$: local exact-attention window,
+  \item $L$: total layer count,
+  \item $L_A$: exact-attention layer count,
+  \item $L_S$: sequence-mixer layer count,
+  \item $E$: number of experts in a sparse MoE layer,
+  \item $k$: number of active experts per token,
+  \item $K$: number of active thought channels,
+  \item $B$: bounded internal search budget,
+  \item $s_t$: recurrent latent state in a sequence-mixer block.
+\end{itemize}
+
+\subsection{Basic Causality}
+
+\begin{definition}[Causal update]
+An update rule is \emph{causal} if step $t$ depends only on $x_{\le t}$ and
+state produced from steps $< t$, and never on any future token $x_u$ with
+$u > t$.
+\end{definition}
+
+\begin{lemma}[Causal composition]
+If $f$ and $g$ are causal update operators over the same prefix order, then
+their composition $g \circ f$ is causal.
+\end{lemma}
+
+\begin{proof}
+The output of $f$ depends only on allowed prefix information. The output of
+$g$ depends only on the output of $f$ and the same allowed prefix information.
+Therefore no future token can enter through composition.
+\end{proof}
+
+\begin{definition}[Incremental-decode equivalence]
+An incremental decode procedure is equivalent to full-prefix recomputation if,
+for fixed weights, masks, and prefix,
+\[
+  y_t^{\mathrm{inc}} = y_t^{\mathrm{full}}
+\]
+up to deterministic arithmetic tolerance.
+\end{definition}
+
+\begin{definition}[Reduction to a simpler class]
+Architecture family $F$ reduces to family $G$ if there exists an explicit
+parameter or control setting under which every member of the reduced subclass
+of $F$ behaves as a member of $G$.
+\end{definition}
+
+\begin{definition}[Strict structural generalization]
+Family $F$ strictly structurally generalizes family $G$ if:
+\begin{enumerate}
+  \item $F$ reduces to $G$ under an explicit restriction, and
+  \item there exist members of $F$ that cannot be represented inside $G$
+    without changing the declared contract class.
+\end{enumerate}
+\end{definition}
+
+\section{Standard Decoder LLMs}
+
+Assume masked causal self-attention, residual blocks, and position-wise
+feed-forward updates.
+
+For one attention head:
+\begin{align}
+  q_t &= W_Q r_t, \\
+  k_u &= W_K r_u, \\
+  v_u &= W_V r_u.
+\end{align}
+With causal masking:
+\[
+  \alpha_{t,u} =
+  \begin{cases}
+    0, & u > t, \\
+    \dfrac{\exp(q_t \cdot k_u / \sqrt{d_k})}
+      {\sum_{j \le t}\exp(q_t \cdot k_j / \sqrt{d_k})}, & u \le t.
+  \end{cases}
+\]
+Then
+\[
+  \Attn_t = \sum_{u \le t} \alpha_{t,u} v_u.
+\]
+
+\begin{definition}[Decoder language model]
+A standard decoder language model is any stacked residual architecture in which
+every layer is causal and the next-token distribution is read from the top
+layer token representation:
+\[
+  p_\theta(x_{t+1}\mid x_{\le t}) = \Softmax(W r_t^{(L)}).
+\]
+\end{definition}
+
+\begin{theorem}[Causal decoder correctness]
+A masked decoder transformer defines a causal conditional distribution over the
+next token.
+\end{theorem}
+
+\begin{proof}
+At every layer, the causal mask forbids access to positions $u > t$.
+Feed-forward blocks are pointwise in position and therefore cannot introduce
+future-token dependence. Residual addition preserves causality whenever both
+branches are causal. By repeated application of the causal-composition lemma,
+the full stack remains causal, and the output head reads only the final causal
+state at position $t$.
+\end{proof}
+
+\begin{theorem}[KV-cache decode equivalence]
+Under fixed weights, fixed masks, and deterministic inference,
+incremental decode with cached keys and values is equivalent to full-prefix
+recomputation for the same prefix.
+\end{theorem}
+
+\begin{proof}
+At step $t$, full-prefix recomputation attends to the set
+$\{(k_u, v_u) : u \le t\}$. Under fixed weights, the keys and values for prior
+positions $u < t$ do not change when a new token arrives. Therefore the cached
+set of prior key-value pairs is exactly the same set that full-prefix
+recomputation would rebuild. The only new objects required are the current
+token's key and value. Since the score function and mask are unchanged, the
+attention output is the same.
+\end{proof}
+
+\begin{proposition}[Approximate copy capacity]
+Exact self-attention can implement arbitrarily sharp copy-like retrieval of a
+visible prior token.
+\end{proposition}
+
+\begin{proof}
+Choose parameters so that the query at position $t$ scores one visible prior
+position $u^\star \le t$ strictly above all others. Then the attention weights
+concentrate on $u^\star$, and the resulting output becomes arbitrarily close to
+$v_{u^\star}$. If the output projection reads the copied content from
+$v_{u^\star}$, the model implements pointer-style copying over the visible
+context.
+\end{proof}
+
+\begin{proposition}[Token comparison capacity]
+Exact self-attention can implement local or long-range token comparison over
+the visible context.
+\end{proposition}
+
+\begin{proof}
+Keys and queries can be parameterized so that the current token representation
+selects one or more comparison-relevant prior tokens. The attention read gathers
+their information into the residual stream, and a subsequent feed-forward block
+can map that gathered evidence to a comparison feature.
+\end{proof}
+
+\begin{proposition}[Complexity bound]
+Let sequence length be $T$, model width be $d$, and layer count be $L$. Then
+train-time dense attention is quadratic in visible sequence length per
+attention layer, while decode-time incremental attention is linear in visible
+cache length per attention layer.
+\end{proposition}
+
+\begin{proof}
+At train time, each visible query position scores against all visible prior
+keys in each attention layer. That induces the familiar quadratic prefix
+interaction. At incremental decode time, each new query scores against the
+already-visible cache once per layer, which is linear in cache length for that
+step.
+\end{proof}
+
+\section{Modern Sub-Variants}
+
+\subsection{Sparse Mixture of Experts}
+
+Write one sparse-MoE feed-forward block as
+\[
+  \mathrm{MoE}(x_t) = \sum_{i \in \mathrm{Active}_t} \pi_{t,i} E_i(x_t),
+\]
+where $|\mathrm{Active}_t| \le k$.
+
+\begin{proposition}[Dense reduction for sparse MoE]
+A sparse-MoE layer reduces to a dense feed-forward layer under a degenerate
+expert-sharing and routing choice.
+\end{proposition}
+
+\begin{proof}
+Set every expert function equal to the same dense function $F$. Force the
+router to activate exactly one expert with weight $1$. Then
+\[
+  \mathrm{MoE}(x_t) = F(x_t).
+\]
+Hence dense FFN is a special case of MoE.
+\end{proof}
+
+\begin{proposition}[Expert budget invariant]
+If routing activates at most $k$ experts per token, then per-token expert
+compute is bounded by $k$ expert evaluations.
+\end{proposition}
+
+\begin{proof}
+The router is the only component allowed to activate experts. By contract it
+emits at most $k$ active experts for a token, so no more than $k$ expert
+evaluations can occur for that token.
+\end{proof}
+
+\begin{proposition}[Control-plane separation]
+Sparse MoE changes conditional compute allocation without changing the causal
+prefix contract of the surrounding decoder.
+\end{proposition}
+
+\begin{proof}
+Routing depends on the current causal token state, and expert evaluation
+consumes only that causal state. Therefore expert selection does not introduce
+future-token dependence by itself.
+\end{proof}
+
+\begin{conjecture}[Parameter-efficiency benefit]
+Sparse expert specialization may improve parameter-efficiency. This is an
+empirical claim, not a theorem.
+\end{conjecture}
+
+\subsection{Linear-Attention Families}
+
+For a factorized linear-attention family with feature map $\phi$, define
+\begin{align}
+  S_t &= \sum_{u \le t} \phi(k_u) v_u^\top, \\
+  z_t &= \sum_{u \le t} \phi(k_u), \\
+  \mathrm{output}_t &= \frac{\phi(q_t)^\top S_t}{\phi(q_t)^\top z_t}.
+\end{align}
+
+\begin{theorem}[Associative recurrent form]
+If the attention kernel factors through an associative feature map $\phi$, then
+prefix processing admits an equivalent recurrent update with linear-time
+sequence evolution.
+\end{theorem}
+
+\begin{proof}
+The objects $S_t$ and $z_t$ can be updated from $S_{t-1}$ and $z_{t-1}$ using
+only the current token contribution. No revisit of all prior tokens is required
+once those prefix summaries are maintained. Therefore the visible-prefix read
+admits a recurrent implementation over bounded summary state.
+\end{proof}
+
+\begin{remark}[Softmax exactness boundary]
+The factorized recurrent form above should not be read as a general
+exact-equivalence guarantee to arbitrary softmax attention.
+Establishing a sharp non-equivalence theorem would require a separate
+representation argument beyond the scope of these notes.
+\end{remark}
+
+\begin{proposition}[Decode complexity bound]
+If the model maintains recurrent prefix summaries of bounded size, incremental
+decode cost is bounded by the recurrent-state update rather than a full
+visible-cache scan.
+\end{proposition}
+
+\begin{proof}
+The recurrent summaries replace explicit re-scanning of all visible prior
+tokens. Thus the decode cost is governed by summary update size rather than
+visible context length itself.
+\end{proof}
+
+\subsection{Hybrid Recurrent-Attention Families}
+
+This class includes:
+\begin{itemize}
+  \item Jamba-style interleaved attention and SSM hybrids,
+  \item Nemotron-H-style mostly-SSM stacks with occasional attention,
+  \item Kimi-style recurrent-memory plus periodic exact-attention stacks.
+\end{itemize}
+
+Let the stack contain $L_A$ exact-attention layers and $L_S$ recurrent or SSM
+sequence-mixer layers.
+
+\begin{definition}[Hybrid layer cost model]
+Let
+\[
+  c_A(T, d), \quad m_A(T, d)
+\]
+denote the per-layer compute and memory obligations of one exact-attention
+layer on visible context length $T$, and let
+\[
+  c_S(d), \quad m_S(d)
+\]
+denote the per-layer compute and memory obligations of one recurrent or SSM
+layer with bounded summary state.
+\end{definition}
+
+\begin{theorem}[Hybrid causal composition]
+An interleaved stack of causal exact-attention and causal recurrent or SSM
+blocks remains causal.
+\end{theorem}
+
+\begin{proof}
+Each attention block is causal by masked attention. Each recurrent or SSM block
+is causal by left-to-right update. The full stack is causal by repeated
+composition.
+\end{proof}
+
+\begin{proposition}[Exact-attention budget decomposition]
+Under the hybrid layer cost model, the exact-attention-specific portion of the
+stack cost is
+\[
+  L_A \, c_A(T, d)
+\]
+in compute and
+\[
+  L_A \, m_A(T, d)
+\]
+in memory.
+\end{proposition}
+
+\begin{proof}
+Only the exact-attention layers incur exact visible-token interaction costs.
+The recurrent or SSM layers replace those exact-attention obligations with
+their own bounded summary-state updates. Summing over $L_A$ exact-attention
+layers yields the stated exact-attention compute and memory terms.
+\end{proof}
+
+\begin{proposition}[Reduction edge cases]
+A hybrid recurrent-attention stack reduces to attention-only when $L_S = 0$,
+and to recurrent-only when $L_A = 0$.
+\end{proposition}
+
+\begin{proof}
+Setting one layer family count to zero removes that family entirely. The
+remaining stack is exactly the edge-case class.
+\end{proof}
+
+\begin{proposition}[Kimi-style periodic exact-attention exposure]
+In a fixed $3{:}1$ KDA-to-MLA schedule, an exact-attention layer occurs at
+regular depth intervals while recurrent memory carries the cheaper background
+state between those refresh points.
+\end{proposition}
+
+\begin{proof}
+Every fourth layer is an exact-attention layer in the stated schedule.
+Therefore any representation that traverses depth encounters an exact
+interaction surface at regular intervals, while the intervening KDA layers
+carry the recurrent-memory path.
+\end{proof}
+
+\begin{proposition}[Hybrid memory decomposition]
+Under the hybrid layer cost model, total layer-local memory obligation is
+\[
+  L_A \, m_A(T, d) + L_S \, m_S(d).
+\]
+In particular, the exact visible-token memory term scales with $L_A$ rather
+than the full layer count $L$.
+\end{proposition}
+
+\begin{proof}
+The recurrent-memory layers replace full exact-attention visible-token state
+with bounded recurrent summaries. Therefore exact visible-token memory appears
+only in the $L_A$ exact-attention layers, while the remaining $L_S$ layers
+contribute only their bounded summary-state terms.
+\end{proof}
+
+\section{\texttt{A + P2}}
+
+The \texttt{A + P2} family is the current Path 1 contender:
+\[
+  A\text{-}P2\text{-}A\text{-}P2\text{-}A\text{-}P2\text{-}A\text{-}P2.
+\]
+
+\subsection{Expected Contract Class}
+
+We assume the currently expected direction:
+\begin{itemize}
+  \item predictive-core sequence primitive only,
+  \item no memory/index sidecar behavior,
+  \item transformed state dynamics before blending,
+  \item emitted output distinct from latent state,
+  \item no routed retrieval or Path 2 control-plane behavior.
+\end{itemize}
+
+Write the \texttt{P2} step abstractly as
+\begin{align}
+  u_t &= T_\theta(s_{t-1}, x_t), \\
+  c_t &= C_\theta(x_t), \\
+  s_t &= U_\theta(u_t, c_t, x_t), \\
+  o_t &= R_\theta(s_t, x_t).
+\end{align}
+
+\begin{remark}
+This section is intentionally conditional on the current expected \texttt{P2}
+contract class. It does not claim that every final implementation detail is
+already frozen.
+\end{remark}
+
+\begin{definition}[Abstract \texttt{P1}-style contract]
+For these notes, a \texttt{P1}-style family is any single-state recurrent
+predictor of the form
+\begin{align}
+  s_t &= G_\theta(s_{t-1}, x_t), \\
+  y_t &= s_t,
+\end{align}
+with no separate emitted object beyond the latent state itself.
+\end{definition}
+
+\begin{definition}[Step/scan consistency for \texttt{P2}]
+A \texttt{P2} implementation is step/scan consistent if repeated
+\texttt{step(...)} over a sequence and one \texttt{scan(...)} over the same
+sequence produce the same emitted outputs and final latent state, up to
+deterministic arithmetic tolerance.
+\end{definition}
+
+\begin{theorem}[Causal \texttt{P2} update correctness]
+If $T_\theta$, $C_\theta$, $U_\theta$, and $R_\theta$ depend only on $x_t$ and
+$s_{t-1}$, then the \texttt{P2} block is causal.
+\end{theorem}
+
+\begin{proof}
+The transformed carry path sees only the prior latent state and current input.
+The candidate path sees only the current input. The update combines only those
+causal objects, and the readout sees only the resulting state and current
+input. No future token can enter the block.
+\end{proof}
+
+\begin{theorem}[\texttt{A + P2} hybrid causality]
+If every $A$ block is causal by masked local attention and every \texttt{P2}
+block is causal, then the interleaved \texttt{A + P2} stack is causal.
+\end{theorem}
+
+\begin{proof}
+Apply the causal-composition lemma layer by layer through the interleaved stack.
+\end{proof}
+
+\begin{proposition}[\texttt{P1}-style reduction]
+Under explicit restrictions, the \texttt{P2} family reduces to a simpler
+\texttt{P1}-style single-state direct-readout family.
+\end{proposition}
+
+\begin{proof}
+Restrict $R_\theta$ to direct state readout so that $o_t = s_t$, absorb
+$C_\theta$ into the update map, and choose $T_\theta$ and $U_\theta$ so that
+their composition becomes one single-state recurrent map
+$G_\theta(s_{t-1}, x_t)$. Under those restrictions the \texttt{P2} step
+becomes
+\[
+  s_t = G_\theta(s_{t-1}, x_t), \qquad y_t = s_t,
+\]
+which is exactly the declared \texttt{P1}-style contract.
+\end{proof}
+
+\begin{proposition}[Structural enlargement over the abstract \texttt{P1} contract]
+If the final \texttt{P2} contract permits a separate emitted object
+$o_t = R_\theta(s_t, x_t)$ that is not required to equal $s_t$, then the
+expected \texttt{P2} class strictly structurally generalizes the abstract
+\texttt{P1}-style family defined above.
+\end{proposition}
+
+\begin{proof}
+The reduction proposition shows that \texttt{P2} contains a restricted
+\texttt{P1}-style subclass. But by definition the abstract \texttt{P1}
+contract requires $y_t = s_t$ for every step. Any \texttt{P2} instance with
+an emitted object $o_t \neq s_t$ on some reachable state trajectory cannot be
+represented inside that direct-readout contract without changing the contract
+class. Hence the expected \texttt{P2} class strictly enlarges the structure.
+\end{proof}
+
+\begin{proposition}[Matched slot complexity]
+Assume both \texttt{M} and \texttt{P2} are bounded-state sequence primitives
+whose per-layer update costs are independent of full visible context length
+beyond the local-attention work already paid by $A$. Then interleaved
+\texttt{A + M} and \texttt{A + P2} stacks share the same slot-level asymptotic
+form: exact local-attention cost from $A$ plus bounded sequence-primitive cost
+from the companion block.
+\end{proposition}
+
+\begin{proof}
+The $A$ layers retain the exact local-attention obligation. The \texttt{P2}
+layers update bounded recurrent or sequence-mixer state instead of performing
+full context scans, and the same assumption holds for the reference
+\texttt{M} lane. Therefore both hybrids have the same slot-level asymptotic
+decomposition: attention work in $A$ and bounded non-attention update work in
+the companion sequence primitive.
+\end{proof}
+
+\begin{conjecture}[Efficiency-quality advantage]
+Whether \texttt{A + P2} matches or beats \texttt{A} or \texttt{A + M} in
+quality, memory, or throughput is empirical.
+\end{conjecture}
+
+\section{Graph-of-Experts / Thought-Channel Model}
+
+The speculative Graph-of-Experts family contains:
+\begin{itemize}
+  \item a shared exact-attention trunk,
+  \item $K$ active thought channels,
+  \item per-channel recurrent or SSM workspaces,
+  \item explicit compare, score, prune, merge, and halt control.
+\end{itemize}
+
+The goal is not classic sparse expert routing.
+The goal is bounded internal multi-hypothesis search.
+
+At step $t$, define:
+\begin{itemize}
+  \item $h_t$: shared trunk state,
+  \item $F_t = \{f_t^{(1)}, \dots, f_t^{(K_t)}\}$: active channel frontier,
+  \item $c_t$: controller state.
+\end{itemize}
+
+One abstract transition form is:
+\begin{align}
+  h_t &= \mathrm{SharedAttention}_\theta(h_{t-1}, x_t), \\
+  F_t^{\mathrm{seed}} &= \mathrm{Seed}_\theta(h_t, F_{t-1}, c_{t-1}), \\
+  F_t^{\mathrm{expand}} &= \mathrm{Expand}_\theta(F_t^{\mathrm{seed}}, h_t), \\
+  F_t^{\mathrm{retrieve}} &= \mathrm{Retrieve}_\theta(F_t^{\mathrm{expand}}, h_t), \\
+  F_t^{\mathrm{cmp}} &= \mathrm{CompareMerge}_\theta(F_t^{\mathrm{retrieve}}, h_t), \\
+  (F_t, c_t) &= \mathrm{Control}_\theta(F_t^{\mathrm{cmp}}, c_{t-1}), \\
+  y_t &= \mathrm{Readout}_\theta(h_t, F_t, c_t).
+\end{align}
+
+Assume explicit bounds:
+\begin{itemize}
+  \item $K_t \le K_{\max}$,
+  \item at most $B$ internal refinement rounds per output step,
+  \item controller operations preserve the channel cap.
+\end{itemize}
+
+\begin{definition}[Channel-separated state]
+A thought-channel system has channel-separated state if each live hypothesis is
+assigned a distinct explicit state slot and any cross-channel interaction occurs
+only through declared compare or merge operators.
+\end{definition}
+
+\begin{proposition}[Single-channel reduction]
+When $K_{\max} = 1$, branching is disabled, and merge and prune are trivial, the
+Graph-of-Experts family reduces to a single-stream hybrid predictor.
+\end{proposition}
+
+\begin{proof}
+With one channel there is no branching, compare and merge become vacuous, and
+the controller reduces to a pass-through. The system becomes a shared trunk
+plus one recurrent workspace.
+\end{proof}
+
+\begin{proposition}[Channel budget invariant]
+If the controller keeps at most $K_{\max}$ live channels after every prune
+step, then the live channel count remains bounded by $K_{\max}$ at every step.
+\end{proposition}
+
+\begin{proof}
+The controller is the only component permitted to alter live-channel count. By
+contract it outputs no more than $K_{\max}$ channels after each prune step.
+Induction over steps yields the invariant.
+\end{proof}
+
+\begin{proposition}[Internal search budget bound]
+If the controller allows at most $B$ internal refinement rounds per output step
+and each round preserves the channel budget invariant, then per-token internal
+search compute is bounded by a function of $K_{\max}$, $B$, one shared-trunk
+pass, and one compare/control pass per round.
+\end{proposition}
+
+\begin{proof}
+The shared-trunk pass occurs once. Each refinement round is explicitly capped,
+and each round operates under the preserved channel budget invariant. Therefore
+the total internal search work is bounded by the declared control-plane budget.
+\end{proof}
+
+\begin{proposition}[No architectural forced collapse under separated slots]
+If channel state is separated by explicit slots and cross-channel interaction
+occurs only through declared compare or merge operators, then the architecture
+does not itself force branch collapse between those declared interaction points.
+\end{proposition}
+
+\begin{proof}
+Each live hypothesis occupies a distinct state slot. Local channel updates act
+only on that slot, and cross-channel interaction occurs only at explicit
+operators. Therefore immediate branch collapse is not imposed by the
+architecture between declared compare or merge steps.
+\end{proof}
+
+\begin{proposition}[Bounded beam-style control skeleton]
+A Graph-of-Experts controller with explicit seed, expand, score, prune, merge,
+and halt operators realizes the same width-bounded successor-selection
+structure as a beam-style search loop in latent space.
+\end{proposition}
+
+\begin{proof}
+Seed initializes the candidate set, expand creates successor states, score
+ranks them, prune enforces bounded width, merge collapses compatible states when
+desired, and halt terminates the loop. This is exactly the structural control
+pattern used by a width-bounded search loop, now expressed over latent channel
+states rather than explicit symbolic states.
+\end{proof}
+
+\begin{proposition}[Shared-trunk amortization]
+Relative to an external GoT harness that re-runs a full model for each branch,
+a Graph-of-Experts family with one shared trunk amortizes common token
+processing work across all live channels.
+\end{proposition}
+
+\begin{proof}
+The shared token-context processing occurs once in the trunk. Channel-local
+branching happens after that shared computation, so common prefix processing is
+not repeated per branch inside the same output step.
+\end{proof}
+
+\begin{proposition}[Token-serialization savings]
+A latent-channel model can avoid explicit token serialization of intermediate
+branches that an external GoT harness would represent as text or extra model
+calls.
+\end{proposition}
+
+\begin{proof}
+Intermediate branch states remain inside the latent frontier $F_t$ rather than
+being emitted as visible text tokens. Hence the family has a lower token
+overhead floor than an external text-serialized branch harness.
+\end{proof}
+
+\begin{conjecture}[Search-efficiency advantage over external GoT]
+The Graph-of-Experts family may be more token-efficient or more compute-efficient
+than an external GoT harness because of latent branch storage,
+shared-trunk amortization, and bounded internal compare/prune loops.
+\end{conjecture}
+
+\begin{conjecture}[Native-search advantage over plain hybrids]
+The family may outperform single-stream hybrids on tasks that require
+maintaining multiple candidate hypotheses over several reasoning steps.
+\end{conjecture}
+
+\section{Boundary}
+
+These notes prove or sketch only what can currently be formalized cleanly:
+\begin{itemize}
+  \item causality,
+  \item decode equivalence where appropriate,
+  \item reductions,
+  \item structural generalization,
+  \item explicit budget invariants,
+  \item bounded-search expressiveness.
+\end{itemize}
+
+They do not prove benchmark wins, training stability, or emergent reasoning
+quality. Those remain empirical.
+
+\end{document}

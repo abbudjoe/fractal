@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>v3a Hybrid Attention • Fractal Visualization</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <script>
+        document.addEventListener("DOMContentLoaded", () => {
+            mermaid.initialize({
+                startOnLoad: true,
+                theme: "base",
+                flowchart: {
+                    curve: "basis",
+                    htmlLabels: false
+                },
+                themeVariables: {
+                    background: "#091224",
+                    primaryColor: "#11203f",
+                    primaryTextColor: "#e7eefc",
+                    primaryBorderColor: "#6de7ff",
+                    secondaryColor: "#0f1a33",
+                    secondaryTextColor: "#e7eefc",
+                    secondaryBorderColor: "#8ea1c6",
+                    tertiaryColor: "#10162a",
+                    tertiaryTextColor: "#e7eefc",
+                    tertiaryBorderColor: "#7f6bff",
+                    lineColor: "#8ea1c6",
+                    clusterBkg: "#0c1630",
+                    clusterBorder: "#7f6bff",
+                    fontFamily: "Inter, Avenir Next, Segoe UI, sans-serif"
+                }
+            });
+        });
+    </script>
+</head>
+<body>
+    <div class="page-shell">
+        <header class="hero">
+            <div>
+                <div class="eyebrow">
+                    <span class="pulse-dot"></span>
+                    Current Build Line
+                </div>
+                <h1 class="title">v3a Hybrid Attention</h1>
+                <p class="subtitle">
+                    A rendered view of the actual Path 1 architecture: a predictive-core hybrid
+                    stack that interleaves local exact-attention layers with a sequence-mixing lane
+                    that is either a Rust Mamba-style reference block or our `P2` primitive.
+                    Tree retrieval belongs to the broader `v3` story, but it is intentionally not
+                    part of this baseline matrix.
+                </p>
+            </div>
+            <nav class="nav-cluster">
+                <a class="nav-link" href="./index.html">Home</a>
+                <a class="nav-link" href="./gpt.html">GPT / Transformer</a>
+                <a class="nav-link" href="./hybrid.html">Hybrid / Jamba</a>
+                <a class="nav-link" href="./fractal-v1.html">Fractal v1</a>
+                <a class="nav-link" href="./fractal-v2.html">Fractal v2</a>
+                <a class="nav-link" href="./native-internal-search.html">Native Internal Search</a>
+                <a class="nav-link active" href="./v3a-hybrid-attention.html">v3a Hybrid Attention</a>
+            </nav>
+        </header>
+
+        <div class="dashboard">
+            <aside class="panel sidebar">
+                <section class="section">
+                    <h2>Source of Truth</h2>
+                    <p>
+                        This page follows the explicit `v3a` docs now present in the repo:
+                        `v3a-hybrid-attention-plan`, `v3a-rust-mamba-baseline-design`, and
+                        `v3a-p2-primitive-contract`.
+                    </p>
+                </section>
+
+                <section class="section">
+                    <h2>Fixed Path 1 Matrix</h2>
+                    <ul>
+                        <li>`A`: eight local exact-attention layers.</li>
+                        <li>`A + M`: `A-S-A-S-A-S-A-S`, where `S` is the Rust Mamba reference lane.</li>
+                        <li>`A + P2`: `A-P2-A-P2-A-P2-A-P2`, where `P2` is our contender block.</li>
+                        <li>Shared phase-1 envelope: width `128`, heads `4`, local window `256`.</li>
+                    </ul>
+                </section>
+
+                <section class="section">
+                    <h2>Explicitly Out Of Scope</h2>
+                    <ul>
+                        <li>No fractal tree retrieval in the Path 1 baseline.</li>
+                        <li>No sealed-leaf memory sidecar in the baseline matrix.</li>
+                        <li>No routed remote token gathering in the baseline stack.</li>
+                        <li>No direct memory-to-logit fusion.</li>
+                    </ul>
+                </section>
+            </aside>
+
+            <main class="panel main-stage">
+                <section class="diagram-panel">
+                    <div class="tag-row">
+                        <span class="tag-pill">8 Layers</span>
+                        <span class="tag-pill">Local Window 256</span>
+                        <span class="tag-pill">Reference SSM Lane</span>
+                        <span class="tag-pill">P2 Contender Lane</span>
+                        <span class="tag-pill">Predictive Core Only</span>
+                    </div>
+
+                    <div>
+                        <h2>Path 1 Runtime</h2>
+                        <p>
+                            The hot path remains exact attention. The hybrid question is whether a
+                            sequence-mixing block can take the non-attention slots in the stack and
+                            preserve quality more efficiently than pure attention everywhere.
+                        </p>
+                    </div>
+
+                    <div class="diagram-shell">
+<pre class="mermaid">flowchart TD
+    Input["Input tokens"] --> Embed["Tokenizer + embeddings"]
+    Embed --> L1["A1\nlocal exact attention"]
+    L1 --> L2["S or P2\nsequence mixer"]
+    L2 --> L3["A2\nlocal exact attention"]
+    L3 --> L4["S or P2\nsequence mixer"]
+    L4 --> L5["A3\nlocal exact attention"]
+    L5 --> L6["S or P2\nsequence mixer"]
+    L6 --> L7["A4\nlocal exact attention"]
+    L7 --> L8["S or P2\nsequence mixer"]
+    L8 --> LM["LM head"]
+    LM --> Output["Next-token distribution"]
+
+    subgraph AttentionBlock["A block contract"]
+        direction TB
+        AIn["token stream"] --> LocalAttn["causal self-attention\nlocal window 256"]
+        LocalAttn --> AOut["updated residual stream"]
+    end
+
+    subgraph SequenceMixer["S / P2 block contract"]
+        direction TB
+        X["x_t"] --> Step["input-conditioned recurrent step"]
+        Prev["latent state t-1"] --> Step
+        Step --> Next["latent state t"]
+        Step --> Emit["emitted output_t"]
+        Emit --> Residual["back into residual stream"]
+    end
+
+    L2 -. reference lane .-> SequenceMixer
+    L4 -. contender lane .-> SequenceMixer
+    L6 -. reference lane .-> SequenceMixer
+    L8 -. contender lane .-> SequenceMixer
+    L1 -. exact path .-> AttentionBlock
+    L3 -. exact path .-> AttentionBlock
+    L5 -. exact path .-> AttentionBlock
+    L7 -. exact path .-> AttentionBlock
+
+    Excluded["Not in Path 1 baseline:\ntree retrieval\nsealed-leaf sidecar\nremote gather\nmemory-to-logit fusion"]</pre>
+                    </div>
+                </section>
+
+                <section class="note-grid">
+                    <article class="note-card">
+                        <h3>What Changed From v2</h3>
+                        <ul>
+                            <li>The baseline is no longer tree-first or retrieval-first.</li>
+                            <li>Exact attention stays in the predictive core instead of being treated as a rescue patch.</li>
+                            <li>The comparison target is a Mamba-family slot inside a hybrid stack.</li>
+                            <li>`P2` now competes for that same slot under a matched budget.</li>
+                        </ul>
+                    </article>
+
+                    <article class="note-card">
+                        <h3>What The Diagram Means</h3>
+                        <ul>
+                            <li>`A` blocks carry exact local token interaction.</li>
+                            <li>`S` blocks are the Rust Mamba-style reference sequence mixer.</li>
+                            <li>`P2` blocks are our improved primitive with separate latent state and emitted output.</li>
+                            <li>The broader `v3` line may later add cold memory back, but Path 1 isolates the predictive-core question first.</li>
+                        </ul>
+                    </article>
+                </section>
+            </main>
+        </div>
+    </div>
+</body>
+</html>

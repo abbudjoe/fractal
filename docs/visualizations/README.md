@@ -1,22 +1,36 @@
 # Architecture Visualization Bundle
 
-This directory contains four standalone HTML pages for thinking through the
+This directory contains seven standalone HTML pages for thinking through the
 architecture pivot visually:
 
 - `gpt.html`
 - `hybrid.html`
 - `fractal-v1.html`
 - `fractal-v2.html`
+- `native-internal-search.html`
+- `v3a-hybrid-attention.html`
+- `thought-channel-hybrid.html`
 
 ## What these pages are for
 
 They are not benchmark dashboards.
 
-They are 3D mental-model tools for comparing:
+Most are 3D mental-model tools for comparing:
 - transformer-style token memory
 - hybrid attention/state designs
 - the single-root recursive design we tried
 - the new recursive-memory architecture direction
+
+`native-internal-search.html` is a rendered Mermaid concept page rather than a
+3D scene. It is there to make a speculative architecture legible fast.
+
+`v3a-hybrid-attention.html` is a rendered Mermaid page for the current
+predictive-core Path 1 hybrid stack: local exact attention interleaved with the
+reference SSM lane or the `P2` contender lane under a matched budget.
+
+`thought-channel-hybrid.html` is a rendered Mermaid page for a more speculative
+native-search architecture: a shared attention trunk plus multiple active
+thought channels with compare, prune, merge, and halt control.
 
 ## How to open them
 

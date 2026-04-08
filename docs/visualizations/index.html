@@ -17,10 +17,12 @@
                     <span class="pulse-dot"></span>
                     Visualization Bundle
                 </div>
-                <h1 class="title">LLM Architecture in 3D</h1>
+                <h1 class="title">LLM Architecture Views</h1>
                 <p class="subtitle">
-                    Four interactive pages to compare standard transformers, hybrids, our original
-                    recursive attempt, and the new recursive-memory direction. The goal is not
+                    Seven architecture pages to compare standard transformers, hybrids, our original
+                    recursive attempt, the new recursive-memory direction, a speculative native
+                    internal-search runtime, the current `v3a` hybrid-attention structure, and a
+                    thought-channel hybrid for native internal search. The goal is not
                     photorealism. The goal is a better mental model.
                 </p>
             </div>
@@ -29,6 +31,9 @@
                 <a class="nav-link" href="./hybrid.html">Hybrid / Jamba</a>
                 <a class="nav-link" href="./fractal-v1.html">Fractal v1</a>
                 <a class="nav-link" href="./fractal-v2.html">Fractal v2</a>
+                <a class="nav-link" href="./native-internal-search.html">Native Internal Search</a>
+                <a class="nav-link" href="./v3a-hybrid-attention.html">v3a Hybrid Attention</a>
+                <a class="nav-link" href="./thought-channel-hybrid.html">Thought-Channel Hybrid</a>
             </nav>
         </header>
 
@@ -68,12 +73,42 @@
                     leaf reads, and runtime views for training, prefill, decode, and synthesis.
                 </p>
             </a>
+
+            <a class="home-card" href="./native-internal-search.html">
+                <span class="home-chip">Page 5</span>
+                <h2>Native Internal Search</h2>
+                <p>
+                    A Mermaid-rendered sketch of a hybrid search architecture that combines
+                    fractal state-space memory, selective attention, bounded latent hypotheses,
+                    and internal verify-or-halt loops.
+                </p>
+            </a>
+
+            <a class="home-card" href="./v3a-hybrid-attention.html">
+                <span class="home-chip">Page 6</span>
+                <h2>v3a Hybrid Attention</h2>
+                <p>
+                    A Mermaid-rendered view of the current Path 1 build: interleaved local
+                    exact-attention layers plus either a Rust Mamba reference lane or our `P2`
+                    contender in the sequence-mixer slots.
+                </p>
+            </a>
+
+            <a class="home-card" href="./thought-channel-hybrid.html">
+                <span class="home-chip">Page 7</span>
+                <h2>Thought-Channel Hybrid</h2>
+                <p>
+                    A Mermaid-rendered block diagram for a native-search model with a shared
+                    attention trunk, multiple fully active thought channels, and explicit
+                    compare-prune-merge control.
+                </p>
+            </a>
         </section>
 
         <p class="footer-note">
-            Recommended use: open the pages side by side and flip modes while comparing the same
-            runtime phase across architectures. That tends to make the memory story and the cost
-            story click much faster than reading prose alone.
+            Recommended use: open the pages side by side and compare the same memory or retrieval
+            story across architectures. On the 3D pages, flip runtime modes while doing that.
+            That tends to make the cost story click much faster than reading prose alone.
         </p>
     </div>
 </body>

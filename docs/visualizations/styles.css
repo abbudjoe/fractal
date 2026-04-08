@@ -444,6 +444,82 @@ a {
     line-height: 1.7;
 }
 
+.diagram-panel {
+    padding: 22px;
+    display: grid;
+    gap: 18px;
+}
+
+.diagram-panel h2,
+.diagram-panel h3 {
+    margin: 0;
+    font-family: "Space Grotesk", "Inter", sans-serif;
+    letter-spacing: -0.03em;
+}
+
+.diagram-panel p {
+    margin: 0;
+    color: var(--muted);
+    line-height: 1.7;
+}
+
+.diagram-shell {
+    overflow-x: auto;
+    padding: 18px;
+    border-radius: 24px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background:
+        radial-gradient(circle at top, rgba(109, 231, 255, 0.08), transparent 36%),
+        rgba(8, 12, 24, 0.88);
+}
+
+.diagram-shell .mermaid {
+    min-width: 920px;
+}
+
+.tag-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.tag-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 9px 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text);
+    font-size: 0.82rem;
+    letter-spacing: 0.02em;
+}
+
+.note-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+}
+
+.note-card {
+    padding: 18px;
+    border-radius: 22px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.note-card h3 {
+    margin: 0 0 10px;
+    font-size: 1rem;
+}
+
+.note-card ul {
+    margin: 0;
+    padding-left: 18px;
+    color: var(--muted);
+    line-height: 1.65;
+}
+
 @media (max-width: 1180px) {
     .dashboard {
         grid-template-columns: 1fr;
@@ -454,7 +530,8 @@ a {
     }
 
     .fact-grid,
-    .home-grid {
+    .home-grid,
+    .note-grid {
         grid-template-columns: 1fr;
     }
 }
@@ -475,5 +552,9 @@ a {
 
     .canvas-panel {
         min-height: 500px;
+    }
+
+    .diagram-shell .mermaid {
+        min-width: 760px;
     }
 }

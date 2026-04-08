@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Native Internal Search • Fractal Visualization</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <script>
+        document.addEventListener("DOMContentLoaded", () => {
+            mermaid.initialize({
+                startOnLoad: true,
+                theme: "base",
+                flowchart: {
+                    curve: "basis",
+                    htmlLabels: false
+                },
+                themeVariables: {
+                    background: "#091224",
+                    primaryColor: "#11203f",
+                    primaryTextColor: "#e7eefc",
+                    primaryBorderColor: "#6de7ff",
+                    secondaryColor: "#0f1a33",
+                    secondaryTextColor: "#e7eefc",
+                    secondaryBorderColor: "#8ea1c6",
+                    tertiaryColor: "#10162a",
+                    tertiaryTextColor: "#e7eefc",
+                    tertiaryBorderColor: "#7f6bff",
+                    lineColor: "#8ea1c6",
+                    clusterBkg: "#0c1630",
+                    clusterBorder: "#7f6bff",
+                    fontFamily: "Inter, Avenir Next, Segoe UI, sans-serif"
+                }
+            });
+        });
+    </script>
+</head>
+<body>
+    <div class="page-shell">
+        <header class="hero">
+            <div>
+                <div class="eyebrow">
+                    <span class="pulse-dot"></span>
+                    Speculative Runtime
+                </div>
+                <h1 class="title">Native Internal Search</h1>
+                <p class="subtitle">
+                    A rendered sketch of a model that tries to unify linear reasoning and
+                    graph-like search inside one runtime: recurrent multiscale state for cheap
+                    persistence, selective attention for exact retrieval, and a bounded latent
+                    frontier for multiple live candidate states.
+                </p>
+            </div>
+            <nav class="nav-cluster">
+                <a class="nav-link" href="./index.html">Home</a>
+                <a class="nav-link" href="./gpt.html">GPT / Transformer</a>
+                <a class="nav-link" href="./hybrid.html">Hybrid / Jamba</a>
+                <a class="nav-link" href="./fractal-v1.html">Fractal v1</a>
+                <a class="nav-link" href="./fractal-v2.html">Fractal v2</a>
+                <a class="nav-link" href="./v3a-hybrid-attention.html">v3a Hybrid Attention</a>
+                <a class="nav-link active" href="./native-internal-search.html">Native Internal Search</a>
+            </nav>
+        </header>
+
+        <div class="dashboard">
+            <aside class="panel sidebar">
+                <section class="section">
+                    <h2>Core Thesis</h2>
+                    <p>
+                        Internal search likely needs more than attention alone or recurrence alone.
+                        This sketch combines both, then adds an explicit latent frontier so the
+                        model can hold, compare, and collapse multiple candidate solution states.
+                    </p>
+                </section>
+
+                <section class="section">
+                    <h2>Why This Shape</h2>
+                    <ul>
+                        <li>Use fractal state-space layers for cheap multiscale persistence.</li>
+                        <li>Use selective attention only when exact retrieval earns its cost.</li>
+                        <li>Keep search branches latent instead of serializing them into tokens.</li>
+                        <li>Verify and halt internally before committing to the next output token.</li>
+                    </ul>
+                </section>
+
+                <section class="section">
+                    <h2>Interpretation</h2>
+                    <ul>
+                        <li>`CoT mode`: frontier width stays near one and halts quickly.</li>
+                        <li>`Search mode`: frontier expands, retrieves, prunes, and loops.</li>
+                        <li>Both behaviors come from one runtime, not separate model families.</li>
+                    </ul>
+                </section>
+            </aside>
+
+            <main class="panel main-stage">
+                <section class="diagram-panel">
+                    <div class="tag-row">
+                        <span class="tag-pill">Fractal State</span>
+                        <span class="tag-pill">Selective Attention</span>
+                        <span class="tag-pill">Latent Frontier</span>
+                        <span class="tag-pill">Verify / Halt</span>
+                    </div>
+
+                    <div>
+                        <h2>Architecture Sketch</h2>
+                        <p>
+                            The key move is to treat graph-like search as an internal bounded loop
+                            over latent candidates instead of an external chain of expensive full
+                            model calls.
+                        </p>
+                    </div>
+
+                    <div class="diagram-shell">
+<pre class="mermaid">flowchart TD
+    Input["Input Tokens"] --> Embed["Embedding + Positional Encoding"]
+    Embed --> Blocks
+
+    subgraph Blocks["Hybrid Search Blocks x N"]
+        direction TB
+
+        Local["Local token processor"]
+        State["Fractal state-space stack\nfine / mid / coarse"]
+        Memory["Typed memory tree\nsummaries + exact leaf slots"]
+        Attend["Selective attention router"]
+        Frontier["Latent frontier slots\nbounded hypothesis set"]
+        Expand["Expand / propose operator"]
+        Score["Score + prune + merge"]
+        Verify["Verifier / consistency head"]
+        Halt{"Need more internal search?"}
+
+        Local --> State
+        Local --> Attend
+        State --> Frontier
+        Attend --> Frontier
+        Memory <--> Attend
+        Frontier --> Expand
+        Expand --> Score
+        Score --> Verify
+        Verify --> Halt
+        Halt -- yes --> State
+        Halt -- yes --> Attend
+        Halt -- no --> Readout
+    end
+
+    Readout["Readout fusion"] --> LM["LM head"]
+    LM --> Output["Next-token distribution"]</pre>
+                    </div>
+                </section>
+
+                <section class="note-grid">
+                    <article class="note-card">
+                        <h3>Why It Could Be Efficient</h3>
+                        <ul>
+                            <li>Branch state stays latent rather than becoming token overhead.</li>
+                            <li>Multiscale recurrent state can preserve search context cheaply.</li>
+                            <li>Attention becomes sparse and targeted instead of global by default.</li>
+                            <li>Halting can happen inside the block loop instead of in a harness.</li>
+                        </ul>
+                    </article>
+
+                    <article class="note-card">
+                        <h3>What Still Has To Be Proven</h3>
+                        <ul>
+                            <li>The frontier must hold distinct hypotheses, not near-duplicates.</li>
+                            <li>Pruning must avoid premature collapse.</li>
+                            <li>The verifier must correlate with actual downstream quality.</li>
+                            <li>Training has to reward useful search rather than verbose drift.</li>
+                        </ul>
+                    </article>
+                </section>
+            </main>
+        </div>
+    </div>
+</body>
+</html>
