@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.profiler import record_function
 
 from python.models.common import PositionWiseFeedForward, build_linear
 
@@ -52,8 +53,10 @@ class LocalCausalTransformerBlock(nn.Module):
         return tensor.view(batch_size, seq_len, self.head_count, self.head_dim).transpose(1, 2)
 
     def forward(self, hidden: torch.Tensor, attn_mask: torch.Tensor | None = None) -> torch.Tensor:
-        normed = self.input_norm(hidden)
-        q, k, v = self.qkv_projection(normed).chunk(3, dim=-1)
+        with record_function("path1.attention.input_norm"):
+            normed = self.input_norm(hidden)
+        with record_function("path1.attention.qkv_projection"):
+            q, k, v = self.qkv_projection(normed).chunk(3, dim=-1)
         q_heads = self._reshape_heads(q)
         k_heads = self._reshape_heads(k)
         v_heads = self._reshape_heads(v)
@@ -70,14 +73,17 @@ class LocalCausalTransformerBlock(nn.Module):
             if attn_bias.ndim == 2:
                 attn_bias = attn_bias.view(1, 1, attn_bias.shape[0], attn_bias.shape[1])
 
-        mixed = F.scaled_dot_product_attention(
-            q_heads,
-            k_heads,
-            v_heads,
-            attn_mask=attn_bias,
-            dropout_p=0.0,
-            is_causal=False,
-        )
+        with record_function("path1.attention.sdpa"):
+            mixed = F.scaled_dot_product_attention(
+                q_heads,
+                k_heads,
+                v_heads,
+                attn_mask=attn_bias,
+                dropout_p=0.0,
+                is_causal=False,
+            )
         mixed = mixed.transpose(1, 2).contiguous().view(hidden.shape[0], hidden.shape[1], self.d_model)
-        residual = hidden + self.output_projection(mixed)
-        return residual + self.ffn(self.output_norm(residual))
+        with record_function("path1.attention.output_projection"):
+            residual = hidden + self.output_projection(mixed)
+        with record_function("path1.attention.feedforward"):
+            return residual + self.ffn(self.output_norm(residual))

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+from torch.profiler import record_function
 
 from python.models.common import PositionWiseFeedForward, SimpleRmsNorm
 from python.specs.path1 import ReferenceSsmProfile
@@ -65,7 +66,8 @@ class OfficialMamba3SequenceMixer(nn.Module):
         )
 
     def forward(self, hidden: torch.Tensor, _attn_mask: torch.Tensor | None = None) -> torch.Tensor:
-        return self.mixer(hidden)
+        with record_function("path1.reference_ssm.native_mamba3"):
+            return self.mixer(hidden)
 
 
 class ReferenceSsmHybridBlock(nn.Module):
@@ -87,6 +89,9 @@ class ReferenceSsmHybridBlock(nn.Module):
         self.feedforward = PositionWiseFeedForward(d_model, d_ff)
 
     def forward(self, hidden: torch.Tensor, attn_mask: torch.Tensor | None = None) -> torch.Tensor:
-        mixed = self.mixer(self.input_norm(hidden), attn_mask)
+        with record_function("path1.reference_ssm.input_norm"):
+            normed = self.input_norm(hidden)
+        mixed = self.mixer(normed, attn_mask)
         residual = hidden + mixed
-        return residual + self.feedforward(self.output_norm(residual))
+        with record_function("path1.reference_ssm.feedforward"):
+            return residual + self.feedforward(self.output_norm(residual))

@@ -5,6 +5,8 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.profiler import record_function
 
 from python.models.common import (
     PositionWiseFeedForward,
@@ -46,7 +48,9 @@ class ContractiveRuntimePlan:
 @dataclass(frozen=True)
 class P20RuntimePlan:
     update_gates: torch.Tensor
-    angles: torch.Tensor
+    retain_gates: torch.Tensor
+    angle_cos: torch.Tensor
+    angle_sin: torch.Tensor
     candidates: torch.Tensor
     output_gates: torch.Tensor
 
@@ -54,7 +58,9 @@ class P20RuntimePlan:
 @dataclass(frozen=True)
 class P2RuntimePlan:
     update_gates: torch.Tensor
-    angles: torch.Tensor
+    retain_gates: torch.Tensor
+    angle_cos: torch.Tensor
+    angle_sin: torch.Tensor
     candidates: torch.Tensor
     output_gates: torch.Tensor
 
@@ -62,8 +68,11 @@ class P2RuntimePlan:
 @dataclass(frozen=True)
 class P23RuntimePlan:
     update_gates: torch.Tensor
+    retain_gates: torch.Tensor
     dynamics_mix_gates: torch.Tensor
-    angles: torch.Tensor
+    dynamics_keep_gates: torch.Tensor
+    angle_cos: torch.Tensor
+    angle_sin: torch.Tensor
     candidates: torch.Tensor
     output_gates: torch.Tensor
 
@@ -71,7 +80,9 @@ class P23RuntimePlan:
 @dataclass(frozen=True)
 class P21RuntimePlan:
     update_gates: torch.Tensor
-    angles: torch.Tensor
+    retain_gates: torch.Tensor
+    angle_cos: torch.Tensor
+    angle_sin: torch.Tensor
     candidates: torch.Tensor
     output_gates: torch.Tensor
 
@@ -79,7 +90,9 @@ class P21RuntimePlan:
 @dataclass(frozen=True)
 class P22RuntimePlan:
     update_gates: torch.Tensor
-    angles: torch.Tensor
+    retain_gates: torch.Tensor
+    angle_cos: torch.Tensor
+    angle_sin: torch.Tensor
     candidates: torch.Tensor
     output_gates: torch.Tensor
 
@@ -149,6 +162,39 @@ def _allocate_emitted_outputs(
         device=device,
         dtype=dtype,
     )
+
+
+def _packed_linear_chunks(inputs: torch.Tensor, *layers: nn.Linear) -> tuple[torch.Tensor, ...]:
+    with record_function("path1.primitive.runtime.packed_input_projection"):
+        packed_weight = torch.cat([layer.weight for layer in layers], dim=0)
+        if all(layer.bias is not None for layer in layers):
+            packed_bias = torch.cat([layer.bias for layer in layers if layer.bias is not None], dim=0)
+        else:
+            packed_bias = None
+        packed_outputs = F.linear(inputs, packed_weight, packed_bias)
+    split_sizes = [layer.out_features for layer in layers]
+    return tuple(packed_outputs.split(split_sizes, dim=-1))
+
+
+def _rotary_runtime_components(angles: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    with record_function("path1.primitive.runtime.rotary_trig"):
+        return torch.cos(angles), torch.sin(angles)
+
+
+def _rotate_state_pairs_with_trig(
+    state: torch.Tensor,
+    *,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    batch_size, width = state.shape
+    pair_count = width // 2
+    state_pairs = state.reshape(batch_size, pair_count, 2)
+    first = state_pairs[..., 0]
+    second = state_pairs[..., 1]
+    rotated_first = first * cos - second * sin
+    rotated_second = first * sin + second * cos
+    return torch.stack([rotated_first, rotated_second], dim=-1).reshape(batch_size, width)
 
 
 class ContractiveSequenceMixer(SequencePrimitive):
@@ -238,11 +284,22 @@ class P20RotaryStateOutputSequenceMixer(SequencePrimitive):
 
 class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer):
     def prepare_runtime_plan(self, inputs: torch.Tensor) -> P20RuntimePlan:
+        update_gate_inputs, angle_inputs, candidate_inputs, output_gate_inputs = _packed_linear_chunks(
+            inputs,
+            self.update_gate_projection,
+            self.angle_projection,
+            self.candidate_projection,
+            self.output_gate_projection,
+        )
+        update_gates = gated_sigmoid(update_gate_inputs)
+        angle_cos, angle_sin = _rotary_runtime_components(angle_inputs)
         return P20RuntimePlan(
-            update_gates=gated_sigmoid(self.update_gate_projection(inputs)),
-            angles=self.angle_projection(inputs),
-            candidates=torch.tanh(self.candidate_projection(inputs)),
-            output_gates=gated_sigmoid(self.output_gate_projection(inputs)),
+            update_gates=update_gates,
+            retain_gates=one_minus(update_gates),
+            angle_cos=angle_cos,
+            angle_sin=angle_sin,
+            candidates=torch.tanh(candidate_inputs),
+            output_gates=gated_sigmoid(output_gate_inputs),
         )
 
     def scan_with_runtime_plan(
@@ -264,13 +321,15 @@ class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer
             dtype=dtype,
         )
         for position in range(seq_len):
-            transformed_state = rotate_state_pairs(
+            transformed_state = _rotate_state_pairs_with_trig(
                 self.state_transform_projection(state),
-                runtime_plan.angles[:, position, :],
+                cos=runtime_plan.angle_cos[:, position, :],
+                sin=runtime_plan.angle_sin[:, position, :],
             )
-            state = runtime_plan.update_gates[:, position, :] * transformed_state + one_minus(
-                runtime_plan.update_gates[:, position, :]
-            ) * runtime_plan.candidates[:, position, :]
+            state = (
+                runtime_plan.update_gates[:, position, :] * transformed_state
+                + runtime_plan.retain_gates[:, position, :] * runtime_plan.candidates[:, position, :]
+            )
             outputs[:, position, :] = runtime_plan.output_gates[:, position, :] * state
         return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
 
@@ -314,11 +373,22 @@ class P2RotaryReadoutSequenceMixer(SequencePrimitive):
 
 class P2RotaryReadoutRuntimeSequenceMixer(P2RotaryReadoutSequenceMixer):
     def prepare_runtime_plan(self, inputs: torch.Tensor) -> P2RuntimePlan:
+        update_gate_inputs, angle_inputs, candidate_inputs, output_gate_inputs = _packed_linear_chunks(
+            inputs,
+            self.update_gate_projection,
+            self.angle_projection,
+            self.candidate_projection,
+            self.output_gate_projection,
+        )
+        update_gates = gated_sigmoid(update_gate_inputs)
+        angle_cos, angle_sin = _rotary_runtime_components(angle_inputs)
         return P2RuntimePlan(
-            update_gates=gated_sigmoid(self.update_gate_projection(inputs)),
-            angles=self.angle_projection(inputs),
-            candidates=torch.tanh(self.candidate_projection(inputs)),
-            output_gates=gated_sigmoid(self.output_gate_projection(inputs)),
+            update_gates=update_gates,
+            retain_gates=one_minus(update_gates),
+            angle_cos=angle_cos,
+            angle_sin=angle_sin,
+            candidates=torch.tanh(candidate_inputs),
+            output_gates=gated_sigmoid(output_gate_inputs),
         )
 
     def scan_with_runtime_plan(
@@ -340,13 +410,15 @@ class P2RotaryReadoutRuntimeSequenceMixer(P2RotaryReadoutSequenceMixer):
             dtype=dtype,
         )
         for position in range(seq_len):
-            transformed_state = rotate_state_pairs(
+            transformed_state = _rotate_state_pairs_with_trig(
                 self.state_transform_projection(state),
-                runtime_plan.angles[:, position, :],
+                cos=runtime_plan.angle_cos[:, position, :],
+                sin=runtime_plan.angle_sin[:, position, :],
             )
-            state = runtime_plan.update_gates[:, position, :] * transformed_state + one_minus(
-                runtime_plan.update_gates[:, position, :]
-            ) * runtime_plan.candidates[:, position, :]
+            state = (
+                runtime_plan.update_gates[:, position, :] * transformed_state
+                + runtime_plan.retain_gates[:, position, :] * runtime_plan.candidates[:, position, :]
+            )
             outputs[:, position, :] = runtime_plan.output_gates[:, position, :] * self.output_projection(state)
         return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
 
@@ -395,12 +467,32 @@ class P23RotaryCarryBlendReadoutSequenceMixer(SequencePrimitive):
 
 class P23RotaryCarryBlendReadoutRuntimeSequenceMixer(P23RotaryCarryBlendReadoutSequenceMixer):
     def prepare_runtime_plan(self, inputs: torch.Tensor) -> P23RuntimePlan:
+        (
+            update_gate_inputs,
+            dynamics_mix_gate_inputs,
+            angle_inputs,
+            candidate_inputs,
+            output_gate_inputs,
+        ) = _packed_linear_chunks(
+            inputs,
+            self.update_gate_projection,
+            self.dynamics_mix_gate_projection,
+            self.angle_projection,
+            self.candidate_projection,
+            self.output_gate_projection,
+        )
+        update_gates = gated_sigmoid(update_gate_inputs)
+        dynamics_mix_gates = gated_sigmoid(dynamics_mix_gate_inputs)
+        angle_cos, angle_sin = _rotary_runtime_components(angle_inputs)
         return P23RuntimePlan(
-            update_gates=gated_sigmoid(self.update_gate_projection(inputs)),
-            dynamics_mix_gates=gated_sigmoid(self.dynamics_mix_gate_projection(inputs)),
-            angles=self.angle_projection(inputs),
-            candidates=torch.tanh(self.candidate_projection(inputs)),
-            output_gates=gated_sigmoid(self.output_gate_projection(inputs)),
+            update_gates=update_gates,
+            retain_gates=one_minus(update_gates),
+            dynamics_mix_gates=dynamics_mix_gates,
+            dynamics_keep_gates=one_minus(dynamics_mix_gates),
+            angle_cos=angle_cos,
+            angle_sin=angle_sin,
+            candidates=torch.tanh(candidate_inputs),
+            output_gates=gated_sigmoid(output_gate_inputs),
         )
 
     def scan_with_runtime_plan(
@@ -422,17 +514,20 @@ class P23RotaryCarryBlendReadoutRuntimeSequenceMixer(P23RotaryCarryBlendReadoutS
             dtype=dtype,
         )
         for position in range(seq_len):
-            rotated_state = rotate_state_pairs(
+            rotated_state = _rotate_state_pairs_with_trig(
                 self.state_transform_projection(state),
-                runtime_plan.angles[:, position, :],
+                cos=runtime_plan.angle_cos[:, position, :],
+                sin=runtime_plan.angle_sin[:, position, :],
             )
             carried_state = torch.tanh(self.carry_state_projection(state))
-            transformed_state = runtime_plan.dynamics_mix_gates[:, position, :] * rotated_state + one_minus(
-                runtime_plan.dynamics_mix_gates[:, position, :]
-            ) * carried_state
-            state = runtime_plan.update_gates[:, position, :] * transformed_state + one_minus(
-                runtime_plan.update_gates[:, position, :]
-            ) * runtime_plan.candidates[:, position, :]
+            transformed_state = (
+                runtime_plan.dynamics_mix_gates[:, position, :] * rotated_state
+                + runtime_plan.dynamics_keep_gates[:, position, :] * carried_state
+            )
+            state = (
+                runtime_plan.update_gates[:, position, :] * transformed_state
+                + runtime_plan.retain_gates[:, position, :] * runtime_plan.candidates[:, position, :]
+            )
             outputs[:, position, :] = runtime_plan.output_gates[:, position, :] * self.output_projection(state)
         return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
 
@@ -474,11 +569,22 @@ class P21WideLatentSequenceMixer(SequencePrimitive):
 
 class P21WideLatentRuntimeSequenceMixer(P21WideLatentSequenceMixer):
     def prepare_runtime_plan(self, inputs: torch.Tensor) -> P21RuntimePlan:
+        update_gate_inputs, angle_inputs, candidate_inputs, output_gate_inputs = _packed_linear_chunks(
+            inputs,
+            self.update_gate_projection,
+            self.angle_projection,
+            self.candidate_projection,
+            self.output_gate_projection,
+        )
+        update_gates = gated_sigmoid(update_gate_inputs)
+        angle_cos, angle_sin = _rotary_runtime_components(angle_inputs)
         return P21RuntimePlan(
-            update_gates=gated_sigmoid(self.update_gate_projection(inputs)),
-            angles=self.angle_projection(inputs),
-            candidates=torch.tanh(self.candidate_projection(inputs)),
-            output_gates=gated_sigmoid(self.output_gate_projection(inputs)),
+            update_gates=update_gates,
+            retain_gates=one_minus(update_gates),
+            angle_cos=angle_cos,
+            angle_sin=angle_sin,
+            candidates=torch.tanh(candidate_inputs),
+            output_gates=gated_sigmoid(output_gate_inputs),
         )
 
     def scan_with_runtime_plan(
@@ -500,13 +606,15 @@ class P21WideLatentRuntimeSequenceMixer(P21WideLatentSequenceMixer):
             dtype=dtype,
         )
         for position in range(seq_len):
-            transformed_state = rotate_state_pairs(
+            transformed_state = _rotate_state_pairs_with_trig(
                 self.state_transform_projection(state),
-                runtime_plan.angles[:, position, :],
+                cos=runtime_plan.angle_cos[:, position, :],
+                sin=runtime_plan.angle_sin[:, position, :],
             )
-            state = runtime_plan.update_gates[:, position, :] * transformed_state + one_minus(
-                runtime_plan.update_gates[:, position, :]
-            ) * runtime_plan.candidates[:, position, :]
+            state = (
+                runtime_plan.update_gates[:, position, :] * transformed_state
+                + runtime_plan.retain_gates[:, position, :] * runtime_plan.candidates[:, position, :]
+            )
             outputs[:, position, :] = runtime_plan.output_gates[:, position, :] * leading_state_slice(
                 state, self.d_model
             )
@@ -550,11 +658,22 @@ class P22WideLatentReadoutSequenceMixer(SequencePrimitive):
 
 class P22WideLatentReadoutRuntimeSequenceMixer(P22WideLatentReadoutSequenceMixer):
     def prepare_runtime_plan(self, inputs: torch.Tensor) -> P22RuntimePlan:
+        update_gate_inputs, angle_inputs, candidate_inputs, output_gate_inputs = _packed_linear_chunks(
+            inputs,
+            self.update_gate_projection,
+            self.angle_projection,
+            self.candidate_projection,
+            self.output_gate_projection,
+        )
+        update_gates = gated_sigmoid(update_gate_inputs)
+        angle_cos, angle_sin = _rotary_runtime_components(angle_inputs)
         return P22RuntimePlan(
-            update_gates=gated_sigmoid(self.update_gate_projection(inputs)),
-            angles=self.angle_projection(inputs),
-            candidates=torch.tanh(self.candidate_projection(inputs)),
-            output_gates=gated_sigmoid(self.output_gate_projection(inputs)),
+            update_gates=update_gates,
+            retain_gates=one_minus(update_gates),
+            angle_cos=angle_cos,
+            angle_sin=angle_sin,
+            candidates=torch.tanh(candidate_inputs),
+            output_gates=gated_sigmoid(output_gate_inputs),
         )
 
     def scan_with_runtime_plan(
@@ -576,13 +695,15 @@ class P22WideLatentReadoutRuntimeSequenceMixer(P22WideLatentReadoutSequenceMixer
             dtype=dtype,
         )
         for position in range(seq_len):
-            transformed_state = rotate_state_pairs(
+            transformed_state = _rotate_state_pairs_with_trig(
                 self.state_transform_projection(state),
-                runtime_plan.angles[:, position, :],
+                cos=runtime_plan.angle_cos[:, position, :],
+                sin=runtime_plan.angle_sin[:, position, :],
             )
-            state = runtime_plan.update_gates[:, position, :] * transformed_state + one_minus(
-                runtime_plan.update_gates[:, position, :]
-            ) * runtime_plan.candidates[:, position, :]
+            state = (
+                runtime_plan.update_gates[:, position, :] * transformed_state
+                + runtime_plan.retain_gates[:, position, :] * runtime_plan.candidates[:, position, :]
+            )
             outputs[:, position, :] = runtime_plan.output_gates[:, position, :] * self.output_projection(state)
         return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
 
@@ -668,28 +789,33 @@ class PrimitiveMixerBlock(nn.Module):
         self.feedforward = PositionWiseFeedForward(d_model, d_ff)
 
     def forward(self, hidden: torch.Tensor, _attn_mask: torch.Tensor | None = None) -> torch.Tensor:
-        if self.wrapper_mode is PrimitiveWrapperMode.STANDARD:
-            normed = self.input_norm(hidden)
-        else:
-            normed = self.input_rms_norm(hidden)
+        with record_function("path1.primitive.input_norm"):
+            if self.wrapper_mode is PrimitiveWrapperMode.STANDARD:
+                normed = self.input_norm(hidden)
+            else:
+                normed = self.input_rms_norm(hidden)
 
         if self.execution_profile is PrimitiveExecutionProfile.RUNTIME:
-            runtime_plan = self.primitive.prepare_runtime_plan(normed)
-            mixed = self.primitive.scan_with_runtime_plan(
-                runtime_plan,
-                batch_size=normed.shape[0],
-                device=normed.device,
-                dtype=normed.dtype,
-                seq_len=normed.shape[1],
-            ).emitted_outputs
+            with record_function("path1.primitive.prepare_runtime_plan"):
+                runtime_plan = self.primitive.prepare_runtime_plan(normed)
+            with record_function("path1.primitive.scan_runtime"):
+                mixed = self.primitive.scan_with_runtime_plan(
+                    runtime_plan,
+                    batch_size=normed.shape[0],
+                    device=normed.device,
+                    dtype=normed.dtype,
+                    seq_len=normed.shape[1],
+                ).emitted_outputs
         else:
-            mixed = self.primitive.scan(normed).emitted_outputs
-        if self.readout_mode is PrimitiveReadoutMode.DIRECT:
-            readout = mixed
-        elif self.readout_mode is PrimitiveReadoutMode.PROJECTED:
-            readout = self.wrapper_readout_projection(mixed)
-        else:
-            readout = self.wrapper_readout_norm(self.wrapper_readout_projection(mixed))
+            with record_function("path1.primitive.scan_reference"):
+                mixed = self.primitive.scan(normed).emitted_outputs
+        with record_function("path1.primitive.readout"):
+            if self.readout_mode is PrimitiveReadoutMode.DIRECT:
+                readout = mixed
+            elif self.readout_mode is PrimitiveReadoutMode.PROJECTED:
+                readout = self.wrapper_readout_projection(mixed)
+            else:
+                readout = self.wrapper_readout_norm(self.wrapper_readout_projection(mixed))
 
         if self.norm_mode is PrimitiveNormMode.POST_READOUT_NORM:
             readout = self.wrapper_post_readout_norm(readout)
@@ -705,8 +831,9 @@ class PrimitiveMixerBlock(nn.Module):
         if self.norm_mode is PrimitiveNormMode.RESIDUAL_RENORM:
             residual = self.wrapper_residual_renorm(residual)
 
-        if self.wrapper_mode is PrimitiveWrapperMode.STANDARD:
-            ff_input = self.output_norm(residual)
-        else:
-            ff_input = self.output_rms_norm(residual)
-        return residual + self.feedforward(ff_input)
+        with record_function("path1.primitive.feedforward"):
+            if self.wrapper_mode is PrimitiveWrapperMode.STANDARD:
+                ff_input = self.output_norm(residual)
+            else:
+                ff_input = self.output_rms_norm(residual)
+            return residual + self.feedforward(ff_input)
