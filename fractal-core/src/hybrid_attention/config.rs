@@ -20,6 +20,7 @@ pub enum ReferenceSsmFamily {
     Mamba3ProxyV1,
     Mamba3RustV1,
     Mamba3RustSisoV1,
+    Mamba3RustSisoRuntimeV1,
 }
 
 impl ReferenceSsmFamily {
@@ -41,6 +42,12 @@ impl ReferenceSsmFamily {
                 projection_layout_policy: ProjectionLayoutPolicy::OutputByInput,
                 state_layout: HybridSequenceStateLayout::StructuredReferenceSsm,
                 scan_mode: HybridSequenceScanMode::ChunkedSequentialStepLoop,
+                explicit_output_readout: true,
+            },
+            Self::Mamba3RustSisoRuntimeV1 => HybridSequenceKernelContract {
+                projection_layout_policy: ProjectionLayoutPolicy::OutputByInput,
+                state_layout: HybridSequenceStateLayout::StructuredReferenceSsm,
+                scan_mode: HybridSequenceScanMode::PackedProjectionStepLoop,
                 explicit_output_readout: true,
             },
         }
@@ -161,6 +168,7 @@ pub enum HybridSequenceStateLayout {
 pub enum HybridSequenceScanMode {
     SequentialStepLoop,
     ChunkedSequentialStepLoop,
+    PackedProjectionStepLoop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1072,6 +1080,7 @@ mod tests {
             ReferenceSsmFamily::Mamba3ProxyV1,
             ReferenceSsmFamily::Mamba3RustV1,
             ReferenceSsmFamily::Mamba3RustSisoV1,
+            ReferenceSsmFamily::Mamba3RustSisoRuntimeV1,
         ] {
             assert_eq!(
                 family.kernel_contract().projection_layout_policy,
@@ -1112,6 +1121,17 @@ mod tests {
             );
             assert!(rust_mamba.explicit_output_readout);
         }
+
+        let rust_runtime = ReferenceSsmFamily::Mamba3RustSisoRuntimeV1.kernel_contract();
+        assert_eq!(
+            rust_runtime.scan_mode,
+            HybridSequenceScanMode::PackedProjectionStepLoop
+        );
+        assert_eq!(
+            rust_runtime.state_layout,
+            HybridSequenceStateLayout::StructuredReferenceSsm
+        );
+        assert!(rust_runtime.explicit_output_readout);
     }
 
     #[test]

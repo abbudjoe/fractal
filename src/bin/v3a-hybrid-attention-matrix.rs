@@ -394,6 +394,9 @@ fn reference_ssm_lane_note(reference_ssm_profile: ReferenceSsmProfile) -> &'stat
         ReferenceSsmProfile::RustSisoReference => {
             "Reference SSM lane uses the Rust Mamba SISO reference family to match the native Python SISO architecture more closely."
         }
+        ReferenceSsmProfile::RustSisoRuntime => {
+            "Reference SSM lane uses the first Rust Mamba SISO runtime family with packed sequence projection to reduce CUDA control-plane overhead."
+        }
     }
 }
 
@@ -818,6 +821,7 @@ impl PrecisionSelection {
 enum ReferenceSsmProfile {
     RustMimoReference,
     RustSisoReference,
+    RustSisoRuntime,
 }
 
 impl ReferenceSsmProfile {
@@ -825,6 +829,7 @@ impl ReferenceSsmProfile {
         match value {
             "rust-mimo-reference" | "rust-reference" => Ok(Self::RustMimoReference),
             "rust-siso-reference" | "rust-siso" => Ok(Self::RustSisoReference),
+            "rust-siso-runtime" | "rust-runtime" => Ok(Self::RustSisoRuntime),
             _ => Err(format!("unknown reference SSM profile: {value}")),
         }
     }
@@ -833,6 +838,7 @@ impl ReferenceSsmProfile {
         match self {
             Self::RustMimoReference => "rust-mimo-reference",
             Self::RustSisoReference => "rust-siso-reference",
+            Self::RustSisoRuntime => "rust-siso-runtime",
         }
     }
 
@@ -840,6 +846,7 @@ impl ReferenceSsmProfile {
         match self {
             Self::RustMimoReference => ReferenceSsmFamily::Mamba3RustV1,
             Self::RustSisoReference => ReferenceSsmFamily::Mamba3RustSisoV1,
+            Self::RustSisoRuntime => ReferenceSsmFamily::Mamba3RustSisoRuntimeV1,
         }
     }
 
@@ -847,6 +854,7 @@ impl ReferenceSsmProfile {
         match self {
             Self::RustMimoReference => "",
             Self::RustSisoReference => "-rust-siso",
+            Self::RustSisoRuntime => "-rust-siso-runtime",
         }
     }
 }
@@ -1684,7 +1692,7 @@ fn usage() -> String {
             "  --learning-rate <value>      Learning rate (default: {lr})\n",
             "  --seed <n>                   Random seed for model initialization (default: {seed})\n",
             "  --variant <name>             One of: all, attention-only, reference-ssm-hybrid, primitive-hybrid (default: all)\n",
-            "  --reference-ssm-profile      One of: rust-mimo-reference, rust-siso-reference (default: rust-mimo-reference)\n",
+            "  --reference-ssm-profile      One of: rust-mimo-reference, rust-siso-reference, rust-siso-runtime (default: rust-mimo-reference)\n",
             "  --primitive-profile <name>   One of: p1, p2-0, p2, p2-1, p2-2, p2-3 (default: p1)\n",
             "  --primitive-residual-profile One of: plain, scaled, gated (default: plain; P2-family contenders only)\n",
             "  --primitive-readout-profile  One of: direct, projected, projected-norm (default: direct; P2-family contenders only)\n",

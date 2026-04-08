@@ -112,6 +112,9 @@ impl RustMamba3BaselineConfig {
             )),
             ReferenceSsmFamily::Mamba3RustV1 => Self::phase1_default(d_model, head_count),
             ReferenceSsmFamily::Mamba3RustSisoV1 => Self::phase1_siso_default(d_model, head_count),
+            ReferenceSsmFamily::Mamba3RustSisoRuntimeV1 => {
+                Self::phase1_siso_default(d_model, head_count)
+            }
         }
     }
 
@@ -308,6 +311,18 @@ struct RustMamba3StepProjection<B: Backend> {
     angles: Tensor<B, 3>,
 }
 
+#[derive(Debug)]
+struct RustMamba3SequenceProjection<B: Backend> {
+    z: Tensor<B, 4>,
+    x: Tensor<B, 4>,
+    b: Tensor<B, 5>,
+    c: Tensor<B, 5>,
+    dt: Tensor<B, 3>,
+    a: Tensor<B, 3>,
+    trap: Tensor<B, 3>,
+    angles: Tensor<B, 4>,
+}
+
 #[derive(Debug, Clone)]
 struct RustMamba3RecurrentState<B: Backend> {
     angle_dt_state: Tensor<B, 3>,
@@ -472,6 +487,13 @@ impl<B: Backend> RustMamba3Mixer<B> {
         Ok(self.scan_sequence(input)?.outputs)
     }
 
+    pub fn forward_sequence_runtime(
+        &self,
+        input: Tensor<B, 3>,
+    ) -> Result<Tensor<B, 3>, FractalError> {
+        Ok(self.scan_sequence_runtime(input)?.outputs)
+    }
+
     fn scan_sequence(
         &self,
         input: Tensor<B, 3>,
@@ -486,6 +508,23 @@ impl<B: Backend> RustMamba3Mixer<B> {
         let device = input.device();
         let state = self.allocate_recurrent_state(batch_size, &device);
         self.scan_sequence_from_state(input, state)
+    }
+
+    fn scan_sequence_runtime(
+        &self,
+        input: Tensor<B, 3>,
+    ) -> Result<RustMamba3SequenceOutput<B>, FractalError> {
+        let [batch_size, _, width] = input.dims();
+        if width != self.config.d_model {
+            return Err(FractalError::Shape(format!(
+                "rust_mamba3_mixer expected width {}, got {}",
+                self.config.d_model, width
+            )));
+        }
+        let device = input.device();
+        let state = self.allocate_recurrent_state(batch_size, &device);
+        let projections = self.project_sequence(input)?;
+        self.scan_projected_sequence_from_state(projections, state)
     }
 
     fn scan_sequence_from_state(
@@ -523,12 +562,47 @@ impl<B: Backend> RustMamba3Mixer<B> {
         })
     }
 
+    fn scan_projected_sequence_from_state(
+        &self,
+        projections: RustMamba3SequenceProjection<B>,
+        mut state: RustMamba3RecurrentState<B>,
+    ) -> Result<RustMamba3SequenceOutput<B>, FractalError> {
+        let [batch_size, seq_len, nheads, headdim] = projections.z.dims();
+        if nheads != self.derived.nheads || headdim != self.config.headdim {
+            return Err(FractalError::Shape(format!(
+                "rust_mamba3 runtime projections expected z dims [batch, seq, {}, {}], got [batch, seq, {}, {}]",
+                self.derived.nheads, self.config.headdim, nheads, headdim
+            )));
+        }
+        let mut outputs = Vec::with_capacity(seq_len);
+        for position in 0..seq_len {
+            let step = self.step_projected(
+                self.sequence_projection_step(&projections, position, batch_size),
+                state,
+            )?;
+            outputs.push(step.output.reshape([batch_size, 1, self.config.d_model]));
+            state = step.next_state;
+        }
+        Ok(RustMamba3SequenceOutput {
+            outputs: Tensor::cat(outputs, 1),
+            final_state: state,
+        })
+    }
+
     fn step(
         &self,
         input: Tensor<B, 2>,
         previous_state: RustMamba3RecurrentState<B>,
     ) -> Result<RustMamba3StepOutput<B>, FractalError> {
         let projections = self.project_step(input)?;
+        self.step_projected(projections, previous_state)
+    }
+
+    fn step_projected(
+        &self,
+        projections: RustMamba3StepProjection<B>,
+        previous_state: RustMamba3RecurrentState<B>,
+    ) -> Result<RustMamba3StepOutput<B>, FractalError> {
         let [batch_size, _, _] = projections.z.dims();
         let rank = self.derived.mimo_rank;
         let nheads = self.derived.nheads;
@@ -631,6 +705,116 @@ impl<B: Backend> RustMamba3Mixer<B> {
         })
     }
 
+    fn project_sequence(
+        &self,
+        input: Tensor<B, 3>,
+    ) -> Result<RustMamba3SequenceProjection<B>, FractalError> {
+        let [batch_size, seq_len, width] = input.dims();
+        if width != self.config.d_model {
+            return Err(FractalError::Shape(format!(
+                "rust_mamba3.project_sequence expected width {}, got {}",
+                self.config.d_model, width
+            )));
+        }
+        let rank = self.derived.mimo_rank;
+        let nheads = self.derived.nheads;
+        let d_inner = self.derived.d_inner;
+        let bc_width = self.config.d_state * self.config.ngroups * rank;
+        let zx_bc_dt_a_trap_angles = self.in_proj.forward(input);
+        let z_end = d_inner;
+        let x_end = z_end + d_inner;
+        let b_end = x_end + bc_width;
+        let c_end = b_end + bc_width;
+        let dt_end = c_end + nheads;
+        let a_end = dt_end + nheads;
+        let trap_end = a_end + nheads;
+
+        let z = zx_bc_dt_a_trap_angles
+            .clone()
+            .slice([0..batch_size, 0..seq_len, 0..z_end])
+            .reshape([batch_size, seq_len, nheads, self.config.headdim]);
+        let x = zx_bc_dt_a_trap_angles
+            .clone()
+            .slice([0..batch_size, 0..seq_len, z_end..x_end])
+            .reshape([batch_size, seq_len, nheads, self.config.headdim]);
+        let raw_b = zx_bc_dt_a_trap_angles
+            .clone()
+            .slice([0..batch_size, 0..seq_len, x_end..b_end])
+            .reshape([
+                batch_size * seq_len,
+                rank,
+                self.config.ngroups,
+                self.config.d_state,
+            ]);
+        let raw_c = zx_bc_dt_a_trap_angles
+            .clone()
+            .slice([0..batch_size, 0..seq_len, b_end..c_end])
+            .reshape([
+                batch_size * seq_len,
+                rank,
+                self.config.ngroups,
+                self.config.d_state,
+            ]);
+        let dd_dt = zx_bc_dt_a_trap_angles
+            .clone()
+            .slice([0..batch_size, 0..seq_len, c_end..dt_end])
+            .reshape([batch_size, seq_len, nheads]);
+        let dd_a = zx_bc_dt_a_trap_angles
+            .clone()
+            .slice([0..batch_size, 0..seq_len, dt_end..a_end])
+            .reshape([batch_size, seq_len, nheads]);
+        let trap_proj = zx_bc_dt_a_trap_angles
+            .clone()
+            .slice([0..batch_size, 0..seq_len, a_end..trap_end])
+            .reshape([batch_size, seq_len, nheads]);
+        let angle_proj = zx_bc_dt_a_trap_angles
+            .slice([0..batch_size, 0..seq_len, trap_end..self.derived.d_in_proj])
+            .reshape([batch_size, seq_len, self.derived.num_rope_angles]);
+
+        let dt = softplus(
+            dd_dt
+                + self
+                    .dt_bias
+                    .val()
+                    .reshape([1, 1, nheads])
+                    .repeat(&[batch_size, seq_len, 1]),
+        );
+        let a = softplus(dd_a)
+            .mul_scalar(-1.0)
+            .clamp(-1.0e9, -self.config.a_floor);
+        let trap = sigmoid(trap_proj);
+        let angles = angle_proj
+            .reshape([batch_size, seq_len, 1, self.derived.num_rope_angles])
+            .repeat(&[1, 1, nheads, 1]);
+        let b = self
+            .expand_grouped_bc(self.b_norm.forward4(raw_b))
+            .reshape([batch_size, seq_len, rank, nheads, self.config.d_state])
+            + self
+                .b_bias
+                .val()
+                .reshape([1, 1, rank, nheads, self.config.d_state])
+                .repeat(&[batch_size, seq_len, 1, 1, 1]);
+        let c = self
+            .expand_grouped_bc(self.c_norm.forward4(raw_c))
+            .reshape([batch_size, seq_len, rank, nheads, self.config.d_state])
+            + self
+                .c_bias
+                .val()
+                .reshape([1, 1, rank, nheads, self.config.d_state])
+                .repeat(&[batch_size, seq_len, 1, 1, 1]);
+
+        Ok(RustMamba3SequenceProjection {
+            z,
+            x,
+            b,
+            c,
+            dt,
+            a,
+            trap,
+            angles,
+        })
+    }
+
     fn project_step(
         &self,
         input: Tensor<B, 2>,
@@ -727,6 +911,109 @@ impl<B: Backend> RustMamba3Mixer<B> {
         })
     }
 
+    fn sequence_projection_step(
+        &self,
+        projections: &RustMamba3SequenceProjection<B>,
+        position: usize,
+        batch_size: usize,
+    ) -> RustMamba3StepProjection<B> {
+        RustMamba3StepProjection {
+            z: projections
+                .z
+                .clone()
+                .slice([
+                    0..batch_size,
+                    position..position + 1,
+                    0..self.derived.nheads,
+                    0..self.config.headdim,
+                ])
+                .reshape([batch_size, self.derived.nheads, self.config.headdim]),
+            x: projections
+                .x
+                .clone()
+                .slice([
+                    0..batch_size,
+                    position..position + 1,
+                    0..self.derived.nheads,
+                    0..self.config.headdim,
+                ])
+                .reshape([batch_size, self.derived.nheads, self.config.headdim]),
+            b: projections
+                .b
+                .clone()
+                .slice([
+                    0..batch_size,
+                    position..position + 1,
+                    0..self.derived.mimo_rank,
+                    0..self.derived.nheads,
+                    0..self.config.d_state,
+                ])
+                .reshape([
+                    batch_size,
+                    self.derived.mimo_rank,
+                    self.derived.nheads,
+                    self.config.d_state,
+                ]),
+            c: projections
+                .c
+                .clone()
+                .slice([
+                    0..batch_size,
+                    position..position + 1,
+                    0..self.derived.mimo_rank,
+                    0..self.derived.nheads,
+                    0..self.config.d_state,
+                ])
+                .reshape([
+                    batch_size,
+                    self.derived.mimo_rank,
+                    self.derived.nheads,
+                    self.config.d_state,
+                ]),
+            dt: projections
+                .dt
+                .clone()
+                .slice([
+                    0..batch_size,
+                    position..position + 1,
+                    0..self.derived.nheads,
+                ])
+                .reshape([batch_size, self.derived.nheads]),
+            a: projections
+                .a
+                .clone()
+                .slice([
+                    0..batch_size,
+                    position..position + 1,
+                    0..self.derived.nheads,
+                ])
+                .reshape([batch_size, self.derived.nheads]),
+            trap: projections
+                .trap
+                .clone()
+                .slice([
+                    0..batch_size,
+                    position..position + 1,
+                    0..self.derived.nheads,
+                ])
+                .reshape([batch_size, self.derived.nheads]),
+            angles: projections
+                .angles
+                .clone()
+                .slice([
+                    0..batch_size,
+                    position..position + 1,
+                    0..self.derived.nheads,
+                    0..self.derived.num_rope_angles,
+                ])
+                .reshape([
+                    batch_size,
+                    self.derived.nheads,
+                    self.derived.num_rope_angles,
+                ]),
+        }
+    }
+
     fn expand_grouped_bc(&self, tensor: Tensor<B, 4>) -> Tensor<B, 4> {
         let [batch_size, rank, groups, d_state] = tensor.dims();
         let heads_per_group = self.derived.nheads / groups;
@@ -784,12 +1071,14 @@ pub struct RustMamba3MixerBlock<B: Backend> {
     mixer: RustMamba3Mixer<B>,
     feedforward: PositionWiseFeedForward<B>,
     d_model: usize,
+    reference_family: Ignored<ReferenceSsmFamily>,
 }
 
 impl<B: Backend> RustMamba3MixerBlock<B> {
     pub fn new(
         shape: HybridAttentionModelShape,
         config: RustMamba3BaselineConfig,
+        reference_family: ReferenceSsmFamily,
         device: &B::Device,
     ) -> Result<Self, FractalError> {
         shape.validate()?;
@@ -811,6 +1100,7 @@ impl<B: Backend> RustMamba3MixerBlock<B> {
                 })
                 .init(device),
             d_model: shape.d_model,
+            reference_family: Ignored(reference_family),
         })
     }
 
@@ -827,7 +1117,14 @@ impl<B: Backend> RustMamba3MixerBlock<B> {
             )));
         }
         let normed = self.input_norm.forward3(input.clone());
-        let mixed = self.mixer.forward_sequence(normed)?;
+        let mixed = match *self.reference_family {
+            ReferenceSsmFamily::Mamba3RustSisoRuntimeV1 => {
+                self.mixer.forward_sequence_runtime(normed)?
+            }
+            ReferenceSsmFamily::Mamba3ProxyV1
+            | ReferenceSsmFamily::Mamba3RustV1
+            | ReferenceSsmFamily::Mamba3RustSisoV1 => self.mixer.forward_sequence(normed)?,
+        };
         let residual = input + mixed;
         let ff = self
             .feedforward
@@ -912,7 +1209,12 @@ impl<B: Backend> RustMamba3ReferenceHybridAttentionModel<B> {
             .collect();
         let mut reference_layers = Vec::with_capacity(reference_count);
         for _ in 0..reference_count {
-            reference_layers.push(RustMamba3MixerBlock::new(shape, baseline.clone(), device)?);
+            reference_layers.push(RustMamba3MixerBlock::new(
+                shape,
+                baseline.clone(),
+                reference_family,
+                device,
+            )?);
         }
         Ok(Self {
             embedding: EmbeddingConfig::new(shape.vocab_size, shape.d_model)
@@ -1001,7 +1303,9 @@ pub fn build_rust_mamba3_reference_hybrid_attention_model<B: Backend>(
     })?;
     if !matches!(
         reference_family,
-        ReferenceSsmFamily::Mamba3RustV1 | ReferenceSsmFamily::Mamba3RustSisoV1
+        ReferenceSsmFamily::Mamba3RustV1
+            | ReferenceSsmFamily::Mamba3RustSisoV1
+            | ReferenceSsmFamily::Mamba3RustSisoRuntimeV1
     ) {
         return Err(FractalError::InvalidConfig(format!(
             "reference variant {} must set reference_ssm_family to a Rust Mamba family, got {:?}",
@@ -1794,6 +2098,24 @@ mod tests {
         assert_eq!(
             model.reference_family(),
             ReferenceSsmFamily::Mamba3RustSisoV1
+        );
+        let input = Tensor::<TestBackend, 2, Int>::zeros([2, 8], &device);
+        assert_eq!(model.forward_logits(input).unwrap().dims(), [2, 8, 257]);
+    }
+
+    #[test]
+    fn reference_rust_siso_runtime_mamba3_model_returns_logits() {
+        let device = Default::default();
+        let mut variant = phase1_hybrid_attention_baseline_matrix().reference_ssm_hybrid;
+        variant.label = "reference-ssm-hybrid-rust-siso-runtime".to_string();
+        variant.reference_ssm_family = Some(ReferenceSsmFamily::Mamba3RustSisoRuntimeV1);
+        let model = build_rust_mamba3_reference_hybrid_attention_model::<TestBackend>(
+            257, &variant, &device,
+        )
+        .unwrap();
+        assert_eq!(
+            model.reference_family(),
+            ReferenceSsmFamily::Mamba3RustSisoRuntimeV1
         );
         let input = Tensor::<TestBackend, 2, Int>::zeros([2, 8], &device);
         assert_eq!(model.forward_logits(input).unwrap().dims(), [2, 8, 257]);

@@ -18,7 +18,7 @@ use fractal_core::{
     build_rust_mamba3_reference_hybrid_attention_model, error::FractalError,
     read_cuda_memory_snapshot_for_device, AttentionOnlyHybridAttentionModel, CudaMemorySnapshot,
     HybridAttentionVariantKind, HybridAttentionVariantSpec, PrimitiveHybridAttentionModel,
-    RustMamba3ReferenceHybridAttentionModel,
+    ReferenceSsmFamily, RustMamba3ReferenceHybridAttentionModel,
 };
 
 use crate::{
@@ -368,17 +368,44 @@ pub fn run_reference_ssm_hybrid_attention_smoke_train<B>(
 where
     B: AutodiffBackend,
 {
+    let reference_family = config.variant.reference_ssm_family.ok_or_else(|| {
+        FractalError::InvalidConfig(
+            "reference SSM hybrid attention run requires variant.reference_ssm_family".to_string(),
+        )
+    })?;
     let model = build_rust_mamba3_reference_hybrid_attention_model::<B>(
         config.vocabulary.vocab_size,
         &config.variant,
         device,
     )?;
+    let (model_label, implementation_kind, note) = match reference_family {
+        ReferenceSsmFamily::Mamba3RustSisoRuntimeV1 => (
+            "v3a_reference_ssm_rust_mamba3_siso_runtime",
+            HybridAttentionImplementationKind::RustRuntime,
+            "Path 1 reference SSM hybrid baseline using the first Rust Mamba-3-style SISO runtime lane with packed sequence projection on the shared byte-level smoke lane",
+        ),
+        ReferenceSsmFamily::Mamba3RustV1 => (
+            "v3a_reference_ssm_rust_mamba3_mimo_reference",
+            HybridAttentionImplementationKind::RustReference,
+            "Path 1 reference SSM hybrid baseline using the faithful Rust Mamba-3-style MIMO reference lane on the shared byte-level smoke lane",
+        ),
+        ReferenceSsmFamily::Mamba3RustSisoV1 => (
+            "v3a_reference_ssm_rust_mamba3_siso_reference",
+            HybridAttentionImplementationKind::RustReference,
+            "Path 1 reference SSM hybrid baseline using the faithful Rust Mamba-3-style SISO reference lane on the shared byte-level smoke lane",
+        ),
+        ReferenceSsmFamily::Mamba3ProxyV1 => (
+            "v3a_reference_ssm_rust_mamba3_proxy_reference",
+            HybridAttentionImplementationKind::RustReference,
+            "Path 1 reference SSM hybrid baseline using the proxy Rust reference lane on the shared byte-level smoke lane",
+        ),
+    };
     run_hybrid_attention_smoke_train_with_model(
         model,
         config,
-        "v3a_reference_ssm_rust_mamba3_baseline",
-        HybridAttentionImplementationKind::RustReference,
-        "Path 1 reference SSM hybrid baseline using the faithful Rust Mamba-3-style lane on the shared byte-level smoke lane",
+        model_label,
+        implementation_kind,
+        note,
         device,
     )
 }
