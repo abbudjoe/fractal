@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -37,6 +37,53 @@ class SequencePrimitiveScanResult:
     final_state: torch.Tensor
 
 
+@dataclass(frozen=True)
+class ContractiveRuntimePlan:
+    gates: torch.Tensor
+    projected_inputs: torch.Tensor
+
+
+@dataclass(frozen=True)
+class P20RuntimePlan:
+    update_gates: torch.Tensor
+    angles: torch.Tensor
+    candidates: torch.Tensor
+    output_gates: torch.Tensor
+
+
+@dataclass(frozen=True)
+class P2RuntimePlan:
+    update_gates: torch.Tensor
+    angles: torch.Tensor
+    candidates: torch.Tensor
+    output_gates: torch.Tensor
+
+
+@dataclass(frozen=True)
+class P23RuntimePlan:
+    update_gates: torch.Tensor
+    dynamics_mix_gates: torch.Tensor
+    angles: torch.Tensor
+    candidates: torch.Tensor
+    output_gates: torch.Tensor
+
+
+@dataclass(frozen=True)
+class P21RuntimePlan:
+    update_gates: torch.Tensor
+    angles: torch.Tensor
+    candidates: torch.Tensor
+    output_gates: torch.Tensor
+
+
+@dataclass(frozen=True)
+class P22RuntimePlan:
+    update_gates: torch.Tensor
+    angles: torch.Tensor
+    candidates: torch.Tensor
+    output_gates: torch.Tensor
+
+
 class SequencePrimitive(nn.Module):
     state_width: int
     d_model: int
@@ -46,6 +93,21 @@ class SequencePrimitive(nn.Module):
 
     def step(self, state: torch.Tensor, inputs: torch.Tensor) -> SequencePrimitiveStepResult:  # pragma: no cover - abstract
         raise NotImplementedError
+
+    def prepare_runtime_plan(self, inputs: torch.Tensor) -> Any:  # pragma: no cover - contract boundary
+        raise RuntimeError(f"{self.__class__.__name__} does not expose a runtime execution plan")
+
+    def scan_with_runtime_plan(
+        self,
+        runtime_plan: Any,
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        seq_len: int,
+        initial_state: torch.Tensor | None = None,
+    ) -> SequencePrimitiveScanResult:  # pragma: no cover - contract boundary
+        raise RuntimeError(f"{self.__class__.__name__} does not implement runtime-plan scanning")
 
     def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
         batch_size, seq_len, _width = inputs.shape
@@ -72,13 +134,20 @@ def _resolve_initial_state(
     return primitive.init_state(inputs.shape[0], inputs.device, inputs.dtype)
 
 
-def _allocate_emitted_outputs(inputs: torch.Tensor, width: int) -> torch.Tensor:
+def _allocate_emitted_outputs(
+    *,
+    batch_size: int,
+    seq_len: int,
+    width: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
     return torch.empty(
-        inputs.shape[0],
-        inputs.shape[1],
+        batch_size,
+        seq_len,
         width,
-        device=inputs.device,
-        dtype=inputs.dtype,
+        device=device,
+        dtype=dtype,
     )
 
 
@@ -99,17 +168,47 @@ class ContractiveSequenceMixer(SequencePrimitive):
 
 
 class ContractiveRuntimeSequenceMixer(ContractiveSequenceMixer):
-    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
-        state = _resolve_initial_state(self, inputs, initial_state)
-        gates = gated_sigmoid(self.gate_projection(inputs))
-        projected_inputs = self.input_projection(inputs)
-        outputs = _allocate_emitted_outputs(inputs, self.d_model)
-        for position in range(inputs.shape[1]):
-            gate = gates[:, position, :]
-            mix = self.state_projection(state) + projected_inputs[:, position, :]
+    def prepare_runtime_plan(self, inputs: torch.Tensor) -> ContractiveRuntimePlan:
+        return ContractiveRuntimePlan(
+            gates=gated_sigmoid(self.gate_projection(inputs)),
+            projected_inputs=self.input_projection(inputs),
+        )
+
+    def scan_with_runtime_plan(
+        self,
+        runtime_plan: ContractiveRuntimePlan,
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        seq_len: int,
+        initial_state: torch.Tensor | None = None,
+    ) -> SequencePrimitiveScanResult:
+        state = initial_state if initial_state is not None else self.init_state(batch_size, device, dtype)
+        outputs = _allocate_emitted_outputs(
+            batch_size=batch_size,
+            seq_len=seq_len,
+            width=self.d_model,
+            device=device,
+            dtype=dtype,
+        )
+        for position in range(seq_len):
+            gate = runtime_plan.gates[:, position, :]
+            mix = self.state_projection(state) + runtime_plan.projected_inputs[:, position, :]
             state = gate * mix + one_minus(gate) * state
             outputs[:, position, :] = state
         return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
+
+    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
+        runtime_plan = self.prepare_runtime_plan(inputs)
+        return self.scan_with_runtime_plan(
+            runtime_plan,
+            batch_size=inputs.shape[0],
+            device=inputs.device,
+            dtype=inputs.dtype,
+            seq_len=inputs.shape[1],
+            initial_state=initial_state,
+        )
 
 
 class P20RotaryStateOutputSequenceMixer(SequencePrimitive):
@@ -138,23 +237,53 @@ class P20RotaryStateOutputSequenceMixer(SequencePrimitive):
 
 
 class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer):
-    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
-        state = _resolve_initial_state(self, inputs, initial_state)
-        update_gates = gated_sigmoid(self.update_gate_projection(inputs))
-        angles = self.angle_projection(inputs)
-        candidates = torch.tanh(self.candidate_projection(inputs))
-        output_gates = gated_sigmoid(self.output_gate_projection(inputs))
-        outputs = _allocate_emitted_outputs(inputs, self.d_model)
-        for position in range(inputs.shape[1]):
+    def prepare_runtime_plan(self, inputs: torch.Tensor) -> P20RuntimePlan:
+        return P20RuntimePlan(
+            update_gates=gated_sigmoid(self.update_gate_projection(inputs)),
+            angles=self.angle_projection(inputs),
+            candidates=torch.tanh(self.candidate_projection(inputs)),
+            output_gates=gated_sigmoid(self.output_gate_projection(inputs)),
+        )
+
+    def scan_with_runtime_plan(
+        self,
+        runtime_plan: P20RuntimePlan,
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        seq_len: int,
+        initial_state: torch.Tensor | None = None,
+    ) -> SequencePrimitiveScanResult:
+        state = initial_state if initial_state is not None else self.init_state(batch_size, device, dtype)
+        outputs = _allocate_emitted_outputs(
+            batch_size=batch_size,
+            seq_len=seq_len,
+            width=self.d_model,
+            device=device,
+            dtype=dtype,
+        )
+        for position in range(seq_len):
             transformed_state = rotate_state_pairs(
                 self.state_transform_projection(state),
-                angles[:, position, :],
+                runtime_plan.angles[:, position, :],
             )
-            state = update_gates[:, position, :] * transformed_state + one_minus(
-                update_gates[:, position, :]
-            ) * candidates[:, position, :]
-            outputs[:, position, :] = output_gates[:, position, :] * state
+            state = runtime_plan.update_gates[:, position, :] * transformed_state + one_minus(
+                runtime_plan.update_gates[:, position, :]
+            ) * runtime_plan.candidates[:, position, :]
+            outputs[:, position, :] = runtime_plan.output_gates[:, position, :] * state
         return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
+
+    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
+        runtime_plan = self.prepare_runtime_plan(inputs)
+        return self.scan_with_runtime_plan(
+            runtime_plan,
+            batch_size=inputs.shape[0],
+            device=inputs.device,
+            dtype=inputs.dtype,
+            seq_len=inputs.shape[1],
+            initial_state=initial_state,
+        )
 
 
 class P2RotaryReadoutSequenceMixer(SequencePrimitive):
@@ -184,23 +313,53 @@ class P2RotaryReadoutSequenceMixer(SequencePrimitive):
 
 
 class P2RotaryReadoutRuntimeSequenceMixer(P2RotaryReadoutSequenceMixer):
-    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
-        state = _resolve_initial_state(self, inputs, initial_state)
-        update_gates = gated_sigmoid(self.update_gate_projection(inputs))
-        angles = self.angle_projection(inputs)
-        candidates = torch.tanh(self.candidate_projection(inputs))
-        output_gates = gated_sigmoid(self.output_gate_projection(inputs))
-        outputs = _allocate_emitted_outputs(inputs, self.d_model)
-        for position in range(inputs.shape[1]):
+    def prepare_runtime_plan(self, inputs: torch.Tensor) -> P2RuntimePlan:
+        return P2RuntimePlan(
+            update_gates=gated_sigmoid(self.update_gate_projection(inputs)),
+            angles=self.angle_projection(inputs),
+            candidates=torch.tanh(self.candidate_projection(inputs)),
+            output_gates=gated_sigmoid(self.output_gate_projection(inputs)),
+        )
+
+    def scan_with_runtime_plan(
+        self,
+        runtime_plan: P2RuntimePlan,
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        seq_len: int,
+        initial_state: torch.Tensor | None = None,
+    ) -> SequencePrimitiveScanResult:
+        state = initial_state if initial_state is not None else self.init_state(batch_size, device, dtype)
+        outputs = _allocate_emitted_outputs(
+            batch_size=batch_size,
+            seq_len=seq_len,
+            width=self.d_model,
+            device=device,
+            dtype=dtype,
+        )
+        for position in range(seq_len):
             transformed_state = rotate_state_pairs(
                 self.state_transform_projection(state),
-                angles[:, position, :],
+                runtime_plan.angles[:, position, :],
             )
-            state = update_gates[:, position, :] * transformed_state + one_minus(
-                update_gates[:, position, :]
-            ) * candidates[:, position, :]
-            outputs[:, position, :] = output_gates[:, position, :] * self.output_projection(state)
+            state = runtime_plan.update_gates[:, position, :] * transformed_state + one_minus(
+                runtime_plan.update_gates[:, position, :]
+            ) * runtime_plan.candidates[:, position, :]
+            outputs[:, position, :] = runtime_plan.output_gates[:, position, :] * self.output_projection(state)
         return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
+
+    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
+        runtime_plan = self.prepare_runtime_plan(inputs)
+        return self.scan_with_runtime_plan(
+            runtime_plan,
+            batch_size=inputs.shape[0],
+            device=inputs.device,
+            dtype=inputs.dtype,
+            seq_len=inputs.shape[1],
+            initial_state=initial_state,
+        )
 
 
 class P23RotaryCarryBlendReadoutSequenceMixer(SequencePrimitive):
@@ -235,28 +394,58 @@ class P23RotaryCarryBlendReadoutSequenceMixer(SequencePrimitive):
 
 
 class P23RotaryCarryBlendReadoutRuntimeSequenceMixer(P23RotaryCarryBlendReadoutSequenceMixer):
-    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
-        state = _resolve_initial_state(self, inputs, initial_state)
-        update_gates = gated_sigmoid(self.update_gate_projection(inputs))
-        dynamics_mix_gates = gated_sigmoid(self.dynamics_mix_gate_projection(inputs))
-        angles = self.angle_projection(inputs)
-        candidates = torch.tanh(self.candidate_projection(inputs))
-        output_gates = gated_sigmoid(self.output_gate_projection(inputs))
-        outputs = _allocate_emitted_outputs(inputs, self.d_model)
-        for position in range(inputs.shape[1]):
+    def prepare_runtime_plan(self, inputs: torch.Tensor) -> P23RuntimePlan:
+        return P23RuntimePlan(
+            update_gates=gated_sigmoid(self.update_gate_projection(inputs)),
+            dynamics_mix_gates=gated_sigmoid(self.dynamics_mix_gate_projection(inputs)),
+            angles=self.angle_projection(inputs),
+            candidates=torch.tanh(self.candidate_projection(inputs)),
+            output_gates=gated_sigmoid(self.output_gate_projection(inputs)),
+        )
+
+    def scan_with_runtime_plan(
+        self,
+        runtime_plan: P23RuntimePlan,
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        seq_len: int,
+        initial_state: torch.Tensor | None = None,
+    ) -> SequencePrimitiveScanResult:
+        state = initial_state if initial_state is not None else self.init_state(batch_size, device, dtype)
+        outputs = _allocate_emitted_outputs(
+            batch_size=batch_size,
+            seq_len=seq_len,
+            width=self.d_model,
+            device=device,
+            dtype=dtype,
+        )
+        for position in range(seq_len):
             rotated_state = rotate_state_pairs(
                 self.state_transform_projection(state),
-                angles[:, position, :],
+                runtime_plan.angles[:, position, :],
             )
             carried_state = torch.tanh(self.carry_state_projection(state))
-            transformed_state = dynamics_mix_gates[:, position, :] * rotated_state + one_minus(
-                dynamics_mix_gates[:, position, :]
+            transformed_state = runtime_plan.dynamics_mix_gates[:, position, :] * rotated_state + one_minus(
+                runtime_plan.dynamics_mix_gates[:, position, :]
             ) * carried_state
-            state = update_gates[:, position, :] * transformed_state + one_minus(
-                update_gates[:, position, :]
-            ) * candidates[:, position, :]
-            outputs[:, position, :] = output_gates[:, position, :] * self.output_projection(state)
+            state = runtime_plan.update_gates[:, position, :] * transformed_state + one_minus(
+                runtime_plan.update_gates[:, position, :]
+            ) * runtime_plan.candidates[:, position, :]
+            outputs[:, position, :] = runtime_plan.output_gates[:, position, :] * self.output_projection(state)
         return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
+
+    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
+        runtime_plan = self.prepare_runtime_plan(inputs)
+        return self.scan_with_runtime_plan(
+            runtime_plan,
+            batch_size=inputs.shape[0],
+            device=inputs.device,
+            dtype=inputs.dtype,
+            seq_len=inputs.shape[1],
+            initial_state=initial_state,
+        )
 
 
 class P21WideLatentSequenceMixer(SequencePrimitive):
@@ -284,23 +473,55 @@ class P21WideLatentSequenceMixer(SequencePrimitive):
 
 
 class P21WideLatentRuntimeSequenceMixer(P21WideLatentSequenceMixer):
-    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
-        state = _resolve_initial_state(self, inputs, initial_state)
-        update_gates = gated_sigmoid(self.update_gate_projection(inputs))
-        angles = self.angle_projection(inputs)
-        candidates = torch.tanh(self.candidate_projection(inputs))
-        output_gates = gated_sigmoid(self.output_gate_projection(inputs))
-        outputs = _allocate_emitted_outputs(inputs, self.d_model)
-        for position in range(inputs.shape[1]):
+    def prepare_runtime_plan(self, inputs: torch.Tensor) -> P21RuntimePlan:
+        return P21RuntimePlan(
+            update_gates=gated_sigmoid(self.update_gate_projection(inputs)),
+            angles=self.angle_projection(inputs),
+            candidates=torch.tanh(self.candidate_projection(inputs)),
+            output_gates=gated_sigmoid(self.output_gate_projection(inputs)),
+        )
+
+    def scan_with_runtime_plan(
+        self,
+        runtime_plan: P21RuntimePlan,
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        seq_len: int,
+        initial_state: torch.Tensor | None = None,
+    ) -> SequencePrimitiveScanResult:
+        state = initial_state if initial_state is not None else self.init_state(batch_size, device, dtype)
+        outputs = _allocate_emitted_outputs(
+            batch_size=batch_size,
+            seq_len=seq_len,
+            width=self.d_model,
+            device=device,
+            dtype=dtype,
+        )
+        for position in range(seq_len):
             transformed_state = rotate_state_pairs(
                 self.state_transform_projection(state),
-                angles[:, position, :],
+                runtime_plan.angles[:, position, :],
             )
-            state = update_gates[:, position, :] * transformed_state + one_minus(
-                update_gates[:, position, :]
-            ) * candidates[:, position, :]
-            outputs[:, position, :] = output_gates[:, position, :] * leading_state_slice(state, self.d_model)
+            state = runtime_plan.update_gates[:, position, :] * transformed_state + one_minus(
+                runtime_plan.update_gates[:, position, :]
+            ) * runtime_plan.candidates[:, position, :]
+            outputs[:, position, :] = runtime_plan.output_gates[:, position, :] * leading_state_slice(
+                state, self.d_model
+            )
         return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
+
+    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
+        runtime_plan = self.prepare_runtime_plan(inputs)
+        return self.scan_with_runtime_plan(
+            runtime_plan,
+            batch_size=inputs.shape[0],
+            device=inputs.device,
+            dtype=inputs.dtype,
+            seq_len=inputs.shape[1],
+            initial_state=initial_state,
+        )
 
 
 class P22WideLatentReadoutSequenceMixer(SequencePrimitive):
@@ -328,23 +549,53 @@ class P22WideLatentReadoutSequenceMixer(SequencePrimitive):
 
 
 class P22WideLatentReadoutRuntimeSequenceMixer(P22WideLatentReadoutSequenceMixer):
-    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
-        state = _resolve_initial_state(self, inputs, initial_state)
-        update_gates = gated_sigmoid(self.update_gate_projection(inputs))
-        angles = self.angle_projection(inputs)
-        candidates = torch.tanh(self.candidate_projection(inputs))
-        output_gates = gated_sigmoid(self.output_gate_projection(inputs))
-        outputs = _allocate_emitted_outputs(inputs, self.d_model)
-        for position in range(inputs.shape[1]):
+    def prepare_runtime_plan(self, inputs: torch.Tensor) -> P22RuntimePlan:
+        return P22RuntimePlan(
+            update_gates=gated_sigmoid(self.update_gate_projection(inputs)),
+            angles=self.angle_projection(inputs),
+            candidates=torch.tanh(self.candidate_projection(inputs)),
+            output_gates=gated_sigmoid(self.output_gate_projection(inputs)),
+        )
+
+    def scan_with_runtime_plan(
+        self,
+        runtime_plan: P22RuntimePlan,
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        seq_len: int,
+        initial_state: torch.Tensor | None = None,
+    ) -> SequencePrimitiveScanResult:
+        state = initial_state if initial_state is not None else self.init_state(batch_size, device, dtype)
+        outputs = _allocate_emitted_outputs(
+            batch_size=batch_size,
+            seq_len=seq_len,
+            width=self.d_model,
+            device=device,
+            dtype=dtype,
+        )
+        for position in range(seq_len):
             transformed_state = rotate_state_pairs(
                 self.state_transform_projection(state),
-                angles[:, position, :],
+                runtime_plan.angles[:, position, :],
             )
-            state = update_gates[:, position, :] * transformed_state + one_minus(
-                update_gates[:, position, :]
-            ) * candidates[:, position, :]
-            outputs[:, position, :] = output_gates[:, position, :] * self.output_projection(state)
+            state = runtime_plan.update_gates[:, position, :] * transformed_state + one_minus(
+                runtime_plan.update_gates[:, position, :]
+            ) * runtime_plan.candidates[:, position, :]
+            outputs[:, position, :] = runtime_plan.output_gates[:, position, :] * self.output_projection(state)
         return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
+
+    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
+        runtime_plan = self.prepare_runtime_plan(inputs)
+        return self.scan_with_runtime_plan(
+            runtime_plan,
+            batch_size=inputs.shape[0],
+            device=inputs.device,
+            dtype=inputs.dtype,
+            seq_len=inputs.shape[1],
+            initial_state=initial_state,
+        )
 
 
 def build_sequence_primitive(
@@ -422,7 +673,17 @@ class PrimitiveMixerBlock(nn.Module):
         else:
             normed = self.input_rms_norm(hidden)
 
-        mixed = self.primitive.scan(normed).emitted_outputs
+        if self.execution_profile is PrimitiveExecutionProfile.RUNTIME:
+            runtime_plan = self.primitive.prepare_runtime_plan(normed)
+            mixed = self.primitive.scan_with_runtime_plan(
+                runtime_plan,
+                batch_size=normed.shape[0],
+                device=normed.device,
+                dtype=normed.dtype,
+                seq_len=normed.shape[1],
+            ).emitted_outputs
+        else:
+            mixed = self.primitive.scan(normed).emitted_outputs
         if self.readout_mode is PrimitiveReadoutMode.DIRECT:
             readout = mixed
         elif self.readout_mode is PrimitiveReadoutMode.PROJECTED:

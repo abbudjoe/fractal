@@ -468,6 +468,20 @@ build_remote_tournament_args() {
             )
         fi
     fi
+    if [ "$BINARY_KIND" = "python" ] && [ "$BINARY_NAME" = "scripts/v3a_python_path1.py" ]; then
+        if [ "$has_output_dir" -eq 0 ]; then
+            REMOTE_TOURNAMENT_ARGS+=(
+                "--output-dir"
+                "${STATE_DIR}/artifacts/v3a-python-path1/${RUN_ID}"
+            )
+        fi
+        if [ "$has_ledger_path" -eq 0 ]; then
+            REMOTE_TOURNAMENT_ARGS+=(
+                "--ledger-path"
+                "${STATE_DIR}/artifacts/v3a-python-path1-results-ledger.jsonl"
+            )
+        fi
+    fi
 }
 
 resolve_local_identity_context() {
@@ -1342,7 +1356,7 @@ if [ "$binary_kind" = "python" ]; then
     python_exec="$python_venv_dir/bin/python"
     bootstrap_spec="python-kind:${binary_name}|install:${python_install_mode}"
     if [ "$python_install_mode" = "official-mamba3" ]; then
-        bootstrap_spec="${bootstrap_spec}|official-mamba3-bootstrap:v2"
+        bootstrap_spec="${bootstrap_spec}|official-mamba3-bootstrap:v4"
     fi
     if [ -n "$python_requirements_file" ]; then
         requirements_path="$python_requirements_file"

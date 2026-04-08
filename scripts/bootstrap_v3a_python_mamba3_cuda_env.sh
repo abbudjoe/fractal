@@ -45,6 +45,7 @@ INSTALL_MODE="official-mamba3"
 VENV_DIR=""
 TORCH_INDEX_URL=""
 TORCH_VERSION=""
+TRITON_VERSION="3.6.0"
 CUDA_ARCH_LIST_OVERRIDE="${TORCH_CUDA_ARCH_LIST:-}"
 FORCE_RECREATE=0
 
@@ -122,18 +123,52 @@ if [[ "${FORCE_RECREATE}" == "1" ]]; then
   rm -rf "${VENV_DIR}"
 fi
 
-"${PYTHON_BIN}" -m venv --system-site-packages "${VENV_DIR}"
+"${PYTHON_BIN}" -m venv "${VENV_DIR}"
 # shellcheck disable=SC1090
 . "${VENV_DIR}/bin/activate"
 
 python -m pip install --upgrade pip setuptools wheel >/dev/null
 
+if [[ -z "${TORCH_VERSION}" ]]; then
+  detected_torch_version="$("${PYTHON_BIN}" - <<'PY'
+try:
+    import torch
+except Exception:
+    raise SystemExit(1)
+version = torch.__version__.split("+", 1)[0]
+cuda_version = getattr(torch.version, "cuda", None)
+if cuda_version:
+    print(f"{version}|{cuda_version}")
+PY
+)" || detected_torch_version=""
+  if [[ -n "${detected_torch_version}" ]]; then
+    TORCH_VERSION="${detected_torch_version%%|*}"
+    if [[ -z "${TORCH_INDEX_URL}" ]]; then
+      detected_cuda_version="${detected_torch_version#*|}"
+      detected_cuda_tag="cu${detected_cuda_version//./}"
+      TORCH_INDEX_URL="https://download.pytorch.org/whl/${detected_cuda_tag}"
+    fi
+  else
+    TORCH_VERSION="2.4.1"
+    if [[ -z "${TORCH_INDEX_URL}" ]]; then
+      TORCH_INDEX_URL="https://download.pytorch.org/whl/cu124"
+    fi
+    echo "defaulting torch bootstrap to ${TORCH_VERSION} from ${TORCH_INDEX_URL}"
+  fi
+fi
+
 if [[ -n "${TORCH_VERSION}" ]]; then
+  echo "installing pinned torch ${TORCH_VERSION}${TORCH_INDEX_URL:+ from ${TORCH_INDEX_URL}}"
   if [[ -n "${TORCH_INDEX_URL}" ]]; then
     python -m pip install --no-build-isolation --index-url "${TORCH_INDEX_URL}" "torch==${TORCH_VERSION}"
   else
     python -m pip install --no-build-isolation "torch==${TORCH_VERSION}"
   fi
+fi
+
+if [[ "${INSTALL_MODE}" == "official-mamba3" ]]; then
+  echo "installing triton ${TRITON_VERSION} for official mamba runtime compatibility"
+  python -m pip install --no-build-isolation "triton==${TRITON_VERSION}"
 fi
 
 python -m pip install --no-build-isolation -r "${REQUIREMENTS_FILE}"

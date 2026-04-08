@@ -47,10 +47,13 @@ source .venv-cuda-mamba3/bin/activate
 
 That will:
 
-1. create a virtualenv with system site packages
-2. install the shared Python requirements
-3. install official `mamba_ssm` from source with `MAMBA_FORCE_BUILD=TRUE`
-4. constrain the build to the detected GPU compute capability when available
+1. create a clean virtualenv
+2. install a pinned CUDA PyTorch build into that env
+3. install the Triton API level currently required by the working native
+   `mamba_ssm` path
+4. install the shared Python requirements
+5. install official `mamba_ssm` from source with `MAMBA_FORCE_BUILD=TRUE`
+6. constrain the build to the detected GPU compute capability when available
 
 ## Optional Torch Pin
 
@@ -60,8 +63,8 @@ explicitly during bootstrap:
 ```bash
 bash scripts/bootstrap_v3a_python_mamba3_cuda_env.sh \
   --venv-dir .venv-cuda-mamba3 \
-  --torch 2.11.0 \
-  --torch-index-url https://download.pytorch.org/whl/cu128
+  --torch 2.4.1 \
+  --torch-index-url https://download.pytorch.org/whl/cu124
 ```
 
 ## RunPod Contract
@@ -83,3 +86,15 @@ logic. That meant local Linux/CUDA bring-up and RunPod bring-up could silently
 drift.
 
 The shared bootstrap script fixes that control-plane split.
+
+## Current Native Mamba Contract
+
+The current working native Mamba bring-up in this repo is pinned around:
+
+* `torch 2.4.1` from `cu124`
+* `triton 3.6.0`
+* official `mamba_ssm` built from source with `--no-build-isolation`
+
+This is intentionally explicit in the bootstrap script so the env does not
+silently fall back to the Torch-bundled Triton runtime or drift to a different
+CUDA toolchain.

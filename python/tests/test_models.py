@@ -67,26 +67,62 @@ class Path1ModelTests(unittest.TestCase):
         self.assertIn("projected_norm", model.model_label)
 
     def test_runtime_primitive_matches_reference_math_for_p20(self) -> None:
-        reference = build_sequence_primitive(
-            PrimitiveProfile.P20,
-            16,
-            PrimitiveExecutionProfile.REFERENCE,
-        )
-        runtime = build_sequence_primitive(
-            PrimitiveProfile.P20,
-            16,
-            PrimitiveExecutionProfile.RUNTIME,
-        )
-        runtime.load_state_dict(reference.state_dict())
         inputs = torch.randn(2, 5, 16)
-        reference_result = reference.scan(inputs)
-        runtime_result = runtime.scan(inputs)
-        self.assertTrue(
-            torch.allclose(reference_result.emitted_outputs, runtime_result.emitted_outputs, atol=1.0e-5, rtol=1.0e-5)
-        )
-        self.assertTrue(
-            torch.allclose(reference_result.final_state, runtime_result.final_state, atol=1.0e-5, rtol=1.0e-5)
-        )
+        for primitive_profile in PrimitiveProfile:
+            with self.subTest(primitive_profile=primitive_profile.value):
+                reference = build_sequence_primitive(
+                    primitive_profile,
+                    16,
+                    PrimitiveExecutionProfile.REFERENCE,
+                )
+                runtime = build_sequence_primitive(
+                    primitive_profile,
+                    16,
+                    PrimitiveExecutionProfile.RUNTIME,
+                )
+                runtime.load_state_dict(reference.state_dict())
+                reference_result = reference.scan(inputs)
+                runtime_plan = runtime.prepare_runtime_plan(inputs)
+                runtime_result = runtime.scan_with_runtime_plan(
+                    runtime_plan,
+                    batch_size=inputs.shape[0],
+                    device=inputs.device,
+                    dtype=inputs.dtype,
+                    seq_len=inputs.shape[1],
+                )
+                runtime_scan_result = runtime.scan(inputs)
+                self.assertTrue(
+                    torch.allclose(
+                        reference_result.emitted_outputs,
+                        runtime_result.emitted_outputs,
+                        atol=1.0e-5,
+                        rtol=1.0e-5,
+                    )
+                )
+                self.assertTrue(
+                    torch.allclose(
+                        reference_result.final_state,
+                        runtime_result.final_state,
+                        atol=1.0e-5,
+                        rtol=1.0e-5,
+                    )
+                )
+                self.assertTrue(
+                    torch.allclose(
+                        runtime_result.emitted_outputs,
+                        runtime_scan_result.emitted_outputs,
+                        atol=1.0e-5,
+                        rtol=1.0e-5,
+                    )
+                )
+                self.assertTrue(
+                    torch.allclose(
+                        runtime_result.final_state,
+                        runtime_scan_result.final_state,
+                        atol=1.0e-5,
+                        rtol=1.0e-5,
+                    )
+                )
 
     def test_reference_ssm_boundary_is_explicit(self) -> None:
         has_official_mamba = importlib.util.find_spec("mamba_ssm") is not None
