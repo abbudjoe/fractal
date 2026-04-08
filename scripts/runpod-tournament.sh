@@ -1007,7 +1007,10 @@ REMOTE
 
 run_remote_tournament() {
     local local_build_key
-    local run_experiment_context_b64
+    local remote_launch_spec_json
+    local remote_launch_spec_path
+    local state_dir_q
+    local remote_launch_spec_path_q
     local_build_key="$(python3 - "$REPO_ROOT" "$BINARY_KIND" "$BINARY_NAME" "$PYTHON_REQUIREMENTS_FILE" "$PYTHON_INSTALL_MODE" <<'PY'
 import hashlib
 import os
@@ -1082,44 +1085,121 @@ PY
             remote_python_requirements_file="${REMOTE_DIR}/${remote_python_requirements_file#${REPO_ROOT}/}"
         fi
     fi
-    run_experiment_context_b64="$(printf '%s' "$RUN_EXPERIMENT_CONTEXT_JSON" | base64 | tr -d '\n')"
+    remote_launch_spec_path="${STATE_DIR}/manifests/remote-launch-${RUN_ID}.json"
+    remote_launch_spec_json="$(
+        python3 - \
+            "$REMOTE_DIR" \
+            "$STATE_DIR" \
+            "$RUN_LOCAL_BRANCH" \
+            "$RUN_LOCAL_COMMIT_SHA" \
+            "$local_build_key" \
+            "$BINARY_KIND" \
+            "$BINARY_NAME" \
+            "$remote_python_requirements_file" \
+            "$PYTHON_INSTALL_MODE" \
+            "$NO_COMPILE" \
+            "$RUN_TIMEOUT_SECONDS" \
+            "$RUN_ID" \
+            "$POD_ID" \
+            "$RUN_EXPERIMENT_CONTEXT_JSON" \
+            "${REMOTE_TOURNAMENT_ARGS[@]}" <<'PY'
+import json
+import sys
+
+(
+    remote_dir,
+    state_dir,
+    local_branch,
+    local_commit_sha,
+    local_build_key,
+    binary_kind,
+    binary_name,
+    python_requirements_file,
+    python_install_mode,
+    no_compile,
+    run_timeout_seconds,
+    run_id,
+    pod_id,
+    experiment_context_json,
+    *command_args,
+) = sys.argv[1:]
+
+launch_spec = {
+    "remote_dir": remote_dir,
+    "state_dir": state_dir,
+    "build": {
+        "branch": local_branch,
+        "commit_sha": local_commit_sha,
+        "build_key": local_build_key,
+    },
+    "runtime": {
+        "binary_kind": binary_kind,
+        "binary_name": binary_name,
+        "python_requirements_file": python_requirements_file,
+        "python_install_mode": python_install_mode,
+        "no_compile": no_compile,
+        "run_timeout_seconds": int(run_timeout_seconds),
+        "run_id": run_id,
+        "pod_id": pod_id,
+        "command_args": command_args,
+    },
+    "experiment": json.loads(experiment_context_json),
+}
+
+print(json.dumps(launch_spec, sort_keys=True))
+PY
+    )"
+    state_dir_q="$(printf '%q' "$STATE_DIR")"
+    remote_launch_spec_path_q="$(printf '%q' "$remote_launch_spec_path")"
 
     write_local_wrapper_manifest "running" 0 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RUN_LOCAL_BRANCH" "$local_build_key" "$RUN_LOCAL_COMMIT_SHA"
 
+    log "uploading remote launch spec"
+    printf '%s' "$remote_launch_spec_json" \
+        | "${SSH_BASE[@]}" "mkdir -p ${state_dir_q}/manifests && cat > ${remote_launch_spec_path_q}"
+
     log "running remote CUDA ${BINARY_KIND}:${BINARY_NAME}"
-    "${SSH_BASE[@]}" bash -s -- \
-        "$REMOTE_DIR" \
-        "$STATE_DIR" \
-        "$RUN_LOCAL_BRANCH" \
-        "$RUN_LOCAL_COMMIT_SHA" \
-        "$local_build_key" \
-        "$BINARY_KIND" \
-        "$BINARY_NAME" \
-        "$remote_python_requirements_file" \
-        "$PYTHON_INSTALL_MODE" \
-        "$NO_COMPILE" \
-        "$RUN_TIMEOUT_SECONDS" \
-        "$RUN_ID" \
-        "$POD_ID" \
-        "$run_experiment_context_b64" \
-        "${REMOTE_TOURNAMENT_ARGS[@]}" <<'REMOTE'
+    "${SSH_BASE[@]}" bash -s -- "$remote_launch_spec_path" <<'REMOTE'
 set -euo pipefail
 
-remote_dir="$1"
-state_dir="$2"
-local_branch="$3"
-local_commit_sha="$4"
-local_build_key="$5"
-binary_kind="$6"
-binary_name="$7"
-python_requirements_file="$8"
-python_install_mode="$9"
-no_compile="${10}"
-run_timeout_seconds="${11}"
-run_id="${12}"
-pod_id="${13}"
-experiment_context_b64="${14}"
-shift 14
+launch_spec_path="$1"
+shift
+
+eval "$(
+    python3 - "$launch_spec_path" <<'PY'
+import json
+import shlex
+import sys
+
+spec = json.loads(open(sys.argv[1]).read())
+build = spec["build"]
+runtime = spec["runtime"]
+
+assignments = {
+    "remote_dir": spec["remote_dir"],
+    "state_dir": spec["state_dir"],
+    "local_branch": build["branch"],
+    "local_commit_sha": build["commit_sha"],
+    "local_build_key": build["build_key"],
+    "binary_kind": runtime["binary_kind"],
+    "binary_name": runtime["binary_name"],
+    "python_requirements_file": runtime["python_requirements_file"],
+    "python_install_mode": runtime["python_install_mode"],
+    "no_compile": runtime["no_compile"],
+    "run_timeout_seconds": str(runtime["run_timeout_seconds"]),
+    "run_id": runtime["run_id"],
+    "pod_id": runtime["pod_id"],
+    "launch_spec_path": sys.argv[1],
+}
+
+for key, value in assignments.items():
+    print(f"{key}={shlex.quote('' if value is None else str(value))}")
+
+command_args = [str(arg) for arg in runtime.get("command_args") or []]
+quoted_args = " ".join(shlex.quote(arg) for arg in command_args)
+print(f"command_args=({quoted_args})")
+PY
+)"
 
 if [ -f "$HOME/.cargo/env" ]; then
     # shellcheck disable=SC1090
@@ -1177,9 +1257,8 @@ write_manifest() {
         "$run_timeout_seconds" \
         "$state_dir" \
         "$remote_dir" \
-        "$experiment_context_b64" \
+        "$launch_spec_path" \
         "$@" <<'PY'
-import base64
 import json
 import pathlib
 import sys
@@ -1197,11 +1276,12 @@ import sys
     run_timeout_seconds,
     state_dir,
     remote_dir,
-    experiment_context_b64,
+    launch_spec_path,
     *command_args,
 ) = sys.argv[1:]
 
-experiment = json.loads(base64.b64decode(experiment_context_b64).decode("utf-8"))
+launch_spec = json.loads(pathlib.Path(launch_spec_path).read_text())
+experiment = launch_spec["experiment"]
 manifest = {
     "run_id": experiment["experiment_id"]["attempt_id"],
     "status": status,
@@ -1224,6 +1304,7 @@ manifest = {
         "state_dir": state_dir,
         "remote_dir": remote_dir,
         "manifest_path": str(pathlib.Path(path).as_posix()),
+        "launch_spec_path": str(pathlib.Path(launch_spec_path).as_posix()),
     },
     "experiment": experiment,
 }
@@ -1234,7 +1315,6 @@ path_obj.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 PY
 }
 
-command_args=("$@")
 write_manifest "running" 0 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${command_args[@]}"
 
 cleanup_manifest() {
