@@ -93,6 +93,28 @@ impl RustMamba3BaselineConfig {
         })
     }
 
+    pub fn phase1_siso_default(d_model: usize, head_count: usize) -> Result<Self, FractalError> {
+        let mut config = Self::phase1_default(d_model, head_count)?;
+        config.is_mimo = false;
+        config.mimo_rank = 1;
+        Ok(config)
+    }
+
+    pub fn phase1_for_reference_family(
+        reference_family: ReferenceSsmFamily,
+        d_model: usize,
+        head_count: usize,
+    ) -> Result<Self, FractalError> {
+        match reference_family {
+            ReferenceSsmFamily::Mamba3ProxyV1 => Err(FractalError::InvalidConfig(
+                "rust_mamba3 baseline config may not be derived for the proxy reference family"
+                    .to_string(),
+            )),
+            ReferenceSsmFamily::Mamba3RustV1 => Self::phase1_default(d_model, head_count),
+            ReferenceSsmFamily::Mamba3RustSisoV1 => Self::phase1_siso_default(d_model, head_count),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), FractalError> {
         if self.d_model == 0
             || self.d_state == 0
@@ -834,6 +856,7 @@ impl<B: Backend> RustMamba3ReferenceHybridAttentionModel<B> {
     pub fn new(
         shape: HybridAttentionModelShape,
         baseline: RustMamba3BaselineConfig,
+        reference_family: ReferenceSsmFamily,
         layer_schedule: &[HybridAttentionLayerRole],
         device: &B::Device,
     ) -> Result<Self, FractalError> {
@@ -914,7 +937,7 @@ impl<B: Backend> RustMamba3ReferenceHybridAttentionModel<B> {
             head_count: shape.head_count,
             local_window: shape.local_window,
             total_layers: shape.total_layers,
-            reference_family: Ignored(ReferenceSsmFamily::Mamba3RustV1),
+            reference_family: Ignored(reference_family),
         })
     }
 
@@ -970,10 +993,19 @@ pub fn build_rust_mamba3_reference_hybrid_attention_model<B: Backend>(
     device: &B::Device,
 ) -> Result<RustMamba3ReferenceHybridAttentionModel<B>, FractalError> {
     variant.validate()?;
-    if variant.reference_ssm_family != Some(ReferenceSsmFamily::Mamba3RustV1) {
-        return Err(FractalError::InvalidConfig(format!(
-            "reference variant {} must set reference_ssm_family=mamba3-rust-v1",
+    let reference_family = variant.reference_ssm_family.ok_or_else(|| {
+        FractalError::InvalidConfig(format!(
+            "reference variant {} must set reference_ssm_family",
             variant.label
+        ))
+    })?;
+    if !matches!(
+        reference_family,
+        ReferenceSsmFamily::Mamba3RustV1 | ReferenceSsmFamily::Mamba3RustSisoV1
+    ) {
+        return Err(FractalError::InvalidConfig(format!(
+            "reference variant {} must set reference_ssm_family to a Rust Mamba family, got {:?}",
+            variant.label, reference_family
         )));
     }
     if variant.layer_schedule.iter().any(|role| {
@@ -996,9 +1028,18 @@ pub fn build_rust_mamba3_reference_hybrid_attention_model<B: Backend>(
         local_window: variant.local_window,
         total_layers: variant.total_layers(),
     };
-    let baseline =
-        RustMamba3BaselineConfig::phase1_default(variant.hidden_dim, variant.head_count)?;
-    RustMamba3ReferenceHybridAttentionModel::new(shape, baseline, &variant.layer_schedule, device)
+    let baseline = RustMamba3BaselineConfig::phase1_for_reference_family(
+        reference_family,
+        variant.hidden_dim,
+        variant.head_count,
+    )?;
+    RustMamba3ReferenceHybridAttentionModel::new(
+        shape,
+        baseline,
+        reference_family,
+        &variant.layer_schedule,
+        device,
+    )
 }
 
 fn local_causal_mask<B: Backend>(
@@ -1704,6 +1745,15 @@ mod tests {
     }
 
     #[test]
+    fn phase1_siso_baseline_config_disables_mimo_ranking() {
+        let config = RustMamba3BaselineConfig::phase1_siso_default(128, 4).unwrap();
+        let derived = config.derived_shape().unwrap();
+        assert!(!config.is_mimo);
+        assert_eq!(config.mimo_rank, 1);
+        assert_eq!(derived.mimo_rank, 1);
+    }
+
+    #[test]
     fn rope_fraction_full_keeps_full_state_prefix() {
         let mut config = RustMamba3BaselineConfig::phase1_default(128, 4).unwrap();
         config.is_mimo = false;
@@ -1727,6 +1777,24 @@ mod tests {
             &device,
         )
         .unwrap();
+        let input = Tensor::<TestBackend, 2, Int>::zeros([2, 8], &device);
+        assert_eq!(model.forward_logits(input).unwrap().dims(), [2, 8, 257]);
+    }
+
+    #[test]
+    fn reference_rust_siso_mamba3_model_returns_logits() {
+        let device = Default::default();
+        let mut variant = phase1_hybrid_attention_baseline_matrix().reference_ssm_hybrid;
+        variant.label = "reference-ssm-hybrid-rust-siso".to_string();
+        variant.reference_ssm_family = Some(ReferenceSsmFamily::Mamba3RustSisoV1);
+        let model = build_rust_mamba3_reference_hybrid_attention_model::<TestBackend>(
+            257, &variant, &device,
+        )
+        .unwrap();
+        assert_eq!(
+            model.reference_family(),
+            ReferenceSsmFamily::Mamba3RustSisoV1
+        );
         let input = Tensor::<TestBackend, 2, Int>::zeros([2, 8], &device);
         assert_eq!(model.forward_logits(input).unwrap().dims(), [2, 8, 257]);
     }

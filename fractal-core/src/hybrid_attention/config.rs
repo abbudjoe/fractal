@@ -19,6 +19,7 @@ pub enum HybridAttentionVariantKind {
 pub enum ReferenceSsmFamily {
     Mamba3ProxyV1,
     Mamba3RustV1,
+    Mamba3RustSisoV1,
 }
 
 impl ReferenceSsmFamily {
@@ -31,6 +32,12 @@ impl ReferenceSsmFamily {
                 explicit_output_readout: true,
             },
             Self::Mamba3RustV1 => HybridSequenceKernelContract {
+                projection_layout_policy: ProjectionLayoutPolicy::OutputByInput,
+                state_layout: HybridSequenceStateLayout::StructuredReferenceSsm,
+                scan_mode: HybridSequenceScanMode::ChunkedSequentialStepLoop,
+                explicit_output_readout: true,
+            },
+            Self::Mamba3RustSisoV1 => HybridSequenceKernelContract {
                 projection_layout_policy: ProjectionLayoutPolicy::OutputByInput,
                 state_layout: HybridSequenceStateLayout::StructuredReferenceSsm,
                 scan_mode: HybridSequenceScanMode::ChunkedSequentialStepLoop,
@@ -1064,6 +1071,7 @@ mod tests {
         for family in [
             ReferenceSsmFamily::Mamba3ProxyV1,
             ReferenceSsmFamily::Mamba3RustV1,
+            ReferenceSsmFamily::Mamba3RustSisoV1,
         ] {
             assert_eq!(
                 family.kernel_contract().projection_layout_policy,
@@ -1090,16 +1098,20 @@ mod tests {
         );
         assert!(wide.explicit_output_readout);
 
-        let rust_mamba = ReferenceSsmFamily::Mamba3RustV1.kernel_contract();
-        assert_eq!(
-            rust_mamba.scan_mode,
-            HybridSequenceScanMode::ChunkedSequentialStepLoop
-        );
-        assert_eq!(
-            rust_mamba.state_layout,
-            HybridSequenceStateLayout::StructuredReferenceSsm
-        );
-        assert!(rust_mamba.explicit_output_readout);
+        for rust_mamba in [
+            ReferenceSsmFamily::Mamba3RustV1.kernel_contract(),
+            ReferenceSsmFamily::Mamba3RustSisoV1.kernel_contract(),
+        ] {
+            assert_eq!(
+                rust_mamba.scan_mode,
+                HybridSequenceScanMode::ChunkedSequentialStepLoop
+            );
+            assert_eq!(
+                rust_mamba.state_layout,
+                HybridSequenceStateLayout::StructuredReferenceSsm
+            );
+            assert!(rust_mamba.explicit_output_readout);
+        }
     }
 
     #[test]

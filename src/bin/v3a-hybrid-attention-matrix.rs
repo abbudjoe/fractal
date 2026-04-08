@@ -13,7 +13,7 @@ use fractal_core::{
     phase1_p23_candidate_variant, phase1_p2_candidate_variant,
     phase1_p2_interface_candidate_variant, CpuTrainBackend, HybridAttentionVariantSpec,
     MetalTrainBackend, PrimitiveHybridNormMode, PrimitiveHybridPrimitive,
-    PrimitiveHybridReadoutMode, PrimitiveHybridResidualMode,
+    PrimitiveHybridReadoutMode, PrimitiveHybridResidualMode, ReferenceSsmFamily,
 };
 use fractal_eval_private::{
     append_v3a_results_ledger_entry, byte_level_smoke_corpus_stats_from_source,
@@ -89,18 +89,19 @@ fn run() -> Result<(), String> {
         args.primitive_norm_profile,
         args.primitive_wrapper_profile,
     );
+    let reference_note = reference_ssm_lane_note(args.reference_ssm_profile);
     let benchmark_prefix = args
         .benchmark_profile
         .map(|profile| format!("benchmark={}. {} ", profile.as_str(), profile.note()))
         .unwrap_or_default();
     let matrix_note = if args.isolate_variants && args.variant.includes_multiple_variants() {
         format!(
-            "{benchmark_prefix}backend={}. {base_note} Variants are executed in isolated child processes for fairer throughput and memory comparison.",
+            "{benchmark_prefix}backend={}. {reference_note} {base_note} Variants are executed in isolated child processes for fairer throughput and memory comparison.",
             args.backend.as_str()
         )
     } else {
         format!(
-            "{benchmark_prefix}backend={}. {base_note}",
+            "{benchmark_prefix}backend={}. {reference_note} {base_note}",
             args.backend.as_str()
         )
     };
@@ -111,6 +112,7 @@ fn run() -> Result<(), String> {
         .clone()
         .unwrap_or_else(|| default_output_dir(&repo_root));
     let matrix = phase1_hybrid_attention_baseline_matrix();
+    let reference_variant = selected_reference_ssm_variant(&args.reference_ssm_profile, &matrix);
     let primitive_variant = selected_primitive_variant(
         &args.primitive_profile,
         &args.primitive_residual_profile,
@@ -120,13 +122,21 @@ fn run() -> Result<(), String> {
         &matrix,
     );
     let variants = if args.isolate_variants && args.variant.includes_multiple_variants() {
-        run_selected_variants_isolated(&args, &repo_root, &output_dir, &matrix, &primitive_variant)?
+        run_selected_variants_isolated(
+            &args,
+            &repo_root,
+            &output_dir,
+            &matrix,
+            &reference_variant,
+            &primitive_variant,
+        )?
     } else {
         run_selected_variants_in_process(
             &args,
             corpus_source,
             &output_dir,
             &matrix,
+            &reference_variant,
             &primitive_variant,
         )?
     };
@@ -370,6 +380,17 @@ fn primitive_lane_note(
     }
 }
 
+fn reference_ssm_lane_note(reference_ssm_profile: ReferenceSsmProfile) -> &'static str {
+    match reference_ssm_profile {
+        ReferenceSsmProfile::RustMimoReference => {
+            "Reference SSM lane uses the current Rust Mamba MIMO reference family."
+        }
+        ReferenceSsmProfile::RustSisoReference => {
+            "Reference SSM lane uses the Rust Mamba SISO reference family to match the native Python SISO architecture more closely."
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BenchmarkProfile {
     CudaFaithfulSmallV1,
@@ -421,6 +442,7 @@ struct CliArgs {
     seed: u64,
     variant: VariantSelection,
     primitive_profile: PrimitiveProfile,
+    reference_ssm_profile: ReferenceSsmProfile,
     primitive_residual_profile: PrimitiveResidualProfile,
     primitive_readout_profile: PrimitiveReadoutProfile,
     primitive_norm_profile: PrimitiveNormProfile,
@@ -454,6 +476,7 @@ impl CliArgs {
         let mut seed = DEFAULT_V3A_SMOKE_SEED;
         let mut variant = VariantSelection::All;
         let mut primitive_profile = PrimitiveProfile::P1;
+        let mut reference_ssm_profile = ReferenceSsmProfile::RustMimoReference;
         let mut primitive_residual_profile = PrimitiveResidualProfile::Plain;
         let mut primitive_readout_profile = PrimitiveReadoutProfile::Direct;
         let mut primitive_norm_profile = PrimitiveNormProfile::PreNormOnly;
@@ -596,6 +619,12 @@ impl CliArgs {
                             .ok_or_else(|| "--primitive-profile requires a value".to_owned())?,
                     )?;
                 }
+                "--reference-ssm-profile" => {
+                    reference_ssm_profile =
+                        ReferenceSsmProfile::parse(&iter.next().ok_or_else(|| {
+                            "--reference-ssm-profile requires a value".to_owned()
+                        })?)?;
+                }
                 "--primitive-residual-profile" => {
                     primitive_residual_profile =
                         PrimitiveResidualProfile::parse(&iter.next().ok_or_else(|| {
@@ -692,6 +721,7 @@ impl CliArgs {
             seed,
             variant,
             primitive_profile,
+            reference_ssm_profile,
             primitive_residual_profile,
             primitive_readout_profile,
             primitive_norm_profile,
@@ -734,6 +764,43 @@ impl BackendSelection {
             Self::Cpu => HybridAttentionExecutionBackend::Cpu,
             Self::Metal => HybridAttentionExecutionBackend::Metal,
             Self::Cuda => HybridAttentionExecutionBackend::Cuda,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReferenceSsmProfile {
+    RustMimoReference,
+    RustSisoReference,
+}
+
+impl ReferenceSsmProfile {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "rust-mimo-reference" | "rust-reference" => Ok(Self::RustMimoReference),
+            "rust-siso-reference" | "rust-siso" => Ok(Self::RustSisoReference),
+            _ => Err(format!("unknown reference SSM profile: {value}")),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RustMimoReference => "rust-mimo-reference",
+            Self::RustSisoReference => "rust-siso-reference",
+        }
+    }
+
+    fn family(self) -> ReferenceSsmFamily {
+        match self {
+            Self::RustMimoReference => ReferenceSsmFamily::Mamba3RustV1,
+            Self::RustSisoReference => ReferenceSsmFamily::Mamba3RustSisoV1,
+        }
+    }
+
+    fn label_suffix(self) -> &'static str {
+        match self {
+            Self::RustMimoReference => "",
+            Self::RustSisoReference => "-rust-siso",
         }
     }
 }
@@ -1207,11 +1274,26 @@ fn selected_primitive_variant(
     }
 }
 
+fn selected_reference_ssm_variant(
+    reference_ssm_profile: &ReferenceSsmProfile,
+    matrix: &fractal_core::HybridAttentionBaselineMatrix,
+) -> HybridAttentionVariantSpec {
+    let mut variant = matrix.reference_ssm_hybrid.clone();
+    variant.reference_ssm_family = Some(reference_ssm_profile.family());
+    variant.label = format!(
+        "{}{}",
+        matrix.reference_ssm_hybrid.label,
+        reference_ssm_profile.label_suffix()
+    );
+    variant
+}
+
 fn run_selected_variants_in_process(
     args: &CliArgs,
     corpus_source: ByteLevelSmokeCorpusSource,
     output_dir: &Path,
     matrix: &fractal_core::HybridAttentionBaselineMatrix,
+    reference_variant: &HybridAttentionVariantSpec,
     primitive_variant: &HybridAttentionVariantSpec,
 ) -> Result<Vec<HybridAttentionMatrixVariantOutcome>, String> {
     match args.backend {
@@ -1222,6 +1304,7 @@ fn run_selected_variants_in_process(
                 corpus_source,
                 output_dir,
                 matrix,
+                reference_variant,
                 primitive_variant,
                 &device,
             )
@@ -1234,6 +1317,7 @@ fn run_selected_variants_in_process(
                 corpus_source,
                 output_dir,
                 matrix,
+                reference_variant,
                 primitive_variant,
                 &device,
             )
@@ -1247,6 +1331,7 @@ fn run_selected_variants_in_process(
                     corpus_source,
                     output_dir,
                     matrix,
+                    reference_variant,
                     primitive_variant,
                     &device,
                 )
@@ -1271,6 +1356,7 @@ fn run_selected_variants_with_backend<B>(
     corpus_source: ByteLevelSmokeCorpusSource,
     output_dir: &Path,
     matrix: &fractal_core::HybridAttentionBaselineMatrix,
+    reference_variant: &HybridAttentionVariantSpec,
     primitive_variant: &HybridAttentionVariantSpec,
     device: &<B as burn::tensor::backend::Backend>::Device,
 ) -> Result<Vec<HybridAttentionMatrixVariantOutcome>, String>
@@ -1305,7 +1391,7 @@ where
                 smoke_config(
                     corpus_source.clone(),
                     output_dir.join("reference-ssm-hybrid"),
-                    matrix.reference_ssm_hybrid.clone(),
+                    reference_variant.clone(),
                     args,
                 ),
                 device,
@@ -1315,8 +1401,8 @@ where
         );
     } else {
         variants.push(HybridAttentionMatrixVariantOutcome::Skipped {
-            label: matrix.reference_ssm_hybrid.label.to_owned(),
-            kind: matrix.reference_ssm_hybrid.kind,
+            label: reference_variant.label.to_owned(),
+            kind: reference_variant.kind,
             reason: "not requested by --variant selection".to_owned(),
         });
     }
@@ -1349,6 +1435,7 @@ fn run_selected_variants_isolated(
     repo_root: &Path,
     output_dir: &Path,
     matrix: &fractal_core::HybridAttentionBaselineMatrix,
+    reference_variant: &HybridAttentionVariantSpec,
     primitive_variant: &HybridAttentionVariantSpec,
 ) -> Result<Vec<HybridAttentionMatrixVariantOutcome>, String> {
     Ok(vec![
@@ -1364,7 +1451,7 @@ fn run_selected_variants_isolated(
             output_dir,
             args,
             VariantSelection::ReferenceSsmHybrid,
-            &matrix.reference_ssm_hybrid.label,
+            &reference_variant.label,
         )?,
         run_isolated_variant(
             repo_root,
@@ -1403,6 +1490,8 @@ fn run_isolated_variant(
         .arg(args.cuda_device.to_string())
         .arg("--variant")
         .arg(variant.as_str())
+        .arg("--reference-ssm-profile")
+        .arg(args.reference_ssm_profile.as_str())
         .arg("--primitive-profile")
         .arg(args.primitive_profile.as_str())
         .arg("--primitive-residual-profile")
@@ -1522,6 +1611,7 @@ fn usage() -> String {
             "  --learning-rate <value>      Learning rate (default: {lr})\n",
             "  --seed <n>                   Random seed for model initialization (default: {seed})\n",
             "  --variant <name>             One of: all, attention-only, reference-ssm-hybrid, primitive-hybrid (default: all)\n",
+            "  --reference-ssm-profile      One of: rust-mimo-reference, rust-siso-reference (default: rust-mimo-reference)\n",
             "  --primitive-profile <name>   One of: p1, p2-0, p2, p2-1, p2-2, p2-3 (default: p1)\n",
             "  --primitive-residual-profile One of: plain, scaled, gated (default: plain; P2-family contenders only)\n",
             "  --primitive-readout-profile  One of: direct, projected, projected-norm (default: direct; P2-family contenders only)\n",
@@ -1550,7 +1640,7 @@ mod tests {
         apply_benchmark_profile_overrides, apply_full_pass_overrides, resolve_corpus_source,
         BenchmarkProfile, CliArgs, OutputFormat, PrimitiveNormProfile, PrimitiveProfile,
         PrimitiveReadoutProfile, PrimitiveResidualProfile, PrimitiveWrapperProfile,
-        VariantSelection,
+        ReferenceSsmProfile, VariantSelection,
     };
     use fractal_eval_private::byte_level_smoke_corpus_stats_from_source;
     use std::path::PathBuf;
@@ -1578,6 +1668,7 @@ mod tests {
             seed: super::DEFAULT_V3A_SMOKE_SEED,
             variant: VariantSelection::AttentionOnly,
             primitive_profile: PrimitiveProfile::P1,
+            reference_ssm_profile: ReferenceSsmProfile::RustMimoReference,
             primitive_residual_profile: PrimitiveResidualProfile::Plain,
             primitive_readout_profile: PrimitiveReadoutProfile::Direct,
             primitive_norm_profile: PrimitiveNormProfile::PreNormOnly,
