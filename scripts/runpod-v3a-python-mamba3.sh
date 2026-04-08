@@ -39,10 +39,11 @@ fi
 
 already_recorded() {
   local run_label="$1"
+  shift
   if [[ ! -d "${LOCAL_RESULTS_ROOT}" ]]; then
     return 1
   fi
-  python3 - "${LOCAL_RESULTS_ROOT}" "${run_label}" <<'PY'
+  python3 - "${LOCAL_RESULTS_ROOT}" "${run_label}" "$@" <<'PY'
 from __future__ import annotations
 
 import json
@@ -51,6 +52,7 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 target = sys.argv[2]
+expected_args = sys.argv[3:]
 
 for manifest_path in root.glob("**/metadata/wrapper-manifest.json"):
     try:
@@ -61,6 +63,8 @@ for manifest_path in root.glob("**/metadata/wrapper-manifest.json"):
         continue
     runtime = manifest.get("runtime") or {}
     command_args = runtime.get("command_args") or []
+    if command_args != expected_args:
+        continue
     for index, value in enumerate(command_args):
         if value == "--run-label" and index + 1 < len(command_args) and command_args[index + 1] == target:
             sys.exit(0)
@@ -114,7 +118,8 @@ else
 fi
 
 run_label="${LABEL_PREFIX}-s${SEED}-python-reference-ssm-hybrid"
-if already_recorded "${run_label}"; then
+EXPECTED_ARGS=("${COMMON_ARGS[@]}" --run-label "${run_label}")
+if already_recorded "${run_label}" "${EXPECTED_ARGS[@]}"; then
   echo "skip ${run_label}"
   exit 0
 fi
@@ -130,7 +135,6 @@ echo "run ${run_label}"
   --run-timeout-seconds "${RUN_TIMEOUT_SECONDS}" \
   --stop-after-run \
   -- \
-  "${COMMON_ARGS[@]}" \
-  --run-label "${run_label}"
+  "${EXPECTED_ARGS[@]}"
 
 echo "completed runpod v3a python mamba3 seed ${SEED}"

@@ -25,10 +25,9 @@ CORPUS_NAME="${CORPUS_NAME:-}"
 CORPUS_TEXT_FIELD="${CORPUS_TEXT_FIELD:-text}"
 
 if [[ "${BENCHMARK_PROFILE}" == "cuda-faithful-small-v1" ]]; then
-  if [[ -z "${CORPUS_TRAIN_JSONL}" && -z "${CORPUS_EVAL_JSONL}" ]]; then
-    CORPUS_TRAIN_JSONL="${REPO_ROOT}/experiments/stage0/assets/fineweb/stage0-local-bench-9row-v1/train.jsonl"
-    CORPUS_EVAL_JSONL="${REPO_ROOT}/experiments/stage0/assets/fineweb/stage0-local-bench-9row-v1/eval.jsonl"
-    CORPUS_NAME="${CORPUS_NAME:-fineweb-stage0-local-bench-9row-v1}"
+  if [[ -n "${CORPUS_TRAIN_JSONL}" || -n "${CORPUS_EVAL_JSONL}" ]]; then
+    echo "BENCHMARK_PROFILE=cuda-faithful-small-v1 may not be combined with explicit CORPUS_TRAIN_JSONL/CORPUS_EVAL_JSONL for the Rust runner" >&2
+    exit 1
   fi
   FULL_TRAIN_PASS=1
   FULL_EVAL_PASS=1
@@ -36,10 +35,11 @@ fi
 
 already_recorded() {
   local run_label="$1"
+  shift
   if [[ ! -d "${LOCAL_RESULTS_ROOT}" ]]; then
     return 1
   fi
-  python3 - "${LOCAL_RESULTS_ROOT}" "${run_label}" <<'PY'
+  python3 - "${LOCAL_RESULTS_ROOT}" "${run_label}" "$@" <<'PY'
 from __future__ import annotations
 
 import json
@@ -48,6 +48,7 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 target = sys.argv[2]
+expected_args = sys.argv[3:]
 
 for manifest_path in root.glob("**/metadata/wrapper-manifest.json"):
     try:
@@ -58,6 +59,8 @@ for manifest_path in root.glob("**/metadata/wrapper-manifest.json"):
         continue
     runtime = manifest.get("runtime") or {}
     command_args = runtime.get("command_args") or []
+    if command_args != expected_args:
+        continue
     for index, value in enumerate(command_args):
         if value == "--run-label" and index + 1 < len(command_args) and command_args[index + 1] == target:
             sys.exit(0)
@@ -112,7 +115,8 @@ run_lane() {
   local run_label="$1"
   shift
 
-  if already_recorded "${run_label}"; then
+  local expected_args=("$@" "${COMMON_ARGS[@]}" --run-label "${run_label}")
+  if already_recorded "${run_label}" "${expected_args[@]}"; then
     echo "skip ${run_label}"
     return 0
   fi
@@ -126,9 +130,7 @@ run_lane() {
     --run-timeout-seconds "${RUN_TIMEOUT_SECONDS}" \
     "${lifecycle_flag}" \
     -- \
-    "$@" \
-    "${COMMON_ARGS[@]}" \
-    --run-label "${run_label}"
+    "${expected_args[@]}"
 }
 
 build_common_args

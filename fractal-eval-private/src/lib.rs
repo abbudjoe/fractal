@@ -23,11 +23,11 @@ pub use hybrid_attention_training::{
     run_attention_only_hybrid_attention_smoke_train, run_primitive_hybrid_attention_smoke_train,
     run_reference_ssm_hybrid_attention_smoke_train, HybridAttentionCudaDeviceMemoryMetrics,
     HybridAttentionCudaMemoryMetricKind, HybridAttentionExecutionBackend,
-    HybridAttentionMatrixVariantOutcome, HybridAttentionRuntimeMetrics,
-    HybridAttentionSmokeTrainConfig, HybridAttentionSmokeTrainReport, DEFAULT_V3A_SMOKE_BATCH_SIZE,
-    DEFAULT_V3A_SMOKE_EVAL_BATCHES, DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY,
-    DEFAULT_V3A_SMOKE_LEARNING_RATE, DEFAULT_V3A_SMOKE_SEED, DEFAULT_V3A_SMOKE_SEQ_LEN,
-    DEFAULT_V3A_SMOKE_TRAIN_STEPS, DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
+    HybridAttentionImplementationKind, HybridAttentionMatrixVariantOutcome,
+    HybridAttentionRuntimeMetrics, HybridAttentionSmokeTrainConfig,
+    HybridAttentionSmokeTrainReport, DEFAULT_V3A_SMOKE_BATCH_SIZE, DEFAULT_V3A_SMOKE_EVAL_BATCHES,
+    DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY, DEFAULT_V3A_SMOKE_LEARNING_RATE, DEFAULT_V3A_SMOKE_SEED,
+    DEFAULT_V3A_SMOKE_SEQ_LEN, DEFAULT_V3A_SMOKE_TRAIN_STEPS, DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
     HYBRID_ATTENTION_RUNTIME_MEMORY_NOTE,
 };
 pub use hybrid_prevalidation::{

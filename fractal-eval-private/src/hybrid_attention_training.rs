@@ -43,6 +43,26 @@ pub const HYBRID_ATTENTION_RUNTIME_MEMORY_NOTE: &str =
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum HybridAttentionImplementationKind {
+    RustFramework,
+    RustReference,
+    RustRuntime,
+    PythonNative,
+}
+
+impl HybridAttentionImplementationKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RustFramework => "rust_framework",
+            Self::RustReference => "rust_reference",
+            Self::RustRuntime => "rust_runtime",
+            Self::PythonNative => "python_native",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HybridAttentionExecutionBackend {
     Cpu,
     Metal,
@@ -189,6 +209,7 @@ impl HybridAttentionSmokeTrainConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HybridAttentionSmokeTrainReport {
     pub model_label: String,
+    pub implementation_kind: HybridAttentionImplementationKind,
     pub note: String,
     pub config: HybridAttentionSmokeTrainConfig,
     pub corpus: V2SmokeCorpusStats,
@@ -275,6 +296,7 @@ where
         model,
         config,
         "v3a_attention_only_baseline",
+        HybridAttentionImplementationKind::RustFramework,
         "Path 1 attention-only baseline on the shared byte-level smoke lane",
         device,
     )
@@ -296,6 +318,7 @@ where
         model,
         config,
         "v3a_primitive_hybrid_baseline",
+        HybridAttentionImplementationKind::RustReference,
         "Path 1 primitive-hybrid baseline on the shared byte-level smoke lane",
         device,
     )
@@ -317,6 +340,7 @@ where
         model,
         config,
         "v3a_reference_ssm_rust_mamba3_baseline",
+        HybridAttentionImplementationKind::RustReference,
         "Path 1 reference SSM hybrid baseline using the faithful Rust Mamba-3-style lane on the shared byte-level smoke lane",
         device,
     )
@@ -326,6 +350,7 @@ fn run_hybrid_attention_smoke_train_with_model<B, M>(
     model: M,
     config: HybridAttentionSmokeTrainConfig,
     model_label: &str,
+    implementation_kind: HybridAttentionImplementationKind,
     note: &str,
     device: &B::Device,
 ) -> Result<HybridAttentionSmokeTrainReport, FractalError>
@@ -460,6 +485,7 @@ where
     let report_path = config.output_dir.join("report.json");
     let report = HybridAttentionSmokeTrainReport {
         model_label: model_label.to_string(),
+        implementation_kind,
         note: note.to_string(),
         config,
         corpus,

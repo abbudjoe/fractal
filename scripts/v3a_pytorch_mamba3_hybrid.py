@@ -479,6 +479,7 @@ def main() -> int:
     selected_eval_tokens = sum(batch.token_count for batch in eval_batches[:eval_batch_count])
     report = {
         "model_label": "v3a_reference_ssm_python_mamba3_official_siso",
+        "implementation_kind": "python_native",
         "note": DEFAULT_NOTE,
         "config": {
             "backend": args.backend,

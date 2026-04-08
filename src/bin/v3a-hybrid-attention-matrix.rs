@@ -1022,8 +1022,9 @@ fn render_table(report: &RenderedMatrixReport<'_>) -> String {
                 );
                 let _ = writeln!(
                     output,
-                    "  backend={}",
+                    "  backend={} implementation={}",
                     report.config.execution_backend.as_str(),
+                    report.implementation_kind.as_str(),
                 );
                 if let Some(benchmark_name) = &report.config.benchmark_name {
                     let _ = writeln!(output, "  benchmark={benchmark_name}");
@@ -1541,4 +1542,94 @@ fn usage() -> String {
         lr = DEFAULT_V3A_SMOKE_LEARNING_RATE,
         seed = DEFAULT_V3A_SMOKE_SEED,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        apply_benchmark_profile_overrides, apply_full_pass_overrides, resolve_corpus_source,
+        BenchmarkProfile, CliArgs, OutputFormat, PrimitiveNormProfile, PrimitiveProfile,
+        PrimitiveReadoutProfile, PrimitiveResidualProfile, PrimitiveWrapperProfile,
+        VariantSelection,
+    };
+    use fractal_eval_private::byte_level_smoke_corpus_stats_from_source;
+    use std::path::PathBuf;
+
+    fn base_args() -> CliArgs {
+        CliArgs {
+            benchmark_profile: None,
+            backend: super::BackendSelection::Cpu,
+            cuda_device: 0,
+            corpus_paths: Vec::new(),
+            jsonl_train_path: None,
+            jsonl_eval_path: None,
+            corpus_name: None,
+            corpus_text_field: "text".to_owned(),
+            output_dir: None,
+            seq_len: super::DEFAULT_V3A_SMOKE_SEQ_LEN,
+            window_stride: Some(super::DEFAULT_V3A_SMOKE_WINDOW_STRIDE),
+            batch_size: super::DEFAULT_V3A_SMOKE_BATCH_SIZE,
+            steps: super::DEFAULT_V3A_SMOKE_TRAIN_STEPS,
+            eval_batches: super::DEFAULT_V3A_SMOKE_EVAL_BATCHES,
+            full_train_pass: false,
+            full_eval_pass: false,
+            eval_holdout_every: super::DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY,
+            learning_rate: super::DEFAULT_V3A_SMOKE_LEARNING_RATE,
+            seed: super::DEFAULT_V3A_SMOKE_SEED,
+            variant: VariantSelection::AttentionOnly,
+            primitive_profile: PrimitiveProfile::P1,
+            primitive_residual_profile: PrimitiveResidualProfile::Plain,
+            primitive_readout_profile: PrimitiveReadoutProfile::Direct,
+            primitive_norm_profile: PrimitiveNormProfile::PreNormOnly,
+            primitive_wrapper_profile: PrimitiveWrapperProfile::Standard,
+            isolate_variants: true,
+            ledger_path: None,
+            run_label: None,
+            output: OutputFormat::Table,
+        }
+    }
+
+    #[test]
+    fn cuda_faithful_small_profile_resolves_full_pass_budget() {
+        let args = CliArgs {
+            benchmark_profile: Some(BenchmarkProfile::CudaFaithfulSmallV1),
+            ..base_args()
+        };
+        let args = apply_benchmark_profile_overrides(args).expect("profile overrides should apply");
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let corpus =
+            resolve_corpus_source(&args, &repo_root).expect("profile corpus should resolve");
+        let stats = byte_level_smoke_corpus_stats_from_source(
+            &corpus,
+            args.seq_len,
+            args.window_stride.unwrap_or(args.seq_len),
+            args.eval_holdout_every,
+        )
+        .expect("corpus stats should derive");
+        let args =
+            apply_full_pass_overrides(args, &corpus).expect("full pass overrides should derive");
+
+        assert!(args.full_train_pass);
+        assert!(args.full_eval_pass);
+        assert_eq!(stats.train_sequences, 961);
+        assert_eq!(stats.eval_sequences, 94);
+        assert_eq!(args.steps, stats.train_sequences.div_ceil(args.batch_size));
+        assert_eq!(
+            args.eval_batches,
+            stats.eval_sequences.div_ceil(args.batch_size)
+        );
+    }
+
+    #[test]
+    fn cuda_faithful_small_profile_rejects_explicit_jsonl_paths() {
+        let args = CliArgs {
+            benchmark_profile: Some(BenchmarkProfile::CudaFaithfulSmallV1),
+            jsonl_train_path: Some(PathBuf::from("/tmp/train.jsonl")),
+            jsonl_eval_path: Some(PathBuf::from("/tmp/eval.jsonl")),
+            ..base_args()
+        };
+        let error = apply_benchmark_profile_overrides(args)
+            .expect_err("profile should reject explicit corpus overrides");
+        assert!(error.contains("may not be combined with explicit corpus path flags"));
+    }
 }
