@@ -2,3 +2,5 @@ target/
 .DS_Store
 .runpod-local-logs/
 .runpod-local-pids/
+__pycache__/
+*.py[cod]
