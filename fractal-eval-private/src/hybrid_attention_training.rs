@@ -81,6 +81,28 @@ impl HybridAttentionExecutionBackend {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum HybridAttentionExecutionPrecision {
+    F32,
+    Bf16,
+}
+
+impl HybridAttentionExecutionPrecision {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::Bf16 => "bf16",
+        }
+    }
+}
+
+impl Default for HybridAttentionExecutionPrecision {
+    fn default() -> Self {
+        Self::F32
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HybridAttentionCudaMemoryMetricKind {
     NvidiaSmiUsedMemory,
 }
@@ -113,6 +135,8 @@ pub struct HybridAttentionSmokeTrainConfig {
     pub variant: HybridAttentionVariantSpec,
     pub execution_backend: HybridAttentionExecutionBackend,
     #[serde(default)]
+    pub execution_precision: HybridAttentionExecutionPrecision,
+    #[serde(default)]
     pub cuda_device_index: Option<usize>,
     pub seq_len: usize,
     pub window_stride: usize,
@@ -137,6 +161,7 @@ impl HybridAttentionSmokeTrainConfig {
             output_dir,
             variant,
             execution_backend: HybridAttentionExecutionBackend::Cpu,
+            execution_precision: HybridAttentionExecutionPrecision::F32,
             cuda_device_index: None,
             seq_len: DEFAULT_V3A_SMOKE_SEQ_LEN,
             window_stride: DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
@@ -190,6 +215,18 @@ impl HybridAttentionSmokeTrainConfig {
         {
             return Err(FractalError::InvalidConfig(
                 "hybrid_attention_smoke_train.cuda_device_index may only be set when execution_backend=cuda"
+                    .to_string(),
+            ));
+        }
+        if matches!(
+            self.execution_precision,
+            HybridAttentionExecutionPrecision::Bf16
+        ) && !matches!(
+            self.execution_backend,
+            HybridAttentionExecutionBackend::Cuda
+        ) {
+            return Err(FractalError::InvalidConfig(
+                "hybrid_attention_smoke_train.execution_precision=bf16 currently requires execution_backend=cuda"
                     .to_string(),
             ));
         }

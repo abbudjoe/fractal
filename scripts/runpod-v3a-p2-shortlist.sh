@@ -19,6 +19,7 @@ FULL_EVAL_PASS="${FULL_EVAL_PASS:-0}"
 RUN_P20_PLAIN="${RUN_P20_PLAIN:-1}"
 BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-}"
 REFERENCE_SSM_PROFILE="${REFERENCE_SSM_PROFILE:-rust-mimo-reference}"
+PRECISION="${PRECISION:-f32}"
 
 CORPUS_TRAIN_JSONL="${CORPUS_TRAIN_JSONL:-}"
 CORPUS_EVAL_JSONL="${CORPUS_EVAL_JSONL:-}"
@@ -74,6 +75,7 @@ build_common_args() {
   COMMON_ARGS=(
     --seed "${SEED}"
     --output table
+    --precision "${PRECISION}"
     --reference-ssm-profile "${REFERENCE_SSM_PROFILE}"
   )
 

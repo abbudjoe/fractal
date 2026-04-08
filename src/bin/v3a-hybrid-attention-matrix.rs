@@ -7,6 +7,8 @@ use std::{
 
 #[cfg(feature = "cuda")]
 use fractal_core::cuda_device;
+#[cfg(feature = "cuda")]
+use fractal_core::CandleBf16TrainBackend;
 use fractal_core::{
     initialize_metal_runtime, phase1_hybrid_attention_baseline_matrix,
     phase1_p20_candidate_variant, phase1_p21_candidate_variant, phase1_p22_candidate_variant,
@@ -22,11 +24,12 @@ use fractal_eval_private::{
     resolve_requested_v3a_results_ledger_path, run_attention_only_hybrid_attention_smoke_train,
     run_primitive_hybrid_attention_smoke_train, run_reference_ssm_hybrid_attention_smoke_train,
     ByteLevelSmokeCorpusSource, HybridAttentionCudaDeviceMemoryMetrics,
-    HybridAttentionExecutionBackend, HybridAttentionMatrixLedgerReport,
-    HybridAttentionMatrixVariantOutcome, HybridAttentionSmokeTrainConfig, V3aResultsLedgerEntry,
-    DEFAULT_V3A_SMOKE_BATCH_SIZE, DEFAULT_V3A_SMOKE_EVAL_BATCHES,
-    DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY, DEFAULT_V3A_SMOKE_LEARNING_RATE, DEFAULT_V3A_SMOKE_SEED,
-    DEFAULT_V3A_SMOKE_SEQ_LEN, DEFAULT_V3A_SMOKE_TRAIN_STEPS, DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
+    HybridAttentionExecutionBackend, HybridAttentionExecutionPrecision,
+    HybridAttentionMatrixLedgerReport, HybridAttentionMatrixVariantOutcome,
+    HybridAttentionSmokeTrainConfig, V3aResultsLedgerEntry, DEFAULT_V3A_SMOKE_BATCH_SIZE,
+    DEFAULT_V3A_SMOKE_EVAL_BATCHES, DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY,
+    DEFAULT_V3A_SMOKE_LEARNING_RATE, DEFAULT_V3A_SMOKE_SEED, DEFAULT_V3A_SMOKE_SEQ_LEN,
+    DEFAULT_V3A_SMOKE_TRAIN_STEPS, DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
 };
 use serde::{Deserialize, Serialize};
 
@@ -96,13 +99,15 @@ fn run() -> Result<(), String> {
         .unwrap_or_default();
     let matrix_note = if args.isolate_variants && args.variant.includes_multiple_variants() {
         format!(
-            "{benchmark_prefix}backend={}. {reference_note} {base_note} Variants are executed in isolated child processes for fairer throughput and memory comparison.",
-            args.backend.as_str()
+            "{benchmark_prefix}backend={} precision={}. {reference_note} {base_note} Variants are executed in isolated child processes for fairer throughput and memory comparison.",
+            args.backend.as_str(),
+            args.precision.as_str()
         )
     } else {
         format!(
-            "{benchmark_prefix}backend={}. {reference_note} {base_note}",
-            args.backend.as_str()
+            "{benchmark_prefix}backend={} precision={}. {reference_note} {base_note}",
+            args.backend.as_str(),
+            args.precision.as_str()
         )
     };
     let corpus_source = resolve_corpus_source(&args, &repo_root)?;
@@ -276,6 +281,7 @@ fn smoke_config(
         .benchmark_profile
         .map(|profile| profile.as_str().to_owned());
     config.execution_backend = args.backend.execution_backend();
+    config.execution_precision = args.precision.execution_precision();
     config.cuda_device_index = match args.backend {
         BackendSelection::Cuda => Some(args.cuda_device),
         BackendSelection::Cpu | BackendSelection::Metal => None,
@@ -423,6 +429,7 @@ impl BenchmarkProfile {
 struct CliArgs {
     benchmark_profile: Option<BenchmarkProfile>,
     backend: BackendSelection,
+    precision: PrecisionSelection,
     cuda_device: usize,
     corpus_paths: Vec<PathBuf>,
     jsonl_train_path: Option<PathBuf>,
@@ -457,6 +464,7 @@ impl CliArgs {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut benchmark_profile = None;
         let mut backend = BackendSelection::Cpu;
+        let mut precision = PrecisionSelection::F32;
         let mut cuda_device = 0usize;
         let mut corpus_paths = Vec::new();
         let mut jsonl_train_path = None;
@@ -501,6 +509,13 @@ impl CliArgs {
                         &iter
                             .next()
                             .ok_or_else(|| "--backend requires a value".to_owned())?,
+                    )?;
+                }
+                "--precision" => {
+                    precision = PrecisionSelection::parse(
+                        &iter
+                            .next()
+                            .ok_or_else(|| "--precision requires a value".to_owned())?,
                     )?;
                 }
                 "--cuda-device" => {
@@ -702,6 +717,7 @@ impl CliArgs {
         Ok(Self {
             benchmark_profile,
             backend,
+            precision,
             cuda_device,
             corpus_paths,
             jsonl_train_path,
@@ -764,6 +780,36 @@ impl BackendSelection {
             Self::Cpu => HybridAttentionExecutionBackend::Cpu,
             Self::Metal => HybridAttentionExecutionBackend::Metal,
             Self::Cuda => HybridAttentionExecutionBackend::Cuda,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrecisionSelection {
+    F32,
+    Bf16,
+}
+
+impl PrecisionSelection {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "f32" => Ok(Self::F32),
+            "bf16" => Ok(Self::Bf16),
+            _ => Err(format!("unknown precision selection: {value}")),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::Bf16 => "bf16",
+        }
+    }
+
+    fn execution_precision(self) -> HybridAttentionExecutionPrecision {
+        match self {
+            Self::F32 => HybridAttentionExecutionPrecision::F32,
+            Self::Bf16 => HybridAttentionExecutionPrecision::Bf16,
         }
     }
 }
@@ -1089,8 +1135,9 @@ fn render_table(report: &RenderedMatrixReport<'_>) -> String {
                 );
                 let _ = writeln!(
                     output,
-                    "  backend={} implementation={}",
+                    "  backend={} precision={} implementation={}",
                     report.config.execution_backend.as_str(),
+                    report.config.execution_precision.as_str(),
                     report.implementation_kind.as_str(),
                 );
                 if let Some(benchmark_name) = &report.config.benchmark_name {
@@ -1298,6 +1345,9 @@ fn run_selected_variants_in_process(
 ) -> Result<Vec<HybridAttentionMatrixVariantOutcome>, String> {
     match args.backend {
         BackendSelection::Cpu => {
+            if matches!(args.precision, PrecisionSelection::Bf16) {
+                return Err("precision bf16 is not yet supported for backend cpu in v3a".to_owned());
+            }
             let device = <CpuTrainBackend as burn::tensor::backend::Backend>::Device::default();
             run_selected_variants_with_backend::<CpuTrainBackend>(
                 args,
@@ -1310,6 +1360,11 @@ fn run_selected_variants_in_process(
             )
         }
         BackendSelection::Metal => {
+            if matches!(args.precision, PrecisionSelection::Bf16) {
+                return Err(
+                    "precision bf16 is not yet supported for backend metal in v3a".to_owned(),
+                );
+            }
             let device = <MetalTrainBackend as burn::tensor::backend::Backend>::Device::default();
             initialize_metal_runtime(&device);
             run_selected_variants_with_backend::<MetalTrainBackend>(
@@ -1326,15 +1381,30 @@ fn run_selected_variants_in_process(
             #[cfg(feature = "cuda")]
             {
                 let device = cuda_device(args.cuda_device);
-                run_selected_variants_with_backend::<fractal_core::CandleF32TrainBackend>(
-                    args,
-                    corpus_source,
-                    output_dir,
-                    matrix,
-                    reference_variant,
-                    primitive_variant,
-                    &device,
-                )
+                match args.precision {
+                    PrecisionSelection::F32 => {
+                        run_selected_variants_with_backend::<fractal_core::CandleF32TrainBackend>(
+                            args,
+                            corpus_source,
+                            output_dir,
+                            matrix,
+                            reference_variant,
+                            primitive_variant,
+                            &device,
+                        )
+                    }
+                    PrecisionSelection::Bf16 => {
+                        run_selected_variants_with_backend::<CandleBf16TrainBackend>(
+                            args,
+                            corpus_source,
+                            output_dir,
+                            matrix,
+                            reference_variant,
+                            primitive_variant,
+                            &device,
+                        )
+                    }
+                }
             }
             #[cfg(not(feature = "cuda"))]
             {
@@ -1486,6 +1556,8 @@ fn run_isolated_variant(
         )
         .arg("--backend")
         .arg(args.backend.as_str())
+        .arg("--precision")
+        .arg(args.precision.as_str())
         .arg("--cuda-device")
         .arg(args.cuda_device.to_string())
         .arg("--variant")
@@ -1593,6 +1665,7 @@ fn usage() -> String {
             "Options:\n",
             "  --benchmark-profile <name>   One of: cuda-faithful-small-v1 (pins the larger frozen 9-row FineWeb full-pass CUDA-faithful surface)\n",
             "  --backend <cpu|metal|cuda>  Execution backend for this run (default: cpu)\n",
+            "  --precision <f32|bf16>      Numeric precision for the selected backend (default: f32; bf16 currently cuda-only)\n",
             "  --cuda-device <n>           CUDA device index when --backend cuda (default: 0)\n",
             "  --corpus-path <path>         Override the default frozen FineWeb canary corpus with raw byte-level files (repeatable)\n",
             "  --jsonl-train-path <path>    Use an explicit JSONL text train split instead of the default canary corpus\n",
@@ -1638,9 +1711,9 @@ fn usage() -> String {
 mod tests {
     use super::{
         apply_benchmark_profile_overrides, apply_full_pass_overrides, resolve_corpus_source,
-        BenchmarkProfile, CliArgs, OutputFormat, PrimitiveNormProfile, PrimitiveProfile,
-        PrimitiveReadoutProfile, PrimitiveResidualProfile, PrimitiveWrapperProfile,
-        ReferenceSsmProfile, VariantSelection,
+        BenchmarkProfile, CliArgs, OutputFormat, PrecisionSelection, PrimitiveNormProfile,
+        PrimitiveProfile, PrimitiveReadoutProfile, PrimitiveResidualProfile,
+        PrimitiveWrapperProfile, ReferenceSsmProfile, VariantSelection,
     };
     use fractal_eval_private::byte_level_smoke_corpus_stats_from_source;
     use std::path::PathBuf;
@@ -1649,6 +1722,7 @@ mod tests {
         CliArgs {
             benchmark_profile: None,
             backend: super::BackendSelection::Cpu,
+            precision: PrecisionSelection::F32,
             cuda_device: 0,
             corpus_paths: Vec::new(),
             jsonl_train_path: None,
