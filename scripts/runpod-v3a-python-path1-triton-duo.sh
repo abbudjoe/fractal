@@ -17,7 +17,9 @@ DTYPE="${DTYPE:-bf16}"
 PYTHON_INSTALL_MODE="${PYTHON_INSTALL_MODE:-primitive-triton}"
 PRIMITIVE_RUNTIME_BACKEND="${PRIMITIVE_RUNTIME_BACKEND:-triton}"
 BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-cuda-faithful-small-v1}"
-PRIMITIVE_STATE_TRANSFORM_PROFILE="${PRIMITIVE_STATE_TRANSFORM_PROFILE:-dense}"
+# Freeze the current block-diagonal-4 Triton lane as the default fast lane.
+# Dense remains an explicit override for quality-focused kernel work.
+PRIMITIVE_STATE_TRANSFORM_PROFILE="${PRIMITIVE_STATE_TRANSFORM_PROFILE:-block-diagonal-4}"
 WARMUP_EVAL_BATCHES="${WARMUP_EVAL_BATCHES:-1}"
 WARMUP_TRAIN_STEPS="${WARMUP_TRAIN_STEPS:-1}"
 

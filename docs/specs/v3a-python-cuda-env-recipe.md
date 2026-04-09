@@ -150,6 +150,15 @@ its own typed control plane. It should be paired with:
 * `runtime.env_kind = primitive-triton`
 * `runtime.primitive_runtime_backend = torch|triton`
 
-At freeze time, `primitive_runtime_backend=triton` is an explicit future seam,
-with the first landed kernel boundary focused on the `P2.0` fused recurrent
-update/readout step.
+The current Triton frontier is intentionally split into two explicit lanes:
+
+* frozen fast lane:
+  * `primitive_runtime_backend=triton`
+  * `primitive_state_transform_profile=block-diagonal-4`
+* dense quality lane:
+  * `primitive_runtime_backend=triton`
+  * `primitive_state_transform_profile=dense`
+
+The shared RunPod Triton duo runner now defaults to the frozen fast lane.
+Dense remains an explicit override while the dense sequence kernel is still
+being redesigned.
