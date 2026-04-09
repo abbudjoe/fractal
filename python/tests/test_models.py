@@ -220,15 +220,26 @@ class Path1ModelTests(unittest.TestCase):
                 primitive_runtime_backend="triton",
             )
 
-    def test_p20_uses_shared_packed_input_projection_surface(self) -> None:
-        primitive = build_sequence_primitive(
-            PrimitiveProfile.P20,
-            16,
-            PrimitiveExecutionProfile.RUNTIME,
-        )
+    def test_primitives_use_shared_packed_input_projection_surface(self) -> None:
+        expected_split_sizes = {
+            PrimitiveProfile.P1: (16, 16),
+            PrimitiveProfile.P20: (16, 8, 16, 16),
+            PrimitiveProfile.P2: (16, 8, 16, 16),
+            PrimitiveProfile.P23: (16, 16, 8, 16, 16),
+            PrimitiveProfile.P21: (32, 16, 32, 16),
+            PrimitiveProfile.P22: (32, 16, 32, 16),
+        }
 
-        self.assertIsInstance(primitive.in_projection, PackedLinearProjection)
-        self.assertEqual(primitive.in_projection.split_sizes, (16, 8, 16, 16))
+        for primitive_profile, split_sizes in expected_split_sizes.items():
+            with self.subTest(primitive_profile=primitive_profile.value):
+                primitive = build_sequence_primitive(
+                    primitive_profile,
+                    16,
+                    PrimitiveExecutionProfile.RUNTIME,
+                )
+
+                self.assertIsInstance(primitive.in_projection, PackedLinearProjection)
+                self.assertEqual(primitive.in_projection.split_sizes, split_sizes)
 
     def test_runtime_p20_block_diagonal_triton_routes_to_sequence_scan(self) -> None:
         runtime = build_sequence_primitive(
