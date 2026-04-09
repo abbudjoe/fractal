@@ -138,7 +138,8 @@ without colliding with the Triton level required by native official Mamba.
 
 The primitive-triton env is a third surface:
 
-* `torch 2.4.1` from `cu124`
+* `torch 2.4.1` from `cu124`, installed without Torch's bundled Triton dependency
+* explicit CUDA wheel dependencies for that Torch build
 * standalone `triton 3.6.0`
 * shared Python research requirements
 * no `causal-conv1d` native build
@@ -151,4 +152,5 @@ its own typed control plane. It should be paired with:
 * `runtime.primitive_runtime_backend = torch|triton`
 
 At freeze time, `primitive_runtime_backend=triton` is an explicit future seam,
-not yet a landed kernel path.
+with the first landed kernel boundary focused on the `P2.0` fused recurrent
+update/readout step.

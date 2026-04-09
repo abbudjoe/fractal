@@ -196,6 +196,29 @@ class Path1ModelTests(unittest.TestCase):
             )
         )
 
+    def test_runtime_p20_triton_backend_boundary_is_explicit(self) -> None:
+        runtime = build_sequence_primitive(
+            PrimitiveProfile.P20,
+            16,
+            PrimitiveExecutionProfile.RUNTIME,
+        )
+        has_triton = importlib.util.find_spec("triton") is not None
+        if has_triton:
+            runtime.configure_runtime_policy(
+                compile_mode=None,
+                primitive_runtime_backend="triton",
+            )
+            return
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "primitive_runtime_backend=triton requires the primitive-triton CUDA env",
+        ):
+            runtime.configure_runtime_policy(
+                compile_mode=None,
+                primitive_runtime_backend="triton",
+            )
+
     def test_reference_ssm_boundary_is_explicit(self) -> None:
         has_official_mamba = importlib.util.find_spec("mamba_ssm") is not None
         if has_official_mamba:

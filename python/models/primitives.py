@@ -17,7 +17,11 @@ from python.models.common import (
     one_minus,
     rotate_state_pairs,
 )
-from python.runtime.triton_primitives import ensure_triton_runtime_available
+from python.runtime.triton_primitives import (
+    TritonPrimitiveBackend,
+    build_triton_primitive_backend,
+    ensure_triton_runtime_available,
+)
 from python.specs.path1 import (
     PrimitiveExecutionProfile,
     PrimitiveNormMode,
@@ -103,6 +107,11 @@ class SequencePrimitive(nn.Module):
     state_width: int
     d_model: int
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._primitive_runtime_backend = "torch"
+        self._triton_backend: TritonPrimitiveBackend | None = None
+
     def init_state(self, batch_size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         return torch.zeros(batch_size, self.state_width, device=device, dtype=dtype)
 
@@ -146,6 +155,10 @@ class SequencePrimitive(nn.Module):
     ) -> None:
         if primitive_runtime_backend == "triton":
             ensure_triton_runtime_available()
+            self._triton_backend = build_triton_primitive_backend()
+        else:
+            self._triton_backend = None
+        self._primitive_runtime_backend = primitive_runtime_backend or "torch"
         del compile_mode
 
 
@@ -446,6 +459,47 @@ class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer
                 outputs[:, position, :] = output_gate * state
         return outputs, state
 
+    def _scan_runtime_impl_triton_profiled(
+        self,
+        state: torch.Tensor,
+        update_gates: torch.Tensor,
+        retain_gates: torch.Tensor,
+        angle_cos: torch.Tensor,
+        angle_sin: torch.Tensor,
+        candidates: torch.Tensor,
+        output_gates: torch.Tensor,
+        outputs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._triton_backend is None:
+            raise RuntimeError("P20 Triton runtime requested without an initialized Triton backend")
+        seq_len = update_gates.shape[1]
+        for position in range(seq_len):
+            update_gate = update_gates[:, position, :]
+            retain_gate = retain_gates[:, position, :]
+            cos = angle_cos[:, position, :]
+            sin = angle_sin[:, position, :]
+            candidate = candidates[:, position, :]
+            output_gate = output_gates[:, position, :]
+            with record_function("path1.primitive.runtime.state_transform_projection"):
+                projected_state = self.state_transform_projection(state)
+            with record_function("path1.primitive.runtime.rotary_apply"):
+                transformed_state = _rotate_state_pairs_with_trig(
+                    projected_state,
+                    cos=cos,
+                    sin=sin,
+                )
+            with record_function("path1.primitive.runtime.triton_state_update"):
+                state, emitted = self._triton_backend.fused_p20_update_readout(
+                    update_gate=update_gate,
+                    retain_gate=retain_gate,
+                    transformed_state=transformed_state,
+                    candidate=candidate,
+                    output_gate=output_gate,
+                )
+            with record_function("path1.primitive.runtime.output_readout"):
+                outputs[:, position, :] = emitted
+        return outputs, state
+
     def scan_with_runtime_plan(
         self,
         runtime_plan: P20RuntimePlan,
@@ -464,19 +518,8 @@ class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer
             device=device,
             dtype=dtype,
         )
-        scan_impl = self._compiled_scan_impl or self._scan_runtime_impl_profiled
-        if self._compiled_scan_impl is not None:
-            outputs, state = scan_impl(
-                state,
-                runtime_plan.update_gates,
-                runtime_plan.retain_gates,
-                runtime_plan.angle_cos,
-                runtime_plan.angle_sin,
-                runtime_plan.candidates,
-                runtime_plan.output_gates,
-            )
-        else:
-            outputs, state = scan_impl(
+        if self._primitive_runtime_backend == "triton":
+            outputs, state = self._scan_runtime_impl_triton_profiled(
                 state,
                 runtime_plan.update_gates,
                 runtime_plan.retain_gates,
@@ -486,6 +529,29 @@ class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer
                 runtime_plan.output_gates,
                 outputs,
             )
+        else:
+            scan_impl = self._compiled_scan_impl or self._scan_runtime_impl_profiled
+            if self._compiled_scan_impl is not None:
+                outputs, state = scan_impl(
+                    state,
+                    runtime_plan.update_gates,
+                    runtime_plan.retain_gates,
+                    runtime_plan.angle_cos,
+                    runtime_plan.angle_sin,
+                    runtime_plan.candidates,
+                    runtime_plan.output_gates,
+                )
+            else:
+                outputs, state = scan_impl(
+                    state,
+                    runtime_plan.update_gates,
+                    runtime_plan.retain_gates,
+                    runtime_plan.angle_cos,
+                    runtime_plan.angle_sin,
+                    runtime_plan.candidates,
+                    runtime_plan.output_gates,
+                    outputs,
+                )
         return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
 
     def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
@@ -1033,6 +1099,10 @@ class PrimitiveMixerBlock(nn.Module):
         primitive_runtime_backend: str | None = "torch",
     ) -> None:
         if self.execution_profile is PrimitiveExecutionProfile.RUNTIME:
+            if primitive_runtime_backend == "triton" and self.primitive_profile is not PrimitiveProfile.P20:
+                raise NotImplementedError(
+                    "primitive_runtime_backend=triton is currently implemented only for primitive profile p2-0"
+                )
             self.primitive.configure_runtime_policy(
                 compile_mode=compile_mode,
                 primitive_runtime_backend=primitive_runtime_backend,

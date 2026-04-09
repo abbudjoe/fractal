@@ -46,11 +46,32 @@ VENV_DIR=""
 TORCH_INDEX_URL=""
 TORCH_VERSION=""
 TRITON_VERSION="3.6.0"
+PRIMITIVE_TRITON_TORCH_VERSION="2.4.1"
 CAUSAL_CONV1D_REPO="https://github.com/Dao-AILab/causal-conv1d.git"
 CAUSAL_CONV1D_GIT_REF="v1.6.1"
 MAMBA_REPO="https://github.com/state-spaces/mamba.git"
 CUDA_ARCH_LIST_OVERRIDE="${TORCH_CUDA_ARCH_LIST:-}"
 FORCE_RECREATE=0
+PRIMITIVE_TRITON_TORCH_DEPS=(
+  filelock
+  typing-extensions
+  sympy
+  networkx
+  jinja2
+  fsspec
+  nvidia-cuda-nvrtc-cu12==12.4.99
+  nvidia-cuda-runtime-cu12==12.4.99
+  nvidia-cuda-cupti-cu12==12.4.99
+  nvidia-cudnn-cu12==9.1.0.70
+  nvidia-cublas-cu12==12.4.2.65
+  nvidia-cufft-cu12==11.2.0.44
+  nvidia-curand-cu12==10.3.5.119
+  nvidia-cusolver-cu12==11.6.0.99
+  nvidia-cusparse-cu12==12.3.0.142
+  nvidia-nccl-cu12==2.20.5
+  nvidia-nvtx-cu12==12.4.99
+  nvidia-nvjitlink-cu12==12.4.99
+)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -160,9 +181,27 @@ PY
   fi
 fi
 
+if [[ "${INSTALL_MODE}" == "primitive-triton" && -z "${TORCH_VERSION}" ]]; then
+  TORCH_VERSION="${PRIMITIVE_TRITON_TORCH_VERSION}"
+  if [[ -z "${TORCH_INDEX_URL}" ]]; then
+    TORCH_INDEX_URL="https://download.pytorch.org/whl/cu124"
+  fi
+fi
+
 if [[ -n "${TORCH_VERSION}" ]]; then
   echo "installing pinned torch ${TORCH_VERSION}${TORCH_INDEX_URL:+ from ${TORCH_INDEX_URL}}"
-  if [[ -n "${TORCH_INDEX_URL}" ]]; then
+  if [[ "${INSTALL_MODE}" == "primitive-triton" ]]; then
+    if [[ "${TORCH_VERSION}" != "${PRIMITIVE_TRITON_TORCH_VERSION}" ]]; then
+      die "primitive-triton currently supports only --torch ${PRIMITIVE_TRITON_TORCH_VERSION}"
+    fi
+    if [[ -z "${TORCH_INDEX_URL}" ]]; then
+      die "primitive-triton requires an explicit CUDA torch index url"
+    fi
+    python -m pip install --no-build-isolation --index-url "${TORCH_INDEX_URL}" \
+      "${PRIMITIVE_TRITON_TORCH_DEPS[@]}"
+    python -m pip install --no-build-isolation --index-url "${TORCH_INDEX_URL}" --no-deps \
+      "torch==${TORCH_VERSION}"
+  elif [[ -n "${TORCH_INDEX_URL}" ]]; then
     python -m pip install --no-build-isolation --index-url "${TORCH_INDEX_URL}" "torch==${TORCH_VERSION}"
   else
     python -m pip install --no-build-isolation "torch==${TORCH_VERSION}"
