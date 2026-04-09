@@ -472,6 +472,22 @@ class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self._triton_backend is None:
             raise RuntimeError("P20 Triton runtime requested without an initialized Triton backend")
+        if (
+            self.state_transform_mode is PrimitiveStateTransformMode.BLOCK_DIAGONAL_4
+            and isinstance(self.state_transform_projection, BlockDiagonalLinear)
+        ):
+            with record_function("path1.primitive.runtime.triton_sequence_scan"):
+                return self._triton_backend.scan_p20_block_diagonal_sequence(
+                    update_gate=update_gates,
+                    retain_gate=retain_gates,
+                    angle_cos=angle_cos,
+                    angle_sin=angle_sin,
+                    candidate=candidates,
+                    output_gate=output_gates,
+                    initial_state=state,
+                    transform_weight=self.state_transform_projection.weight,
+                    transform_bias=self.state_transform_projection.bias,
+                )
         seq_len = update_gates.shape[1]
         for position in range(seq_len):
             update_gate = update_gates[:, position, :]

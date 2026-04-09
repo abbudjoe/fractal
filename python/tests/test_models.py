@@ -219,6 +219,83 @@ class Path1ModelTests(unittest.TestCase):
                 primitive_runtime_backend="triton",
             )
 
+    def test_runtime_p20_block_diagonal_triton_routes_to_sequence_scan(self) -> None:
+        runtime = build_sequence_primitive(
+            PrimitiveProfile.P20,
+            16,
+            PrimitiveExecutionProfile.RUNTIME,
+            state_transform_mode=PrimitiveStateTransformMode.BLOCK_DIAGONAL_4,
+        )
+
+        class FakeBackend:
+            def __init__(self) -> None:
+                self.sequence_calls = 0
+
+            def scan_p20_block_diagonal_sequence(
+                self,
+                *,
+                update_gate: torch.Tensor,
+                retain_gate: torch.Tensor,
+                angle_cos: torch.Tensor,
+                angle_sin: torch.Tensor,
+                candidate: torch.Tensor,
+                output_gate: torch.Tensor,
+                initial_state: torch.Tensor,
+                transform_weight: torch.Tensor,
+                transform_bias: torch.Tensor,
+            ) -> tuple[torch.Tensor, torch.Tensor]:
+                self.sequence_calls += 1
+                self.last_shapes = (
+                    tuple(update_gate.shape),
+                    tuple(retain_gate.shape),
+                    tuple(angle_cos.shape),
+                    tuple(angle_sin.shape),
+                    tuple(candidate.shape),
+                    tuple(output_gate.shape),
+                    tuple(initial_state.shape),
+                    tuple(transform_weight.shape),
+                    tuple(transform_bias.shape),
+                )
+                return (
+                    torch.full_like(update_gate, 3.0),
+                    torch.full_like(initial_state, 4.0),
+                )
+
+            def fused_p20_update_readout(self, **_: object) -> tuple[torch.Tensor, torch.Tensor]:
+                raise AssertionError("block-diagonal Triton runtime should not fall back to the step kernel")
+
+        fake_backend = FakeBackend()
+        runtime._primitive_runtime_backend = "triton"
+        runtime._triton_backend = fake_backend
+
+        inputs = torch.randn(2, 5, 16)
+        runtime_plan = runtime.prepare_runtime_plan(inputs)
+        result = runtime.scan_with_runtime_plan(
+            runtime_plan,
+            batch_size=inputs.shape[0],
+            device=inputs.device,
+            dtype=inputs.dtype,
+            seq_len=inputs.shape[1],
+        )
+
+        self.assertEqual(fake_backend.sequence_calls, 1)
+        self.assertEqual(
+            fake_backend.last_shapes,
+            (
+                (2, 5, 16),
+                (2, 5, 16),
+                (2, 5, 8),
+                (2, 5, 8),
+                (2, 5, 16),
+                (2, 5, 16),
+                (2, 16),
+                (4, 4, 4),
+                (16,),
+            ),
+        )
+        self.assertTrue(torch.allclose(result.emitted_outputs, torch.full_like(result.emitted_outputs, 3.0)))
+        self.assertTrue(torch.allclose(result.final_state, torch.full_like(result.final_state, 4.0)))
+
     def test_reference_ssm_boundary_is_explicit(self) -> None:
         has_official_mamba = importlib.util.find_spec("mamba_ssm") is not None
         if has_official_mamba:
