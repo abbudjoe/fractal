@@ -256,14 +256,14 @@ if triton_runtime_available():  # pragma: no branch
         output_seq_stride,
         weight_row_stride,
         weight_col_stride,
-        pair_width,
         SEQ_LEN: tl.constexpr,
+        PAIR_WIDTH: tl.constexpr,
         BLOCK_PAIR_WIDTH: tl.constexpr,
     ):
         batch_index = tl.program_id(0)
 
         pair_offsets = tl.arange(0, BLOCK_PAIR_WIDTH)
-        pair_mask = pair_offsets < pair_width
+        pair_mask = pair_offsets < PAIR_WIDTH
         even_offsets = pair_offsets * 2
         odd_offsets = even_offsets + 1
         matrix_mask = pair_mask[:, None] & pair_mask[None, :]
@@ -407,14 +407,14 @@ if triton_runtime_available():  # pragma: no branch
         grad_weight_row_stride,
         grad_weight_col_stride,
         grad_bias_batch_stride,
-        pair_width,
         SEQ_LEN: tl.constexpr,
+        PAIR_WIDTH: tl.constexpr,
         BLOCK_PAIR_WIDTH: tl.constexpr,
     ):
         batch_index = tl.program_id(0)
 
         pair_offsets = tl.arange(0, BLOCK_PAIR_WIDTH)
-        pair_mask = pair_offsets < pair_width
+        pair_mask = pair_offsets < PAIR_WIDTH
         even_offsets = pair_offsets * 2
         odd_offsets = even_offsets + 1
         matrix_mask = pair_mask[:, None] & pair_mask[None, :]
@@ -680,7 +680,6 @@ class _P20DenseSequenceScan(torch.autograd.Function):
         if pair_width > 64:
             raise RuntimeError("P20 Triton dense sequence scan currently supports widths up to 128")
         block_pair_width = _next_power_of_two(pair_width)
-
         emitted_outputs = torch.empty_like(update_gate)
         state_history = torch.empty(
             batch_size,
@@ -714,8 +713,8 @@ class _P20DenseSequenceScan(torch.autograd.Function):
             emitted_outputs.stride(1),
             transform_weight.stride(0),
             transform_weight.stride(1),
-            pair_width,
             SEQ_LEN=seq_len,
+            PAIR_WIDTH=pair_width,
             BLOCK_PAIR_WIDTH=block_pair_width,
         )
 
@@ -780,7 +779,6 @@ class _P20DenseSequenceScan(torch.autograd.Function):
             device=transform_bias.device,
             dtype=transform_bias.dtype,
         )
-
         grid = (batch_size,)
         _p20_dense_sequence_backward_kernel[grid](
             grad_emitted_outputs,
@@ -816,8 +814,8 @@ class _P20DenseSequenceScan(torch.autograd.Function):
             grad_transform_weight_contrib.stride(1),
             grad_transform_weight_contrib.stride(2),
             grad_transform_bias_contrib.stride(0),
-            ctx.pair_width,
             SEQ_LEN=ctx.seq_len,
+            PAIR_WIDTH=ctx.pair_width,
             BLOCK_PAIR_WIDTH=ctx.block_pair_width,
         )
         grad_transform_weight = grad_transform_weight_contrib.sum(dim=0)
@@ -1299,8 +1297,6 @@ class _P20BlockDiagonalSequenceScan(torch.autograd.Function):
             raise RuntimeError("P20 Triton sequence scan requires square block-diagonal transform weights")
         if blocks * block_width != width:
             raise RuntimeError("P20 Triton sequence scan requires block-diagonal weight width to match state width")
-        if blocks != 4:
-            raise RuntimeError("P20 Triton sequence scan currently supports only block-diagonal-4 transforms")
         if block_width % 2 != 0:
             raise RuntimeError("P20 Triton sequence scan requires an even per-block width for rotary pairs")
         pair_width = block_width // 2

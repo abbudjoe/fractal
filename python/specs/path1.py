@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .common import StringEnum, ValidationError, ensure_positive
+from .runtime import PrimitiveStateTransformMode
 
 
 BYTE_LEVEL_PAD_TOKEN = 0
@@ -86,11 +87,6 @@ class PrimitiveWrapperMode(StringEnum):
 class PrimitiveExecutionProfile(StringEnum):
     REFERENCE = "reference"
     RUNTIME = "runtime"
-
-
-class PrimitiveStateTransformMode(StringEnum):
-    DENSE = "dense"
-    BLOCK_DIAGONAL_4 = "block-diagonal-4"
 
 
 @dataclass(frozen=True)

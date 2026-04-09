@@ -29,6 +29,7 @@ from python.specs.path1 import (
     phase1_primitive_variant,
     phase1_reference_ssm_variant,
 )
+from python.specs.runtime import PrimitiveStateTransformMode as SharedPrimitiveStateTransformMode
 
 
 class Path1SpecTests(unittest.TestCase):
@@ -113,6 +114,22 @@ class Path1SpecTests(unittest.TestCase):
         self.assertIn("gated", variant_a.label)
         self.assertIn("projected-norm", variant_a.label)
         self.assertIn("block-diagonal-4", variant_a.label)
+
+    def test_primitive_variant_label_tracks_block_diagonal_2(self) -> None:
+        variant = phase1_primitive_variant(
+            primitive_profile=PrimitiveProfile.P20,
+            execution_profile=PrimitiveExecutionProfile.RUNTIME,
+            residual_mode=PrimitiveResidualMode.SCALED,
+            readout_mode=PrimitiveReadoutMode.PROJECTED,
+            norm_mode=PrimitiveNormMode.PRE_NORM_ONLY,
+            wrapper_mode=PrimitiveWrapperMode.STANDARD,
+            state_transform_mode=PrimitiveStateTransformMode.BLOCK_DIAGONAL_2,
+        )
+        variant.validate()
+        self.assertIn("block-diagonal-2", variant.label)
+
+    def test_path1_reuses_shared_state_transform_mode_contract(self) -> None:
+        self.assertIs(PrimitiveStateTransformMode.BLOCK_DIAGONAL_2, SharedPrimitiveStateTransformMode.BLOCK_DIAGONAL_2)
 
 
 class MiniMoeSpecTests(unittest.TestCase):
