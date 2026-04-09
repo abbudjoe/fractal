@@ -577,6 +577,44 @@ class P2RotaryReadoutRuntimeSequenceMixer(P2RotaryReadoutSequenceMixer):
         initial_state: torch.Tensor | None = None,
     ) -> SequencePrimitiveScanResult:
         state = initial_state if initial_state is not None else self.init_state(batch_size, device, dtype)
+        if self._primitive_runtime_backend == "triton":
+            if self._triton_backend is None:
+                raise RuntimeError("P2 Triton runtime requested without an initialized Triton backend")
+            if (
+                self.state_transform_mode
+                in {
+                    PrimitiveStateTransformMode.BLOCK_DIAGONAL_2,
+                    PrimitiveStateTransformMode.BLOCK_DIAGONAL_4,
+                }
+                and isinstance(self.state_transform_projection, BlockDiagonalLinear)
+            ):
+                with record_function("path1.primitive.runtime.triton_sequence_scan"):
+                    state_outputs, state = self._triton_backend.scan_rotary_state_block_diagonal_sequence(
+                        update_gate=runtime_plan.update_gates,
+                        retain_gate=runtime_plan.retain_gates,
+                        angle_cos=runtime_plan.angle_cos,
+                        angle_sin=runtime_plan.angle_sin,
+                        candidate=runtime_plan.candidates,
+                        initial_state=state,
+                        transform_weight=self.state_transform_projection.weight,
+                        transform_bias=self.state_transform_projection.bias,
+                    )
+                with record_function("path1.primitive.runtime.output_projection"):
+                    projected_output = self.output_projection(state_outputs)
+                with record_function("path1.primitive.runtime.output_readout"):
+                    outputs = runtime_plan.output_gates * projected_output
+                return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
+            if (
+                self.state_transform_mode is PrimitiveStateTransformMode.DENSE
+                and isinstance(self.state_transform_projection, nn.Linear)
+            ):
+                raise NotImplementedError(
+                    "primitive_runtime_backend=triton for primitive profile p2 currently requires a block-diagonal state transform"
+                )
+            raise NotImplementedError(
+                f"primitive_runtime_backend=triton is not implemented for P2 state transform mode {self.state_transform_mode.value}"
+            )
+
         outputs = _allocate_emitted_outputs(
             batch_size=batch_size,
             seq_len=seq_len,
@@ -1028,10 +1066,23 @@ class PrimitiveMixerBlock(nn.Module):
         primitive_runtime_backend: str | None = "torch",
     ) -> None:
         if self.execution_profile is PrimitiveExecutionProfile.RUNTIME:
-            if primitive_runtime_backend == "triton" and self.primitive_profile is not PrimitiveProfile.P20:
-                raise NotImplementedError(
-                    "primitive_runtime_backend=triton is currently implemented only for primitive profile p2-0"
-                )
+            if primitive_runtime_backend == "triton":
+                if self.primitive_profile is PrimitiveProfile.P20:
+                    pass
+                elif (
+                    self.primitive_profile is PrimitiveProfile.P2
+                    and self.state_transform_mode
+                    in {
+                        PrimitiveStateTransformMode.BLOCK_DIAGONAL_2,
+                        PrimitiveStateTransformMode.BLOCK_DIAGONAL_4,
+                    }
+                ):
+                    pass
+                else:
+                    raise NotImplementedError(
+                        "primitive_runtime_backend=triton is currently implemented for primitive profile p2-0, "
+                        "and for primitive profile p2 with block-diagonal state transforms"
+                    )
             self.primitive.configure_runtime_policy(
                 compile_mode=compile_mode,
                 primitive_runtime_backend=primitive_runtime_backend,

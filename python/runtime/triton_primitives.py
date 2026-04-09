@@ -1539,6 +1539,56 @@ class TritonPrimitiveBackend:
             transform_bias,
         )
 
+    def scan_rotary_state_dense_sequence(
+        self,
+        *,
+        update_gate: torch.Tensor,
+        retain_gate: torch.Tensor,
+        angle_cos: torch.Tensor,
+        angle_sin: torch.Tensor,
+        candidate: torch.Tensor,
+        initial_state: torch.Tensor,
+        transform_weight: torch.Tensor,
+        transform_bias: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        output_gate = torch.ones_like(update_gate)
+        return _P20DenseSequenceScan.apply(
+            update_gate,
+            retain_gate,
+            angle_cos,
+            angle_sin,
+            candidate,
+            output_gate,
+            initial_state,
+            transform_weight,
+            transform_bias,
+        )
+
+    def scan_rotary_state_block_diagonal_sequence(
+        self,
+        *,
+        update_gate: torch.Tensor,
+        retain_gate: torch.Tensor,
+        angle_cos: torch.Tensor,
+        angle_sin: torch.Tensor,
+        candidate: torch.Tensor,
+        initial_state: torch.Tensor,
+        transform_weight: torch.Tensor,
+        transform_bias: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        output_gate = torch.ones_like(update_gate)
+        return _P20BlockDiagonalSequenceScan.apply(
+            update_gate,
+            retain_gate,
+            angle_cos,
+            angle_sin,
+            candidate,
+            output_gate,
+            initial_state,
+            transform_weight,
+            transform_bias,
+        )
+
 
 def build_triton_primitive_backend() -> TritonPrimitiveBackend:
     ensure_triton_runtime_available()
