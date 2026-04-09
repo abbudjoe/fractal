@@ -138,9 +138,8 @@ without colliding with the Triton level required by native official Mamba.
 
 The primitive-triton env is a third surface:
 
-* `torch 2.4.1` from `cu124`, installed without Torch's bundled Triton dependency
-* explicit CUDA wheel dependencies for that Torch build
-* standalone `triton 3.6.0`
+* `torch 2.10.0` from `cu128`
+* Torch's matching bundled `triton 3.6.0`
 * shared Python research requirements
 * no `causal-conv1d` native build
 * no `mamba_ssm` install
