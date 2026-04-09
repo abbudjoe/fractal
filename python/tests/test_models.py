@@ -14,6 +14,7 @@ from python.models.mini_moe import MiniMoeBackboneModel
 from python.models.primitives import build_sequence_primitive
 from python.models.path1 import build_path1_model
 from python.models.reference_ssm import resolve_reference_ssm_config
+from python.runtime.recurrent import PackedLinearProjection
 from python.specs.mini_moe import (
     MiniMoeArchitectureSpec,
     MiniMoeBackboneSpec,
@@ -218,6 +219,16 @@ class Path1ModelTests(unittest.TestCase):
                 compile_mode=None,
                 primitive_runtime_backend="triton",
             )
+
+    def test_p20_uses_shared_packed_input_projection_surface(self) -> None:
+        primitive = build_sequence_primitive(
+            PrimitiveProfile.P20,
+            16,
+            PrimitiveExecutionProfile.RUNTIME,
+        )
+
+        self.assertIsInstance(primitive.in_projection, PackedLinearProjection)
+        self.assertEqual(primitive.in_projection.split_sizes, (16, 8, 16, 16))
 
     def test_runtime_p20_block_diagonal_triton_routes_to_sequence_scan(self) -> None:
         runtime = build_sequence_primitive(

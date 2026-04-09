@@ -3,6 +3,7 @@
 from .compilation import apply_runtime_policy
 from .recurrent import (
     BlockDiagonalLinear,
+    PackedLinearProjection,
     SequencePrimitiveScanResult,
     SequencePrimitiveStepResult,
     allocate_emitted_outputs,

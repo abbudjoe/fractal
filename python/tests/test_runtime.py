@@ -8,6 +8,7 @@ import torch.nn as nn
 from python.runtime.cuda_setup_patch import patch_cuda_setup_text
 from python.runtime.recurrent import (
     BlockDiagonalLinear,
+    PackedLinearProjection,
     build_state_transform_projection,
     packed_linear_chunks,
 )
@@ -60,3 +61,15 @@ class RecurrentRuntimeTests(unittest.TestCase):
 
         self.assertTrue(torch.allclose(actual_a, layer_a(inputs)))
         self.assertTrue(torch.allclose(actual_b, layer_b(inputs)))
+
+    def test_packed_linear_projection_matches_manual_linear_split(self) -> None:
+        torch.manual_seed(0)
+        inputs = torch.randn(2, 3, 4)
+        projection = PackedLinearProjection(4, (5, 6))
+
+        expected = projection.projection(inputs).split((5, 6), dim=-1)
+        actual = projection(inputs)
+
+        self.assertEqual(len(actual), 2)
+        self.assertTrue(torch.allclose(actual[0], expected[0]))
+        self.assertTrue(torch.allclose(actual[1], expected[1]))

@@ -30,6 +30,7 @@ from python.specs.path1 import (
     phase1_reference_ssm_variant,
 )
 from python.specs.runtime import PrimitiveStateTransformMode as SharedPrimitiveStateTransformMode
+from python.specs.runtime import RuntimeOptimizationTarget, runtime_optimization_profile
 
 
 class Path1SpecTests(unittest.TestCase):
@@ -130,6 +131,22 @@ class Path1SpecTests(unittest.TestCase):
 
     def test_path1_reuses_shared_state_transform_mode_contract(self) -> None:
         self.assertIs(PrimitiveStateTransformMode.BLOCK_DIAGONAL_2, SharedPrimitiveStateTransformMode.BLOCK_DIAGONAL_2)
+
+    def test_recurrent_scan_runtime_optimization_profile_exposes_scan_targets(self) -> None:
+        profile = runtime_optimization_profile("recurrent-scan-hybrid")
+
+        self.assertIn(RuntimeOptimizationTarget.PACKED_PROJECTIONS, profile.targets)
+        self.assertIn(RuntimeOptimizationTarget.SEQUENCE_SCAN_KERNEL, profile.targets)
+        self.assertIn(RuntimeOptimizationTarget.STRUCTURED_STATE_TRANSFORM, profile.targets)
+        self.assertNotIn(RuntimeOptimizationTarget.ATTENTION_KERNEL, profile.targets)
+
+    def test_pure_transformer_runtime_optimization_profile_exposes_transformer_targets(self) -> None:
+        profile = runtime_optimization_profile("pure-transformer")
+
+        self.assertIn(RuntimeOptimizationTarget.ATTENTION_KERNEL, profile.targets)
+        self.assertIn(RuntimeOptimizationTarget.KV_CACHE_LAYOUT, profile.targets)
+        self.assertIn(RuntimeOptimizationTarget.MLP_FUSION, profile.targets)
+        self.assertNotIn(RuntimeOptimizationTarget.SEQUENCE_SCAN_KERNEL, profile.targets)
 
 
 class MiniMoeSpecTests(unittest.TestCase):

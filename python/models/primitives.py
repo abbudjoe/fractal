@@ -18,6 +18,7 @@ from python.models.common import (
 )
 from python.runtime.recurrent import (
     BlockDiagonalLinear,
+    PackedLinearProjection,
     SequencePrimitiveScanResult,
     SequencePrimitiveStepResult,
     allocate_emitted_outputs as _allocate_emitted_outputs,
@@ -242,21 +243,22 @@ class P20RotaryStateOutputSequenceMixer(SequencePrimitive):
         self.d_model = d_model
         self.state_width = d_model
         self.state_transform_mode = state_transform_mode
-        self.update_gate_projection = build_linear(d_model, d_model)
+        self.in_projection = PackedLinearProjection(
+            d_model,
+            (d_model, d_model // 2, d_model, d_model),
+        )
         self.state_transform_projection = _build_state_transform_projection(d_model, state_transform_mode)
-        self.angle_projection = build_linear(d_model, d_model // 2)
-        self.candidate_projection = build_linear(d_model, d_model)
-        self.output_gate_projection = build_linear(d_model, d_model)
 
     def step(self, state: torch.Tensor, inputs: torch.Tensor) -> SequencePrimitiveStepResult:
-        update_gate = gated_sigmoid(self.update_gate_projection(inputs))
+        update_gate_inputs, angle_inputs, candidate_inputs, output_gate_inputs = self.in_projection(inputs)
+        update_gate = gated_sigmoid(update_gate_inputs)
         transformed_state = rotate_state_pairs(
             self.state_transform_projection(state),
-            self.angle_projection(inputs),
+            angle_inputs,
         )
-        candidate = torch.tanh(self.candidate_projection(inputs))
+        candidate = torch.tanh(candidate_inputs)
         next_state = update_gate * transformed_state + one_minus(update_gate) * candidate
-        emitted_output = gated_sigmoid(self.output_gate_projection(inputs)) * next_state
+        emitted_output = gated_sigmoid(output_gate_inputs) * next_state
         return SequencePrimitiveStepResult(next_state=next_state, emitted_output=emitted_output)
 
 
@@ -271,13 +273,7 @@ class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer
         self._compiled_scan_impl = None
 
     def prepare_runtime_plan(self, inputs: torch.Tensor) -> P20RuntimePlan:
-        update_gate_inputs, angle_inputs, candidate_inputs, output_gate_inputs = _packed_linear_chunks(
-            inputs,
-            self.update_gate_projection,
-            self.angle_projection,
-            self.candidate_projection,
-            self.output_gate_projection,
-        )
+        update_gate_inputs, angle_inputs, candidate_inputs, output_gate_inputs = self.in_projection(inputs)
         update_gates = gated_sigmoid(update_gate_inputs)
         angle_cos, angle_sin = _rotary_runtime_components(angle_inputs)
         return P20RuntimePlan(

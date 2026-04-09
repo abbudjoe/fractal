@@ -22,6 +22,30 @@ class SequencePrimitiveScanResult:
     final_state: torch.Tensor
 
 
+class PackedLinearProjection(nn.Module):
+    def __init__(self, d_in: int, split_sizes: tuple[int, ...], *, bias: bool = True) -> None:
+        super().__init__()
+        if not split_sizes:
+            raise ValueError("packed projection requires at least one split")
+        if any(size <= 0 for size in split_sizes):
+            raise ValueError(f"packed projection split sizes must be positive, got {split_sizes}")
+        self.split_sizes = split_sizes
+        self.projection = nn.Linear(d_in, sum(split_sizes), bias=bias)
+
+    @property
+    def weight(self) -> torch.nn.Parameter:
+        return self.projection.weight
+
+    @property
+    def bias(self) -> torch.nn.Parameter | None:
+        return self.projection.bias
+
+    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        with record_function("path1.primitive.runtime.packed_input_projection"):
+            packed_outputs = self.projection(inputs)
+        return tuple(packed_outputs.split(self.split_sizes, dim=-1))
+
+
 def allocate_emitted_outputs(
     *,
     batch_size: int,
