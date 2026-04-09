@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.profiler import record_function
 
-from python.models.common import PositionWiseFeedForward, build_linear
+from python.models.common import AuxiliaryLossProvider, PositionWiseFeedForward, build_linear
 
 
 def local_causal_attention_bias(
@@ -47,6 +47,7 @@ class LocalCausalTransformerBlock(nn.Module):
         self.output_projection = build_linear(d_model, d_model)
         self.output_norm = nn.LayerNorm(d_model)
         self.ffn = ffn_module if ffn_module is not None else PositionWiseFeedForward(d_model, d_ff)
+        self._last_auxiliary_loss: torch.Tensor | None = None
 
     def _reshape_heads(self, tensor: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, _ = tensor.shape
@@ -86,4 +87,27 @@ class LocalCausalTransformerBlock(nn.Module):
         with record_function("path1.attention.output_projection"):
             residual = hidden + self.output_projection(mixed)
         with record_function("path1.attention.feedforward"):
-            return residual + self.ffn(self.output_norm(residual))
+            ffn_output = self.ffn(self.output_norm(residual))
+            if isinstance(self.ffn, AuxiliaryLossProvider):
+                self._last_auxiliary_loss = self.ffn.pop_auxiliary_loss()
+            else:
+                self._last_auxiliary_loss = None
+            return residual + ffn_output
+
+    def pop_auxiliary_loss(self) -> torch.Tensor | None:
+        auxiliary_loss = self._last_auxiliary_loss
+        self._last_auxiliary_loss = None
+        return auxiliary_loss
+
+    def configure_runtime_policy(
+        self,
+        *,
+        compile_mode: str | None,
+        primitive_runtime_backend: str | None = "torch",
+    ) -> None:
+        configure = getattr(self.ffn, "configure_runtime_policy", None)
+        if callable(configure):
+            configure(
+                compile_mode=compile_mode,
+                primitive_runtime_backend=primitive_runtime_backend,
+            )

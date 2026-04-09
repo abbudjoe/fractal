@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Protocol, runtime_checkable
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -46,11 +48,36 @@ class PositionWiseFeedForward(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(d_model, d_ff)
         self.fc2 = nn.Linear(d_ff, d_model)
+        self._compiled_mode: str | None = None
+        self._forward_impl = self._forward_eager
+
+    def _forward_eager(self, hidden: torch.Tensor) -> torch.Tensor:
+        return self.fc2(F.gelu(self.fc1(hidden)))
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        return self.fc2(F.gelu(self.fc1(hidden)))
+        return self._forward_impl(hidden)
+
+    def configure_runtime_policy(
+        self,
+        *,
+        compile_mode: str | None,
+        primitive_runtime_backend: str | None = "torch",
+    ) -> None:
+        del primitive_runtime_backend
+        if compile_mode == self._compiled_mode:
+            return
+        if compile_mode is None:
+            self._forward_impl = self._forward_eager
+        else:
+            self._forward_impl = torch.compile(self._forward_eager, mode=compile_mode)
+        self._compiled_mode = compile_mode
 
 
 def build_linear(d_in: int, d_out: int, *, bias: bool = True) -> nn.Linear:
     return nn.Linear(d_in, d_out, bias=bias)
 
+
+@runtime_checkable
+class AuxiliaryLossProvider(Protocol):
+    def pop_auxiliary_loss(self) -> torch.Tensor | None:
+        ...

@@ -142,6 +142,15 @@ if [[ -z "${TORCH_VERSION}" && "${INSTALL_MODE}" == "primitive-triton" ]]; then
 fi
 
 if [[ -z "${TORCH_VERSION}" ]]; then
+  if [[ "${INSTALL_MODE}" == "primitive-triton" ]]; then
+    TORCH_VERSION="${PRIMITIVE_TRITON_TORCH_VERSION}"
+    if [[ -z "${TORCH_INDEX_URL}" ]]; then
+      TORCH_INDEX_URL="${PRIMITIVE_TRITON_TORCH_INDEX_URL}"
+    fi
+  fi
+fi
+
+if [[ -z "${TORCH_VERSION}" ]]; then
   detected_torch_version="$("${PYTHON_BIN}" - <<'PY'
 try:
     import torch

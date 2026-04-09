@@ -4,6 +4,7 @@ from .common import BenchmarkBudgetSpec, BenchmarkRunManifest, DeviceRuntimeSpec
 from .mini_moe import (
     MiniMoeArchitectureSpec,
     MiniMoeBackboneSpec,
+    MiniMoeDispatchExecutionStrategy,
     MiniMoeDispatchMode,
     MiniMoeDispatchSpec,
     MiniMoeLayerSchedule,
@@ -11,6 +12,9 @@ from .mini_moe import (
     MiniMoeLayerSchedulePreset,
     MiniMoeObservabilitySpec,
     MiniMoePreset,
+    RecurrentRoundExecutionStrategy,
+    RecurrentRoundGateKind,
+    RecurrentRoundGateSpec,
     MiniMoeRouterSpec,
     MiniMoeRuntimeSpec,
     MiniMoeStackSpec,
@@ -18,6 +22,10 @@ from .mini_moe import (
     OneShotRouterSpec,
     RecurrentPreExpertRouterSpec,
     ResolvedMiniMoeLayout,
+    contiguous_layer_bands,
+    transfer_round2_layer_bands_by_anchor_fill,
+    transfer_round2_layer_bands_by_scaled_span,
+    transfer_round2_layer_indices_by_depth_fraction,
 )
 from .path1 import (
     BYTE_LEVEL_PAD_TOKEN,
@@ -40,4 +48,4 @@ from .path1 import (
     phase1_primitive_variant,
     phase1_reference_ssm_variant,
 )
-from .runtime import PrimitiveStateTransformMode
+from .runtime import PrimitiveStateTransformMode, RuntimeOptimizationFamily

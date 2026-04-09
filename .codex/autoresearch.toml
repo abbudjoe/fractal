@@ -1,0 +1,89 @@
+version = 1
+name = "mini-moe-selective-round2-d16"
+
+[repo]
+root = "."
+entry_branch = "main"
+
+[execution]
+isolation = "in_place"
+worktree_root = ".codex/autoresearch/worktrees"
+parallel_candidates = 4
+max_iterations = 65534
+time_budget_minutes = 1440
+cleanup_worktrees = false
+
+[environment]
+mode = "prebaked"
+setup_commands = []
+verify_commands = [
+  "/Users/joseph/fractal/.venv/bin/python -c \"import torch, pytest; print(torch.__version__)\"",
+  "/Users/joseph/fractal/.venv/bin/python -m pytest python/tests/test_autoresearch.py python/tests/test_specs.py python/tests/test_models.py python/tests/test_runtime.py -q",
+]
+required_binaries = ["git", "/Users/joseph/fractal/.venv/bin/python"]
+required_python_modules = ["torch", "pytest"]
+
+[mutation]
+allowed_paths = [
+  "python/specs/mini_moe.py",
+  "python/models/mini_moe.py",
+  "python/runners/mini_moe_autoresearch.py",
+  "python/runners/mini_moe_policy_search.py",
+  "scripts/dreegmor_mini_moe_autoresearch.py",
+  "python/tests/test_autoresearch.py",
+  "python/tests/test_specs.py",
+  "python/tests/test_models.py",
+]
+forbidden_paths = [".git/**", "artifacts/**", "experiments/**", "target/**"]
+max_changed_files = 10
+
+[baseline]
+commands = [
+  "mkdir -p .codex/autoresearch/results",
+  "/Users/joseph/fractal/.venv/bin/python scripts/dreegmor_mini_moe_autoresearch.py --backend mps --dtype fp32 --jsonl-train-path experiments/stage0/assets/fineweb/stage0-canary/train.jsonl --jsonl-eval-path experiments/stage0/assets/fineweb/stage0-canary/eval.jsonl --output-dir .codex/autoresearch/results/mps-d16 --run-label mps-autoresearch-d16 --benchmark-name dreegmor-mini-moe-autoresearch-d16 --seeds 42,43 --experts-per-block 8 --total-layers 16 --source-total-layers 8 --source-round2-layers 2,3,4,6,7 --entropy-threshold 0.95 --max-new-candidates 0 > .codex/autoresearch/results/baseline.json",
+]
+
+[baseline.metric]
+kind = "json_file"
+path = ".codex/autoresearch/results/baseline.json"
+key = "success_found"
+goal = "maximize"
+
+[evaluation.fast]
+commands = [
+  "/Users/joseph/fractal/.venv/bin/python scripts/dreegmor_mini_moe_autoresearch.py --backend mps --dtype fp32 --jsonl-train-path experiments/stage0/assets/fineweb/stage0-canary/train.jsonl --jsonl-eval-path experiments/stage0/assets/fineweb/stage0-canary/eval.jsonl --output-dir .codex/autoresearch/results/mps-d16 --run-label mps-autoresearch-d16 --benchmark-name dreegmor-mini-moe-autoresearch-d16 --seeds 42,43 --experts-per-block 8 --total-layers 16 --source-total-layers 8 --source-round2-layers 2,3,4,6,7 --entropy-threshold 0.95 --max-new-candidates 12 > .codex/autoresearch/results/fast.json",
+]
+
+[evaluation.fast.metric]
+kind = "json_file"
+path = ".codex/autoresearch/results/fast.json"
+key = "success_found"
+goal = "maximize"
+
+[evaluation.promote]
+commands = [
+  "/Users/joseph/fractal/.venv/bin/python scripts/dreegmor_mini_moe_autoresearch.py --backend mps --dtype fp32 --jsonl-train-path experiments/stage0/assets/fineweb/stage0-canary/train.jsonl --jsonl-eval-path experiments/stage0/assets/fineweb/stage0-canary/eval.jsonl --output-dir .codex/autoresearch/results/mps-d16 --run-label mps-autoresearch-d16 --benchmark-name dreegmor-mini-moe-autoresearch-d16 --seeds 42,43 --experts-per-block 8 --total-layers 16 --source-total-layers 8 --source-round2-layers 2,3,4,6,7 --entropy-threshold 0.95 > .codex/autoresearch/results/promote.json",
+]
+
+[evaluation.promote.metric]
+kind = "json_file"
+path = ".codex/autoresearch/results/promote.json"
+key = "success_found"
+goal = "maximize"
+
+[selection]
+source_stage = "promote"
+min_improvement = 1.0
+reruns_for_acceptance = 1
+aggregation = "best"
+
+[research]
+objective = "Find a selective recurrent round-2 layer policy for 16-layer mini-MoE that beats the all-layer recurrent baseline on loss while training faster."
+focus = ["typed mask search", "layer-selective recurrent routing", "resume-safe hill climbing"]
+avoid = ["dataset changes", "new gate families", "manual per-run heuristics"]
+
+[artifacts]
+preserve = [
+  ".codex/autoresearch/results/**",
+  "artifacts/dreegmor-mini-moe-experiment/**",
+]

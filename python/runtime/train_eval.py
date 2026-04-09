@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import resource
+import sys
 import time
 from typing import Protocol
 
@@ -9,6 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from python.data.byte_corpus import TokenBatch
+from python.models.common import AuxiliaryLossProvider
 from python.reporting.schema import BenchmarkReport, EvalSummary, RuntimeSummary, TrainStepRecord
 
 
@@ -17,12 +19,28 @@ class LanguageModelProtocol(Protocol):
         ...
 
 
+def compiler_mark_step_begin() -> None:
+    compiler = getattr(torch, "compiler", None)
+    mark_step_begin = getattr(compiler, "cudagraph_mark_step_begin", None)
+    if callable(mark_step_begin):
+        mark_step_begin()
+
+
+def _consume_auxiliary_loss(model: LanguageModelProtocol) -> torch.Tensor | None:
+    if isinstance(model, AuxiliaryLossProvider):
+        return model.pop_auxiliary_loss()
+    return None
+
+
 def materialize_batch(batch: TokenBatch, device: torch.device) -> TokenBatch:
     return batch.to_device(device)
 
 
 def process_peak_rss_bytes() -> int:
-    return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+    peak_rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    if sys.platform == "darwin":
+        return peak_rss
+    return peak_rss * 1024
 
 
 def cuda_memory_stats(device: torch.device) -> tuple[int, int]:
@@ -47,8 +65,10 @@ def evaluate_model(
     with torch.no_grad():
         for batch in selected:
             batch_on_device = materialize_batch(batch, device)
+            compiler_mark_step_begin()
             with torch.autocast(device_type=device_type, dtype=autocast_dtype, enabled=autocast_dtype is not None):
                 logits = model.forward_logits(batch_on_device.input_ids)
+                _consume_auxiliary_loss(model)
                 loss = F.cross_entropy(
                     logits.reshape(-1, logits.shape[-1]),
                     batch_on_device.target_ids.reshape(-1),
@@ -88,13 +108,16 @@ def warmup_model(
         for step in range(warmup_train_steps):
             batch = materialize_batch(train_batches[step % len(train_batches)], device)
             optimizer.zero_grad(set_to_none=True)
+            compiler_mark_step_begin()
             with torch.autocast(device_type=device_type, dtype=autocast_dtype, enabled=autocast_dtype is not None):
                 logits = model.forward_logits(batch.input_ids)
-                loss = F.cross_entropy(
+                train_loss = F.cross_entropy(
                     logits.reshape(-1, logits.shape[-1]),
                     batch.target_ids.reshape(-1),
                     ignore_index=pad_token,
                 )
+                auxiliary_loss = _consume_auxiliary_loss(model)
+                loss = train_loss if auxiliary_loss is None else train_loss + auxiliary_loss
             loss.backward()
         optimizer.zero_grad(set_to_none=True)
 
@@ -148,16 +171,19 @@ def run_training_benchmark(
     for step in range(train_steps):
         batch = materialize_batch(train_batches[step % len(train_batches)], device)
         optimizer.zero_grad(set_to_none=True)
+        compiler_mark_step_begin()
         with torch.autocast(device_type=device_type, dtype=autocast_dtype, enabled=autocast_dtype is not None):
             logits = model.forward_logits(batch.input_ids)
-            loss = F.cross_entropy(
+            train_loss_tensor = F.cross_entropy(
                 logits.reshape(-1, logits.shape[-1]),
                 batch.target_ids.reshape(-1),
                 ignore_index=pad_token,
             )
+            auxiliary_loss = _consume_auxiliary_loss(model)
+            loss = train_loss_tensor if auxiliary_loss is None else train_loss_tensor + auxiliary_loss
         loss.backward()
         optimizer.step()
-        train_loss = float(loss.detach().float().item())
+        train_loss = float(train_loss_tensor.detach().float().item())
         seen_tokens += batch.token_count
         train_step_reports.append(
             TrainStepRecord(

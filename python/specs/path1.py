@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .common import StringEnum, ValidationError, ensure_positive
-from .runtime import PrimitiveStateTransformMode
+from .runtime import PrimitiveStateTransformMode, RuntimeOptimizationFamily
 
 
 BYTE_LEVEL_PAD_TOKEN = 0
@@ -133,6 +133,12 @@ class Path1VariantSpec:
     primitive_execution_profile: PrimitiveExecutionProfile | None = None
     primitive_state_transform_mode: PrimitiveStateTransformMode | None = None
     final_norm_kind: str = "identity"
+
+    @property
+    def runtime_optimization_family(self) -> RuntimeOptimizationFamily:
+        if self.kind is Path1VariantKind.ATTENTION_ONLY:
+            return RuntimeOptimizationFamily.PURE_TRANSFORMER
+        return RuntimeOptimizationFamily.RECURRENT_SCAN_HYBRID
 
     def validate(self) -> None:
         self.shape.validate()

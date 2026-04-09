@@ -376,6 +376,11 @@ sync_worktree() {
     if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         git -C "$REPO_ROOT" ls-files --cached --others --exclude-standard -z \
             | while IFS= read -r -d '' path; do
+                case "$path" in
+                    artifacts/*|.runpod-local-logs/*|.codex/autoresearch/results/*)
+                        continue
+                        ;;
+                esac
                 [ -e "${REPO_ROOT}/${path}" ] || continue
                 printf '%s\0' "$path"
             done \
@@ -943,31 +948,94 @@ PY
 preserve_remote_results() {
     local preserve_status=0
     log "preserving remote results under ${RUN_RESULT_DIR}"
-    if "${SSH_BASE[@]}" bash -s -- "$STATE_DIR" <<'REMOTE' | tar -x -C "$RUN_RESULT_REMOTE_DIR" -f -; then
+    if "${SSH_BASE[@]}" bash -s -- "$STATE_DIR" "$REMOTE_DIR" <<'REMOTE' | tar -x -C "$RUN_RESULT_REMOTE_DIR" -f -; then
 set -euo pipefail
 
 state_dir="$1"
-cd "$state_dir"
+remote_dir="$2"
 
-tmp_list="$(mktemp)"
-trap 'rm -f "$tmp_list"' EXIT
+python3 - "$state_dir" "$remote_dir" <<'PY'
+from __future__ import annotations
 
-for path in logs/latest.log last-sync.txt last-build-key.txt; do
-    [ -f "$path" ] && printf '%s\0' "$path" >> "$tmp_list"
-done
+import json
+import os
+import sys
+import tarfile
+from pathlib import Path
 
-for dir in artifacts manifests; do
-    if [ -d "$dir" ]; then
-        find "$dir" -type f -print0 | sort -z >> "$tmp_list"
-    fi
-done
+state_dir = Path(sys.argv[1]).resolve()
+remote_dir = Path(sys.argv[2]).resolve()
+run_manifest_path = state_dir / "manifests" / "run-manifest.json"
 
-if [ ! -s "$tmp_list" ]; then
-    tar -cf - --files-from /dev/null
-    exit 0
-fi
+added: set[Path] = set()
 
-tar -cf - --null -T "$tmp_list"
+
+def safe_relative(path: Path, root: Path) -> Path | None:
+    try:
+        return path.relative_to(root)
+    except ValueError:
+        return None
+
+
+def add_path(tf: tarfile.TarFile, path: Path, *, arcname: Path) -> None:
+    resolved = path.resolve()
+    if not resolved.exists():
+        return
+    if resolved in added:
+        return
+    added.add(resolved)
+    tf.add(resolved, arcname=arcname.as_posix(), recursive=True)
+
+
+def iter_declared_output_paths(command_args: list[str]) -> list[Path]:
+    declared: list[Path] = []
+    path_flags = {
+        "--output-dir": "dir",
+        "--profile-output-dir": "dir",
+        "--ledger-path": "file",
+    }
+    index = 0
+    while index < len(command_args):
+        arg = command_args[index]
+        if arg in path_flags and index + 1 < len(command_args):
+            raw = Path(command_args[index + 1])
+            declared.append(raw if raw.is_absolute() else (remote_dir / raw))
+            index += 2
+            continue
+        index += 1
+    return declared
+
+
+with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as tf:
+    for relative_path in ("logs/latest.log", "last-sync.txt", "last-build-key.txt"):
+        path = state_dir / relative_path
+        if path.exists():
+            add_path(tf, path, arcname=Path(relative_path))
+
+    for dir_name in ("artifacts", "manifests"):
+        path = state_dir / dir_name
+        if path.exists():
+            add_path(tf, path, arcname=Path(dir_name))
+
+    if run_manifest_path.exists():
+        try:
+            run_manifest = json.loads(run_manifest_path.read_text())
+        except Exception:
+            run_manifest = None
+        if isinstance(run_manifest, dict):
+            command_args = [str(arg) for arg in ((run_manifest.get("runtime") or {}).get("command_args") or [])]
+            for output_path in iter_declared_output_paths(command_args):
+                state_relative = safe_relative(output_path, state_dir)
+                if state_relative is not None:
+                    add_path(tf, output_path, arcname=state_relative)
+                    continue
+                repo_relative = safe_relative(output_path, remote_dir)
+                if repo_relative is not None:
+                    add_path(tf, output_path, arcname=Path("repo") / repo_relative)
+                    continue
+                external_relative = Path(*output_path.parts[1:]) if output_path.is_absolute() else output_path
+                add_path(tf, output_path, arcname=Path("external") / external_relative)
+PY
 REMOTE
         preserve_status=0
     else
@@ -979,12 +1047,13 @@ REMOTE
 
 bootstrap_remote() {
     log "bootstrapping remote toolchain"
-    "${SSH_BASE[@]}" bash -s -- "$REMOTE_DIR" "$STATE_DIR" "$BINARY_KIND" <<'REMOTE'
+    "${SSH_BASE[@]}" bash -s -- "$REMOTE_DIR" "$STATE_DIR" "$BINARY_KIND" "$PYTHON_INSTALL_MODE" <<'REMOTE'
 set -euo pipefail
 
 remote_dir="$1"
 state_dir="$2"
 binary_kind="$3"
+python_install_mode="$4"
 export DEBIAN_FRONTEND=noninteractive
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 if [ -d "${CUDA_HOME}/bin" ]; then
@@ -998,8 +1067,18 @@ if [ -f "$HOME/.cargo/env" ]; then
     . "$HOME/.cargo/env"
 fi
 
+required_cmds=()
+apt_packages=()
+if [ "$binary_kind" = "python" ] && [ "$python_install_mode" = "requirements-only" ]; then
+    required_cmds=(python3)
+    apt_packages=(python3 python3-pip python3-venv)
+else
+    required_cmds=(curl git cmake pkg-config g++ python3)
+    apt_packages=(build-essential cmake curl git pkg-config libssl-dev python3 python3-dev python3-pip python3-venv)
+fi
+
 need_apt=0
-for cmd in curl git cmake pkg-config g++ python3; do
+for cmd in "${required_cmds[@]}"; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         need_apt=1
     fi
@@ -1007,10 +1086,13 @@ done
 if ! python3 -m pip --version >/dev/null 2>&1; then
     need_apt=1
 fi
+if ! python3 -m venv --help >/dev/null 2>&1; then
+    need_apt=1
+fi
 
 if [ "$need_apt" -eq 1 ]; then
     apt-get update
-    apt-get install -y build-essential cmake curl git pkg-config libssl-dev python3 python3-dev python3-pip python3-venv
+    apt-get install -y "${apt_packages[@]}"
 fi
 
 if [ "$binary_kind" != "python" ] && { ! command -v cargo >/dev/null 2>&1 || ! cargo --version >/dev/null 2>&1; }; then

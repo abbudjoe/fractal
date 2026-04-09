@@ -91,16 +91,16 @@ class DeviceRuntimeSpec:
     primitive_runtime_backend: str | None = "torch"
 
     def validate(self) -> None:
-        if self.backend not in {"cpu", "cuda"}:
+        if self.backend not in {"cpu", "cuda", "mps"}:
             raise ValidationError(
-                f"runtime.backend must be one of cpu|cuda, got {self.backend}"
+                f"runtime.backend must be one of cpu|cuda|mps, got {self.backend}"
             )
         ensure_non_negative(self.cuda_device, "runtime.cuda_device")
         if self.dtype not in {"fp32", "bf16"}:
             raise ValidationError(
                 f"runtime.dtype must be one of fp32|bf16, got {self.dtype}"
             )
-        if self.backend == "cpu" and self.dtype == "bf16":
+        if self.backend != "cuda" and self.dtype == "bf16":
             raise ValidationError("runtime.dtype=bf16 is only supported for backend=cuda")
         if self.env_kind not in {
             None,

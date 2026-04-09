@@ -88,6 +88,8 @@ The future mini-MoE line plugs into the same substrate through:
 - `/private/tmp/fractal-v3a-merge-G4mipf/python/specs/mini_moe.py`
 - `/private/tmp/fractal-v3a-merge-G4mipf/python/models/mini_moe.py`
 - `/private/tmp/fractal-v3a-merge-G4mipf/python/models/transformer.py`
+- `/private/tmp/fractal-v3a-merge-G4mipf/python/runners/mini_moe.py`
+- `/private/tmp/fractal-v3a-merge-G4mipf/scripts/dreegmor_mini_moe_experiment.py`
 
 The important seam is explicit:
 
@@ -97,21 +99,26 @@ The important seam is explicit:
 - typed dispatch boundary
 - typed observability sink
 
-That means future one-shot and recurrent mini-MoE routers can land as narrow
-model-layer deltas instead of forcing a backbone rewrite.
+Current mini-MoE support now includes:
+
+- phase-1 one-shot router
+- phase-1 recurrent pre-expert router
+- dispatcher-owned sparse top-k compilation
+- package-native benchmark runner and report emission
+
+That means future routing changes can land as narrow model-layer deltas
+instead of forcing a backbone rewrite.
 
 ## Intentionally Deferred
 
 Still intentionally deferred:
 
 - full Python port of every historical Rust `v3a` runner surface
-- recurrent mini-MoE router implementation
-- route-plan vs dispatch-plan experiment harness for mini-MoE
 - kernel/performance optimization work as the primary task
 - final large-scale benchmark policy
 
 The current priority remains:
 
 1. Path 1 first-class Python architecture
-2. mini-MoE substrate on the same seams
-3. future routing experiments as narrow additions on top of that foundation
+2. mini-MoE routing experiments on the same seams
+3. future kernel and scale work as narrow additions on top of that foundation

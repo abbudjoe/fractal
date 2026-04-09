@@ -7,8 +7,8 @@ from typing import Any
 import torch
 
 from python.data.byte_corpus import load_byte_corpus
-from python.models.path1 import build_path1_model
-from python.reporting.render import render_path1_table
+from python.models.mini_moe import CollectingMiniMoeObservabilitySink, build_mini_moe_model
+from python.reporting.render import render_mini_moe_table
 from python.reporting.schema import BenchmarkReport, append_ledger_entry, write_report
 from python.runtime import (
     apply_runtime_policy,
@@ -19,13 +19,14 @@ from python.runtime import (
     warmup_model,
 )
 from python.specs.common import BenchmarkRunManifest, repo_relative, to_jsonable
-from python.specs.path1 import BYTE_LEVEL_PAD_TOKEN, Path1VariantSpec
+from python.specs.path1 import BYTE_LEVEL_PAD_TOKEN
+from python.specs.mini_moe import MiniMoeSurfaceSpec
 
 
 @dataclass(frozen=True)
-class Path1RunnerRequest:
+class MiniMoeRunnerRequest:
     manifest: BenchmarkRunManifest
-    variant: Path1VariantSpec
+    surface: MiniMoeSurfaceSpec
     output_dir: Path
     output_format: str = "table"
     ledger_path: Path | None = None
@@ -33,17 +34,20 @@ class Path1RunnerRequest:
     model_note: str = ""
 
 
-def _variant_output_name(request: Path1RunnerRequest) -> str:
+def _variant_output_name(request: MiniMoeRunnerRequest) -> str:
     if request.variant_output_name:
         return request.variant_output_name
-    return request.variant.label
+    return request.surface.architecture.label
 
 
-def _config_payload(request: Path1RunnerRequest, train_steps: int, eval_batches: int) -> dict[str, Any]:
-    variant = request.variant
+def _config_payload(
+    request: MiniMoeRunnerRequest,
+    train_steps: int,
+    eval_batches: int,
+) -> dict[str, Any]:
     return {
         "backend": request.manifest.runtime.backend,
-        "runtime_optimization_family": request.variant.runtime_optimization_family.value,
+        "runtime_optimization_family": request.surface.runtime_optimization_family.value,
         "compile_mode": request.manifest.runtime.compile_mode,
         "env_kind": request.manifest.runtime.env_kind,
         "primitive_runtime_backend": request.manifest.runtime.primitive_runtime_backend,
@@ -60,14 +64,15 @@ def _config_payload(request: Path1RunnerRequest, train_steps: int, eval_batches:
         "dtype": request.manifest.runtime.dtype,
         "warmup_eval_batches": request.manifest.budget.warmup_eval_batches,
         "warmup_train_steps": request.manifest.budget.warmup_train_steps,
-        "schedule": [role.value for role in variant.layer_schedule],
-        "variant": to_jsonable(variant),
+        "surface": to_jsonable(request.surface),
+        "resolved_layout": to_jsonable(request.surface.architecture.resolved_layout()),
+        "resolved_dispatch": to_jsonable(request.surface.resolved_dispatch()),
     }
 
 
-def run_path1_variant(request: Path1RunnerRequest) -> BenchmarkReport:
+def run_mini_moe_variant(request: MiniMoeRunnerRequest) -> BenchmarkReport:
     request.manifest.validate()
-    request.variant.validate()
+    request.surface.validate()
     if request.output_format not in {"table", "json"}:
         raise ValueError(f"unsupported output format: {request.output_format}")
 
@@ -83,10 +88,22 @@ def run_path1_variant(request: Path1RunnerRequest) -> BenchmarkReport:
         shuffle_train=request.manifest.seed_spec.data_seed is not None,
         pin_memory=request.manifest.runtime.backend == "cuda",
     )
-    train_steps = len(corpus.train_batches) if request.manifest.budget.full_train_pass else request.manifest.budget.train_steps
-    eval_batch_count = len(corpus.eval_batches) if request.manifest.budget.full_eval_pass else request.manifest.budget.eval_batches
+    train_steps = (
+        len(corpus.train_batches)
+        if request.manifest.budget.full_train_pass
+        else request.manifest.budget.train_steps
+    )
+    eval_batch_count = (
+        len(corpus.eval_batches)
+        if request.manifest.budget.full_eval_pass
+        else request.manifest.budget.eval_batches
+    )
 
-    model = build_path1_model(request.variant, dtype_mode=request.manifest.runtime.dtype).to(device)
+    observability_sink = CollectingMiniMoeObservabilitySink(request.surface)
+    model = build_mini_moe_model(
+        request.surface,
+        observability_sink=observability_sink,
+    ).to(device)
     model = apply_runtime_policy(model, request.manifest.runtime)
     optimizer = torch.optim.Adam(model.parameters(), lr=request.manifest.budget.learning_rate)
     warmup_model(
@@ -101,6 +118,7 @@ def run_path1_variant(request: Path1RunnerRequest) -> BenchmarkReport:
         device=device,
         device_type=device.type,
     )
+    observability_sink.reset()
     if device.type == "cuda":
         torch.cuda.synchronize(device)
 
@@ -120,17 +138,19 @@ def run_path1_variant(request: Path1RunnerRequest) -> BenchmarkReport:
         config_payload=_config_payload(request, train_steps, eval_batch_count),
         corpus_payload=corpus.corpus_stats,
     )
+    report.mini_moe_summary = observability_sink.finalize()
 
     output_dir = request.output_dir / _variant_output_name(request)
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "report.json"
     write_report(report, report_path)
     if request.ledger_path is not None:
+        routing = report.mini_moe_summary.routing if report.mini_moe_summary is not None else None
         append_ledger_entry(
             request.ledger_path,
             {
                 "run_label": request.manifest.run_label,
-                "variant": request.variant.label,
+                "variant": request.surface.architecture.label,
                 "model_label": report.model_label,
                 "report_path": repo_relative(report_path),
                 "corpus_name": request.manifest.corpus.corpus_name,
@@ -138,6 +158,8 @@ def run_path1_variant(request: Path1RunnerRequest) -> BenchmarkReport:
                 "data_seed": request.manifest.seed_spec.data_seed,
                 "final_loss": report.final_eval.mean_loss,
                 "train_tokens_per_second": report.runtime.train_tokens_per_second,
+                "route_entropy_bits": None if routing is None else routing.mean_route_entropy_bits,
+                "round_count": None if routing is None else routing.round_count,
                 "peak_cuda_memory_bytes": (
                     0
                     if report.runtime.cuda_device_memory is None
@@ -148,7 +170,7 @@ def run_path1_variant(request: Path1RunnerRequest) -> BenchmarkReport:
     return report
 
 
-def render_report(report: BenchmarkReport, request: Path1RunnerRequest) -> str | dict[str, Any]:
+def render_report(report: BenchmarkReport, request: MiniMoeRunnerRequest) -> str | dict[str, Any]:
     if request.output_format == "json":
         return report.to_dict()
-    return render_path1_table(report, request.variant.label)
+    return render_mini_moe_table(report, request.surface.architecture.label)

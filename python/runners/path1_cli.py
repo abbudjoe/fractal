@@ -87,7 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=PrimitiveStateTransformMode.DENSE.value,
         choices=[mode.value for mode in PrimitiveStateTransformMode],
     )
-    parser.add_argument("--backend", default="cuda", choices=["cpu", "cuda"])
+    parser.add_argument("--backend", default="cuda", choices=["cpu", "cuda", "mps"])
     parser.add_argument("--cuda-device", type=int, default=0)
     parser.add_argument("--dtype", default="bf16", choices=["bf16", "fp32"])
     parser.add_argument(
