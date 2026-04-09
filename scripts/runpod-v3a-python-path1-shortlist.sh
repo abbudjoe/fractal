@@ -17,6 +17,7 @@ RUN_TIMEOUT_SECONDS="${RUN_TIMEOUT_SECONDS:-14400}"
 CUDA_DEVICE="${CUDA_DEVICE:-0}"
 DTYPE="${DTYPE:-bf16}"
 PYTHON_INSTALL_MODE="${PYTHON_INSTALL_MODE:-official-mamba3}"
+PRIMITIVE_RUNTIME_BACKEND="${PRIMITIVE_RUNTIME_BACKEND:-torch}"
 BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-cuda-faithful-small-v1}"
 WARMUP_EVAL_BATCHES="${WARMUP_EVAL_BATCHES:-1}"
 WARMUP_TRAIN_STEPS="${WARMUP_TRAIN_STEPS:-1}"
@@ -62,6 +63,7 @@ COMMON_ARGS=(
   --cuda-device "${CUDA_DEVICE}"
   --dtype "${DTYPE}"
   --env-kind "${PYTHON_INSTALL_MODE}"
+  --primitive-runtime-backend "${PRIMITIVE_RUNTIME_BACKEND}"
   --seed "${SEED}"
   --warmup-eval-batches "${WARMUP_EVAL_BATCHES}"
   --warmup-train-steps "${WARMUP_TRAIN_STEPS}"
@@ -73,6 +75,7 @@ LABEL_SUFFIX=""
 if [[ "${PYTHON_INSTALL_MODE}" != "official-mamba3" ]]; then
   LABEL_SUFFIX="-env-${PYTHON_INSTALL_MODE}"
 fi
+LABEL_SUFFIX="${LABEL_SUFFIX}-primitive-${PRIMITIVE_RUNTIME_BACKEND}"
 
 if [[ "${BENCHMARK_PROFILE}" == "cuda-faithful-small-v1" ]]; then
   COMMON_ARGS+=(--full-train-pass --full-eval-pass)
@@ -106,8 +109,12 @@ run_lane() {
     "${expected_args[@]}"
 }
 
-if [[ "${PYTHON_INSTALL_MODE}" == "compile-safe" ]]; then
-  echo "compile-safe mode does not provide official mamba; use a compile-specific runner instead of the shortlist"
+if [[ "${PYTHON_INSTALL_MODE}" != "official-mamba3" ]]; then
+  echo "shortlist expects PYTHON_INSTALL_MODE=official-mamba3 because it includes native reference-ssm runs"
+  exit 1
+fi
+if [[ "${PRIMITIVE_RUNTIME_BACKEND}" != "torch" ]]; then
+  echo "shortlist currently expects PRIMITIVE_RUNTIME_BACKEND=torch"
   exit 1
 fi
 

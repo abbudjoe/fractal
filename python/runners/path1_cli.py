@@ -22,6 +22,7 @@ from python.specs.path1 import (
     PrimitiveProfile,
     PrimitiveReadoutMode,
     PrimitiveResidualMode,
+    PrimitiveStateTransformMode,
     PrimitiveWrapperMode,
     ReferenceSsmProfile,
     phase1_attention_only_variant,
@@ -81,16 +82,26 @@ def build_parser() -> argparse.ArgumentParser:
         default=PrimitiveWrapperMode.STANDARD.value,
         choices=[mode.value for mode in PrimitiveWrapperMode],
     )
+    parser.add_argument(
+        "--primitive-state-transform-profile",
+        default=PrimitiveStateTransformMode.DENSE.value,
+        choices=[mode.value for mode in PrimitiveStateTransformMode],
+    )
     parser.add_argument("--backend", default="cuda", choices=["cpu", "cuda"])
     parser.add_argument("--cuda-device", type=int, default=0)
     parser.add_argument("--dtype", default="bf16", choices=["bf16", "fp32"])
     parser.add_argument(
         "--env-kind",
-        choices=["requirements-only", "official-mamba3", "compile-safe"],
+        choices=["requirements-only", "official-mamba3", "compile-safe", "primitive-triton"],
     )
     parser.add_argument(
         "--compile-mode",
         choices=["default", "reduce-overhead", "max-autotune"],
+    )
+    parser.add_argument(
+        "--primitive-runtime-backend",
+        default="torch",
+        choices=["torch", "triton"],
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--data-seed", type=int)
@@ -185,10 +196,11 @@ def _build_variant(args: argparse.Namespace):
         readout_mode=PrimitiveReadoutMode(args.primitive_readout_profile),
         norm_mode=PrimitiveNormMode(args.primitive_norm_profile),
         wrapper_mode=PrimitiveWrapperMode(args.primitive_wrapper_profile),
+        state_transform_mode=PrimitiveStateTransformMode(args.primitive_state_transform_profile),
     )
 
 
-def _implementation_kind_for_variant(variant) -> str:
+def _implementation_kind_for_variant(variant, *, primitive_runtime_backend: str) -> str:
     if variant.kind is Path1VariantKind.ATTENTION_ONLY:
         return "python_attention_sdpa"
     if variant.kind is Path1VariantKind.REFERENCE_SSM_HYBRID:
@@ -197,6 +209,8 @@ def _implementation_kind_for_variant(variant) -> str:
             if variant.reference_ssm_profile.runtime_oriented
             else "python_reference_ssm_reference"
         )
+    if primitive_runtime_backend == "triton":
+        return "python_primitive_triton_runtime"
     return (
         "python_primitive_runtime"
         if variant.primitive_execution_profile is PrimitiveExecutionProfile.RUNTIME
@@ -216,7 +230,10 @@ def build_request_from_args(
 
     manifest = BenchmarkRunManifest(
         run_label=args.run_label,
-        implementation_kind=_implementation_kind_for_variant(variant),
+        implementation_kind=_implementation_kind_for_variant(
+            variant,
+            primitive_runtime_backend=args.primitive_runtime_backend,
+        ),
         benchmark_name=args.benchmark_name,
         seed_spec=SeedSpec(model_seed=args.seed, data_seed=args.data_seed),
         corpus=corpus,
@@ -227,6 +244,7 @@ def build_request_from_args(
             dtype=args.dtype,
             env_kind=args.env_kind,
             compile_mode=args.compile_mode,
+            primitive_runtime_backend=args.primitive_runtime_backend,
         ),
     )
     return Path1RunnerRequest(

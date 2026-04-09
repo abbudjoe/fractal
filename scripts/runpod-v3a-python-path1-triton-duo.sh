@@ -7,27 +7,22 @@ WRAPPER="${REPO_ROOT}/scripts/runpod-tournament.sh"
 LOCAL_RESULTS_ROOT="${REPO_ROOT}/.runpod-local-logs/runpod-results"
 
 SEED="${1:-42}"
-LABEL_PREFIX="${2:-v3a-python-path1-compile-duo}"
+LABEL_PREFIX="${2:-v3a-python-path1-triton-duo}"
 
 POD_NAME="${POD_NAME:-fractal-v3a}"
 GPU_ID="${GPU_ID:-NVIDIA GeForce RTX 4090}"
 RUN_TIMEOUT_SECONDS="${RUN_TIMEOUT_SECONDS:-14400}"
 CUDA_DEVICE="${CUDA_DEVICE:-0}"
 DTYPE="${DTYPE:-bf16}"
-COMPILE_MODE="${COMPILE_MODE:-reduce-overhead}"
-PYTHON_INSTALL_MODE="${PYTHON_INSTALL_MODE:-compile-safe}"
+PYTHON_INSTALL_MODE="${PYTHON_INSTALL_MODE:-primitive-triton}"
 PRIMITIVE_RUNTIME_BACKEND="${PRIMITIVE_RUNTIME_BACKEND:-torch}"
 BENCHMARK_PROFILE="${BENCHMARK_PROFILE:-cuda-faithful-small-v1}"
 PRIMITIVE_STATE_TRANSFORM_PROFILE="${PRIMITIVE_STATE_TRANSFORM_PROFILE:-dense}"
 WARMUP_EVAL_BATCHES="${WARMUP_EVAL_BATCHES:-1}"
 WARMUP_TRAIN_STEPS="${WARMUP_TRAIN_STEPS:-1}"
 
-if [[ "${PYTHON_INSTALL_MODE}" != "compile-safe" ]]; then
-  echo "compile duo expects PYTHON_INSTALL_MODE=compile-safe"
-  exit 1
-fi
-if [[ "${PRIMITIVE_RUNTIME_BACKEND}" != "torch" ]]; then
-  echo "compile duo expects PRIMITIVE_RUNTIME_BACKEND=torch"
+if [[ "${PYTHON_INSTALL_MODE}" != "primitive-triton" ]]; then
+  echo "triton duo expects PYTHON_INSTALL_MODE=primitive-triton"
   exit 1
 fi
 
@@ -72,7 +67,6 @@ COMMON_ARGS=(
   --dtype "${DTYPE}"
   --env-kind "${PYTHON_INSTALL_MODE}"
   --primitive-runtime-backend "${PRIMITIVE_RUNTIME_BACKEND}"
-  --compile-mode "${COMPILE_MODE}"
   --seed "${SEED}"
   --warmup-eval-batches "${WARMUP_EVAL_BATCHES}"
   --warmup-train-steps "${WARMUP_TRAIN_STEPS}"
@@ -82,7 +76,7 @@ COMMON_ARGS=(
   --full-eval-pass
 )
 
-LABEL_SUFFIX="-env-${PYTHON_INSTALL_MODE}-primitive-${PRIMITIVE_RUNTIME_BACKEND}-compile-${COMPILE_MODE}-state-${PRIMITIVE_STATE_TRANSFORM_PROFILE}"
+LABEL_SUFFIX="-env-${PYTHON_INSTALL_MODE}-primitive-${PRIMITIVE_RUNTIME_BACKEND}-state-${PRIMITIVE_STATE_TRANSFORM_PROFILE}"
 
 run_lane() {
   local lifecycle_flag="$1"
@@ -127,4 +121,4 @@ run_lane \
   --primitive-wrapper-profile standard \
   --primitive-state-transform-profile "${PRIMITIVE_STATE_TRANSFORM_PROFILE}"
 
-echo "completed runpod v3a python path1 compile duo seed ${SEED}"
+echo "completed runpod v3a python path1 triton duo seed ${SEED}"

@@ -22,6 +22,7 @@ from python.specs.path1 import (
     PrimitiveProfile,
     PrimitiveReadoutMode,
     PrimitiveResidualMode,
+    PrimitiveStateTransformMode,
     PrimitiveWrapperMode,
     ReferenceSsmProfile,
     phase1_baseline_matrix,
@@ -38,8 +39,31 @@ class Path1SpecTests(unittest.TestCase):
 
     def test_runtime_spec_accepts_env_kinds(self) -> None:
         DeviceRuntimeSpec(backend="cuda", dtype="bf16", env_kind="compile-safe").validate()
+        DeviceRuntimeSpec(backend="cuda", dtype="bf16", env_kind="primitive-triton").validate()
         with self.assertRaises(ValidationError):
             DeviceRuntimeSpec(backend="cuda", dtype="bf16", env_kind="mystery-env").validate()
+
+    def test_runtime_spec_rejects_invalid_triton_backend_contract(self) -> None:
+        with self.assertRaises(ValidationError):
+            DeviceRuntimeSpec(
+                backend="cuda",
+                dtype="bf16",
+                env_kind="compile-safe",
+                primitive_runtime_backend="triton",
+            ).validate()
+        with self.assertRaises(ValidationError):
+            DeviceRuntimeSpec(
+                backend="cuda",
+                dtype="bf16",
+                env_kind="primitive-triton",
+                compile_mode="reduce-overhead",
+            ).validate()
+        DeviceRuntimeSpec(
+            backend="cuda",
+            dtype="bf16",
+            env_kind="primitive-triton",
+            primitive_runtime_backend="triton",
+        ).validate()
 
     def test_baseline_matrix_validates(self) -> None:
         matrix = phase1_baseline_matrix(
@@ -49,6 +73,7 @@ class Path1SpecTests(unittest.TestCase):
             readout_mode=PrimitiveReadoutMode.PROJECTED_NORM,
             norm_mode=PrimitiveNormMode.RESIDUAL_RENORM,
             wrapper_mode=PrimitiveWrapperMode.STANDARD,
+            state_transform_mode=PrimitiveStateTransformMode.BLOCK_DIAGONAL_4,
         )
         matrix.validate()
         self.assertEqual(matrix.reference_ssm_hybrid.reference_ssm_profile, ReferenceSsmProfile.MAMBA3_SISO_RUNTIME)
@@ -72,6 +97,7 @@ class Path1SpecTests(unittest.TestCase):
             readout_mode=PrimitiveReadoutMode.PROJECTED_NORM,
             norm_mode=PrimitiveNormMode.RESIDUAL_RENORM,
             wrapper_mode=PrimitiveWrapperMode.STANDARD,
+            state_transform_mode=PrimitiveStateTransformMode.BLOCK_DIAGONAL_4,
         )
         variant_b = phase1_primitive_variant(
             primitive_profile=PrimitiveProfile.P23,
@@ -80,11 +106,13 @@ class Path1SpecTests(unittest.TestCase):
             readout_mode=PrimitiveReadoutMode.PROJECTED,
             norm_mode=PrimitiveNormMode.PRE_NORM_ONLY,
             wrapper_mode=PrimitiveWrapperMode.MAMBA_RMS,
+            state_transform_mode=PrimitiveStateTransformMode.DENSE,
         )
         self.assertNotEqual(variant_a.label, variant_b.label)
         self.assertIn("runtime", variant_a.label)
         self.assertIn("gated", variant_a.label)
         self.assertIn("projected-norm", variant_a.label)
+        self.assertIn("block-diagonal-4", variant_a.label)
 
 
 class MiniMoeSpecTests(unittest.TestCase):

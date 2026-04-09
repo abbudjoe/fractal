@@ -14,7 +14,7 @@ Optional:
   --requirements PATH             Requirements file. Default: scripts/requirements-v3a-python-mamba3.txt
   --repo-root PATH                Repo root. Default: parent of this script
   --python BIN                    Python executable used to create the env. Default: python3
-  --install-mode MODE             requirements-only|official-mamba3|compile-safe. Default: official-mamba3
+  --install-mode MODE             requirements-only|official-mamba3|compile-safe|primitive-triton. Default: official-mamba3
   --torch-index-url URL           Install torch from this index before requirements (optional)
   --torch VERSION                 Explicit torch version to install before requirements (optional)
   --cuda-arch-list ARCH           Override detected CUDA arch, e.g. 8.9
@@ -101,7 +101,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "${VENV_DIR}" ]] || die "--venv-dir is required"
-[[ "${INSTALL_MODE}" == "requirements-only" || "${INSTALL_MODE}" == "official-mamba3" || "${INSTALL_MODE}" == "compile-safe" ]] || die "--install-mode must be requirements-only, compile-safe, or official-mamba3"
+[[ "${INSTALL_MODE}" == "requirements-only" || "${INSTALL_MODE}" == "official-mamba3" || "${INSTALL_MODE}" == "compile-safe" || "${INSTALL_MODE}" == "primitive-triton" ]] || die "--install-mode must be requirements-only, compile-safe, primitive-triton, or official-mamba3"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   die "this bootstrap is for Linux/CUDA only"
@@ -190,7 +190,7 @@ if [[ -n "${CUDA_ARCH_LIST}" ]]; then
   export TORCH_CUDA_ARCH_LIST="${CUDA_ARCH_LIST}"
 fi
 
-if [[ "${INSTALL_MODE}" == "official-mamba3" ]]; then
+if [[ "${INSTALL_MODE}" == "official-mamba3" || "${INSTALL_MODE}" == "primitive-triton" ]]; then
   echo "installing triton ${TRITON_VERSION} for official mamba runtime compatibility"
   python -m pip install --no-build-isolation "triton==${TRITON_VERSION}"
 fi
@@ -202,6 +202,11 @@ fi
 
 if [[ "${INSTALL_MODE}" == "compile-safe" ]]; then
   echo "bootstrapped compile-safe env at ${VENV_DIR}"
+  exit 0
+fi
+
+if [[ "${INSTALL_MODE}" == "primitive-triton" ]]; then
+  echo "bootstrapped primitive-triton env at ${VENV_DIR}"
   exit 0
 fi
 

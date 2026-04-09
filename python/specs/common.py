@@ -88,6 +88,7 @@ class DeviceRuntimeSpec:
     dtype: str = "bf16"
     env_kind: str | None = None
     compile_mode: str | None = None
+    primitive_runtime_backend: str | None = "torch"
 
     def validate(self) -> None:
         if self.backend not in {"cpu", "cuda"}:
@@ -101,14 +102,37 @@ class DeviceRuntimeSpec:
             )
         if self.backend == "cpu" and self.dtype == "bf16":
             raise ValidationError("runtime.dtype=bf16 is only supported for backend=cuda")
-        if self.env_kind not in {None, "requirements-only", "official-mamba3", "compile-safe"}:
+        if self.env_kind not in {
+            None,
+            "requirements-only",
+            "official-mamba3",
+            "compile-safe",
+            "primitive-triton",
+        }:
             raise ValidationError(
-                "runtime.env_kind must be one of requirements-only|official-mamba3|compile-safe or omitted"
+                "runtime.env_kind must be one of requirements-only|official-mamba3|compile-safe|primitive-triton or omitted"
             )
         if self.compile_mode not in {None, "default", "reduce-overhead", "max-autotune"}:
             raise ValidationError(
                 "runtime.compile_mode must be one of default|reduce-overhead|max-autotune or omitted"
             )
+        if self.primitive_runtime_backend not in {None, "torch", "triton"}:
+            raise ValidationError(
+                "runtime.primitive_runtime_backend must be one of torch|triton or omitted"
+            )
+        if self.env_kind == "primitive-triton" and self.compile_mode is not None:
+            raise ValidationError(
+                "runtime.compile_mode is not supported with env_kind=primitive-triton"
+            )
+        if self.primitive_runtime_backend == "triton":
+            if self.backend != "cuda":
+                raise ValidationError(
+                    "runtime.primitive_runtime_backend=triton requires backend=cuda"
+                )
+            if self.env_kind != "primitive-triton":
+                raise ValidationError(
+                    "runtime.primitive_runtime_backend=triton requires env_kind=primitive-triton"
+                )
 
 
 @dataclass(frozen=True)

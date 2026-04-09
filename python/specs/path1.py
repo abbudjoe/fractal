@@ -88,6 +88,11 @@ class PrimitiveExecutionProfile(StringEnum):
     RUNTIME = "runtime"
 
 
+class PrimitiveStateTransformMode(StringEnum):
+    DENSE = "dense"
+    BLOCK_DIAGONAL_4 = "block-diagonal-4"
+
+
 @dataclass(frozen=True)
 class Path1ModelShape:
     vocab_size: int = BYTE_LEVEL_VOCAB_SIZE
@@ -130,6 +135,7 @@ class Path1VariantSpec:
     primitive_norm_mode: PrimitiveNormMode | None = None
     primitive_wrapper_mode: PrimitiveWrapperMode | None = None
     primitive_execution_profile: PrimitiveExecutionProfile | None = None
+    primitive_state_transform_mode: PrimitiveStateTransformMode | None = None
     final_norm_kind: str = "identity"
 
     def validate(self) -> None:
@@ -158,6 +164,7 @@ class Path1VariantSpec:
                     self.primitive_norm_mode,
                     self.primitive_wrapper_mode,
                     self.primitive_execution_profile,
+                    self.primitive_state_transform_mode,
                 )
             ):
                 raise ValidationError("attention-only variant must not set reference or primitive options")
@@ -183,10 +190,11 @@ class Path1VariantSpec:
                     self.primitive_norm_mode,
                     self.primitive_wrapper_mode,
                     self.primitive_execution_profile,
+                    self.primitive_state_transform_mode,
                 )
             ):
                 raise ValidationError(
-                    "primitive-hybrid variant must set primitive residual/readout/norm/wrapper/execution modes"
+                    "primitive-hybrid variant must set primitive residual/readout/norm/wrapper/execution/state-transform modes"
                 )
         else:
             raise ValidationError(f"unsupported path1 variant kind: {self.kind}")
@@ -259,6 +267,7 @@ def phase1_primitive_variant(
     readout_mode: PrimitiveReadoutMode = PrimitiveReadoutMode.DIRECT,
     norm_mode: PrimitiveNormMode = PrimitiveNormMode.PRE_NORM_ONLY,
     wrapper_mode: PrimitiveWrapperMode = PrimitiveWrapperMode.STANDARD,
+    state_transform_mode: PrimitiveStateTransformMode = PrimitiveStateTransformMode.DENSE,
 ) -> Path1VariantSpec:
     return Path1VariantSpec(
         kind=Path1VariantKind.PRIMITIVE_HYBRID,
@@ -270,6 +279,7 @@ def phase1_primitive_variant(
             readout_mode.value,
             norm_mode.value,
             wrapper_mode.value,
+            state_transform_mode.value,
         ),
         shape=shape,
         layer_schedule=_alternating_schedule(shape.total_layers, HybridAttentionLayerRole.PRIMITIVE),
@@ -279,6 +289,7 @@ def phase1_primitive_variant(
         primitive_norm_mode=norm_mode,
         primitive_wrapper_mode=wrapper_mode,
         primitive_execution_profile=execution_profile,
+        primitive_state_transform_mode=state_transform_mode,
     )
 
 
@@ -291,6 +302,7 @@ def phase1_baseline_matrix(
     readout_mode: PrimitiveReadoutMode = PrimitiveReadoutMode.DIRECT,
     norm_mode: PrimitiveNormMode = PrimitiveNormMode.PRE_NORM_ONLY,
     wrapper_mode: PrimitiveWrapperMode = PrimitiveWrapperMode.STANDARD,
+    state_transform_mode: PrimitiveStateTransformMode = PrimitiveStateTransformMode.DENSE,
 ) -> Path1BaselineMatrix:
     matrix = Path1BaselineMatrix(
         attention_only=phase1_attention_only_variant(shape),
@@ -303,6 +315,7 @@ def phase1_baseline_matrix(
             readout_mode=readout_mode,
             norm_mode=norm_mode,
             wrapper_mode=wrapper_mode,
+            state_transform_mode=state_transform_mode,
         ),
     )
     matrix.validate()

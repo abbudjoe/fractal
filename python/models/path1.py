@@ -55,6 +55,7 @@ class Path1HybridLanguageModel(nn.Module):
                         readout_mode=variant.primitive_readout_mode,
                         norm_mode=variant.primitive_norm_mode,
                         wrapper_mode=variant.primitive_wrapper_mode,
+                        state_transform_mode=variant.primitive_state_transform_mode,
                     )
                 )
             else:
@@ -79,11 +80,19 @@ class Path1HybridLanguageModel(nn.Module):
         hidden = self.final_norm(hidden)
         return self.output(hidden)
 
-    def configure_runtime_policy(self, *, compile_mode: str | None) -> None:
+    def configure_runtime_policy(
+        self,
+        *,
+        compile_mode: str | None,
+        primitive_runtime_backend: str | None = "torch",
+    ) -> None:
         for block in self.blocks:
             configure = getattr(block, "configure_runtime_policy", None)
             if callable(configure):
-                configure(compile_mode=compile_mode)
+                configure(
+                    compile_mode=compile_mode,
+                    primitive_runtime_backend=primitive_runtime_backend,
+                )
 
 
 def build_path1_model(variant: Path1VariantSpec, *, dtype_mode: str) -> Path1HybridLanguageModel:

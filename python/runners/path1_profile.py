@@ -56,6 +56,7 @@ class Path1ProfileReport:
     dtype: str
     env_kind: str | None
     compile_mode: str | None
+    primitive_runtime_backend: str | None
     train_loss: float
     sort_by: str
     row_limit: int
@@ -76,6 +77,7 @@ class Path1ProfileReport:
             "dtype": self.dtype,
             "env_kind": self.env_kind,
             "compile_mode": self.compile_mode,
+            "primitive_runtime_backend": self.primitive_runtime_backend,
             "train_loss": self.train_loss,
             "sort_by": self.sort_by,
             "row_limit": self.row_limit,
@@ -261,6 +263,7 @@ def profile_path1_request(
         dtype=request.manifest.runtime.dtype,
         env_kind=request.manifest.runtime.env_kind,
         compile_mode=request.manifest.runtime.compile_mode,
+        primitive_runtime_backend=request.manifest.runtime.primitive_runtime_backend,
         train_loss=float(loss.detach().float().item()),
         sort_by=sort_by,
         row_limit=row_limit,
@@ -297,6 +300,7 @@ def cli_main(argv: Sequence[str] | None = None, *, repo_root: Path) -> int:
                 "run_label": report.run_label,
                 "variant_label": report.variant_label,
                 "train_loss": report.train_loss,
+                "primitive_runtime_backend": report.primitive_runtime_backend,
                 "sort_by": report.sort_by,
                 "profile_json_path": report.profile_json_path,
                 "profile_table_path": report.profile_table_path,

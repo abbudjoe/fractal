@@ -35,6 +35,7 @@ from python.specs.path1 import (
     PrimitiveProfile,
     PrimitiveReadoutMode,
     PrimitiveResidualMode,
+    PrimitiveStateTransformMode,
     PrimitiveWrapperMode,
     ReferenceSsmProfile,
     phase1_attention_only_variant,
@@ -123,6 +124,77 @@ class Path1ModelTests(unittest.TestCase):
                         rtol=1.0e-5,
                     )
                 )
+
+    def test_compiled_runtime_p20_matches_uncompiled_runtime(self) -> None:
+        inputs = torch.randn(2, 5, 16)
+        baseline = build_sequence_primitive(
+            PrimitiveProfile.P20,
+            16,
+            PrimitiveExecutionProfile.RUNTIME,
+        )
+        compiled = build_sequence_primitive(
+            PrimitiveProfile.P20,
+            16,
+            PrimitiveExecutionProfile.RUNTIME,
+        )
+        compiled.load_state_dict(baseline.state_dict())
+        compiled.configure_runtime_policy(compile_mode="reduce-overhead")
+
+        baseline_result = baseline.scan(inputs)
+        compiled_result = compiled.scan(inputs)
+
+        self.assertTrue(
+            torch.allclose(
+                baseline_result.emitted_outputs,
+                compiled_result.emitted_outputs,
+                atol=1.0e-5,
+                rtol=1.0e-5,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                baseline_result.final_state,
+                compiled_result.final_state,
+                atol=1.0e-5,
+                rtol=1.0e-5,
+            )
+        )
+
+    def test_runtime_p20_block_diagonal_matches_reference(self) -> None:
+        inputs = torch.randn(2, 5, 16)
+        reference = build_sequence_primitive(
+            PrimitiveProfile.P20,
+            16,
+            PrimitiveExecutionProfile.REFERENCE,
+            state_transform_mode=PrimitiveStateTransformMode.BLOCK_DIAGONAL_4,
+        )
+        runtime = build_sequence_primitive(
+            PrimitiveProfile.P20,
+            16,
+            PrimitiveExecutionProfile.RUNTIME,
+            state_transform_mode=PrimitiveStateTransformMode.BLOCK_DIAGONAL_4,
+        )
+        runtime.load_state_dict(reference.state_dict())
+
+        reference_result = reference.scan(inputs)
+        runtime_result = runtime.scan(inputs)
+
+        self.assertTrue(
+            torch.allclose(
+                reference_result.emitted_outputs,
+                runtime_result.emitted_outputs,
+                atol=1.0e-5,
+                rtol=1.0e-5,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                reference_result.final_state,
+                runtime_result.final_state,
+                atol=1.0e-5,
+                rtol=1.0e-5,
+            )
+        )
 
     def test_reference_ssm_boundary_is_explicit(self) -> None:
         has_official_mamba = importlib.util.find_spec("mamba_ssm") is not None

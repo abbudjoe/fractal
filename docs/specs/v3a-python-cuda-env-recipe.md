@@ -91,6 +91,15 @@ That keeps Torch on its compatible bundled Triton path instead of upgrading the
 environment to the newer Triton level required by the official native Mamba
 stack.
 
+For Path 1 primitive experiments that need the newer standalone Triton package
+without installing native `mamba_ssm`, use:
+
+* `--python-install-mode primitive-triton`
+
+That env exists to host the upcoming custom primitive Triton runtime without
+reusing the `compile-safe` control plane or pretending it is the same thing as
+the official native Mamba stack.
+
 ## Why This Exists
 
 Before this change, the RunPod wrapper had its own inline `mamba_ssm` bootstrap
@@ -124,3 +133,22 @@ The compile-safe Path 1 env is intentionally different:
 
 This env exists so `torch.compile` runs for `A` and `A+P` can be evaluated
 without colliding with the Triton level required by native official Mamba.
+
+## Primitive-Triton Contract
+
+The primitive-triton env is a third surface:
+
+* `torch 2.4.1` from `cu124`
+* standalone `triton 3.6.0`
+* shared Python research requirements
+* no `causal-conv1d` native build
+* no `mamba_ssm` install
+
+This env exists so the primitive line can move onto the newer Triton stack on
+its own typed control plane. It should be paired with:
+
+* `runtime.env_kind = primitive-triton`
+* `runtime.primitive_runtime_backend = torch|triton`
+
+At freeze time, `primitive_runtime_backend=triton` is an explicit future seam,
+not yet a landed kernel path.
