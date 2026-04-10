@@ -16,7 +16,10 @@ from python.specs.common import (
     ValidationError,
 )
 from python.specs.path1 import (
+    DEFAULT_PATH1_MODEL_SHAPE,
+    HybridAttentionLayerRole,
     Path1VariantKind,
+    Path1ModelShape,
     PrimitiveExecutionProfile,
     PrimitiveNormMode,
     PrimitiveProfile,
@@ -25,6 +28,7 @@ from python.specs.path1 import (
     PrimitiveStateTransformMode,
     PrimitiveWrapperMode,
     ReferenceSsmProfile,
+    parse_layer_schedule_spec,
     phase1_attention_only_variant,
     phase1_primitive_variant,
     phase1_reference_ssm_variant,
@@ -105,6 +109,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--data-seed", type=int)
+    parser.add_argument("--total-layers", type=int)
+    parser.add_argument("--layer-schedule")
     parser.add_argument("--seq-len", type=int, default=32)
     parser.add_argument("--window-stride", type=int, default=32)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -181,15 +187,34 @@ def _resolve_corpus_args(
     return corpus, budget
 
 
-def _build_variant(args: argparse.Namespace):
+def _build_shape_and_schedule(
+    args: argparse.Namespace,
+    *,
+    parser: argparse.ArgumentParser,
+) -> tuple[Path1ModelShape, tuple[HybridAttentionLayerRole, ...] | None]:
+    layer_schedule = parse_layer_schedule_spec(args.layer_schedule) if args.layer_schedule else None
+    if layer_schedule is None:
+        total_layers = args.total_layers or DEFAULT_PATH1_MODEL_SHAPE.total_layers
+    else:
+        if args.total_layers is not None and args.total_layers != len(layer_schedule):
+            parser.error("--total-layers must match the explicit --layer-schedule length")
+        total_layers = len(layer_schedule)
+    return Path1ModelShape(total_layers=total_layers), layer_schedule
+
+
+def _build_variant(args: argparse.Namespace, *, parser: argparse.ArgumentParser):
+    shape, layer_schedule = _build_shape_and_schedule(args, parser=parser)
     kind = Path1VariantKind(args.variant)
     if kind is Path1VariantKind.ATTENTION_ONLY:
-        return phase1_attention_only_variant()
+        return phase1_attention_only_variant(shape=shape, layer_schedule=layer_schedule)
     if kind is Path1VariantKind.REFERENCE_SSM_HYBRID:
         return phase1_reference_ssm_variant(
-            profile=ReferenceSsmProfile(args.reference_ssm_profile)
+            shape=shape,
+            profile=ReferenceSsmProfile(args.reference_ssm_profile),
+            layer_schedule=layer_schedule,
         )
     return phase1_primitive_variant(
+        shape=shape,
         primitive_profile=PrimitiveProfile(args.primitive_profile),
         execution_profile=PrimitiveExecutionProfile(args.primitive_execution_profile),
         residual_mode=PrimitiveResidualMode(args.primitive_residual_profile),
@@ -197,6 +222,7 @@ def _build_variant(args: argparse.Namespace):
         norm_mode=PrimitiveNormMode(args.primitive_norm_profile),
         wrapper_mode=PrimitiveWrapperMode(args.primitive_wrapper_profile),
         state_transform_mode=PrimitiveStateTransformMode(args.primitive_state_transform_profile),
+        layer_schedule=layer_schedule,
     )
 
 
@@ -225,7 +251,7 @@ def build_request_from_args(
     repo_root: Path,
 ) -> Path1RunnerRequest:
     corpus, budget = _resolve_corpus_args(args, parser=parser, repo_root=repo_root)
-    variant = _build_variant(args)
+    variant = _build_variant(args, parser=parser)
     output_dir = args.output_dir or repo_root / "artifacts" / "v3a-python-path1"
 
     manifest = BenchmarkRunManifest(

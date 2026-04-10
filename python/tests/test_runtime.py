@@ -12,6 +12,7 @@ from python.runtime.recurrent import (
     build_state_transform_projection,
     packed_linear_chunks,
 )
+from python.runtime.train_eval import perplexity_from_loss
 from python.specs.runtime import PrimitiveStateTransformMode
 
 
@@ -43,6 +44,14 @@ class CudaSetupPatchTests(unittest.TestCase):
 
 
 class RecurrentRuntimeTests(unittest.TestCase):
+    def test_perplexity_from_loss_handles_large_finite_loss(self) -> None:
+        self.assertEqual(perplexity_from_loss(1.0e6), float("inf"))
+
+    def test_perplexity_from_loss_preserves_special_values(self) -> None:
+        self.assertTrue(torch.isnan(torch.tensor(perplexity_from_loss(float("nan")))))
+        self.assertEqual(perplexity_from_loss(float("inf")), float("inf"))
+        self.assertEqual(perplexity_from_loss(float("-inf")), 0.0)
+
     def test_build_state_transform_projection_uses_shared_runtime_modes(self) -> None:
         dense = build_state_transform_projection(8, PrimitiveStateTransformMode.DENSE)
         block = build_state_transform_projection(8, PrimitiveStateTransformMode.BLOCK_DIAGONAL_2)

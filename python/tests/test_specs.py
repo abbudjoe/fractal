@@ -17,6 +17,7 @@ from python.specs.mini_moe import (
     OneShotRouterSpec,
 )
 from python.specs.path1 import (
+    HybridAttentionLayerRole,
     PrimitiveExecutionProfile,
     PrimitiveNormMode,
     PrimitiveProfile,
@@ -25,7 +26,10 @@ from python.specs.path1 import (
     PrimitiveStateTransformMode,
     PrimitiveWrapperMode,
     ReferenceSsmProfile,
+    layer_schedule_signature,
+    parse_layer_schedule_spec,
     phase1_baseline_matrix,
+    Path1ModelShape,
     phase1_primitive_variant,
     phase1_reference_ssm_variant,
 )
@@ -136,6 +140,35 @@ class Path1SpecTests(unittest.TestCase):
         )
         variant.validate()
         self.assertIn("p1-fractal-hybrid", variant.label)
+
+    def test_parse_layer_schedule_spec_accepts_compact_schedule_strings(self) -> None:
+        schedule = parse_layer_schedule_spec("AAAAAPAAAAA")
+
+        self.assertEqual(len(schedule), 11)
+        self.assertEqual(schedule[5], HybridAttentionLayerRole.PRIMITIVE)
+        self.assertEqual(layer_schedule_signature(schedule), "aaaaapaaaaa")
+
+    def test_parse_layer_schedule_spec_rejects_unknown_tokens(self) -> None:
+        with self.assertRaises(ValidationError):
+            parse_layer_schedule_spec("AAAXP")
+
+    def test_primitive_variant_tracks_custom_schedule_in_label(self) -> None:
+        schedule = parse_layer_schedule_spec("AAAAAPAAAAA")
+        variant = phase1_primitive_variant(
+            shape=Path1ModelShape(total_layers=len(schedule)),
+            primitive_profile=PrimitiveProfile.P20,
+            execution_profile=PrimitiveExecutionProfile.RUNTIME,
+            residual_mode=PrimitiveResidualMode.SCALED,
+            readout_mode=PrimitiveReadoutMode.PROJECTED,
+            norm_mode=PrimitiveNormMode.PRE_NORM_ONLY,
+            wrapper_mode=PrimitiveWrapperMode.STANDARD,
+            state_transform_mode=PrimitiveStateTransformMode.BLOCK_DIAGONAL_2,
+            layer_schedule=schedule,
+        )
+
+        variant.validate()
+        self.assertEqual(variant.shape.total_layers, 11)
+        self.assertIn("schedule-aaaaapaaaaa", variant.label)
 
     def test_path1_reuses_shared_state_transform_mode_contract(self) -> None:
         self.assertIs(PrimitiveStateTransformMode.BLOCK_DIAGONAL_2, SharedPrimitiveStateTransformMode.BLOCK_DIAGONAL_2)

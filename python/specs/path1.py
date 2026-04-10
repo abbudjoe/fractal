@@ -131,6 +131,12 @@ class Path1ModelShape:
 
 DEFAULT_PATH1_MODEL_SHAPE = Path1ModelShape()
 
+_LAYER_SCHEDULE_TOKEN_MAP = {
+    "A": HybridAttentionLayerRole.EXACT_ATTENTION,
+    "R": HybridAttentionLayerRole.REFERENCE_SSM,
+    "P": HybridAttentionLayerRole.PRIMITIVE,
+}
+
 
 @dataclass(frozen=True)
 class Path1VariantSpec:
@@ -245,25 +251,62 @@ def _variant_label(*parts: str) -> str:
     return "-".join(part for part in parts if part)
 
 
-def phase1_attention_only_variant(shape: Path1ModelShape = DEFAULT_PATH1_MODEL_SHAPE) -> Path1VariantSpec:
+def parse_layer_schedule_spec(schedule: str) -> tuple[HybridAttentionLayerRole, ...]:
+    normalized = (
+        schedule.strip().replace(",", "").replace("-", "").replace("_", "").replace(" ", "").upper()
+    )
+    if not normalized:
+        raise ValidationError("path1_variant.layer_schedule override must not be empty")
+    try:
+        return tuple(_LAYER_SCHEDULE_TOKEN_MAP[token] for token in normalized)
+    except KeyError as exc:
+        raise ValidationError(
+            "path1_variant.layer_schedule override may contain only A, R, or P tokens"
+        ) from exc
+
+
+def layer_schedule_signature(schedule: tuple[HybridAttentionLayerRole, ...]) -> str:
+    return "".join(
+        "a"
+        if role is HybridAttentionLayerRole.EXACT_ATTENTION
+        else "r"
+        if role is HybridAttentionLayerRole.REFERENCE_SSM
+        else "p"
+        for role in schedule
+    )
+
+
+def phase1_attention_only_variant(
+    shape: Path1ModelShape = DEFAULT_PATH1_MODEL_SHAPE,
+    layer_schedule: tuple[HybridAttentionLayerRole, ...] | None = None,
+) -> Path1VariantSpec:
+    schedule = layer_schedule or _attention_schedule(shape.total_layers)
     return Path1VariantSpec(
         kind=Path1VariantKind.ATTENTION_ONLY,
         label="attention-only",
         shape=shape,
-        layer_schedule=_attention_schedule(shape.total_layers),
+        layer_schedule=schedule,
     )
 
 
 def phase1_reference_ssm_variant(
     shape: Path1ModelShape = DEFAULT_PATH1_MODEL_SHAPE,
     profile: ReferenceSsmProfile = ReferenceSsmProfile.MAMBA3_SISO_RUNTIME,
+    layer_schedule: tuple[HybridAttentionLayerRole, ...] | None = None,
 ) -> Path1VariantSpec:
     final_norm = "rmsnorm" if profile in {ReferenceSsmProfile.MAMBA3_SISO_REFERENCE, ReferenceSsmProfile.MAMBA3_SISO_RUNTIME} else "identity"
+    default_schedule = _alternating_schedule(shape.total_layers, HybridAttentionLayerRole.REFERENCE_SSM)
+    schedule = layer_schedule or default_schedule
+    schedule_suffix = (
+        f"schedule-{layer_schedule_signature(schedule)}"
+        if schedule != default_schedule
+        else ""
+    )
     return Path1VariantSpec(
         kind=Path1VariantKind.REFERENCE_SSM_HYBRID,
-        label=_variant_label("reference-ssm-hybrid", profile.value),
+        label=_variant_label("reference-ssm-hybrid", profile.value, schedule_suffix),
         shape=shape,
-        layer_schedule=_alternating_schedule(shape.total_layers, HybridAttentionLayerRole.REFERENCE_SSM),
+        layer_schedule=schedule,
         reference_ssm_profile=profile,
         final_norm_kind=final_norm,
     )
@@ -278,7 +321,15 @@ def phase1_primitive_variant(
     norm_mode: PrimitiveNormMode = PrimitiveNormMode.PRE_NORM_ONLY,
     wrapper_mode: PrimitiveWrapperMode = PrimitiveWrapperMode.STANDARD,
     state_transform_mode: PrimitiveStateTransformMode = PrimitiveStateTransformMode.DENSE,
+    layer_schedule: tuple[HybridAttentionLayerRole, ...] | None = None,
 ) -> Path1VariantSpec:
+    default_schedule = _alternating_schedule(shape.total_layers, HybridAttentionLayerRole.PRIMITIVE)
+    schedule = layer_schedule or default_schedule
+    schedule_suffix = (
+        f"schedule-{layer_schedule_signature(schedule)}"
+        if schedule != default_schedule
+        else ""
+    )
     return Path1VariantSpec(
         kind=Path1VariantKind.PRIMITIVE_HYBRID,
         label=_variant_label(
@@ -290,9 +341,10 @@ def phase1_primitive_variant(
             norm_mode.value,
             wrapper_mode.value,
             state_transform_mode.value,
+            schedule_suffix,
         ),
         shape=shape,
-        layer_schedule=_alternating_schedule(shape.total_layers, HybridAttentionLayerRole.PRIMITIVE),
+        layer_schedule=schedule,
         primitive_profile=primitive_profile,
         primitive_residual_mode=residual_mode,
         primitive_readout_mode=readout_mode,

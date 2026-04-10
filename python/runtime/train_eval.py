@@ -17,6 +17,19 @@ class LanguageModelProtocol(Protocol):
         ...
 
 
+def perplexity_from_loss(loss: float) -> float:
+    if math.isnan(loss):
+        return math.nan
+    if loss == math.inf:
+        return math.inf
+    if loss == -math.inf:
+        return 0.0
+    try:
+        return math.exp(loss)
+    except OverflowError:
+        return math.inf
+
+
 def materialize_batch(batch: TokenBatch, device: torch.device) -> TokenBatch:
     return batch.to_device(device)
 
@@ -57,7 +70,11 @@ def evaluate_model(
             total_loss += float(loss.detach().float().item())
             total_batches += 1
     mean_loss = total_loss / max(total_batches, 1)
-    return EvalSummary(batch_count=total_batches, mean_loss=mean_loss, perplexity=math.exp(mean_loss))
+    return EvalSummary(
+        batch_count=total_batches,
+        mean_loss=mean_loss,
+        perplexity=perplexity_from_loss(mean_loss),
+    )
 
 
 def warmup_model(
@@ -164,7 +181,7 @@ def run_training_benchmark(
                 step=step + 1,
                 learning_rate=optimizer.param_groups[0]["lr"],
                 train_loss=train_loss,
-                train_perplexity=math.exp(train_loss),
+                train_perplexity=perplexity_from_loss(train_loss),
                 seen_tokens=seen_tokens,
             )
         )
