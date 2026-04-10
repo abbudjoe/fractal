@@ -55,6 +55,11 @@ class P1FractalHybridRuntimePlan:
 
 
 @dataclass(frozen=True)
+class PackedChunksRuntimePlan:
+    chunks: tuple[torch.Tensor, ...]
+
+
+@dataclass(frozen=True)
 class P20RuntimePlan:
     update_gates: torch.Tensor
     retain_gates: torch.Tensor
@@ -181,6 +186,112 @@ def _row_l2_norm(tensor: torch.Tensor) -> torch.Tensor:
 
 def _clamp_symmetric_by_row(tensor: torch.Tensor, clamp: torch.Tensor) -> torch.Tensor:
     return torch.maximum(torch.minimum(tensor, clamp), -clamp)
+
+
+def _clamp_max_by_row(tensor: torch.Tensor, clamp: torch.Tensor) -> torch.Tensor:
+    return torch.minimum(tensor, clamp)
+
+
+def _repeat_row_value(value: torch.Tensor, width: int) -> torch.Tensor:
+    return value.repeat(1, width)
+
+
+def _complex_square(state: torch.Tensor) -> torch.Tensor:
+    real, imag = state.chunk(2, dim=-1)
+    next_real = real * real - imag * imag
+    next_imag = 2.0 * real * imag
+    return torch.cat((next_real, next_imag), dim=-1)
+
+
+def _hierarchical_top_level(state: torch.Tensor) -> torch.Tensor:
+    return state[:, -1, :]
+
+
+LEGACY_HIERARCHICAL_LEVELS = 3
+LEGACY_ROOT_DEPTH_FRACTION = 0.0
+LEGACY_ROOT_ITERATIONS = 1
+NUM_IFS_MAPS = 4
+
+
+class PackedRuntimeSequencePrimitive(SequencePrimitive):
+    in_projection: PackedLinearProjection
+
+    def step_projected(
+        self,
+        state: torch.Tensor,
+        *projected_chunks: torch.Tensor,
+    ) -> SequencePrimitiveStepResult:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def step(self, state: torch.Tensor, inputs: torch.Tensor) -> SequencePrimitiveStepResult:
+        return self.step_projected(state, *self.in_projection(inputs))
+
+    def prepare_runtime_plan(self, inputs: torch.Tensor) -> PackedChunksRuntimePlan:
+        return PackedChunksRuntimePlan(chunks=self.in_projection(inputs))
+
+    def scan_with_runtime_plan(
+        self,
+        runtime_plan: PackedChunksRuntimePlan,
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        seq_len: int,
+        initial_state: torch.Tensor | None = None,
+    ) -> SequencePrimitiveScanResult:
+        state = initial_state if initial_state is not None else self.init_state(batch_size, device, dtype)
+        outputs = _allocate_emitted_outputs(
+            batch_size=batch_size,
+            seq_len=seq_len,
+            width=self.d_model,
+            device=device,
+            dtype=dtype,
+        )
+        for position in range(seq_len):
+            step = self.step_projected(
+                state,
+                *(chunk[:, position, ...] for chunk in runtime_plan.chunks),
+            )
+            state = step.next_state
+            outputs[:, position, :] = step.emitted_output
+        return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
+
+    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
+        return SequencePrimitive.scan(self, inputs, initial_state=initial_state)
+
+
+class ComplexStatePackedRuntimeSequencePrimitive(PackedRuntimeSequencePrimitive):
+    def __init__(self, d_model: int) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.state_width = d_model * 2
+        self.state_readout_projection = build_linear(self.state_width, d_model)
+
+    def _emit_from_state(self, state: torch.Tensor) -> torch.Tensor:
+        return self.state_readout_projection(state)
+
+
+class HierarchicalStatePackedRuntimeSequencePrimitive(PackedRuntimeSequencePrimitive):
+    def __init__(self, d_model: int, *, per_level_width: int, levels: int = LEGACY_HIERARCHICAL_LEVELS) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.levels = levels
+        self.state_width = per_level_width
+
+    def init_state(self, batch_size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        return torch.zeros(batch_size, self.levels, self.state_width, device=device, dtype=dtype)
+
+    def _emit_from_state(self, state: torch.Tensor) -> torch.Tensor:
+        return _hierarchical_top_level(state)
+
+
+class HierarchicalComplexStatePackedRuntimeSequencePrimitive(HierarchicalStatePackedRuntimeSequencePrimitive):
+    def __init__(self, d_model: int, *, levels: int = LEGACY_HIERARCHICAL_LEVELS) -> None:
+        super().__init__(d_model, per_level_width=d_model * 2, levels=levels)
+        self.state_readout_projection = build_linear(self.state_width, d_model)
+
+    def _emit_from_state(self, state: torch.Tensor) -> torch.Tensor:
+        return self.state_readout_projection(_hierarchical_top_level(state))
 
 
 class ContractiveSequenceMixer(SequencePrimitive):
@@ -319,6 +430,354 @@ class P1FractalHybridRuntimeSequenceMixer(P1FractalHybridSequenceMixer):
             seq_len=inputs.shape[1],
             initial_state=initial_state,
         )
+
+
+class P1FractalHybridCompositeSequenceMixer(PackedRuntimeSequencePrimitive):
+    def __init__(self, d_model: int) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.state_width = d_model
+        self.in_projection = PackedLinearProjection(d_model, (d_model, d_model))
+        self.state_projection = build_linear(d_model, d_model)
+
+    def _clamp_value(self, state: torch.Tensor) -> torch.Tensor:
+        return gated_sigmoid(_row_l2_norm(state)).mul(-0.225).add(0.75)
+
+    def _squared_update(self, state: torch.Tensor, projected_inputs: torch.Tensor) -> torch.Tensor:
+        squared = _clamp_symmetric_by_row(state * state, self._clamp_value(state))
+        return self.state_projection(state) + projected_inputs + squared
+
+    def _contractive_inner(self, state: torch.Tensor, gate: torch.Tensor, projected_inputs: torch.Tensor) -> torch.Tensor:
+        mix = self.state_projection(state) + projected_inputs
+        return gate * mix + one_minus(gate) * state
+
+    def step_projected(
+        self,
+        state: torch.Tensor,
+        gate_inputs: torch.Tensor,
+        projected_inputs: torch.Tensor,
+    ) -> SequencePrimitiveStepResult:
+        outer_gate = gated_sigmoid(gate_inputs)
+        base_state = self._contractive_inner(state, outer_gate, projected_inputs)
+        main_update = self._squared_update(base_state, projected_inputs)
+        next_state = outer_gate * main_update + one_minus(outer_gate) * base_state
+        return SequencePrimitiveStepResult(next_state=next_state, emitted_output=next_state)
+
+
+class P1FractalHybridDynGateSequenceMixer(PackedRuntimeSequencePrimitive):
+    def __init__(self, d_model: int) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.state_width = d_model
+        self.in_projection = PackedLinearProjection(d_model, (d_model, d_model))
+        self.state_projection = build_linear(d_model, d_model)
+
+    def _clamp_value(self, state: torch.Tensor) -> torch.Tensor:
+        return gated_sigmoid(_row_l2_norm(state)).mul(-0.225).add(0.75)
+
+    def _squared_update(self, state: torch.Tensor, projected_inputs: torch.Tensor) -> torch.Tensor:
+        squared = _clamp_symmetric_by_row(state * state, self._clamp_value(state))
+        return self.state_projection(state) + projected_inputs + squared
+
+    def step_projected(
+        self,
+        state: torch.Tensor,
+        gate_inputs: torch.Tensor,
+        projected_inputs: torch.Tensor,
+    ) -> SequencePrimitiveStepResult:
+        gate_cap = torch.full_like(gate_inputs, 0.95 - 0.25 * LEGACY_ROOT_DEPTH_FRACTION)
+        tuned_gate = _clamp_max_by_row(gated_sigmoid(gate_inputs), gate_cap)
+        main_update = self._squared_update(state, projected_inputs)
+        next_state = tuned_gate * main_update + one_minus(tuned_gate) * state
+        return SequencePrimitiveStepResult(next_state=next_state, emitted_output=next_state)
+
+
+class P2MandelbrotSequenceMixer(ComplexStatePackedRuntimeSequencePrimitive):
+    def __init__(self, d_model: int) -> None:
+        super().__init__(d_model)
+        self.in_projection = PackedLinearProjection(d_model, (self.state_width, self.state_width))
+
+    def step_projected(
+        self,
+        state: torch.Tensor,
+        gate_inputs: torch.Tensor,
+        c_inputs: torch.Tensor,
+    ) -> SequencePrimitiveStepResult:
+        clamp_value = _repeat_row_value(gated_sigmoid(_row_l2_norm(state)).mul(-0.225).add(0.9), self.state_width)
+        gate = _clamp_max_by_row(gated_sigmoid(gate_inputs), clamp_value)
+        next_state = gate * _complex_square(state) + c_inputs
+        return SequencePrimitiveStepResult(next_state=next_state, emitted_output=self._emit_from_state(next_state))
+
+
+class B1FractalGatedSequenceMixer(ComplexStatePackedRuntimeSequencePrimitive):
+    def __init__(self, d_model: int) -> None:
+        super().__init__(d_model)
+        self.in_projection = PackedLinearProjection(d_model, (self.state_width, self.state_width))
+
+    def step_projected(
+        self,
+        state: torch.Tensor,
+        gate_inputs: torch.Tensor,
+        c_inputs: torch.Tensor,
+    ) -> SequencePrimitiveStepResult:
+        gate = gated_sigmoid(gate_inputs)
+        main_update = gate * (_complex_square(state) + c_inputs) + one_minus(gate) * state
+        alpha = _repeat_row_value(gated_sigmoid(_row_l2_norm(state)).mul(0.08).add(0.02), self.state_width)
+        next_state = alpha * main_update + one_minus(alpha) * state
+        return SequencePrimitiveStepResult(next_state=next_state, emitted_output=self._emit_from_state(next_state))
+
+
+class JuliaRecursiveEscapeSequenceMixer(ComplexStatePackedRuntimeSequencePrimitive):
+    def __init__(self, d_model: int) -> None:
+        super().__init__(d_model)
+        self.in_projection = PackedLinearProjection(d_model, (self.state_width,))
+
+    def step_projected(
+        self,
+        state: torch.Tensor,
+        c_inputs: torch.Tensor,
+    ) -> SequencePrimitiveStepResult:
+        next_state = _complex_square(state) + c_inputs
+        escape_radius = _repeat_row_value(
+            gated_sigmoid(_row_l2_norm(next_state))
+            .mul(1.0 - 0.2 * LEGACY_ROOT_DEPTH_FRACTION)
+            .add(2.0),
+            self.state_width,
+        )
+        bounded_state = _clamp_symmetric_by_row(next_state, escape_radius)
+        return SequencePrimitiveStepResult(
+            next_state=bounded_state,
+            emitted_output=self._emit_from_state(bounded_state),
+        )
+
+
+class LogisticChaoticMapSequenceMixer(PackedRuntimeSequencePrimitive):
+    def __init__(self, d_model: int) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.state_width = d_model
+        self.in_projection = PackedLinearProjection(d_model, (d_model, d_model))
+
+    def step(self, state: torch.Tensor, inputs: torch.Tensor) -> SequencePrimitiveStepResult:
+        r_inputs, gate_inputs = self.in_projection(inputs)
+        return self.step_projected(state, r_inputs, gate_inputs, inputs)
+
+    def prepare_runtime_plan(self, inputs: torch.Tensor) -> PackedChunksRuntimePlan:
+        return PackedChunksRuntimePlan(chunks=(*self.in_projection(inputs), inputs))
+
+    def step_projected(
+        self,
+        state: torch.Tensor,
+        r_inputs: torch.Tensor,
+        gate_inputs: torch.Tensor,
+        raw_inputs: torch.Tensor,
+    ) -> SequencePrimitiveStepResult:
+        bounded_state = gated_sigmoid(state)
+        r_t = (
+            gated_sigmoid(r_inputs)
+            .mul(3.95 - 3.6)
+            .add(3.6)
+            .clamp(3.6, 3.95)
+        )
+        gate = gated_sigmoid(gate_inputs)
+        next_state = r_t * bounded_state * one_minus(bounded_state) + gate * raw_inputs
+        alpha = _repeat_row_value(gated_sigmoid(_row_l2_norm(state)).mul(0.08).add(0.02), self.d_model)
+        next_state = alpha * next_state + one_minus(alpha) * state
+        return SequencePrimitiveStepResult(next_state=next_state, emitted_output=next_state)
+
+
+class GeneralizedMobiusSequenceMixer(PackedRuntimeSequencePrimitive):
+    def __init__(self, d_model: int) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.state_width = d_model
+        self.in_projection = PackedLinearProjection(d_model, (d_model, d_model, d_model, d_model))
+
+    def step_projected(
+        self,
+        state: torch.Tensor,
+        a_inputs: torch.Tensor,
+        b_inputs: torch.Tensor,
+        c_inputs: torch.Tensor,
+        d_inputs: torch.Tensor,
+    ) -> SequencePrimitiveStepResult:
+        a = a_inputs.tanh()
+        b = b_inputs.tanh().mul(0.5)
+        c = c_inputs.tanh()
+        d = d_inputs.tanh().mul(0.5).add(1.0)
+        norm = _row_l2_norm(state)
+        epsilon = (norm.mul(1.0e-5).add(1.0e-6) * norm.mul(0.5).add(1.0)).repeat(1, self.d_model)
+        numerator = a * state + b
+        denominator = c * state + d + epsilon
+        next_state = numerator * denominator.reciprocal()
+        return SequencePrimitiveStepResult(next_state=next_state, emitted_output=next_state)
+
+
+class IfsSequenceMixer(PackedRuntimeSequencePrimitive):
+    def __init__(self, d_model: int) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.state_width = d_model
+        self.in_projection = PackedLinearProjection(d_model, (NUM_IFS_MAPS,))
+        self.a_diag = nn.Parameter(torch.empty(NUM_IFS_MAPS, d_model))
+        self.b_bias = nn.Parameter(torch.empty(NUM_IFS_MAPS, d_model))
+        nn.init.uniform_(self.a_diag, -0.1, 0.1)
+        nn.init.uniform_(self.b_bias, -0.1, 0.1)
+
+    def step_projected(
+        self,
+        state: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> SequencePrimitiveStepResult:
+        probs = torch.softmax(router_logits, dim=-1)
+        next_state = torch.zeros_like(state)
+        radius = 0.98 - 0.03 * LEGACY_ROOT_DEPTH_FRACTION
+        for map_index in range(NUM_IFS_MAPS):
+            a = self.a_diag[map_index].unsqueeze(0).expand_as(state) * radius
+            b = self.b_bias[map_index].unsqueeze(0).expand_as(state)
+            weight = probs[:, map_index : map_index + 1].expand_as(state)
+            candidate = a * state + b
+            next_state = next_state + weight * candidate
+        return SequencePrimitiveStepResult(next_state=next_state, emitted_output=next_state)
+
+
+class MandelboxRecursiveSequenceMixer(PackedRuntimeSequencePrimitive):
+    def __init__(self, d_model: int) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.state_width = d_model
+        self.in_projection = PackedLinearProjection(d_model, (d_model,))
+
+    def _mandelbox_step(
+        self,
+        state: torch.Tensor,
+        *,
+        escape_radius: torch.Tensor,
+        drive: torch.Tensor,
+    ) -> torch.Tensor:
+        folded = _clamp_symmetric_by_row(state, escape_radius) * 2.0 - state
+        return folded * 2.0 + drive
+
+    def step_projected(
+        self,
+        state: torch.Tensor,
+        drive_inputs: torch.Tensor,
+    ) -> SequencePrimitiveStepResult:
+        drive = torch.tanh(drive_inputs).mul(0.1)
+        escape_radius = torch.full_like(state, 1.8 - 0.45 * LEGACY_ROOT_DEPTH_FRACTION)
+        current = state + drive
+        for _ in range(LEGACY_ROOT_ITERATIONS):
+            current = self._mandelbox_step(current, escape_radius=escape_radius, drive=drive)
+        next_state = state.mul(0.7) + current.mul(0.3)
+        return SequencePrimitiveStepResult(next_state=next_state, emitted_output=next_state)
+
+
+class P3HierarchicalSequenceMixer(HierarchicalStatePackedRuntimeSequencePrimitive):
+    def __init__(self, d_model: int, *, levels: int = LEGACY_HIERARCHICAL_LEVELS) -> None:
+        super().__init__(d_model, per_level_width=d_model, levels=levels)
+        self.in_projection = PackedLinearProjection(d_model, (d_model, d_model, d_model, d_model))
+        self.compressor = build_linear(d_model, d_model)
+
+    def step_projected(
+        self,
+        state: torch.Tensor,
+        u_inputs: torch.Tensor,
+        alpha_inputs: torch.Tensor,
+        beta_inputs: torch.Tensor,
+        gamma_inputs: torch.Tensor,
+    ) -> SequencePrimitiveStepResult:
+        alpha = gated_sigmoid(alpha_inputs)
+        beta = gated_sigmoid(beta_inputs)
+        gamma = gated_sigmoid(gamma_inputs)
+        next_levels: list[torch.Tensor] = []
+        for level in range(self.levels):
+            prev = state[:, level, :]
+            next_level = alpha * prev + beta * u_inputs
+            if level > 0:
+                next_level = next_level + gamma * self.compressor(next_levels[level - 1])
+            next_levels.append(next_level)
+        next_state = torch.stack(next_levels, dim=1)
+        return SequencePrimitiveStepResult(next_state=next_state, emitted_output=self._emit_from_state(next_state))
+
+
+class B2StableHierarchicalSequenceMixer(HierarchicalStatePackedRuntimeSequencePrimitive):
+    def __init__(self, d_model: int, *, levels: int = LEGACY_HIERARCHICAL_LEVELS) -> None:
+        super().__init__(d_model, per_level_width=d_model, levels=levels)
+        self.in_projection = PackedLinearProjection(d_model, (d_model, d_model, d_model))
+        self.state_projection = build_linear(d_model, d_model)
+        self.compressor = build_linear(d_model, d_model)
+
+    def step_projected(
+        self,
+        state: torch.Tensor,
+        gate_inputs: torch.Tensor,
+        u_inputs: torch.Tensor,
+        gamma_inputs: torch.Tensor,
+    ) -> SequencePrimitiveStepResult:
+        gate = gated_sigmoid(gate_inputs)
+        gamma = gated_sigmoid(gamma_inputs)
+        next_levels: list[torch.Tensor] = []
+        for level in range(self.levels):
+            prev = state[:, level, :]
+            base = gate * (self.state_projection(prev) + u_inputs) + one_minus(gate) * prev
+            if level > 0:
+                base = base + gamma * self.compressor(next_levels[level - 1])
+            next_levels.append(base)
+        next_state = torch.stack(next_levels, dim=1)
+        return SequencePrimitiveStepResult(next_state=next_state, emitted_output=self._emit_from_state(next_state))
+
+
+class B3FractalHierarchicalSequenceMixer(HierarchicalComplexStatePackedRuntimeSequencePrimitive):
+    def __init__(self, d_model: int, *, levels: int = LEGACY_HIERARCHICAL_LEVELS) -> None:
+        super().__init__(d_model, levels=levels)
+        self.in_projection = PackedLinearProjection(d_model, (self.state_width, self.state_width))
+        self.compressor = build_linear(self.state_width, self.state_width)
+
+    def step_projected(
+        self,
+        state: torch.Tensor,
+        c_inputs: torch.Tensor,
+        gamma_inputs: torch.Tensor,
+    ) -> SequencePrimitiveStepResult:
+        gamma = gated_sigmoid(gamma_inputs)
+        radius = 0.98 - 0.03 * LEGACY_ROOT_DEPTH_FRACTION
+        next_levels: list[torch.Tensor] = []
+        for level in range(self.levels):
+            prev = state[:, level, :]
+            next_level = _complex_square(prev).mul(radius) + c_inputs
+            if level > 0:
+                next_level = next_level + gamma * self.compressor(next_levels[level - 1])
+            next_levels.append(next_level)
+        next_state = torch.stack(next_levels, dim=1)
+        return SequencePrimitiveStepResult(next_state=next_state, emitted_output=self._emit_from_state(next_state))
+
+
+class B4UniversalSequenceMixer(HierarchicalComplexStatePackedRuntimeSequencePrimitive):
+    def __init__(self, d_model: int, *, levels: int = LEGACY_HIERARCHICAL_LEVELS) -> None:
+        super().__init__(d_model, levels=levels)
+        self.in_projection = PackedLinearProjection(d_model, (self.state_width, self.state_width, self.state_width))
+        self.compressor = build_linear(self.state_width, self.state_width)
+
+    def step_projected(
+        self,
+        state: torch.Tensor,
+        gate_inputs: torch.Tensor,
+        c_inputs: torch.Tensor,
+        gamma_inputs: torch.Tensor,
+    ) -> SequencePrimitiveStepResult:
+        gate = gated_sigmoid(gate_inputs)
+        gamma = gated_sigmoid(gamma_inputs)
+        next_levels: list[torch.Tensor] = []
+        for level in range(self.levels):
+            prev = state[:, level, :]
+            base = gate * (_complex_square(prev) + c_inputs) + one_minus(gate) * prev
+            if level > 0:
+                base = base + gamma * self.compressor(next_levels[level - 1])
+            alpha = _repeat_row_value(gated_sigmoid(_row_l2_norm(prev)).mul(0.08).add(0.02), self.state_width)
+            next_level = alpha * base + one_minus(alpha) * prev
+            next_levels.append(next_level)
+        next_state = torch.stack(next_levels, dim=1)
+        return SequencePrimitiveStepResult(next_state=next_state, emitted_output=self._emit_from_state(next_state))
 
 
 class P20RotaryStateOutputSequenceMixer(SequencePrimitive):
@@ -1150,6 +1609,19 @@ def build_sequence_primitive(
     if state_transform_mode is not PrimitiveStateTransformMode.DENSE and profile in {
         PrimitiveProfile.P1,
         PrimitiveProfile.P1_FRACTAL_HYBRID,
+        PrimitiveProfile.P1_FRACTAL_HYBRID_COMPOSITE,
+        PrimitiveProfile.P1_FRACTAL_HYBRID_DYN_GATE,
+        PrimitiveProfile.P2_MANDELBROT,
+        PrimitiveProfile.P3_HIERARCHICAL,
+        PrimitiveProfile.B1_FRACTAL_GATED,
+        PrimitiveProfile.B2_STABLE_HIERARCHICAL,
+        PrimitiveProfile.B3_FRACTAL_HIERARCHICAL,
+        PrimitiveProfile.B4_UNIVERSAL,
+        PrimitiveProfile.IFS,
+        PrimitiveProfile.GENERALIZED_MOBIUS,
+        PrimitiveProfile.LOGISTIC_CHAOTIC_MAP,
+        PrimitiveProfile.JULIA_RECURSIVE_ESCAPE,
+        PrimitiveProfile.MANDELBOX_RECURSIVE,
     }:
         raise ValueError(
             f"primitive profile {profile.value} does not support non-dense state transforms"
@@ -1159,6 +1631,10 @@ def build_sequence_primitive(
             return ContractiveRuntimeSequenceMixer(d_model)
         if profile is PrimitiveProfile.P1_FRACTAL_HYBRID:
             return P1FractalHybridRuntimeSequenceMixer(d_model)
+        if profile is PrimitiveProfile.P1_FRACTAL_HYBRID_COMPOSITE:
+            return P1FractalHybridCompositeSequenceMixer(d_model)
+        if profile is PrimitiveProfile.P1_FRACTAL_HYBRID_DYN_GATE:
+            return P1FractalHybridDynGateSequenceMixer(d_model)
         if profile is PrimitiveProfile.P20:
             return P20RotaryStateOutputRuntimeSequenceMixer(d_model, state_transform_mode=state_transform_mode)
         if profile is PrimitiveProfile.P2:
@@ -1169,12 +1645,38 @@ def build_sequence_primitive(
             return P21WideLatentRuntimeSequenceMixer(d_model, state_transform_mode=state_transform_mode)
         if profile is PrimitiveProfile.P22:
             return P22WideLatentReadoutRuntimeSequenceMixer(d_model, state_transform_mode=state_transform_mode)
+        if profile is PrimitiveProfile.P2_MANDELBROT:
+            return P2MandelbrotSequenceMixer(d_model)
+        if profile is PrimitiveProfile.P3_HIERARCHICAL:
+            return P3HierarchicalSequenceMixer(d_model)
+        if profile is PrimitiveProfile.B1_FRACTAL_GATED:
+            return B1FractalGatedSequenceMixer(d_model)
+        if profile is PrimitiveProfile.B2_STABLE_HIERARCHICAL:
+            return B2StableHierarchicalSequenceMixer(d_model)
+        if profile is PrimitiveProfile.B3_FRACTAL_HIERARCHICAL:
+            return B3FractalHierarchicalSequenceMixer(d_model)
+        if profile is PrimitiveProfile.B4_UNIVERSAL:
+            return B4UniversalSequenceMixer(d_model)
+        if profile is PrimitiveProfile.IFS:
+            return IfsSequenceMixer(d_model)
+        if profile is PrimitiveProfile.GENERALIZED_MOBIUS:
+            return GeneralizedMobiusSequenceMixer(d_model)
+        if profile is PrimitiveProfile.LOGISTIC_CHAOTIC_MAP:
+            return LogisticChaoticMapSequenceMixer(d_model)
+        if profile is PrimitiveProfile.JULIA_RECURSIVE_ESCAPE:
+            return JuliaRecursiveEscapeSequenceMixer(d_model)
+        if profile is PrimitiveProfile.MANDELBOX_RECURSIVE:
+            return MandelboxRecursiveSequenceMixer(d_model)
         raise ValueError(f"unsupported primitive runtime profile: {profile}")
 
     if profile is PrimitiveProfile.P1:
         return ContractiveSequenceMixer(d_model)
     if profile is PrimitiveProfile.P1_FRACTAL_HYBRID:
         return P1FractalHybridSequenceMixer(d_model)
+    if profile is PrimitiveProfile.P1_FRACTAL_HYBRID_COMPOSITE:
+        return P1FractalHybridCompositeSequenceMixer(d_model)
+    if profile is PrimitiveProfile.P1_FRACTAL_HYBRID_DYN_GATE:
+        return P1FractalHybridDynGateSequenceMixer(d_model)
     if profile is PrimitiveProfile.P20:
         return P20RotaryStateOutputSequenceMixer(d_model, state_transform_mode=state_transform_mode)
     if profile is PrimitiveProfile.P2:
@@ -1185,6 +1687,28 @@ def build_sequence_primitive(
         return P21WideLatentSequenceMixer(d_model, state_transform_mode=state_transform_mode)
     if profile is PrimitiveProfile.P22:
         return P22WideLatentReadoutSequenceMixer(d_model, state_transform_mode=state_transform_mode)
+    if profile is PrimitiveProfile.P2_MANDELBROT:
+        return P2MandelbrotSequenceMixer(d_model)
+    if profile is PrimitiveProfile.P3_HIERARCHICAL:
+        return P3HierarchicalSequenceMixer(d_model)
+    if profile is PrimitiveProfile.B1_FRACTAL_GATED:
+        return B1FractalGatedSequenceMixer(d_model)
+    if profile is PrimitiveProfile.B2_STABLE_HIERARCHICAL:
+        return B2StableHierarchicalSequenceMixer(d_model)
+    if profile is PrimitiveProfile.B3_FRACTAL_HIERARCHICAL:
+        return B3FractalHierarchicalSequenceMixer(d_model)
+    if profile is PrimitiveProfile.B4_UNIVERSAL:
+        return B4UniversalSequenceMixer(d_model)
+    if profile is PrimitiveProfile.IFS:
+        return IfsSequenceMixer(d_model)
+    if profile is PrimitiveProfile.GENERALIZED_MOBIUS:
+        return GeneralizedMobiusSequenceMixer(d_model)
+    if profile is PrimitiveProfile.LOGISTIC_CHAOTIC_MAP:
+        return LogisticChaoticMapSequenceMixer(d_model)
+    if profile is PrimitiveProfile.JULIA_RECURSIVE_ESCAPE:
+        return JuliaRecursiveEscapeSequenceMixer(d_model)
+    if profile is PrimitiveProfile.MANDELBOX_RECURSIVE:
+        return MandelboxRecursiveSequenceMixer(d_model)
     raise ValueError(f"unsupported primitive profile: {profile}")
 
 

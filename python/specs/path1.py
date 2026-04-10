@@ -47,11 +47,24 @@ class ReferenceSsmProfile(StringEnum):
 class PrimitiveProfile(StringEnum):
     P1 = "p1"
     P1_FRACTAL_HYBRID = "p1-fractal-hybrid"
+    P1_FRACTAL_HYBRID_COMPOSITE = "p1-fractal-hybrid-composite"
+    P1_FRACTAL_HYBRID_DYN_GATE = "p1-fractal-hybrid-dyn-gate"
     P20 = "p2-0"
     P2 = "p2"
     P21 = "p2-1"
     P22 = "p2-2"
     P23 = "p2-3"
+    P2_MANDELBROT = "p2-mandelbrot"
+    P3_HIERARCHICAL = "p3-hierarchical"
+    B1_FRACTAL_GATED = "b1-fractal-gated"
+    B2_STABLE_HIERARCHICAL = "b2-stable-hierarchical"
+    B3_FRACTAL_HIERARCHICAL = "b3-fractal-hierarchical"
+    B4_UNIVERSAL = "b4-universal"
+    IFS = "ifs"
+    GENERALIZED_MOBIUS = "generalized-mobius"
+    LOGISTIC_CHAOTIC_MAP = "logistic-chaotic-map"
+    JULIA_RECURSIVE_ESCAPE = "julia-recursive-escape"
+    MANDELBOX_RECURSIVE = "mandelbox-recursive"
 
     @property
     def state_width_factor(self) -> int:

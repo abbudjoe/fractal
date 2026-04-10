@@ -84,6 +84,34 @@ class Path1ModelTests(unittest.TestCase):
         self.assertEqual(tuple(logits.shape), (2, 8, 257))
         self.assertIn("p1_fractal_hybrid", model.model_label)
 
+    def test_legacy_primitive_ports_scan_cpu(self) -> None:
+        inputs = torch.randn(2, 5, 16)
+        legacy_profiles = (
+            PrimitiveProfile.P1_FRACTAL_HYBRID_COMPOSITE,
+            PrimitiveProfile.P1_FRACTAL_HYBRID_DYN_GATE,
+            PrimitiveProfile.P2_MANDELBROT,
+            PrimitiveProfile.P3_HIERARCHICAL,
+            PrimitiveProfile.B1_FRACTAL_GATED,
+            PrimitiveProfile.B2_STABLE_HIERARCHICAL,
+            PrimitiveProfile.B3_FRACTAL_HIERARCHICAL,
+            PrimitiveProfile.B4_UNIVERSAL,
+            PrimitiveProfile.IFS,
+            PrimitiveProfile.GENERALIZED_MOBIUS,
+            PrimitiveProfile.LOGISTIC_CHAOTIC_MAP,
+            PrimitiveProfile.JULIA_RECURSIVE_ESCAPE,
+            PrimitiveProfile.MANDELBOX_RECURSIVE,
+        )
+        for primitive_profile in legacy_profiles:
+            with self.subTest(primitive_profile=primitive_profile.value):
+                primitive = build_sequence_primitive(
+                    primitive_profile,
+                    16,
+                    PrimitiveExecutionProfile.RUNTIME,
+                )
+                result = primitive.scan(inputs)
+                self.assertEqual(tuple(result.emitted_outputs.shape), (2, 5, 16))
+                self.assertEqual(result.final_state.shape[0], 2)
+
     def test_runtime_primitive_matches_reference_math_for_p20(self) -> None:
         inputs = torch.randn(2, 5, 16)
         for primitive_profile in PrimitiveProfile:
@@ -245,15 +273,54 @@ class Path1ModelTests(unittest.TestCase):
                 state_transform_mode=PrimitiveStateTransformMode.BLOCK_DIAGONAL_2,
             )
 
+    def test_legacy_ports_reject_non_dense_state_transform(self) -> None:
+        legacy_profiles = (
+            PrimitiveProfile.P1_FRACTAL_HYBRID_COMPOSITE,
+            PrimitiveProfile.P1_FRACTAL_HYBRID_DYN_GATE,
+            PrimitiveProfile.P2_MANDELBROT,
+            PrimitiveProfile.P3_HIERARCHICAL,
+            PrimitiveProfile.B1_FRACTAL_GATED,
+            PrimitiveProfile.B2_STABLE_HIERARCHICAL,
+            PrimitiveProfile.B3_FRACTAL_HIERARCHICAL,
+            PrimitiveProfile.B4_UNIVERSAL,
+            PrimitiveProfile.IFS,
+            PrimitiveProfile.GENERALIZED_MOBIUS,
+            PrimitiveProfile.LOGISTIC_CHAOTIC_MAP,
+            PrimitiveProfile.JULIA_RECURSIVE_ESCAPE,
+            PrimitiveProfile.MANDELBOX_RECURSIVE,
+        )
+        for primitive_profile in legacy_profiles:
+            with self.subTest(primitive_profile=primitive_profile.value):
+                with self.assertRaisesRegex(ValueError, "does not support non-dense state transforms"):
+                    build_sequence_primitive(
+                        primitive_profile,
+                        16,
+                        PrimitiveExecutionProfile.RUNTIME,
+                        state_transform_mode=PrimitiveStateTransformMode.BLOCK_DIAGONAL_2,
+                    )
+
     def test_primitives_use_shared_packed_input_projection_surface(self) -> None:
         expected_split_sizes = {
             PrimitiveProfile.P1: (16, 16),
             PrimitiveProfile.P1_FRACTAL_HYBRID: (16, 16),
+            PrimitiveProfile.P1_FRACTAL_HYBRID_COMPOSITE: (16, 16),
+            PrimitiveProfile.P1_FRACTAL_HYBRID_DYN_GATE: (16, 16),
             PrimitiveProfile.P20: (16, 8, 16, 16),
             PrimitiveProfile.P2: (16, 8, 16, 16),
             PrimitiveProfile.P23: (16, 16, 8, 16, 16),
             PrimitiveProfile.P21: (32, 16, 32, 16),
             PrimitiveProfile.P22: (32, 16, 32, 16),
+            PrimitiveProfile.P2_MANDELBROT: (32, 32),
+            PrimitiveProfile.P3_HIERARCHICAL: (16, 16, 16, 16),
+            PrimitiveProfile.B1_FRACTAL_GATED: (32, 32),
+            PrimitiveProfile.B2_STABLE_HIERARCHICAL: (16, 16, 16),
+            PrimitiveProfile.B3_FRACTAL_HIERARCHICAL: (32, 32),
+            PrimitiveProfile.B4_UNIVERSAL: (32, 32, 32),
+            PrimitiveProfile.IFS: (4,),
+            PrimitiveProfile.GENERALIZED_MOBIUS: (16, 16, 16, 16),
+            PrimitiveProfile.LOGISTIC_CHAOTIC_MAP: (16, 16),
+            PrimitiveProfile.JULIA_RECURSIVE_ESCAPE: (32,),
+            PrimitiveProfile.MANDELBOX_RECURSIVE: (16,),
         }
 
         for primitive_profile, split_sizes in expected_split_sizes.items():
