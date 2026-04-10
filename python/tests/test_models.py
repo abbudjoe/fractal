@@ -69,6 +69,21 @@ class Path1ModelTests(unittest.TestCase):
         self.assertIn("gated", model.model_label)
         self.assertIn("projected_norm", model.model_label)
 
+    def test_p1_fractal_hybrid_forward_cpu(self) -> None:
+        variant = phase1_primitive_variant(
+            primitive_profile=PrimitiveProfile.P1_FRACTAL_HYBRID,
+            execution_profile=PrimitiveExecutionProfile.RUNTIME,
+            residual_mode=PrimitiveResidualMode.PLAIN,
+            readout_mode=PrimitiveReadoutMode.DIRECT,
+            norm_mode=PrimitiveNormMode.PRE_NORM_ONLY,
+            wrapper_mode=PrimitiveWrapperMode.STANDARD,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        logits = model.forward_logits(input_ids)
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertIn("p1_fractal_hybrid", model.model_label)
+
     def test_runtime_primitive_matches_reference_math_for_p20(self) -> None:
         inputs = torch.randn(2, 5, 16)
         for primitive_profile in PrimitiveProfile:
@@ -221,9 +236,19 @@ class Path1ModelTests(unittest.TestCase):
                 primitive_runtime_backend="triton",
             )
 
+    def test_p1_fractal_hybrid_rejects_non_dense_state_transform(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not support non-dense state transforms"):
+            build_sequence_primitive(
+                PrimitiveProfile.P1_FRACTAL_HYBRID,
+                16,
+                PrimitiveExecutionProfile.RUNTIME,
+                state_transform_mode=PrimitiveStateTransformMode.BLOCK_DIAGONAL_2,
+            )
+
     def test_primitives_use_shared_packed_input_projection_surface(self) -> None:
         expected_split_sizes = {
             PrimitiveProfile.P1: (16, 16),
+            PrimitiveProfile.P1_FRACTAL_HYBRID: (16, 16),
             PrimitiveProfile.P20: (16, 8, 16, 16),
             PrimitiveProfile.P2: (16, 8, 16, 16),
             PrimitiveProfile.P23: (16, 16, 8, 16, 16),

@@ -129,6 +129,14 @@ class Path1SpecTests(unittest.TestCase):
         variant.validate()
         self.assertIn("block-diagonal-2", variant.label)
 
+    def test_p1_fractal_hybrid_variant_is_typed_distinct_from_p1(self) -> None:
+        variant = phase1_primitive_variant(
+            primitive_profile=PrimitiveProfile.P1_FRACTAL_HYBRID,
+            execution_profile=PrimitiveExecutionProfile.RUNTIME,
+        )
+        variant.validate()
+        self.assertIn("p1-fractal-hybrid", variant.label)
+
     def test_path1_reuses_shared_state_transform_mode_contract(self) -> None:
         self.assertIs(PrimitiveStateTransformMode.BLOCK_DIAGONAL_2, SharedPrimitiveStateTransformMode.BLOCK_DIAGONAL_2)
 

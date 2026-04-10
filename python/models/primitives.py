@@ -49,6 +49,12 @@ class ContractiveRuntimePlan:
 
 
 @dataclass(frozen=True)
+class P1FractalHybridRuntimePlan:
+    gates: torch.Tensor
+    projected_inputs: torch.Tensor
+
+
+@dataclass(frozen=True)
 class P20RuntimePlan:
     update_gates: torch.Tensor
     retain_gates: torch.Tensor
@@ -169,6 +175,14 @@ def _resolve_initial_state(
     return primitive.init_state(inputs.shape[0], inputs.device, inputs.dtype)
 
 
+def _row_l2_norm(tensor: torch.Tensor) -> torch.Tensor:
+    return (tensor * tensor).sum(dim=-1, keepdim=True).add(1.0e-12).sqrt()
+
+
+def _clamp_symmetric_by_row(tensor: torch.Tensor, clamp: torch.Tensor) -> torch.Tensor:
+    return torch.maximum(torch.minimum(tensor, clamp), -clamp)
+
+
 class ContractiveSequenceMixer(SequencePrimitive):
     def __init__(self, d_model: int) -> None:
         super().__init__()
@@ -218,6 +232,80 @@ class ContractiveRuntimeSequenceMixer(ContractiveSequenceMixer):
             gate = runtime_plan.gates[:, position, :]
             mix = self.state_projection(state) + runtime_plan.projected_inputs[:, position, :]
             state = gate * mix + one_minus(gate) * state
+            outputs[:, position, :] = state
+        return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
+
+    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
+        runtime_plan = self.prepare_runtime_plan(inputs)
+        return self.scan_with_runtime_plan(
+            runtime_plan,
+            batch_size=inputs.shape[0],
+            device=inputs.device,
+            dtype=inputs.dtype,
+            seq_len=inputs.shape[1],
+            initial_state=initial_state,
+        )
+
+
+class P1FractalHybridSequenceMixer(SequencePrimitive):
+    def __init__(self, d_model: int) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.state_width = d_model
+        self.in_projection = PackedLinearProjection(
+            d_model,
+            (d_model, d_model),
+        )
+        self.state_projection = build_linear(d_model, d_model)
+
+    def _clamp_value(self, state: torch.Tensor) -> torch.Tensor:
+        return gated_sigmoid(_row_l2_norm(state)).mul(-0.225).add(0.75)
+
+    def _squared_update(self, state: torch.Tensor, projected_inputs: torch.Tensor) -> torch.Tensor:
+        squared = _clamp_symmetric_by_row(state * state, self._clamp_value(state))
+        return self.state_projection(state) + projected_inputs + squared
+
+    def step(self, state: torch.Tensor, inputs: torch.Tensor) -> SequencePrimitiveStepResult:
+        gate_inputs, projected_inputs = self.in_projection(inputs)
+        gate = gated_sigmoid(gate_inputs)
+        main_update = self._squared_update(state, projected_inputs)
+        next_state = gate * main_update + one_minus(gate) * state
+        return SequencePrimitiveStepResult(next_state=next_state, emitted_output=next_state)
+
+
+class P1FractalHybridRuntimeSequenceMixer(P1FractalHybridSequenceMixer):
+    def prepare_runtime_plan(self, inputs: torch.Tensor) -> P1FractalHybridRuntimePlan:
+        gate_inputs, projected_inputs = self.in_projection(inputs)
+        return P1FractalHybridRuntimePlan(
+            gates=gated_sigmoid(gate_inputs),
+            projected_inputs=projected_inputs,
+        )
+
+    def scan_with_runtime_plan(
+        self,
+        runtime_plan: P1FractalHybridRuntimePlan,
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        seq_len: int,
+        initial_state: torch.Tensor | None = None,
+    ) -> SequencePrimitiveScanResult:
+        state = initial_state if initial_state is not None else self.init_state(batch_size, device, dtype)
+        outputs = _allocate_emitted_outputs(
+            batch_size=batch_size,
+            seq_len=seq_len,
+            width=self.d_model,
+            device=device,
+            dtype=dtype,
+        )
+        for position in range(seq_len):
+            gate = runtime_plan.gates[:, position, :]
+            main_update = self._squared_update(
+                state,
+                runtime_plan.projected_inputs[:, position, :],
+            )
+            state = gate * main_update + one_minus(gate) * state
             outputs[:, position, :] = state
         return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
 
@@ -1059,11 +1147,18 @@ def build_sequence_primitive(
     execution_profile: PrimitiveExecutionProfile,
     state_transform_mode: PrimitiveStateTransformMode = PrimitiveStateTransformMode.DENSE,
 ) -> SequencePrimitive:
-    if state_transform_mode is not PrimitiveStateTransformMode.DENSE and profile is PrimitiveProfile.P1:
-        raise ValueError("primitive profile p1 does not support non-dense state transforms")
+    if state_transform_mode is not PrimitiveStateTransformMode.DENSE and profile in {
+        PrimitiveProfile.P1,
+        PrimitiveProfile.P1_FRACTAL_HYBRID,
+    }:
+        raise ValueError(
+            f"primitive profile {profile.value} does not support non-dense state transforms"
+        )
     if execution_profile is PrimitiveExecutionProfile.RUNTIME:
         if profile is PrimitiveProfile.P1:
             return ContractiveRuntimeSequenceMixer(d_model)
+        if profile is PrimitiveProfile.P1_FRACTAL_HYBRID:
+            return P1FractalHybridRuntimeSequenceMixer(d_model)
         if profile is PrimitiveProfile.P20:
             return P20RotaryStateOutputRuntimeSequenceMixer(d_model, state_transform_mode=state_transform_mode)
         if profile is PrimitiveProfile.P2:
@@ -1078,6 +1173,8 @@ def build_sequence_primitive(
 
     if profile is PrimitiveProfile.P1:
         return ContractiveSequenceMixer(d_model)
+    if profile is PrimitiveProfile.P1_FRACTAL_HYBRID:
+        return P1FractalHybridSequenceMixer(d_model)
     if profile is PrimitiveProfile.P20:
         return P20RotaryStateOutputSequenceMixer(d_model, state_transform_mode=state_transform_mode)
     if profile is PrimitiveProfile.P2:

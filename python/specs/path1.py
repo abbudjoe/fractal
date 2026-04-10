@@ -46,6 +46,7 @@ class ReferenceSsmProfile(StringEnum):
 
 class PrimitiveProfile(StringEnum):
     P1 = "p1"
+    P1_FRACTAL_HYBRID = "p1-fractal-hybrid"
     P20 = "p2-0"
     P2 = "p2"
     P21 = "p2-1"
