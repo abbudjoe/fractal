@@ -549,6 +549,79 @@ class Path1ModelTests(unittest.TestCase):
         self.assertTrue(torch.allclose(result.emitted_outputs, expected_outputs))
         self.assertTrue(torch.allclose(result.final_state, torch.full_like(result.final_state, 4.0)))
 
+    def test_runtime_p22_block_diagonal_2_triton_routes_to_state_sequence_scan(self) -> None:
+        runtime = build_sequence_primitive(
+            PrimitiveProfile.P22,
+            16,
+            PrimitiveExecutionProfile.RUNTIME,
+            state_transform_mode=PrimitiveStateTransformMode.BLOCK_DIAGONAL_2,
+        )
+
+        class FakeBackend:
+            def __init__(self) -> None:
+                self.sequence_calls = 0
+
+            def scan_rotary_state_block_diagonal_sequence(
+                self,
+                *,
+                update_gate: torch.Tensor,
+                retain_gate: torch.Tensor,
+                angle_cos: torch.Tensor,
+                angle_sin: torch.Tensor,
+                candidate: torch.Tensor,
+                initial_state: torch.Tensor,
+                transform_weight: torch.Tensor,
+                transform_bias: torch.Tensor,
+            ) -> tuple[torch.Tensor, torch.Tensor]:
+                self.sequence_calls += 1
+                self.last_shapes = (
+                    tuple(update_gate.shape),
+                    tuple(retain_gate.shape),
+                    tuple(angle_cos.shape),
+                    tuple(angle_sin.shape),
+                    tuple(candidate.shape),
+                    tuple(initial_state.shape),
+                    tuple(transform_weight.shape),
+                    tuple(transform_bias.shape),
+                )
+                state_outputs = torch.full_like(update_gate, 3.0)
+                final_state = torch.full_like(initial_state, 5.0)
+                return state_outputs, final_state
+
+        fake_backend = FakeBackend()
+        runtime._primitive_runtime_backend = "triton"
+        runtime._triton_backend = fake_backend
+
+        inputs = torch.randn(2, 5, 16)
+        runtime_plan = runtime.prepare_runtime_plan(inputs)
+        result = runtime.scan_with_runtime_plan(
+            runtime_plan,
+            batch_size=inputs.shape[0],
+            device=inputs.device,
+            dtype=inputs.dtype,
+            seq_len=inputs.shape[1],
+        )
+
+        self.assertEqual(fake_backend.sequence_calls, 1)
+        self.assertEqual(
+            fake_backend.last_shapes,
+            (
+                (2, 5, 32),
+                (2, 5, 32),
+                (2, 5, 16),
+                (2, 5, 16),
+                (2, 5, 32),
+                (2, 32),
+                (2, 16, 16),
+                (32,),
+            ),
+        )
+        expected_outputs = runtime_plan.output_gates * runtime.output_projection(
+            torch.full_like(runtime_plan.update_gates, 3.0)
+        )
+        self.assertTrue(torch.allclose(result.emitted_outputs, expected_outputs))
+        self.assertTrue(torch.allclose(result.final_state, torch.full_like(result.final_state, 5.0)))
+
     def test_reference_ssm_boundary_is_explicit(self) -> None:
         has_official_mamba = importlib.util.find_spec("mamba_ssm") is not None
         if has_official_mamba:
