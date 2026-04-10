@@ -27,7 +27,7 @@ def rotate_state_pairs(state: torch.Tensor, angles: torch.Tensor) -> torch.Tenso
 
 
 def leading_state_slice(state: torch.Tensor, width: int) -> torch.Tensor:
-    return state[:, :width]
+    return state[..., :width]
 
 
 class SimpleRmsNorm(nn.Module):
@@ -53,4 +53,3 @@ class PositionWiseFeedForward(nn.Module):
 
 def build_linear(d_in: int, d_out: int, *, bias: bool = True) -> nn.Linear:
     return nn.Linear(d_in, d_out, bias=bias)
-
