@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 from python.runners.mini_moe_autoresearch import (  # noqa: E402
     bitmask_to_mask,
     bitmask_to_key,
+    neighborhood_masks,
     top_selective_mask_ids_from_state,
 )
 from python.runners.mini_moe_policy_search import (  # noqa: E402
@@ -101,8 +102,26 @@ def parse_args() -> argparse.Namespace:
         choices=["dense_blend", "masked_token_update"],
         default="dense_blend",
     )
+    parser.add_argument(
+        "--mask-source",
+        choices=["state_topk", "explicit", "hamming1"],
+        default="state_topk",
+        help="How to select selective recurrent masks for replay.",
+    )
     parser.add_argument("--state-path", type=Path)
     parser.add_argument("--top-k", type=int, default=2)
+    parser.add_argument(
+        "--base-mask",
+        action="append",
+        default=[],
+        help="Repeatable comma-separated base mask for neighborhood search, e.g. 1,11,12",
+    )
+    parser.add_argument(
+        "--include-base-mask",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include each base mask itself when --mask-source=hamming1.",
+    )
     parser.add_argument(
         "--round2-mask",
         action="append",
@@ -186,6 +205,20 @@ def _configured_surface(
 
 
 def _selected_masks(args: argparse.Namespace) -> tuple[tuple[int, ...], ...]:
+    if args.mask_source == "explicit":
+        explicit_masks = tuple(_parse_int_tuple(mask) for mask in args.round2_mask)
+        if not explicit_masks:
+            raise ValueError("--mask-source=explicit requires at least one --round2-mask")
+        return explicit_masks
+    if args.mask_source == "hamming1":
+        base_masks = tuple(_parse_int_tuple(mask) for mask in args.base_mask)
+        if not base_masks:
+            raise ValueError("--mask-source=hamming1 requires at least one --base-mask")
+        return neighborhood_masks(
+            base_masks,
+            total_layers=args.total_layers,
+            include_base=args.include_base_mask,
+        )
     explicit_masks = tuple(_parse_int_tuple(mask) for mask in args.round2_mask)
     if explicit_masks:
         return explicit_masks

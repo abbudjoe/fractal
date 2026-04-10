@@ -53,6 +53,25 @@ def neighbor_masks(mask: tuple[int, ...], total_layers: int) -> tuple[tuple[int,
     return tuple(sorted(neighbors))
 
 
+def neighborhood_masks(
+    base_masks: tuple[tuple[int, ...], ...],
+    *,
+    total_layers: int,
+    include_base: bool = True,
+) -> tuple[tuple[int, ...], ...]:
+    ordered: list[tuple[int, ...]] = []
+    seen: set[tuple[int, ...]] = set()
+    for base_mask in base_masks:
+        candidates = [base_mask] if include_base else []
+        candidates.extend(neighbor_masks(base_mask, total_layers))
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            ordered.append(candidate)
+    return tuple(ordered)
+
+
 def mask_to_bitmask(mask: tuple[int, ...]) -> int:
     bitmask = 0
     for layer_index in mask:

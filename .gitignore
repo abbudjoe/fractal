@@ -1,5 +1,6 @@
 target/
 .DS_Store
+artifacts/
 .runpod-local-logs/
 .runpod-local-pids/
 __pycache__/

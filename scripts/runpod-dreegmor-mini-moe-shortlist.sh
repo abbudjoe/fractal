@@ -33,11 +33,20 @@ EXPERTS_PER_BLOCK="${EXPERTS_PER_BLOCK:-8}"
 ENTROPY_THRESHOLD="${ENTROPY_THRESHOLD:-0.95}"
 DISPATCH_EXECUTION_STRATEGY="${DISPATCH_EXECUTION_STRATEGY:-dense_gather}"
 ROUND2_EXECUTION_STRATEGY="${ROUND2_EXECUTION_STRATEGY:-dense_blend}"
+MASK_SOURCE="${MASK_SOURCE:-state_topk}"
+BASE_MASK="${BASE_MASK:-}"
+INCLUDE_BASE_MASK="${INCLUDE_BASE_MASK:-true}"
+ROUND2_MASKS="${ROUND2_MASKS:-}"
+KEEP_POD="${KEEP_POD:-false}"
 CORPUS_TRAIN_JSONL="${CORPUS_TRAIN_JSONL:-experiments/stage0/assets/fineweb/stage0-canary/train.jsonl}"
 CORPUS_EVAL_JSONL="${CORPUS_EVAL_JSONL:-experiments/stage0/assets/fineweb/stage0-canary/eval.jsonl}"
 OUTPUT_DIR="${OUTPUT_DIR:-artifacts/dreegmor-mini-moe-experiment/runpod-cuda-shortlist}"
 LEDGER_PATH="${LEDGER_PATH:-artifacts/dreegmor-mini-moe-experiment/runpod-cuda-shortlist/ledger.jsonl}"
 TOP_K="${TOP_K:-2}"
+
+if [[ "${MASK_SOURCE}" != "state_topk" && "${ROUND2_EXECUTION_STRATEGY}" == "dense_blend" ]]; then
+  ROUND2_EXECUTION_STRATEGY="masked_token_update"
+fi
 
 already_recorded() {
   local run_label="$1"
@@ -75,6 +84,33 @@ PY
 }
 
 build_mask_args() {
+  if [[ "${MASK_SOURCE}" == "explicit" ]]; then
+    if [[ -z "${ROUND2_MASKS}" ]]; then
+      echo "ROUND2_MASKS is required when MASK_SOURCE=explicit" >&2
+      return 1
+    fi
+    printf '%s\n' --mask-source explicit
+    local raw_mask
+    IFS=';' read -r -a raw_masks <<< "${ROUND2_MASKS}"
+    for raw_mask in "${raw_masks[@]}"; do
+      [[ -n "${raw_mask}" ]] || continue
+      printf '%s\n' --round2-mask "${raw_mask}"
+    done
+    return 0
+  fi
+  if [[ "${MASK_SOURCE}" == "hamming1" ]]; then
+    if [[ -z "${BASE_MASK}" ]]; then
+      echo "BASE_MASK is required when MASK_SOURCE=hamming1" >&2
+      return 1
+    fi
+    printf '%s\n' --mask-source hamming1 --base-mask "${BASE_MASK}"
+    if [[ "${INCLUDE_BASE_MASK}" == "true" ]]; then
+      printf '%s\n' --include-base-mask
+    else
+      printf '%s\n' --no-include-base-mask
+    fi
+    return 0
+  fi
   "${PYTHON_BIN}" - "${REPO_ROOT}" "${STATE_PATH}" "${TOTAL_LAYERS}" "${TOP_K}" <<'PY'
 from __future__ import annotations
 
@@ -126,9 +162,10 @@ COMMON_ARGS=(
   --entropy-threshold "${ENTROPY_THRESHOLD}"
   --dispatch-execution-strategy "${DISPATCH_EXECUTION_STRATEGY}"
   --round2-execution-strategy "${ROUND2_EXECUTION_STRATEGY}"
-  --state-path "${STATE_PATH}"
-  --top-k "${TOP_K}"
 )
+if [[ "${MASK_SOURCE}" == "state_topk" ]]; then
+  COMMON_ARGS+=(--state-path "${STATE_PATH}" --top-k "${TOP_K}")
+fi
 
 if [[ -n "${ENV_KIND}" ]]; then
   COMMON_ARGS+=(--env-kind "${ENV_KIND}")
@@ -147,6 +184,10 @@ if already_recorded "${RUN_LABEL}" "${EXPECTED_ARGS[@]}"; then
 fi
 
 echo "run ${RUN_LABEL}"
+WRAPPER_LIFECYCLE_FLAG="--stop-after-run"
+if [[ "${KEEP_POD}" == "true" ]]; then
+  WRAPPER_LIFECYCLE_FLAG="--keep-pod"
+fi
 "${WRAPPER}" \
   --pod-name "${POD_NAME}" \
   --gpu-id "${GPU_ID}" \
@@ -155,7 +196,7 @@ echo "run ${RUN_LABEL}"
   --python-requirements scripts/requirements-mini-moe-python.txt \
   --python-install-mode "${PYTHON_INSTALL_MODE}" \
   --run-timeout-seconds "${RUN_TIMEOUT_SECONDS}" \
-  --stop-after-run \
+  "${WRAPPER_LIFECYCLE_FLAG}" \
   -- \
   "${EXPECTED_ARGS[@]}"
 

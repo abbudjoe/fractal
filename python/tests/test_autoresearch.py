@@ -17,6 +17,7 @@ from python.runners.mini_moe_autoresearch import (
     load_mini_moe_autoresearch_state,
     mask_to_bitmask,
     mask_to_key,
+    neighborhood_masks,
     neighbor_masks,
     top_selective_mask_ids_from_state,
 )
@@ -49,6 +50,25 @@ class MiniMoeAutoresearchTests(unittest.TestCase):
     def test_neighbor_masks_exclude_empty_and_full_masks(self) -> None:
         self.assertEqual(neighbor_masks((0,), total_layers=2), ())
         self.assertEqual(neighbor_masks((0, 1), total_layers=3), ((0,), (1,)))
+
+    def test_neighborhood_masks_include_base_and_deduplicate(self) -> None:
+        self.assertEqual(
+            neighborhood_masks(((1, 3), (1, 3, 4)), total_layers=6),
+            (
+                (1, 3),
+                (0, 1, 3),
+                (1,),
+                (1, 2, 3),
+                (1, 3, 4),
+                (1, 3, 5),
+                (3,),
+                (0, 1, 3, 4),
+                (1, 2, 3, 4),
+                (1, 3, 4, 5),
+                (1, 4),
+                (3, 4),
+            ),
+        )
 
     def test_total_selective_search_space_excludes_reference_and_all_layer(self) -> None:
         self.assertEqual(_total_selective_search_space(1), 0)
