@@ -65,7 +65,7 @@ PY
 }
 
 normalize_schedule() {
-  printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr -d ' ,-_'
+  printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr -d ' ,_-'
 }
 
 COMMON_ARGS=(
