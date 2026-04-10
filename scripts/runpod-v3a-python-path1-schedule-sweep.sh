@@ -121,7 +121,9 @@ run_lane() {
   fi
 
   local run_label="${LABEL_PREFIX}-s${SEED}-${schedule_kind}-${PRIMITIVE_PROFILE}-schedule-${schedule}"
-  local pod_name="${POD_NAME_PREFIX}-${PRIMITIVE_PROFILE}-${schedule,,}"
+  local schedule_slug
+  schedule_slug="$(printf '%s' "${schedule}" | tr '[:upper:]' '[:lower:]')"
+  local pod_name="${POD_NAME_PREFIX}-${PRIMITIVE_PROFILE}-${schedule_slug}"
   local expected_args=(
     "${variant_args[@]}"
     "${COMMON_ARGS[@]}"
