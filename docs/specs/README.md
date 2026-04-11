@@ -19,6 +19,9 @@ This folder contains the updated planning documents with **Causal Memory Auditor
 - [`v3a-p2-primitive-quality-plan.md`](./v3a-p2-primitive-quality-plan.md) — gated primitive-internal tuning ladder for `P2`, beginning with `P2.1`
 - [`python-research-stack-foundation.md`](./python-research-stack-foundation.md) — Python architecture substrate for Path 1 and future mini-MoE work
 - [`python-path1-phase1-wrap.md`](./python-path1-phase1-wrap.md) — wrap note for the first Python-native Path 1 migration phase and the initial CUDA trio result
+- [`mamba-golf-gauntlet.md`](./mamba-golf-gauntlet.md) — public-facing proving-ground contract for `A`, native Mamba, and `P20` under Mamba-native constraints
+- [`mamba-golf-scorecard-template.md`](./mamba-golf-scorecard-template.md) — scorecard template for freezing Mamba Golf runs
+- [`mamba-golf-seed42-starter-scorecard.md`](./mamba-golf-seed42-starter-scorecard.md) — timestamped seed-42 starter result for the first Mamba Golf `A`/native Mamba/`P20` RunPod gauntlet
 - [`math-proof-program.md`](./math-proof-program.md) — shared notation and theorem-outline program for standard decoder LLMs, modern hybrid variants, `A + P2`, and the proposed Graph-of-Experts line
 - [`math/README.md`](./math/README.md) — split proof notes, theorem audit, and LaTeX source for the repo’s current math-proof program
 - [`native-internal-search-sketch.md`](./native-internal-search-sketch.md) — sketch note for a native internal-search runtime direction
