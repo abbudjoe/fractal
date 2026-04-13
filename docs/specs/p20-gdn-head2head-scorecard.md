@@ -748,6 +748,50 @@ Interpretation:
 - The next gates are: short CUDA train smoke, then 120s H100 benchmark only if
   the smoke remains stable.
 
+## Fractal Triton Matrix Kernel Smoke And Benchmark
+
+Date: 2026-04-13
+
+After fp32 and BF16 parity passed, this pass ran the Triton matrix-kernel lane
+against the Torch fused multi-read control on the same H100 pod. The benchmark
+profile resolved to the full local faithful-small surface (`1925` train steps,
+`189` eval batches, `seq_len=16`, `batch_size=1`), so the nominal smoke became
+a full tiny-corpus train/eval pass.
+
+Run contract:
+
+- RunPod GPU: `NVIDIA H100 80GB HBM3`
+- env: `primitive-triton`
+- seed: `42`
+- dtype: `bf16`
+- benchmark profile: `cuda-faithful-small-v1`
+- schedule: `RRRRRARRRRRS`
+- topology: `[5xR] -> SWA -> [5xR] -> SWA_shared`
+- profile: `gated-deltanet-p20-fused-multi-read-torch`
+
+Result:
+
+| lane | implementation | train steps | initial loss | final loss | train tok/s | CUDA peak MB | local report |
+|---|---|---:|---:|---:|---:|---:|---|
+| Triton matrix-kernel smoke | `python_reference_ssm_gdnp_fused_multi_read_triton_vector_matrix` | `1925` | `5.7545` | `2.2968` | `317.69` | `129.77` | `/Users/joseph/fractal/.runpod-local-logs/runpod-results/exp-589e3e101a2e8613/20260413T081152Z_a02/remote/artifacts/v3a-python-path1/20260413T081152Z_a02/reference-ssm-hybrid-gated-deltanet-p20-fused-multi-read-torch-schedule-rrrrrarrrrrs/report.json` |
+| Torch fused multi-read control | `python_reference_ssm_gdnp_fused_multi_read_torch` | `1925` | `5.7545` | `2.2640` | `45.25` | `129.77` | `/Users/joseph/fractal/.runpod-local-logs/runpod-results/exp-589e3e101a2e8613/20260413T081431Z_a03/remote/artifacts/v3a-python-path1/20260413T081431Z_a03/reference-ssm-hybrid-gated-deltanet-p20-fused-multi-read-torch-schedule-rrrrrarrrrrs/report.json` |
+| Triton matrix-kernel repeat | `python_reference_ssm_gdnp_fused_multi_read_triton_vector_matrix` | `1925` | `5.7545` | `2.2968` | `324.13` | `129.77` | `/Users/joseph/fractal/.runpod-local-logs/runpod-results/exp-589e3e101a2e8613/20260413T082737Z_a04/remote/artifacts/v3a-python-path1/20260413T082737Z_a04/reference-ssm-hybrid-gated-deltanet-p20-fused-multi-read-torch-schedule-rrrrrarrrrrs/report.json` |
+
+Interpretation:
+
+- The Triton matrix-kernel lane is now a real training candidate, not just a
+  parity scaffold: it trains end-to-end on the local faithful-small surface.
+- Throughput improved from `45.25 tok/s` to `324.13 tok/s`, about `7.16x`
+  faster than the Torch fused multi-read control at the same CUDA peak memory.
+- Quality still trails the Torch teacher on this tiny surface by about `0.033`
+  loss, so the acceleration path is promising but not yet a final promotion.
+- The lane no longer appears to be slower than the previously measured FLA GDN
+  lanes, so the immediate "profile because it still lags FLA badly" gate is
+  not triggered.
+- Next work should compare this Triton fused multi-read lane against pure FLA
+  GDN and FLA GDN + P20 single-read on the same benchmark surface, then decide
+  whether to spend effort on quality recovery or Parameter Golf integration.
+
 ## Reproduction
 
 ```bash
