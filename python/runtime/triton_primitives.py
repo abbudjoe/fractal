@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 
 try:  # pragma: no cover - import availability depends on runtime environment
     import triton
@@ -1469,6 +1470,392 @@ class _P20BlockDiagonalSequenceScan(torch.autograd.Function):
         )
 
 
+def _gdnp_matrix_multi_read_reference(
+    queries: torch.Tensor,
+    keys: torch.Tensor,
+    value_bases: torch.Tensor,
+    vector_states: torch.Tensor,
+    alpha_gates: torch.Tensor,
+    beta_gates: torch.Tensor,
+    aux_query_state_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    batch_size, seq_len, head_count, head_dim = queries.shape
+    matrix_state = torch.zeros(
+        batch_size,
+        head_count,
+        head_dim,
+        head_dim,
+        device=queries.device,
+        dtype=queries.dtype,
+    )
+    matrix_reads = []
+    aux_matrix_reads = []
+    aux_scale = aux_query_state_scale.view(1, head_count, head_dim)
+    for position in range(seq_len):
+        query = queries[:, position, :, :]
+        key = keys[:, position, :, :]
+        vector_heads = vector_states[:, position, :, :]
+        value = value_bases[:, position, :, :] + vector_heads
+        alpha = alpha_gates[:, position, :].view(batch_size, head_count, 1, 1)
+        beta = beta_gates[:, position, :].view(batch_size, head_count, 1, 1)
+        old_value = torch.einsum("bhvk,bhk->bhv", matrix_state, key)
+        erase = torch.einsum("bhv,bhk->bhvk", old_value, key)
+        write = torch.einsum("bhv,bhk->bhvk", value, key)
+        matrix_state = alpha * (matrix_state - beta * erase) + beta * write
+        matrix_reads.append(torch.einsum("bhvk,bhk->bhv", matrix_state, query))
+        aux_query = F.normalize(query + vector_heads * aux_scale, p=2.0, dim=-1, eps=1.0e-6)
+        aux_matrix_reads.append(torch.einsum("bhvk,bhk->bhv", matrix_state, aux_query))
+    return torch.stack(matrix_reads, dim=1), torch.stack(aux_matrix_reads, dim=1)
+
+
+if triton_runtime_available():  # pragma: no branch
+
+    @triton.jit
+    def _gdnp_matrix_multi_read_forward_kernel(
+        query_ptr,
+        key_ptr,
+        value_base_ptr,
+        vector_state_ptr,
+        alpha_ptr,
+        beta_ptr,
+        aux_scale_ptr,
+        matrix_read_ptr,
+        aux_matrix_read_ptr,
+        state_history_ptr,
+        head_dim,
+        SEQ_LEN: tl.constexpr,
+        HEAD_COUNT: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+    ):
+        batch_index = tl.program_id(0)
+        head_index = tl.program_id(1)
+        offsets = tl.arange(0, BLOCK_D)
+        row_offsets = offsets[:, None]
+        col_offsets = offsets[None, :]
+        vector_mask = offsets < head_dim
+        matrix_mask = (row_offsets < head_dim) & (col_offsets < head_dim)
+        state = tl.zeros((BLOCK_D, BLOCK_D), dtype=tl.float32)
+        aux_scale = tl.load(
+            aux_scale_ptr + head_index * head_dim + offsets,
+            mask=vector_mask,
+            other=0.0,
+        ).to(tl.float32)
+
+        for position in range(SEQ_LEN):
+            step_head_index = (batch_index * SEQ_LEN + position) * HEAD_COUNT + head_index
+            vector_base = step_head_index * head_dim
+            query = tl.load(query_ptr + vector_base + offsets, mask=vector_mask, other=0.0).to(tl.float32)
+            key = tl.load(key_ptr + vector_base + offsets, mask=vector_mask, other=0.0).to(tl.float32)
+            value_base = tl.load(value_base_ptr + vector_base + offsets, mask=vector_mask, other=0.0).to(tl.float32)
+            vector_state = tl.load(vector_state_ptr + vector_base + offsets, mask=vector_mask, other=0.0).to(tl.float32)
+            alpha = tl.load(alpha_ptr + step_head_index).to(tl.float32)
+            beta = tl.load(beta_ptr + step_head_index).to(tl.float32)
+            value = value_base + vector_state
+
+            old_value = tl.sum(state * key[None, :], axis=1)
+            state = alpha * (state - beta * old_value[:, None] * key[None, :]) + beta * value[:, None] * key[None, :]
+            state = tl.where(matrix_mask, state, 0.0)
+            state_base = step_head_index * head_dim * head_dim
+            tl.store(
+                state_history_ptr + state_base + row_offsets * head_dim + col_offsets,
+                state,
+                mask=matrix_mask,
+            )
+
+            matrix_read = tl.sum(state * query[None, :], axis=1)
+            tl.store(matrix_read_ptr + vector_base + offsets, matrix_read, mask=vector_mask)
+
+            aux_query_raw = query + vector_state * aux_scale
+            aux_norm = tl.sqrt(tl.sum(aux_query_raw * aux_query_raw, axis=0))
+            aux_query = aux_query_raw / tl.maximum(aux_norm, 1.0e-6)
+            aux_matrix_read = tl.sum(state * aux_query[None, :], axis=1)
+            tl.store(aux_matrix_read_ptr + vector_base + offsets, aux_matrix_read, mask=vector_mask)
+
+
+    @triton.jit
+    def _gdnp_matrix_multi_read_backward_kernel(
+        query_ptr,
+        key_ptr,
+        value_base_ptr,
+        vector_state_ptr,
+        alpha_ptr,
+        beta_ptr,
+        aux_scale_ptr,
+        state_history_ptr,
+        grad_matrix_read_ptr,
+        grad_aux_matrix_read_ptr,
+        grad_query_ptr,
+        grad_key_ptr,
+        grad_value_base_ptr,
+        grad_vector_state_ptr,
+        grad_alpha_ptr,
+        grad_beta_ptr,
+        grad_aux_scale_contrib_ptr,
+        head_dim,
+        SEQ_LEN: tl.constexpr,
+        HEAD_COUNT: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+    ):
+        batch_index = tl.program_id(0)
+        head_index = tl.program_id(1)
+        offsets = tl.arange(0, BLOCK_D)
+        row_offsets = offsets[:, None]
+        col_offsets = offsets[None, :]
+        vector_mask = offsets < head_dim
+        matrix_mask = (row_offsets < head_dim) & (col_offsets < head_dim)
+        grad_next_state = tl.zeros((BLOCK_D, BLOCK_D), dtype=tl.float32)
+        aux_scale = tl.load(
+            aux_scale_ptr + head_index * head_dim + offsets,
+            mask=vector_mask,
+            other=0.0,
+        ).to(tl.float32)
+        grad_aux_scale = tl.zeros((BLOCK_D,), dtype=tl.float32)
+
+        for reverse_index in range(SEQ_LEN):
+            position = SEQ_LEN - 1 - reverse_index
+            step_head_index = (batch_index * SEQ_LEN + position) * HEAD_COUNT + head_index
+            vector_base = step_head_index * head_dim
+            state_base = step_head_index * head_dim * head_dim
+
+            query = tl.load(query_ptr + vector_base + offsets, mask=vector_mask, other=0.0).to(tl.float32)
+            key = tl.load(key_ptr + vector_base + offsets, mask=vector_mask, other=0.0).to(tl.float32)
+            value_base = tl.load(value_base_ptr + vector_base + offsets, mask=vector_mask, other=0.0).to(tl.float32)
+            vector_state = tl.load(vector_state_ptr + vector_base + offsets, mask=vector_mask, other=0.0).to(tl.float32)
+            alpha = tl.load(alpha_ptr + step_head_index).to(tl.float32)
+            beta = tl.load(beta_ptr + step_head_index).to(tl.float32)
+            value = value_base + vector_state
+            state = tl.load(
+                state_history_ptr + state_base + row_offsets * head_dim + col_offsets,
+                mask=matrix_mask,
+                other=0.0,
+            ).to(tl.float32)
+            if position > 0:
+                previous_state_base = ((batch_index * SEQ_LEN + position - 1) * HEAD_COUNT + head_index) * head_dim * head_dim
+                previous_state = tl.load(
+                    state_history_ptr + previous_state_base + row_offsets * head_dim + col_offsets,
+                    mask=matrix_mask,
+                    other=0.0,
+                ).to(tl.float32)
+            else:
+                previous_state = tl.zeros((BLOCK_D, BLOCK_D), dtype=tl.float32)
+
+            grad_matrix_read = tl.load(
+                grad_matrix_read_ptr + vector_base + offsets,
+                mask=vector_mask,
+                other=0.0,
+            ).to(tl.float32)
+            grad_aux_read = tl.load(
+                grad_aux_matrix_read_ptr + vector_base + offsets,
+                mask=vector_mask,
+                other=0.0,
+            ).to(tl.float32)
+
+            grad_state = grad_next_state
+            grad_state += grad_matrix_read[:, None] * query[None, :]
+            grad_query = tl.sum(state * grad_matrix_read[:, None], axis=0)
+
+            aux_query_raw = query + vector_state * aux_scale
+            aux_norm = tl.sqrt(tl.sum(aux_query_raw * aux_query_raw, axis=0))
+            safe_aux_norm = tl.maximum(aux_norm, 1.0e-6)
+            aux_query = aux_query_raw / safe_aux_norm
+            grad_state += grad_aux_read[:, None] * aux_query[None, :]
+            grad_aux_query = tl.sum(state * grad_aux_read[:, None], axis=0)
+            aux_dot = tl.sum(grad_aux_query * aux_query, axis=0)
+            grad_aux_raw = (grad_aux_query - aux_query * aux_dot) / safe_aux_norm
+            grad_query += grad_aux_raw
+            grad_vector_state = grad_aux_raw * aux_scale
+            grad_aux_scale += grad_aux_raw * vector_state
+
+            old_value = tl.sum(previous_state * key[None, :], axis=1)
+            erase = old_value[:, None] * key[None, :]
+            write = value[:, None] * key[None, :]
+            base_state = previous_state - beta * erase
+
+            grad_alpha = tl.sum(grad_state * base_state, axis=0)
+            grad_alpha = tl.sum(grad_alpha, axis=0)
+
+            grad_base_state = alpha * grad_state
+            grad_beta = tl.sum(grad_state * write, axis=0)
+            grad_beta = tl.sum(grad_beta, axis=0)
+            grad_beta_erase = tl.sum(grad_base_state * erase, axis=0)
+            grad_beta -= tl.sum(grad_beta_erase, axis=0)
+            grad_erase = -beta * grad_base_state
+            grad_write = beta * grad_state
+
+            grad_value = tl.sum(grad_write * key[None, :], axis=1)
+            grad_key = tl.sum(grad_write * value[:, None], axis=0)
+            grad_old_value = tl.sum(grad_erase * key[None, :], axis=1)
+            grad_key += tl.sum(grad_erase * old_value[:, None], axis=0)
+            grad_previous_state = grad_base_state + grad_old_value[:, None] * key[None, :]
+            grad_key += tl.sum(previous_state * grad_old_value[:, None], axis=0)
+            grad_vector_state += grad_value
+
+            tl.store(grad_query_ptr + vector_base + offsets, grad_query, mask=vector_mask)
+            tl.store(grad_key_ptr + vector_base + offsets, grad_key, mask=vector_mask)
+            tl.store(grad_value_base_ptr + vector_base + offsets, grad_value, mask=vector_mask)
+            tl.store(grad_vector_state_ptr + vector_base + offsets, grad_vector_state, mask=vector_mask)
+            tl.store(grad_alpha_ptr + step_head_index, grad_alpha)
+            tl.store(grad_beta_ptr + step_head_index, grad_beta)
+            grad_next_state = tl.where(matrix_mask, grad_previous_state, 0.0)
+
+        aux_contrib_base = (batch_index * HEAD_COUNT + head_index) * head_dim
+        tl.store(grad_aux_scale_contrib_ptr + aux_contrib_base + offsets, grad_aux_scale, mask=vector_mask)
+
+
+class _GdnpMatrixMultiReadScan(torch.autograd.Function):
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx,
+        queries: torch.Tensor,
+        keys: torch.Tensor,
+        value_bases: torch.Tensor,
+        vector_states: torch.Tensor,
+        alpha_gates: torch.Tensor,
+        beta_gates: torch.Tensor,
+        aux_query_state_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        ensure_triton_runtime_available()
+        tensors = (
+            queries,
+            keys,
+            value_bases,
+            vector_states,
+            alpha_gates,
+            beta_gates,
+            aux_query_state_scale,
+        )
+        if any(tensor.device.type != "cuda" for tensor in tensors):
+            raise RuntimeError("GDN/P20 Triton matrix scan requires CUDA tensors")
+        if keys.shape != queries.shape or value_bases.shape != queries.shape or vector_states.shape != queries.shape:
+            raise RuntimeError("GDN/P20 Triton matrix scan requires matching [batch, seq, heads, head_dim] tensors")
+        batch_size, seq_len, head_count, head_dim = queries.shape
+        if alpha_gates.shape != (batch_size, seq_len, head_count):
+            raise RuntimeError("GDN/P20 Triton matrix scan requires alpha shape [batch, seq, heads]")
+        if beta_gates.shape != (batch_size, seq_len, head_count):
+            raise RuntimeError("GDN/P20 Triton matrix scan requires beta shape [batch, seq, heads]")
+        if aux_query_state_scale.shape != (head_count, head_dim):
+            raise RuntimeError("GDN/P20 Triton matrix scan requires aux scale shape [heads, head_dim]")
+        if head_dim > 64:
+            raise RuntimeError("GDN/P20 Triton matrix scan currently supports head_dim <= 64")
+
+        queries = queries.contiguous()
+        keys = keys.contiguous()
+        value_bases = value_bases.contiguous()
+        vector_states = vector_states.contiguous()
+        alpha_gates = alpha_gates.contiguous()
+        beta_gates = beta_gates.contiguous()
+        aux_query_state_scale = aux_query_state_scale.contiguous()
+        matrix_reads = torch.empty_like(queries)
+        aux_matrix_reads = torch.empty_like(queries)
+        state_history = torch.empty(
+            batch_size,
+            seq_len,
+            head_count,
+            head_dim,
+            head_dim,
+            device=queries.device,
+            dtype=torch.float32,
+        )
+        block_d = _next_power_of_two(head_dim)
+        grid = (batch_size, head_count)
+        _gdnp_matrix_multi_read_forward_kernel[grid](
+            queries,
+            keys,
+            value_bases,
+            vector_states,
+            alpha_gates,
+            beta_gates,
+            aux_query_state_scale,
+            matrix_reads,
+            aux_matrix_reads,
+            state_history,
+            head_dim,
+            SEQ_LEN=seq_len,
+            HEAD_COUNT=head_count,
+            BLOCK_D=block_d,
+            num_warps=4,
+        )
+        ctx.save_for_backward(
+            queries,
+            keys,
+            value_bases,
+            vector_states,
+            alpha_gates,
+            beta_gates,
+            aux_query_state_scale,
+            state_history,
+        )
+        return matrix_reads, aux_matrix_reads
+
+    @staticmethod
+    def backward(ctx, grad_matrix_reads: torch.Tensor | None, grad_aux_matrix_reads: torch.Tensor | None):  # type: ignore[override]
+        (
+            queries,
+            keys,
+            value_bases,
+            vector_states,
+            alpha_gates,
+            beta_gates,
+            aux_query_state_scale,
+            state_history,
+        ) = ctx.saved_tensors
+        if grad_matrix_reads is None:
+            grad_matrix_reads = torch.zeros_like(queries)
+        if grad_aux_matrix_reads is None:
+            grad_aux_matrix_reads = torch.zeros_like(queries)
+
+        batch_size, seq_len, head_count, head_dim = queries.shape
+        grad_queries = torch.empty_like(queries)
+        grad_keys = torch.empty_like(keys)
+        grad_value_bases = torch.empty_like(value_bases)
+        grad_vector_states = torch.empty_like(vector_states)
+        grad_alpha_gates = torch.empty_like(alpha_gates)
+        grad_beta_gates = torch.empty_like(beta_gates)
+        grad_aux_scale_contrib = torch.empty(
+            batch_size,
+            head_count,
+            head_dim,
+            device=queries.device,
+            dtype=torch.float32,
+        )
+        block_d = _next_power_of_two(head_dim)
+        grid = (batch_size, head_count)
+        _gdnp_matrix_multi_read_backward_kernel[grid](
+            queries.contiguous(),
+            keys.contiguous(),
+            value_bases.contiguous(),
+            vector_states.contiguous(),
+            alpha_gates.contiguous(),
+            beta_gates.contiguous(),
+            aux_query_state_scale.contiguous(),
+            state_history.contiguous(),
+            grad_matrix_reads.contiguous(),
+            grad_aux_matrix_reads.contiguous(),
+            grad_queries,
+            grad_keys,
+            grad_value_bases,
+            grad_vector_states,
+            grad_alpha_gates,
+            grad_beta_gates,
+            grad_aux_scale_contrib,
+            head_dim,
+            SEQ_LEN=seq_len,
+            HEAD_COUNT=head_count,
+            BLOCK_D=block_d,
+            num_warps=4,
+        )
+        grad_aux_scale = grad_aux_scale_contrib.sum(dim=0).to(dtype=aux_query_state_scale.dtype)
+        return (
+            grad_queries,
+            grad_keys,
+            grad_value_bases,
+            grad_vector_states,
+            grad_alpha_gates,
+            grad_beta_gates,
+            grad_aux_scale,
+        )
+
+
 @dataclass(frozen=True)
 class TritonPrimitiveBackend:
     name: str = "triton"
@@ -1587,6 +1974,27 @@ class TritonPrimitiveBackend:
             initial_state,
             transform_weight,
             transform_bias,
+        )
+
+    def scan_gdnp_matrix_multi_read(
+        self,
+        *,
+        queries: torch.Tensor,
+        keys: torch.Tensor,
+        value_bases: torch.Tensor,
+        vector_states: torch.Tensor,
+        alpha_gates: torch.Tensor,
+        beta_gates: torch.Tensor,
+        aux_query_state_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return _GdnpMatrixMultiReadScan.apply(
+            queries,
+            keys,
+            value_bases,
+            vector_states,
+            alpha_gates,
+            beta_gates,
+            aux_query_state_scale,
         )
 
 

@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.profiler import record_function
 
 from python.models.common import (
@@ -66,6 +67,16 @@ class P20RuntimePlan:
     angle_cos: torch.Tensor
     angle_sin: torch.Tensor
     candidates: torch.Tensor
+    output_gates: torch.Tensor
+
+
+@dataclass(frozen=True)
+class P20GdnRoleRuntimePlan:
+    queries: torch.Tensor
+    keys: torch.Tensor
+    values: torch.Tensor
+    alpha_gates: torch.Tensor
+    beta_gates: torch.Tensor
     output_gates: torch.Tensor
 
 
@@ -780,6 +791,25 @@ class B4UniversalSequenceMixer(HierarchicalComplexStatePackedRuntimeSequencePrim
         return SequencePrimitiveStepResult(next_state=next_state, emitted_output=self._emit_from_state(next_state))
 
 
+class CausalDepthwiseConv1d(nn.Module):
+    def __init__(self, width: int, *, kernel_size: int = 4, activation: bool = True) -> None:
+        super().__init__()
+        if kernel_size <= 0:
+            raise ValueError(f"causal depthwise conv kernel_size must be positive, got {kernel_size}")
+        self.width = width
+        self.kernel_size = kernel_size
+        self.activation = activation
+        self.weight = nn.Parameter(torch.zeros(width, 1, kernel_size))
+        with torch.no_grad():
+            self.weight[:, 0, -1] = 1.0
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        with record_function("path1.primitive.runtime.short_causal_conv"):
+            conv_inputs = F.pad(inputs.transpose(1, 2), (self.kernel_size - 1, 0))
+            mixed = F.conv1d(conv_inputs, self.weight, groups=self.width).transpose(1, 2)
+        return F.silu(mixed) if self.activation else mixed
+
+
 class P20RotaryStateOutputSequenceMixer(SequencePrimitive):
     def __init__(
         self,
@@ -1055,6 +1085,192 @@ class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer
             dtype=inputs.dtype,
             seq_len=inputs.shape[1],
             initial_state=initial_state,
+        )
+
+
+class P20GatedDeltaRoleSequenceMixer(SequencePrimitive):
+    def __init__(
+        self,
+        d_model: int,
+        *,
+        local_kernel_size: int = 4,
+        state_heads: int | None = None,
+    ) -> None:
+        super().__init__()
+        resolved_heads = state_heads or (4 if d_model % 4 == 0 else 1)
+        if d_model % resolved_heads != 0:
+            raise ValueError(
+                f"p2_0_gdn_role requires d_model divisible by state_heads, got {d_model} and {resolved_heads}"
+            )
+        self.d_model = d_model
+        self.state_heads = resolved_heads
+        self.head_dim = d_model // resolved_heads
+        self.state_width = self.state_heads * self.head_dim * self.head_dim
+        self.in_projection = PackedLinearProjection(d_model, (d_model, d_model, d_model), bias=False)
+        self.control_projection = PackedLinearProjection(
+            d_model,
+            (self.state_heads, self.state_heads, d_model),
+            bias=True,
+        )
+        self.q_local = CausalDepthwiseConv1d(d_model, kernel_size=local_kernel_size)
+        self.k_local = CausalDepthwiseConv1d(d_model, kernel_size=local_kernel_size)
+        self.v_local = CausalDepthwiseConv1d(d_model, kernel_size=local_kernel_size)
+        self.output_norm = SimpleRmsNorm(self.head_dim)
+        self.output_projection = build_linear(d_model, d_model)
+        self.readout_ramp_logit = nn.Parameter(torch.full((d_model,), -2.1972246))
+        self._compiled_scan_impl = None
+        self._init_gdn_role_parameters()
+
+    def _init_gdn_role_parameters(self) -> None:
+        if self.control_projection.bias is not None:
+            with torch.no_grad():
+                alpha_bias, beta_bias, output_gate_bias = self.control_projection.bias.split(
+                    self.control_projection.split_sizes,
+                    dim=0,
+                )
+                alpha_bias.fill_(1.5)
+                beta_bias.fill_(-2.0)
+                output_gate_bias.fill_(-1.5)
+        nn.init.xavier_uniform_(self.output_projection.weight, gain=0.1)
+        if self.output_projection.bias is not None:
+            nn.init.zeros_(self.output_projection.bias)
+
+    def init_state(self, batch_size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        return torch.zeros(
+            batch_size,
+            self.state_heads,
+            self.head_dim,
+            self.head_dim,
+            device=device,
+            dtype=dtype,
+        )
+
+    def _reshape_heads(self, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.reshape(*tensor.shape[:-1], self.state_heads, self.head_dim)
+
+    def prepare_runtime_plan(self, inputs: torch.Tensor) -> P20GdnRoleRuntimePlan:
+        q_inputs, k_inputs, v_inputs = self.in_projection(inputs)
+        alpha_inputs, beta_inputs, output_gate_inputs = self.control_projection(inputs)
+        queries = F.normalize(self._reshape_heads(self.q_local(q_inputs)), p=2.0, dim=-1, eps=1.0e-6)
+        keys = F.normalize(self._reshape_heads(self.k_local(k_inputs)), p=2.0, dim=-1, eps=1.0e-6)
+        values = self._reshape_heads(self.v_local(v_inputs))
+        alpha_gates = gated_sigmoid(alpha_inputs).mul(0.98).add(0.01)
+        beta_gates = gated_sigmoid(beta_inputs)
+        return P20GdnRoleRuntimePlan(
+            queries=queries,
+            keys=keys,
+            values=values,
+            alpha_gates=alpha_gates,
+            beta_gates=beta_gates,
+            output_gates=gated_sigmoid(output_gate_inputs),
+        )
+
+    def _scan_runtime_impl(
+        self,
+        state: torch.Tensor,
+        queries: torch.Tensor,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+        alpha_gates: torch.Tensor,
+        beta_gates: torch.Tensor,
+        output_gates: torch.Tensor,
+        outputs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        seq_len = queries.shape[1]
+        readout_ramp = gated_sigmoid(self.readout_ramp_logit).view(1, 1, self.d_model)
+        for position in range(seq_len):
+            query = queries[:, position, :, :]
+            key = keys[:, position, :, :]
+            value = values[:, position, :, :]
+            alpha = alpha_gates[:, position, :].view(-1, self.state_heads, 1, 1)
+            beta = beta_gates[:, position, :].view(-1, self.state_heads, 1, 1)
+            old_value = torch.einsum("bhvk,bhk->bhv", state, key)
+            erase = torch.einsum("bhv,bhk->bhvk", old_value, key)
+            write = torch.einsum("bhv,bhk->bhvk", value, key)
+            state = alpha * (state - beta * erase) + beta * write
+            read = torch.einsum("bhvk,bhk->bhv", state, query)
+            read = self.output_norm(read).reshape(read.shape[0], self.d_model)
+            projected = self.output_projection(read).unsqueeze(1)
+            gate = output_gates[:, position : position + 1, :]
+            outputs[:, position : position + 1, :] = gate * projected * readout_ramp
+        return outputs, state
+
+    def scan_with_runtime_plan(
+        self,
+        runtime_plan: P20GdnRoleRuntimePlan,
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        seq_len: int,
+        initial_state: torch.Tensor | None = None,
+    ) -> SequencePrimitiveScanResult:
+        if self._primitive_runtime_backend == "triton":
+            raise NotImplementedError("p2-0-gdn-role currently has a torch runtime only")
+        state = initial_state if initial_state is not None else self.init_state(batch_size, device, dtype)
+        outputs = _allocate_emitted_outputs(
+            batch_size=batch_size,
+            seq_len=seq_len,
+            width=self.d_model,
+            device=device,
+            dtype=dtype,
+        )
+        scan_impl = self._compiled_scan_impl or self._scan_runtime_impl
+        outputs, state = scan_impl(
+            state,
+            runtime_plan.queries,
+            runtime_plan.keys,
+            runtime_plan.values,
+            runtime_plan.alpha_gates,
+            runtime_plan.beta_gates,
+            runtime_plan.output_gates,
+            outputs,
+        )
+        return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
+
+    def configure_runtime_policy(
+        self,
+        *,
+        compile_mode: str | None,
+        primitive_runtime_backend: str | None = "torch",
+    ) -> None:
+        super().configure_runtime_policy(
+            compile_mode=None,
+            primitive_runtime_backend=primitive_runtime_backend,
+        )
+        if compile_mode is None:
+            self._compiled_scan_impl = None
+            return
+        self._compiled_scan_impl = torch.compile(
+            self._scan_runtime_impl,
+            mode=compile_mode,
+            fullgraph=False,
+        )
+
+    def scan(self, inputs: torch.Tensor, initial_state: torch.Tensor | None = None) -> SequencePrimitiveScanResult:
+        runtime_plan = self.prepare_runtime_plan(inputs)
+        return self.scan_with_runtime_plan(
+            runtime_plan,
+            batch_size=inputs.shape[0],
+            device=inputs.device,
+            dtype=inputs.dtype,
+            seq_len=inputs.shape[1],
+            initial_state=initial_state,
+        )
+
+    def step(self, state: torch.Tensor, inputs: torch.Tensor) -> SequencePrimitiveStepResult:
+        runtime_plan = self.prepare_runtime_plan(inputs.unsqueeze(1))
+        result = self.scan_with_runtime_plan(
+            runtime_plan,
+            batch_size=inputs.shape[0],
+            device=inputs.device,
+            dtype=inputs.dtype,
+            seq_len=1,
+            initial_state=state,
+        )
+        return SequencePrimitiveStepResult(
+            next_state=result.final_state,
+            emitted_output=result.emitted_outputs[:, 0, :],
         )
 
 
@@ -1611,6 +1827,7 @@ def build_sequence_primitive(
         PrimitiveProfile.P1_FRACTAL_HYBRID,
         PrimitiveProfile.P1_FRACTAL_HYBRID_COMPOSITE,
         PrimitiveProfile.P1_FRACTAL_HYBRID_DYN_GATE,
+        PrimitiveProfile.P20_GDN_ROLE,
         PrimitiveProfile.P2_MANDELBROT,
         PrimitiveProfile.P3_HIERARCHICAL,
         PrimitiveProfile.B1_FRACTAL_GATED,
@@ -1637,6 +1854,8 @@ def build_sequence_primitive(
             return P1FractalHybridDynGateSequenceMixer(d_model)
         if profile is PrimitiveProfile.P20:
             return P20RotaryStateOutputRuntimeSequenceMixer(d_model, state_transform_mode=state_transform_mode)
+        if profile is PrimitiveProfile.P20_GDN_ROLE:
+            return P20GatedDeltaRoleSequenceMixer(d_model)
         if profile is PrimitiveProfile.P2:
             return P2RotaryReadoutRuntimeSequenceMixer(d_model, state_transform_mode=state_transform_mode)
         if profile is PrimitiveProfile.P23:
@@ -1679,6 +1898,8 @@ def build_sequence_primitive(
         return P1FractalHybridDynGateSequenceMixer(d_model)
     if profile is PrimitiveProfile.P20:
         return P20RotaryStateOutputSequenceMixer(d_model, state_transform_mode=state_transform_mode)
+    if profile is PrimitiveProfile.P20_GDN_ROLE:
+        return P20GatedDeltaRoleSequenceMixer(d_model)
     if profile is PrimitiveProfile.P2:
         return P2RotaryReadoutSequenceMixer(d_model, state_transform_mode=state_transform_mode)
     if profile is PrimitiveProfile.P23:
@@ -1745,7 +1966,12 @@ class PrimitiveMixerBlock(nn.Module):
         self.output_norm = nn.LayerNorm(d_model) if wrapper_mode is PrimitiveWrapperMode.STANDARD else None
         self.input_rms_norm = SimpleRmsNorm(d_model) if wrapper_mode is PrimitiveWrapperMode.MAMBA_RMS else None
         self.output_rms_norm = SimpleRmsNorm(d_model) if wrapper_mode is PrimitiveWrapperMode.MAMBA_RMS else None
-        self.residual_scale = nn.Parameter(torch.full((d_model,), 0.5)) if residual_mode is PrimitiveResidualMode.SCALED else None
+        residual_scale_init = 0.1 if primitive_profile is PrimitiveProfile.P20_GDN_ROLE else 0.5
+        self.residual_scale = (
+            nn.Parameter(torch.full((d_model,), residual_scale_init))
+            if residual_mode is PrimitiveResidualMode.SCALED
+            else None
+        )
         self.residual_gate_projection = build_linear(d_model, d_model) if residual_mode is PrimitiveResidualMode.GATED else None
         self.wrapper_readout_projection = build_linear(d_model, d_model) if readout_mode in {PrimitiveReadoutMode.PROJECTED, PrimitiveReadoutMode.PROJECTED_NORM} else None
         self.wrapper_readout_norm = nn.LayerNorm(d_model) if readout_mode is PrimitiveReadoutMode.PROJECTED_NORM else None

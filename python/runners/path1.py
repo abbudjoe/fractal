@@ -87,7 +87,10 @@ def run_path1_variant(request: Path1RunnerRequest) -> BenchmarkReport:
 
     model = build_path1_model(request.variant, dtype_mode=request.manifest.runtime.dtype).to(device)
     model = apply_runtime_policy(model, request.manifest.runtime)
-    optimizer = torch.optim.Adam(model.parameters(), lr=request.manifest.budget.learning_rate)
+    optimizer = torch.optim.Adam(
+        model.optimizer_parameter_groups(request.manifest.budget.learning_rate),
+        lr=request.manifest.budget.learning_rate,
+    )
     warmup_model(
         model,
         optimizer,
@@ -119,6 +122,9 @@ def run_path1_variant(request: Path1RunnerRequest) -> BenchmarkReport:
         config_payload=_config_payload(request, train_steps, eval_batch_count),
         corpus_payload=corpus.corpus_stats,
     )
+    diagnostic_payload = getattr(model, "diagnostic_payload", None)
+    if callable(diagnostic_payload):
+        report.diagnostics = diagnostic_payload()
 
     output_dir = request.output_dir / _variant_output_name(request)
     output_dir.mkdir(parents=True, exist_ok=True)

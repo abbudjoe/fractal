@@ -22,6 +22,8 @@ This folder contains the updated planning documents with **Causal Memory Auditor
 - [`mamba-golf-gauntlet.md`](./mamba-golf-gauntlet.md) — public-facing proving-ground contract for `A`, native Mamba, and `P20` under Mamba-native constraints
 - [`mamba-golf-scorecard-template.md`](./mamba-golf-scorecard-template.md) — scorecard template for freezing Mamba Golf runs
 - [`mamba-golf-seed42-starter-scorecard.md`](./mamba-golf-seed42-starter-scorecard.md) — timestamped seed-42 starter result for the first Mamba Golf `A`/native Mamba/`P20` RunPod gauntlet
+- [`p20-gdn-role-candidate.md`](./p20-gdn-role-candidate.md) — first Fractal-native `P20` redesign for the Gated-DeltaNet recurrent-block role, including update/ramp/optimizer contracts and local smoke results
+- [`p20-gdn-head2head-scorecard.md`](./p20-gdn-head2head-scorecard.md) — H100 Path 1 head-to-head for `A`, native Mamba3, Fractal-native GDN, frozen `P20` Triton, and `P20-GDN-role`
 - [`math-proof-program.md`](./math-proof-program.md) — shared notation and theorem-outline program for standard decoder LLMs, modern hybrid variants, `A + P2`, and the proposed Graph-of-Experts line
 - [`math/README.md`](./math/README.md) — split proof notes, theorem audit, and LaTeX source for the repo’s current math-proof program
 - [`native-internal-search-sketch.md`](./native-internal-search-sketch.md) — sketch note for a native internal-search runtime direction

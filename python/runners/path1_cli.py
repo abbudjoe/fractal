@@ -110,6 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--data-seed", type=int)
     parser.add_argument("--total-layers", type=int)
+    parser.add_argument("--local-window", type=int)
     parser.add_argument("--layer-schedule")
     parser.add_argument("--seq-len", type=int, default=32)
     parser.add_argument("--window-stride", type=int, default=32)
@@ -199,7 +200,10 @@ def _build_shape_and_schedule(
         if args.total_layers is not None and args.total_layers != len(layer_schedule):
             parser.error("--total-layers must match the explicit --layer-schedule length")
         total_layers = len(layer_schedule)
-    return Path1ModelShape(total_layers=total_layers), layer_schedule
+    return Path1ModelShape(
+        total_layers=total_layers,
+        local_window=args.local_window or DEFAULT_PATH1_MODEL_SHAPE.local_window,
+    ), layer_schedule
 
 
 def _build_variant(args: argparse.Namespace, *, parser: argparse.ArgumentParser):
@@ -230,6 +234,24 @@ def _implementation_kind_for_variant(variant, *, primitive_runtime_backend: str)
     if variant.kind is Path1VariantKind.ATTENTION_ONLY:
         return "python_attention_sdpa"
     if variant.kind is Path1VariantKind.REFERENCE_SSM_HYBRID:
+        if variant.reference_ssm_profile.is_composite:
+            return f"python_reference_ssm_composite_{variant.reference_ssm_profile.value.replace('-', '_')}"
+        if variant.reference_ssm_profile is ReferenceSsmProfile.GATED_DELTANET_FLA:
+            return "python_reference_ssm_gated_deltanet_fla"
+        if variant.reference_ssm_profile.is_fla_gdnp_compatible:
+            law = variant.reference_ssm_profile.fla_gdnp_compatible_law.replace("-", "_")
+            return f"python_reference_ssm_gdnp_fla_compatible_{law}"
+        if variant.reference_ssm_profile.is_gdnp_fused:
+            law = variant.reference_ssm_profile.gdnp_fused_law.replace("-", "_")
+            if primitive_runtime_backend == "triton":
+                if law == "multi_read":
+                    return f"python_reference_ssm_gdnp_fused_{law}_triton_vector_matrix"
+                return f"python_reference_ssm_gdnp_fused_{law}_triton_vector"
+            return f"python_reference_ssm_gdnp_fused_{law}_torch"
+        if variant.reference_ssm_profile is ReferenceSsmProfile.GATED_DELTANET_TORCH:
+            return "python_reference_ssm_gated_deltanet_torch"
+        if variant.reference_ssm_profile.is_p20_scan:
+            return f"python_reference_ssm_{variant.reference_ssm_profile.value.replace('-', '_')}"
         return (
             "python_reference_ssm_native_runtime"
             if variant.reference_ssm_profile.runtime_oriented

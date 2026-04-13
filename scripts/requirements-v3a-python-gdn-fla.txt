@@ -1,0 +1,7 @@
+einops>=0.8.0
+flash-linear-attention==0.4.2
+ninja>=1.11.0
+numpy>=2.0.0
+packaging>=24.0
+pytest>=8.0.0
+transformers>=4.51.0

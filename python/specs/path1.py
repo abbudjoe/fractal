@@ -22,18 +22,130 @@ class Path1VariantKind(StringEnum):
 
 class HybridAttentionLayerRole(StringEnum):
     EXACT_ATTENTION = "exact-attention"
+    SHARED_EXACT_ATTENTION = "shared-exact-attention"
     REFERENCE_SSM = "reference-ssm"
     PRIMITIVE = "primitive"
 
 
 class ReferenceSsmProfile(StringEnum):
+    GATED_DELTANET_FLA = "gated-deltanet-fla"
+    GATED_DELTANET_FLA_P20_COMPAT = "gated-deltanet-fla-p20-compatible"
+    GATED_DELTANET_FLA_P20_MULTI_READ = "gated-deltanet-fla-p20-multi-read"
+    GATED_DELTANET_MAMBA3_TORCH = "gated-deltanet-mamba3-torch"
+    GATED_DELTANET_P20_FUSED_ALL_TORCH = "gated-deltanet-p20-fused-all-torch"
+    GATED_DELTANET_P20_FUSED_BETA_TORCH = "gated-deltanet-p20-fused-beta-torch"
+    GATED_DELTANET_P20_FUSED_MULTI_READ_TORCH = "gated-deltanet-p20-fused-multi-read-torch"
+    GATED_DELTANET_P20_FUSED_QKV_TORCH = "gated-deltanet-p20-fused-qkv-torch"
+    GATED_DELTANET_P20_FUSED_RESIDUAL_READOUT_TORCH = "gated-deltanet-p20-fused-residual-readout-torch"
+    GATED_DELTANET_P20_FUSED_TORCH = "gated-deltanet-p20-fused-torch"
+    GATED_DELTANET_P20_MAMBA3_TORCH = "gated-deltanet-p20-mamba3-torch"
+    GATED_DELTANET_P20_THIN_TORCH = "gated-deltanet-p20-thin-torch"
+    GATED_DELTANET_P20_TORCH = "gated-deltanet-p20-torch"
+    GATED_DELTANET_TORCH = "gated-deltanet-torch"
     MAMBA3_MIMO_REFERENCE = "mamba3-mimo-reference"
     MAMBA3_SISO_REFERENCE = "mamba3-siso-reference"
     MAMBA3_SISO_RUNTIME = "mamba3-siso-runtime"
+    P20_MAMBA3_TORCH = "p20-mamba3-torch"
+    P20_THIN_TORCH = "p20-thin-torch"
+    P20_TORCH = "p20-torch"
 
     @property
     def is_mimo(self) -> bool:
         return self is ReferenceSsmProfile.MAMBA3_MIMO_REFERENCE
+
+    @property
+    def is_gated_deltanet(self) -> bool:
+        return self in {
+            ReferenceSsmProfile.GATED_DELTANET_FLA,
+            ReferenceSsmProfile.GATED_DELTANET_FLA_P20_COMPAT,
+            ReferenceSsmProfile.GATED_DELTANET_FLA_P20_MULTI_READ,
+            ReferenceSsmProfile.GATED_DELTANET_MAMBA3_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_ALL_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_BETA_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_MULTI_READ_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_QKV_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_RESIDUAL_READOUT_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_MAMBA3_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_THIN_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_TORCH,
+        }
+
+    @property
+    def is_fla_gated_deltanet(self) -> bool:
+        return self is ReferenceSsmProfile.GATED_DELTANET_FLA
+
+    @property
+    def is_fla_gdnp_compatible(self) -> bool:
+        return self in {
+            ReferenceSsmProfile.GATED_DELTANET_FLA_P20_COMPAT,
+            ReferenceSsmProfile.GATED_DELTANET_FLA_P20_MULTI_READ,
+        }
+
+    @property
+    def fla_gdnp_compatible_law(self) -> str:
+        if self is ReferenceSsmProfile.GATED_DELTANET_FLA_P20_COMPAT:
+            return "single-read"
+        if self is ReferenceSsmProfile.GATED_DELTANET_FLA_P20_MULTI_READ:
+            return "multi-read"
+        raise ValueError(f"reference SSM profile {self.value} is not an FLA-compatible GDN/P20 profile")
+
+    @property
+    def is_gdnp_fused(self) -> bool:
+        return self in {
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_ALL_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_BETA_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_MULTI_READ_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_QKV_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_RESIDUAL_READOUT_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_TORCH,
+        }
+
+    @property
+    def gdnp_fused_law(self) -> str:
+        if self is ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_ALL_TORCH:
+            return "all"
+        if self is ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_BETA_TORCH:
+            return "beta"
+        if self is ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_MULTI_READ_TORCH:
+            return "multi-read"
+        if self is ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_QKV_TORCH:
+            return "qkv"
+        if self is ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_RESIDUAL_READOUT_TORCH:
+            return "residual-readout"
+        if self is ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_TORCH:
+            return "value"
+        raise ValueError(f"reference SSM profile {self.value} is not a fused GDN/P20 profile")
+
+    @property
+    def composite_branches(self) -> tuple[str, ...]:
+        if self is ReferenceSsmProfile.GATED_DELTANET_MAMBA3_TORCH:
+            return ("gdn", "mamba3")
+        if self is ReferenceSsmProfile.GATED_DELTANET_P20_MAMBA3_TORCH:
+            return ("gdn", "p20", "mamba3")
+        if self is ReferenceSsmProfile.GATED_DELTANET_P20_THIN_TORCH:
+            return ("gdn", "p20_thin")
+        if self is ReferenceSsmProfile.GATED_DELTANET_P20_TORCH:
+            return ("gdn", "p20")
+        if self is ReferenceSsmProfile.P20_MAMBA3_TORCH:
+            return ("p20", "mamba3")
+        return ()
+
+    @property
+    def is_composite(self) -> bool:
+        return bool(self.composite_branches)
+
+    @property
+    def is_p20_scan(self) -> bool:
+        return self in {
+            ReferenceSsmProfile.P20_THIN_TORCH,
+            ReferenceSsmProfile.P20_TORCH,
+        }
+
+    @property
+    def p20_branch_width_factor(self) -> float:
+        return 0.5 if self is ReferenceSsmProfile.P20_THIN_TORCH else 1.0
 
     @property
     def mimo_rank(self) -> int:
@@ -41,7 +153,22 @@ class ReferenceSsmProfile(StringEnum):
 
     @property
     def runtime_oriented(self) -> bool:
-        return self is ReferenceSsmProfile.MAMBA3_SISO_RUNTIME
+        return self in {
+            ReferenceSsmProfile.GATED_DELTANET_FLA,
+            ReferenceSsmProfile.GATED_DELTANET_FLA_P20_COMPAT,
+            ReferenceSsmProfile.GATED_DELTANET_FLA_P20_MULTI_READ,
+            ReferenceSsmProfile.GATED_DELTANET_MAMBA3_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_ALL_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_BETA_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_MULTI_READ_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_QKV_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_RESIDUAL_READOUT_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_MAMBA3_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_THIN_TORCH,
+            ReferenceSsmProfile.P20_MAMBA3_TORCH,
+            ReferenceSsmProfile.MAMBA3_SISO_RUNTIME,
+        }
 
 
 class PrimitiveProfile(StringEnum):
@@ -50,6 +177,7 @@ class PrimitiveProfile(StringEnum):
     P1_FRACTAL_HYBRID_COMPOSITE = "p1-fractal-hybrid-composite"
     P1_FRACTAL_HYBRID_DYN_GATE = "p1-fractal-hybrid-dyn-gate"
     P20 = "p2-0"
+    P20_GDN_ROLE = "p2-0-gdn-role"
     P2 = "p2"
     P21 = "p2-1"
     P22 = "p2-2"
@@ -72,7 +200,12 @@ class PrimitiveProfile(StringEnum):
 
     @property
     def has_explicit_internal_readout(self) -> bool:
-        return self in {PrimitiveProfile.P2, PrimitiveProfile.P22, PrimitiveProfile.P23}
+        return self in {
+            PrimitiveProfile.P20_GDN_ROLE,
+            PrimitiveProfile.P2,
+            PrimitiveProfile.P22,
+            PrimitiveProfile.P23,
+        }
 
 
 class PrimitiveResidualMode(StringEnum):
@@ -133,8 +266,14 @@ DEFAULT_PATH1_MODEL_SHAPE = Path1ModelShape()
 
 _LAYER_SCHEDULE_TOKEN_MAP = {
     "A": HybridAttentionLayerRole.EXACT_ATTENTION,
+    "S": HybridAttentionLayerRole.SHARED_EXACT_ATTENTION,
     "R": HybridAttentionLayerRole.REFERENCE_SSM,
     "P": HybridAttentionLayerRole.PRIMITIVE,
+}
+
+_EXACT_ATTENTION_ROLES = {
+    HybridAttentionLayerRole.EXACT_ATTENTION,
+    HybridAttentionLayerRole.SHARED_EXACT_ATTENTION,
 }
 
 
@@ -163,12 +302,12 @@ class Path1VariantSpec:
                 "path1_variant.layer_schedule length must match shape.total_layers"
             )
         exact_attention_layers = sum(
-            1 for role in self.layer_schedule if role is HybridAttentionLayerRole.EXACT_ATTENTION
+            1 for role in self.layer_schedule if role in _EXACT_ATTENTION_ROLES
         )
         if exact_attention_layers == 0:
             raise ValidationError("path1_variant must retain at least one exact-attention layer")
         if self.kind is Path1VariantKind.ATTENTION_ONLY:
-            if any(role is not HybridAttentionLayerRole.EXACT_ATTENTION for role in self.layer_schedule):
+            if any(role not in _EXACT_ATTENTION_ROLES for role in self.layer_schedule):
                 raise ValidationError("attention-only variant must contain only exact-attention layers")
             if any(
                 value is not None
@@ -189,14 +328,14 @@ class Path1VariantSpec:
                 raise ValidationError("reference-ssm-hybrid variant must set reference_ssm_profile")
             if self.primitive_profile is not None:
                 raise ValidationError("reference-ssm-hybrid variant must not set primitive_profile")
-            if any(role not in {HybridAttentionLayerRole.EXACT_ATTENTION, HybridAttentionLayerRole.REFERENCE_SSM} for role in self.layer_schedule):
+            if any(role not in {*_EXACT_ATTENTION_ROLES, HybridAttentionLayerRole.REFERENCE_SSM} for role in self.layer_schedule):
                 raise ValidationError("reference-ssm-hybrid schedule may contain only exact-attention and reference-SSM roles")
         elif self.kind is Path1VariantKind.PRIMITIVE_HYBRID:
             if self.primitive_profile is None:
                 raise ValidationError("primitive-hybrid variant must set primitive_profile")
             if self.reference_ssm_profile is not None:
                 raise ValidationError("primitive-hybrid variant must not set reference_ssm_profile")
-            if any(role not in {HybridAttentionLayerRole.EXACT_ATTENTION, HybridAttentionLayerRole.PRIMITIVE} for role in self.layer_schedule):
+            if any(role not in {*_EXACT_ATTENTION_ROLES, HybridAttentionLayerRole.PRIMITIVE} for role in self.layer_schedule):
                 raise ValidationError("primitive-hybrid schedule may contain only exact-attention and primitive roles")
             if any(
                 value is None
@@ -261,7 +400,7 @@ def parse_layer_schedule_spec(schedule: str) -> tuple[HybridAttentionLayerRole, 
         return tuple(_LAYER_SCHEDULE_TOKEN_MAP[token] for token in normalized)
     except KeyError as exc:
         raise ValidationError(
-            "path1_variant.layer_schedule override may contain only A, R, or P tokens"
+            "path1_variant.layer_schedule override may contain only A, S, R, or P tokens"
         ) from exc
 
 
@@ -269,6 +408,8 @@ def layer_schedule_signature(schedule: tuple[HybridAttentionLayerRole, ...]) -> 
     return "".join(
         "a"
         if role is HybridAttentionLayerRole.EXACT_ATTENTION
+        else "s"
+        if role is HybridAttentionLayerRole.SHARED_EXACT_ATTENTION
         else "r"
         if role is HybridAttentionLayerRole.REFERENCE_SSM
         else "p"
@@ -281,9 +422,15 @@ def phase1_attention_only_variant(
     layer_schedule: tuple[HybridAttentionLayerRole, ...] | None = None,
 ) -> Path1VariantSpec:
     schedule = layer_schedule or _attention_schedule(shape.total_layers)
+    default_schedule = _attention_schedule(shape.total_layers)
+    schedule_suffix = (
+        f"schedule-{layer_schedule_signature(schedule)}"
+        if schedule != default_schedule
+        else ""
+    )
     return Path1VariantSpec(
         kind=Path1VariantKind.ATTENTION_ONLY,
-        label="attention-only",
+        label=_variant_label("attention-only", schedule_suffix),
         shape=shape,
         layer_schedule=schedule,
     )
@@ -294,7 +441,19 @@ def phase1_reference_ssm_variant(
     profile: ReferenceSsmProfile = ReferenceSsmProfile.MAMBA3_SISO_RUNTIME,
     layer_schedule: tuple[HybridAttentionLayerRole, ...] | None = None,
 ) -> Path1VariantSpec:
-    final_norm = "rmsnorm" if profile in {ReferenceSsmProfile.MAMBA3_SISO_REFERENCE, ReferenceSsmProfile.MAMBA3_SISO_RUNTIME} else "identity"
+    final_norm = (
+        "rmsnorm"
+        if profile.is_gated_deltanet
+        or profile
+        in {
+            ReferenceSsmProfile.MAMBA3_SISO_REFERENCE,
+            ReferenceSsmProfile.MAMBA3_SISO_RUNTIME,
+            ReferenceSsmProfile.P20_MAMBA3_TORCH,
+            ReferenceSsmProfile.P20_THIN_TORCH,
+            ReferenceSsmProfile.P20_TORCH,
+        }
+        else "identity"
+    )
     default_schedule = _alternating_schedule(shape.total_layers, HybridAttentionLayerRole.REFERENCE_SSM)
     schedule = layer_schedule or default_schedule
     schedule_suffix = (

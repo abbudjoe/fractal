@@ -14,7 +14,8 @@ from python.models.mini_moe import MiniMoeBackboneModel
 from python.models.common import leading_state_slice
 from python.models.primitives import build_sequence_primitive
 from python.models.path1 import build_path1_model
-from python.models.reference_ssm import resolve_reference_ssm_config
+from python.models.reference_ssm import GdnpFusedSequenceMixer, resolve_reference_ssm_config
+from python.models.transformer import LocalCausalSelfAttention, local_causal_attention_bias
 from python.runtime.recurrent import PackedLinearProjection
 from python.specs.mini_moe import (
     MiniMoeArchitectureSpec,
@@ -39,7 +40,9 @@ from python.specs.path1 import (
     PrimitiveResidualMode,
     PrimitiveStateTransformMode,
     PrimitiveWrapperMode,
+    Path1ModelShape,
     ReferenceSsmProfile,
+    parse_layer_schedule_spec,
     phase1_attention_only_variant,
     phase1_primitive_variant,
     phase1_reference_ssm_variant,
@@ -83,6 +86,303 @@ class Path1ModelTests(unittest.TestCase):
         logits = model.forward_logits(input_ids)
         self.assertEqual(tuple(logits.shape), (2, 8, 257))
         self.assertIn("p1_fractal_hybrid", model.model_label)
+
+    def test_p20_gdn_role_forward_cpu(self) -> None:
+        variant = phase1_primitive_variant(
+            primitive_profile=PrimitiveProfile.P20_GDN_ROLE,
+            execution_profile=PrimitiveExecutionProfile.RUNTIME,
+            residual_mode=PrimitiveResidualMode.SCALED,
+            readout_mode=PrimitiveReadoutMode.DIRECT,
+            norm_mode=PrimitiveNormMode.PRE_NORM_ONLY,
+            wrapper_mode=PrimitiveWrapperMode.MAMBA_RMS,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        logits = model.forward_logits(input_ids)
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertIn("p2_0_gdn_role", model.model_label)
+
+    def test_gated_deltanet_reference_forward_cpu(self) -> None:
+        variant = phase1_reference_ssm_variant(profile=ReferenceSsmProfile.GATED_DELTANET_TORCH)
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertIn("gated_deltanet_torch", model.model_label)
+
+    def test_gated_deltanet_reference_is_causal(self) -> None:
+        variant = phase1_reference_ssm_variant(profile=ReferenceSsmProfile.GATED_DELTANET_TORCH)
+        model = build_path1_model(variant, dtype_mode="fp32")
+        prefix = torch.randint(low=0, high=257, size=(1, 6), dtype=torch.long)
+        suffix_a = torch.randint(low=0, high=257, size=(1, 4), dtype=torch.long)
+        suffix_b = torch.randint(low=0, high=257, size=(1, 4), dtype=torch.long)
+
+        logits_a = model.forward_logits(torch.cat((prefix, suffix_a), dim=1))
+        logits_b = model.forward_logits(torch.cat((prefix, suffix_b), dim=1))
+
+        self.assertTrue(torch.allclose(logits_a[:, : prefix.shape[1], :], logits_b[:, : prefix.shape[1], :]))
+
+    def test_gated_deltanet_pr_topology_reuses_shared_swa_attention(self) -> None:
+        schedule = parse_layer_schedule_spec("RRRRRARRRRRS")
+        variant = phase1_reference_ssm_variant(
+            shape=Path1ModelShape(total_layers=len(schedule), local_window=4),
+            profile=ReferenceSsmProfile.GATED_DELTANET_TORCH,
+            layer_schedule=schedule,
+        )
+
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        logits = model.forward_logits(input_ids)
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertIs(model.blocks[5].attention, model.blocks[11].attention)
+        self.assertIsNot(model.blocks[5], model.blocks[11])
+        self.assertIn("schedule_rrrrrarrrrrs", model.model_label)
+
+    def test_gated_deltanet_p20_composite_forward_cpu(self) -> None:
+        variant = phase1_reference_ssm_variant(profile=ReferenceSsmProfile.GATED_DELTANET_P20_TORCH)
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        first_composite = model.blocks[1].mixer
+        self.assertEqual(first_composite.branch_names, ("gdn", "p20"))
+        self.assertIn("gated_deltanet_p20_torch", model.model_label)
+        diagnostics = model.diagnostic_payload()
+        summary = diagnostics["composite_branch_weight_summary"]
+        self.assertEqual(summary["gdn"]["layer_count"], 4)
+        self.assertAlmostEqual(summary["gdn"]["mean_weight_across_layers"], 0.5)
+        self.assertAlmostEqual(summary["p20"]["mean_weight_across_layers"], 0.5)
+
+    def test_gated_deltanet_thin_p20_composite_forward_cpu(self) -> None:
+        variant = phase1_reference_ssm_variant(profile=ReferenceSsmProfile.GATED_DELTANET_P20_THIN_TORCH)
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        first_composite = model.blocks[1].mixer
+        self.assertEqual(first_composite.branch_names, ("gdn", "p20_thin"))
+        p20_branch = first_composite.branches["p20_thin"]
+        self.assertEqual(p20_branch.bottleneck_width, 64)
+        diagnostics = model.diagnostic_payload()
+        first_block = diagnostics["reference_ssm_blocks"][0]
+        thin_branch = first_block["mixer"]["branches"][1]
+        self.assertEqual(thin_branch["module"]["bottleneck_width"], 64)
+
+    def test_p20_reference_ssm_scan_forward_cpu(self) -> None:
+        variant = phase1_reference_ssm_variant(profile=ReferenceSsmProfile.P20_TORCH)
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertIn("p20_torch", model.model_label)
+
+    def test_gdnp_fused_reference_forward_cpu(self) -> None:
+        profiles = (
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_BETA_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_QKV_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_RESIDUAL_READOUT_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_MULTI_READ_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_ALL_TORCH,
+        )
+        for profile in profiles:
+            with self.subTest(profile=profile.value):
+                variant = phase1_reference_ssm_variant(profile=profile)
+                model = build_path1_model(variant, dtype_mode="fp32")
+                input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+                logits = model.forward_logits(input_ids)
+
+                self.assertEqual(tuple(logits.shape), (2, 8, 257))
+                self.assertIn(profile.value.replace("-", "_"), model.model_label)
+                diagnostics = model.diagnostic_payload()
+                first_block = diagnostics["reference_ssm_blocks"][0]
+                self.assertEqual(first_block["mixer"]["kind"], "gdnp-fused")
+                self.assertEqual(first_block["mixer"]["law"], profile.gdnp_fused_law)
+                self.assertEqual(first_block["mixer"]["vector_state_width"], 128)
+
+    def test_gdnp_fused_reference_is_causal(self) -> None:
+        variant = phase1_reference_ssm_variant(profile=ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_TORCH)
+        model = build_path1_model(variant, dtype_mode="fp32")
+        prefix = torch.randint(low=0, high=257, size=(1, 6), dtype=torch.long)
+        suffix_a = torch.randint(low=0, high=257, size=(1, 4), dtype=torch.long)
+        suffix_b = torch.randint(low=0, high=257, size=(1, 4), dtype=torch.long)
+
+        logits_a = model.forward_logits(torch.cat((prefix, suffix_a), dim=1))
+        logits_b = model.forward_logits(torch.cat((prefix, suffix_b), dim=1))
+
+        self.assertTrue(torch.allclose(logits_a[:, : prefix.shape[1], :], logits_b[:, : prefix.shape[1], :]))
+
+    def test_gdnp_fused_triton_policy_routes_vector_scan_to_sequence_kernel(self) -> None:
+        config = resolve_reference_ssm_config(
+            d_model=32,
+            head_count=4,
+            profile=ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_MULTI_READ_TORCH,
+            dtype_mode="fp32",
+        )
+        mixer = GdnpFusedSequenceMixer(config)
+
+        class FakeBackend:
+            def __init__(self) -> None:
+                self.sequence_calls = 0
+                self.matrix_calls = 0
+
+            def scan_rotary_state_block_diagonal_sequence(
+                self,
+                *,
+                update_gate: torch.Tensor,
+                retain_gate: torch.Tensor,
+                angle_cos: torch.Tensor,
+                angle_sin: torch.Tensor,
+                candidate: torch.Tensor,
+                initial_state: torch.Tensor,
+                transform_weight: torch.Tensor,
+                transform_bias: torch.Tensor,
+            ) -> tuple[torch.Tensor, torch.Tensor]:
+                self.sequence_calls += 1
+                self.last_shapes = (
+                    tuple(update_gate.shape),
+                    tuple(retain_gate.shape),
+                    tuple(angle_cos.shape),
+                    tuple(angle_sin.shape),
+                    tuple(candidate.shape),
+                    tuple(initial_state.shape),
+                    tuple(transform_weight.shape),
+                    tuple(transform_bias.shape),
+                )
+                return (
+                    torch.full_like(update_gate, 0.25),
+                    torch.full_like(initial_state, 0.5),
+                )
+
+            def scan_gdnp_matrix_multi_read(
+                self,
+                *,
+                queries: torch.Tensor,
+                keys: torch.Tensor,
+                value_bases: torch.Tensor,
+                vector_states: torch.Tensor,
+                alpha_gates: torch.Tensor,
+                beta_gates: torch.Tensor,
+                aux_query_state_scale: torch.Tensor,
+            ) -> tuple[torch.Tensor, torch.Tensor]:
+                self.matrix_calls += 1
+                self.last_matrix_shapes = (
+                    tuple(queries.shape),
+                    tuple(keys.shape),
+                    tuple(value_bases.shape),
+                    tuple(vector_states.shape),
+                    tuple(alpha_gates.shape),
+                    tuple(beta_gates.shape),
+                    tuple(aux_query_state_scale.shape),
+                )
+                return (
+                    torch.full_like(queries, 0.75),
+                    torch.full_like(queries, 0.125),
+                )
+
+        fake_backend = FakeBackend()
+        mixer._primitive_runtime_backend = "triton"
+        mixer._triton_backend = fake_backend
+
+        outputs = mixer(torch.randn(2, 5, 32))
+
+        self.assertEqual(tuple(outputs.shape), (2, 5, 32))
+        self.assertEqual(fake_backend.sequence_calls, 1)
+        self.assertEqual(fake_backend.matrix_calls, 1)
+        self.assertEqual(
+            fake_backend.last_shapes,
+            (
+                (2, 5, 32),
+                (2, 5, 32),
+                (2, 5, 16),
+                (2, 5, 16),
+                (2, 5, 32),
+                (2, 32),
+                (2, 16, 16),
+                (32,),
+            ),
+        )
+        self.assertEqual(
+            fake_backend.last_matrix_shapes,
+            (
+                (2, 5, 4, 8),
+                (2, 5, 4, 8),
+                (2, 5, 4, 8),
+                (2, 5, 4, 8),
+                (2, 5, 4),
+                (2, 5, 4),
+                (4, 8),
+            ),
+        )
+        self.assertEqual(mixer.diagnostic_payload()["primitive_runtime_backend"], "triton")
+        self.assertTrue(mixer.diagnostic_payload()["triton_matrix_scan"])
+
+    def test_fla_gdnp_compatible_profile_exposes_dependency_boundary(self) -> None:
+        has_fla = importlib.util.find_spec("fla") is not None
+        profiles = (
+            ReferenceSsmProfile.GATED_DELTANET_FLA_P20_COMPAT,
+            ReferenceSsmProfile.GATED_DELTANET_FLA_P20_MULTI_READ,
+        )
+
+        for profile in profiles:
+            with self.subTest(profile=profile.value):
+                variant = phase1_reference_ssm_variant(profile=profile)
+                if has_fla:
+                    model = build_path1_model(variant, dtype_mode="fp32")
+                    input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+                    logits = model.forward_logits(input_ids)
+                    self.assertEqual(tuple(logits.shape), (2, 8, 257))
+                    diagnostics = model.diagnostic_payload()
+                    first_block = diagnostics["reference_ssm_blocks"][0]
+                    self.assertEqual(first_block["mixer"]["kind"], "fla-gdnp-compatible")
+                    self.assertEqual(first_block["mixer"]["law"], profile.fla_gdnp_compatible_law)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "FLA gated-delta-rule import failed"):
+                        build_path1_model(variant, dtype_mode="fp32")
+
+    def test_full_window_attention_matches_explicit_causal_mask(self) -> None:
+        attention = LocalCausalSelfAttention(d_model=16, head_count=4)
+        hidden = torch.randn(2, 6, 16)
+        explicit_mask = local_causal_attention_bias(
+            seq_len=hidden.shape[1],
+            local_window=hidden.shape[1],
+            device=hidden.device,
+            dtype=hidden.dtype,
+        )
+
+        implicit = attention(hidden, None)
+        explicit = attention(hidden, explicit_mask)
+
+        self.assertTrue(torch.allclose(implicit, explicit, atol=1.0e-5, rtol=1.0e-5))
+
+    def test_mamba_composite_profiles_keep_explicit_dependency_boundary(self) -> None:
+        has_official_mamba = importlib.util.find_spec("mamba_ssm") is not None
+        mamba_profiles = (
+            ReferenceSsmProfile.GATED_DELTANET_MAMBA3_TORCH,
+            ReferenceSsmProfile.GATED_DELTANET_P20_MAMBA3_TORCH,
+            ReferenceSsmProfile.P20_MAMBA3_TORCH,
+        )
+        for profile in mamba_profiles:
+            with self.subTest(profile=profile.value):
+                variant = phase1_reference_ssm_variant(profile=profile)
+                if has_official_mamba:
+                    model = build_path1_model(variant, dtype_mode="fp32")
+                    input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+                    logits = model.forward_logits(input_ids)
+                    self.assertEqual(tuple(logits.shape), (2, 8, 257))
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "official PyTorch Mamba3 import failed"):
+                        build_path1_model(variant, dtype_mode="fp32")
 
     def test_legacy_primitive_ports_scan_cpu(self) -> None:
         inputs = torch.randn(2, 5, 16)
@@ -299,6 +599,15 @@ class Path1ModelTests(unittest.TestCase):
                         state_transform_mode=PrimitiveStateTransformMode.BLOCK_DIAGONAL_2,
                     )
 
+    def test_p20_gdn_role_rejects_non_dense_state_transform(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not support non-dense state transforms"):
+            build_sequence_primitive(
+                PrimitiveProfile.P20_GDN_ROLE,
+                16,
+                PrimitiveExecutionProfile.RUNTIME,
+                state_transform_mode=PrimitiveStateTransformMode.BLOCK_DIAGONAL_2,
+            )
+
     def test_primitives_use_shared_packed_input_projection_surface(self) -> None:
         expected_split_sizes = {
             PrimitiveProfile.P1: (16, 16),
@@ -306,6 +615,7 @@ class Path1ModelTests(unittest.TestCase):
             PrimitiveProfile.P1_FRACTAL_HYBRID_COMPOSITE: (16, 16),
             PrimitiveProfile.P1_FRACTAL_HYBRID_DYN_GATE: (16, 16),
             PrimitiveProfile.P20: (16, 8, 16, 16),
+            PrimitiveProfile.P20_GDN_ROLE: (16, 16, 16),
             PrimitiveProfile.P2: (16, 8, 16, 16),
             PrimitiveProfile.P23: (16, 16, 8, 16, 16),
             PrimitiveProfile.P21: (32, 16, 32, 16),
@@ -333,6 +643,41 @@ class Path1ModelTests(unittest.TestCase):
 
                 self.assertIsInstance(primitive.in_projection, PackedLinearProjection)
                 self.assertEqual(primitive.in_projection.split_sizes, split_sizes)
+
+    def test_p20_gdn_role_causal_prefix_invariance(self) -> None:
+        primitive = build_sequence_primitive(
+            PrimitiveProfile.P20_GDN_ROLE,
+            16,
+            PrimitiveExecutionProfile.RUNTIME,
+        )
+        prefix = torch.randn(2, 6, 16)
+        suffix = torch.randn(2, 3, 16)
+        prefix_outputs = primitive.scan(prefix).emitted_outputs
+        extended_outputs = primitive.scan(torch.cat([prefix, suffix], dim=1)).emitted_outputs[:, :6, :]
+        self.assertTrue(torch.allclose(prefix_outputs, extended_outputs, atol=1.0e-5, rtol=1.0e-5))
+
+    def test_p20_gdn_role_optimizer_groups_are_disjoint(self) -> None:
+        variant = phase1_primitive_variant(
+            primitive_profile=PrimitiveProfile.P20_GDN_ROLE,
+            execution_profile=PrimitiveExecutionProfile.RUNTIME,
+            residual_mode=PrimitiveResidualMode.SCALED,
+            readout_mode=PrimitiveReadoutMode.DIRECT,
+            norm_mode=PrimitiveNormMode.PRE_NORM_ONLY,
+            wrapper_mode=PrimitiveWrapperMode.MAMBA_RMS,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        groups = model.optimizer_parameter_groups(1.0e-3)
+        group_names = {group["name"] for group in groups}
+        self.assertIn("p20_gdn_recurrent", group_names)
+        self.assertIn("p20_gdn_gates", group_names)
+        self.assertIn("p20_gdn_readout", group_names)
+        self.assertIn("p20_gdn_scalars", group_names)
+        grouped_params = [param for group in groups for param in group["params"]]
+        self.assertEqual(len({id(param) for param in grouped_params}), len(grouped_params))
+        self.assertEqual(
+            {id(param) for param in model.parameters() if param.requires_grad},
+            {id(param) for param in grouped_params},
+        )
 
     def test_runtime_p20_block_diagonal_triton_routes_to_sequence_scan(self) -> None:
         runtime = build_sequence_primitive(
@@ -821,6 +1166,17 @@ class Path1ModelTests(unittest.TestCase):
         self.assertEqual(runtime.chunk_size, 8)
         self.assertFalse(reference.runtime_oriented)
         self.assertTrue(runtime.runtime_oriented)
+
+    def test_gated_deltanet_reference_profile_is_internal_torch_baseline(self) -> None:
+        config = resolve_reference_ssm_config(
+            d_model=128,
+            head_count=4,
+            profile=ReferenceSsmProfile.GATED_DELTANET_TORCH,
+            dtype_mode="fp32",
+        )
+
+        self.assertFalse(config.runtime_oriented)
+        self.assertTrue(config.profile.is_gated_deltanet)
 
 
 class MiniMoeModelTests(unittest.TestCase):

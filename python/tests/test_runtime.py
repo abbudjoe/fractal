@@ -38,6 +38,24 @@ class CudaSetupPatchTests(unittest.TestCase):
         self.assertNotIn("arch=compute_75,code=sm_75", patched)
         self.assertIn("# HACK:", patched)
 
+    def test_patches_causal_conv1d_arch_block_with_ptx_fallback(self) -> None:
+        original = """
+        cc_flag.append("-gencode")
+        cc_flag.append("arch=compute_80,code=sm_80")
+        if bare_metal_version >= Version("11.8"):
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_90,code=sm_90")
+
+    # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
+""".lstrip(
+            "\n"
+        )
+        patched = patch_cuda_setup_text(original, "9.0+PTX")
+        self.assertIn('cc_flag.append("arch=compute_90,code=sm_90")', patched)
+        self.assertIn('cc_flag.append("arch=compute_90,code=compute_90")', patched)
+        self.assertNotIn("arch=compute_80,code=sm_80", patched)
+        self.assertIn("# HACK:", patched)
+
     def test_raises_when_arch_block_missing(self) -> None:
         with self.assertRaisesRegex(ValueError, "failed to locate CUDA arch block"):
             patch_cuda_setup_text("print('no cuda block here')\n", "8.9")

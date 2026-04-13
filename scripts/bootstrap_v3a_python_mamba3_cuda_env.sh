@@ -17,7 +17,7 @@ Optional:
   --install-mode MODE             requirements-only|official-mamba3|compile-safe|primitive-triton. Default: official-mamba3
   --torch-index-url URL           Install torch from this index before requirements (optional)
   --torch VERSION                 Explicit torch version to install before requirements (optional)
-  --cuda-arch-list ARCH           Override detected CUDA arch, e.g. 8.9
+  --cuda-arch-list ARCH           Override detected device CUDA arch, e.g. 8.9
   --force-recreate                Delete and recreate the target venv first
   --help                          Show this help
 
@@ -28,7 +28,9 @@ Environment:
 Notes:
   - This script is intended for Linux hosts with NVIDIA CUDA support.
   - The official Mamba3 path is installed from source with MAMBA_FORCE_BUILD=TRUE.
-  - When a CUDA arch is known, the Mamba build is patched to compile only that arch.
+  - When a CUDA arch is known, the Mamba build is patched to compile only the
+    nearest compiler-supported arch. If the device is newer than nvcc, the
+    build falls back to the highest available PTX target for forward JIT.
 EOF
 }
 
@@ -46,6 +48,10 @@ VENV_DIR=""
 TORCH_INDEX_URL=""
 TORCH_VERSION=""
 TRITON_VERSION="3.6.0"
+DEFAULT_TORCH_VERSION="2.4.1"
+DEFAULT_TORCH_INDEX_URL="https://download.pytorch.org/whl/cu124"
+BLACKWELL_TORCH_VERSION="2.10.0"
+BLACKWELL_TORCH_INDEX_URL="https://download.pytorch.org/whl/cu128"
 PRIMITIVE_TRITON_TORCH_VERSION="2.10.0"
 PRIMITIVE_TRITON_TORCH_INDEX_URL="https://download.pytorch.org/whl/cu128"
 CAUSAL_CONV1D_REPO="https://github.com/Dao-AILab/causal-conv1d.git"
@@ -134,6 +140,91 @@ fi
 
 python -m pip install --upgrade pip setuptools wheel >/dev/null
 
+CUDA_ARCH_LIST="${CUDA_ARCH_LIST_OVERRIDE}"
+if [[ -z "${CUDA_ARCH_LIST}" ]] && command -v nvidia-smi >/dev/null 2>&1; then
+  CUDA_ARCH_LIST="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)"
+fi
+
+first_cuda_arch_token() {
+  local arch="$1"
+  arch="${arch%%[ ;,]*}"
+  arch="${arch%+PTX}"
+  arch="${arch%+ptx}"
+  printf '%s\n' "${arch}"
+}
+
+sm_from_cuda_arch() {
+  local arch
+  arch="$(first_cuda_arch_token "$1")"
+  printf '%s\n' "${arch//./}"
+}
+
+cuda_arch_from_sm() {
+  local sm="$1"
+  if [[ "${#sm}" -le 2 ]]; then
+    printf '%s.%s\n' "${sm:0:1}" "${sm:1:1}"
+  else
+    printf '%s.%s\n' "${sm:0:${#sm}-1}" "${sm: -1}"
+  fi
+}
+
+nvcc_supports_sm() {
+  local sm="$1"
+  nvcc --list-gpu-arch 2>/dev/null | grep -qx "compute_${sm}"
+}
+
+highest_nvcc_numeric_sm() {
+  nvcc --list-gpu-arch 2>/dev/null \
+    | sed -n 's/^compute_\([0-9][0-9]*\)$/\1/p' \
+    | sort -n \
+    | tail -n 1
+}
+
+resolve_extension_cuda_arch_list() {
+  local requested_arch="$1"
+  if [[ -z "${requested_arch}" ]]; then
+    return 0
+  fi
+
+  local requested_sm
+  requested_sm="$(sm_from_cuda_arch "${requested_arch}")"
+  if nvcc_supports_sm "${requested_sm}"; then
+    printf '%s\n' "${requested_arch}"
+    return 0
+  fi
+
+  local fallback_sm
+  fallback_sm="$(highest_nvcc_numeric_sm || true)"
+  if [[ -z "${fallback_sm}" ]]; then
+    echo "warning: nvcc did not report supported GPU arches; using requested CUDA arch ${requested_arch}" >&2
+    printf '%s\n' "${requested_arch}"
+    return 0
+  fi
+
+  local fallback_arch
+  fallback_arch="$(cuda_arch_from_sm "${fallback_sm}")"
+  echo "warning: nvcc cannot compile requested CUDA arch ${requested_arch}; using ${fallback_arch}+PTX for source extensions" >&2
+  printf '%s+PTX\n' "${fallback_arch}"
+}
+
+cuda_arch_is_blackwell_or_newer() {
+  local arch="$1"
+  [[ -n "${arch}" ]] || return 1
+
+  local first_arch
+  first_arch="$(first_cuda_arch_token "${arch}")"
+  local major="${first_arch%%.*}"
+
+  [[ "${major}" =~ ^[0-9]+$ ]] || return 1
+  [[ "${major}" -ge 12 ]]
+}
+
+EXTENSION_CUDA_ARCH_LIST="$(resolve_extension_cuda_arch_list "${CUDA_ARCH_LIST}")"
+if [[ -n "${CUDA_ARCH_LIST}" && "${EXTENSION_CUDA_ARCH_LIST}" != "${CUDA_ARCH_LIST}" ]]; then
+  echo "device CUDA arch hint: ${CUDA_ARCH_LIST}"
+  echo "source-extension CUDA arch target: ${EXTENSION_CUDA_ARCH_LIST}"
+fi
+
 if [[ -z "${TORCH_VERSION}" && "${INSTALL_MODE}" == "primitive-triton" ]]; then
   TORCH_VERSION="${PRIMITIVE_TRITON_TORCH_VERSION}"
   if [[ -z "${TORCH_INDEX_URL}" ]]; then
@@ -142,7 +233,14 @@ if [[ -z "${TORCH_VERSION}" && "${INSTALL_MODE}" == "primitive-triton" ]]; then
 fi
 
 if [[ -z "${TORCH_VERSION}" ]]; then
-  detected_torch_version="$("${PYTHON_BIN}" - <<'PY'
+  if cuda_arch_is_blackwell_or_newer "${CUDA_ARCH_LIST}"; then
+    TORCH_VERSION="${BLACKWELL_TORCH_VERSION}"
+    if [[ -z "${TORCH_INDEX_URL}" ]]; then
+      TORCH_INDEX_URL="${BLACKWELL_TORCH_INDEX_URL}"
+    fi
+    echo "defaulting Blackwell-or-newer torch bootstrap to ${TORCH_VERSION} from ${TORCH_INDEX_URL}"
+  else
+    detected_torch_version="$("${PYTHON_BIN}" - <<'PY'
 try:
     import torch
 except Exception:
@@ -152,20 +250,24 @@ cuda_version = getattr(torch.version, "cuda", None)
 if cuda_version:
     print(f"{version}|{cuda_version}")
 PY
-)" || detected_torch_version=""
-  if [[ -n "${detected_torch_version}" ]]; then
-    TORCH_VERSION="${detected_torch_version%%|*}"
-    if [[ -z "${TORCH_INDEX_URL}" ]]; then
-      detected_cuda_version="${detected_torch_version#*|}"
-      detected_cuda_tag="cu${detected_cuda_version//./}"
-      TORCH_INDEX_URL="https://download.pytorch.org/whl/${detected_cuda_tag}"
+  )" || detected_torch_version=""
+    if [[ -n "${detected_torch_version}" ]]; then
+      TORCH_VERSION="${detected_torch_version%%|*}"
+      if [[ -z "${TORCH_INDEX_URL}" ]]; then
+        detected_cuda_version="${detected_torch_version#*|}"
+        detected_cuda_tag="cu${detected_cuda_version//./}"
+        TORCH_INDEX_URL="https://download.pytorch.org/whl/${detected_cuda_tag}"
+      fi
+    else
+      TORCH_VERSION="${DEFAULT_TORCH_VERSION}"
+      if [[ -z "${TORCH_INDEX_URL}" ]]; then
+        TORCH_INDEX_URL="${DEFAULT_TORCH_INDEX_URL}"
+      fi
+      echo "defaulting torch bootstrap to ${TORCH_VERSION} from ${TORCH_INDEX_URL}"
     fi
-  else
-    TORCH_VERSION="2.4.1"
-    if [[ -z "${TORCH_INDEX_URL}" ]]; then
-      TORCH_INDEX_URL="https://download.pytorch.org/whl/cu124"
-    fi
-    echo "defaulting torch bootstrap to ${TORCH_VERSION} from ${TORCH_INDEX_URL}"
+  fi
+  if [[ -z "${TORCH_INDEX_URL}" ]]; then
+    die "failed to resolve torch index url"
   fi
 fi
 
@@ -189,23 +291,18 @@ fi
 
 python -m pip install --no-build-isolation -r "${REQUIREMENTS_FILE}"
 
-CUDA_ARCH_LIST="${CUDA_ARCH_LIST_OVERRIDE}"
-if [[ -z "${CUDA_ARCH_LIST}" ]] && command -v nvidia-smi >/dev/null 2>&1; then
-  CUDA_ARCH_LIST="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)"
-fi
-
 patch_cuda_setup_arch() {
   local source_dir="$1"
-  if [[ -z "${CUDA_ARCH_LIST}" ]]; then
+  if [[ -z "${EXTENSION_CUDA_ARCH_LIST}" ]]; then
     return 0
   fi
   python "${REPO_ROOT}/python/runtime/cuda_setup_patch.py" \
     "${source_dir}/setup.py" \
-    --arch "${CUDA_ARCH_LIST}"
+    --arch "${EXTENSION_CUDA_ARCH_LIST}"
 }
 
-if [[ -n "${CUDA_ARCH_LIST}" ]]; then
-  export TORCH_CUDA_ARCH_LIST="${CUDA_ARCH_LIST}"
+if [[ -n "${EXTENSION_CUDA_ARCH_LIST}" ]]; then
+  export TORCH_CUDA_ARCH_LIST="${EXTENSION_CUDA_ARCH_LIST}"
 fi
 
 if [[ "${INSTALL_MODE}" == "official-mamba3" ]]; then

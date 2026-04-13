@@ -121,18 +121,28 @@ This is intentionally explicit in the bootstrap script so the env does not
 silently fall back to the Torch-bundled Triton runtime or drift to a different
 CUDA toolchain.
 
+For Blackwell devices on older RunPod CUDA devel images, the device arch and
+compiler arch are treated as separate contracts. The bootstrap can select the
+cu128 Torch wheel for an RTX 5090 while compiling source extensions against
+the highest `nvcc`-supported `+PTX` target when the local compiler cannot emit
+`sm_120` directly. This avoids the broken implicit assumption that
+`nvidia-smi` compute capability is always a valid `nvcc` build target.
+
 ## Compile-Safe Contract
 
 The compile-safe Path 1 env is intentionally different:
 
-* `torch 2.4.1` from `cu124`
-* Torch-bundled `triton 3.0.0`
+* `torch 2.4.1` from `cu124` on pre-Blackwell CUDA hosts
+* `torch 2.10.0` from `cu128` on Blackwell-or-newer hosts (`sm_120+`)
+* Torch-bundled Triton matched to the selected Torch wheel
 * shared Python research requirements
 * no `causal-conv1d` native build
 * no `mamba_ssm` install
 
 This env exists so `torch.compile` runs for `A` and `A+P` can be evaluated
 without colliding with the Triton level required by native official Mamba.
+The bootstrap chooses the Blackwell-safe wheel before reusing any base-image
+Torch install so RTX 5090 runs do not silently inherit an `sm_90`-only runtime.
 
 ## Primitive-Triton Contract
 

@@ -28,6 +28,7 @@ from python.specs.path1 import (
     ReferenceSsmProfile,
     layer_schedule_signature,
     parse_layer_schedule_spec,
+    phase1_attention_only_variant,
     phase1_baseline_matrix,
     Path1ModelShape,
     phase1_primitive_variant,
@@ -95,6 +96,102 @@ class Path1SpecTests(unittest.TestCase):
         self.assertTrue(variant.reference_ssm_profile.is_mimo)
         self.assertEqual(variant.label, "reference-ssm-hybrid-mamba3-mimo-reference")
 
+    def test_gated_deltanet_reference_variant_tracks_profile(self) -> None:
+        variant = phase1_reference_ssm_variant(profile=ReferenceSsmProfile.GATED_DELTANET_TORCH)
+
+        variant.validate()
+
+        self.assertTrue(variant.reference_ssm_profile.is_gated_deltanet)
+        self.assertEqual(variant.final_norm_kind, "rmsnorm")
+        self.assertEqual(variant.label, "reference-ssm-hybrid-gated-deltanet-torch")
+
+    def test_fla_gated_deltanet_reference_variant_tracks_runtime_profile(self) -> None:
+        variant = phase1_reference_ssm_variant(profile=ReferenceSsmProfile.GATED_DELTANET_FLA)
+
+        variant.validate()
+
+        self.assertTrue(variant.reference_ssm_profile.is_gated_deltanet)
+        self.assertTrue(variant.reference_ssm_profile.is_fla_gated_deltanet)
+        self.assertTrue(variant.reference_ssm_profile.runtime_oriented)
+        self.assertEqual(variant.final_norm_kind, "rmsnorm")
+        self.assertEqual(variant.label, "reference-ssm-hybrid-gated-deltanet-fla")
+
+    def test_fla_gdnp_compatible_reference_variant_tracks_runtime_profile(self) -> None:
+        expected_laws = {
+            ReferenceSsmProfile.GATED_DELTANET_FLA_P20_COMPAT: "single-read",
+            ReferenceSsmProfile.GATED_DELTANET_FLA_P20_MULTI_READ: "multi-read",
+        }
+
+        for profile, law in expected_laws.items():
+            with self.subTest(profile=profile.value):
+                variant = phase1_reference_ssm_variant(profile=profile)
+
+                variant.validate()
+
+                self.assertTrue(variant.reference_ssm_profile.is_gated_deltanet)
+                self.assertTrue(variant.reference_ssm_profile.is_fla_gdnp_compatible)
+                self.assertEqual(variant.reference_ssm_profile.fla_gdnp_compatible_law, law)
+                self.assertTrue(variant.reference_ssm_profile.runtime_oriented)
+                self.assertEqual(variant.final_norm_kind, "rmsnorm")
+                self.assertIn(profile.value, variant.label)
+
+    def test_gdnp_fused_reference_variant_tracks_profile(self) -> None:
+        expected_laws = {
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_TORCH: "value",
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_BETA_TORCH: "beta",
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_QKV_TORCH: "qkv",
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_RESIDUAL_READOUT_TORCH: "residual-readout",
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_MULTI_READ_TORCH: "multi-read",
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_ALL_TORCH: "all",
+        }
+
+        for profile, law in expected_laws.items():
+            with self.subTest(profile=profile.value):
+                variant = phase1_reference_ssm_variant(profile=profile)
+
+                variant.validate()
+
+                self.assertTrue(variant.reference_ssm_profile.is_gated_deltanet)
+                self.assertTrue(variant.reference_ssm_profile.is_gdnp_fused)
+                self.assertFalse(variant.reference_ssm_profile.is_composite)
+                self.assertEqual(variant.reference_ssm_profile.gdnp_fused_law, law)
+                self.assertEqual(variant.final_norm_kind, "rmsnorm")
+                self.assertIn(profile.value, variant.label)
+
+    def test_composite_reference_variants_expose_branch_contracts(self) -> None:
+        expected = {
+            ReferenceSsmProfile.GATED_DELTANET_P20_TORCH: ("gdn", "p20"),
+            ReferenceSsmProfile.GATED_DELTANET_P20_THIN_TORCH: ("gdn", "p20_thin"),
+            ReferenceSsmProfile.P20_MAMBA3_TORCH: ("p20", "mamba3"),
+            ReferenceSsmProfile.GATED_DELTANET_MAMBA3_TORCH: ("gdn", "mamba3"),
+            ReferenceSsmProfile.GATED_DELTANET_P20_MAMBA3_TORCH: ("gdn", "p20", "mamba3"),
+        }
+
+        for profile, branches in expected.items():
+            with self.subTest(profile=profile.value):
+                variant = phase1_reference_ssm_variant(profile=profile)
+
+                variant.validate()
+
+                self.assertTrue(profile.is_composite)
+                self.assertEqual(profile.composite_branches, branches)
+                self.assertEqual(variant.final_norm_kind, "rmsnorm")
+                self.assertIn(profile.value, variant.label)
+
+    def test_p20_reference_scan_variants_expose_width_contracts(self) -> None:
+        full = phase1_reference_ssm_variant(profile=ReferenceSsmProfile.P20_TORCH)
+        thin = phase1_reference_ssm_variant(profile=ReferenceSsmProfile.P20_THIN_TORCH)
+
+        full.validate()
+        thin.validate()
+
+        self.assertTrue(full.reference_ssm_profile.is_p20_scan)
+        self.assertEqual(full.reference_ssm_profile.p20_branch_width_factor, 1.0)
+        self.assertTrue(thin.reference_ssm_profile.is_p20_scan)
+        self.assertEqual(thin.reference_ssm_profile.p20_branch_width_factor, 0.5)
+        self.assertEqual(full.final_norm_kind, "rmsnorm")
+        self.assertEqual(thin.final_norm_kind, "rmsnorm")
+
     def test_primitive_variant_label_includes_wrapper_identity(self) -> None:
         variant_a = phase1_primitive_variant(
             primitive_profile=PrimitiveProfile.P23,
@@ -148,6 +245,14 @@ class Path1SpecTests(unittest.TestCase):
         self.assertEqual(schedule[5], HybridAttentionLayerRole.PRIMITIVE)
         self.assertEqual(layer_schedule_signature(schedule), "aaaaapaaaaa")
 
+    def test_parse_layer_schedule_spec_accepts_shared_swa_token(self) -> None:
+        schedule = parse_layer_schedule_spec("RRRRRARRRRRS")
+
+        self.assertEqual(len(schedule), 12)
+        self.assertEqual(schedule[5], HybridAttentionLayerRole.EXACT_ATTENTION)
+        self.assertEqual(schedule[11], HybridAttentionLayerRole.SHARED_EXACT_ATTENTION)
+        self.assertEqual(layer_schedule_signature(schedule), "rrrrrarrrrrs")
+
     def test_parse_layer_schedule_spec_rejects_unknown_tokens(self) -> None:
         with self.assertRaises(ValidationError):
             parse_layer_schedule_spec("AAAXP")
@@ -169,6 +274,16 @@ class Path1SpecTests(unittest.TestCase):
         variant.validate()
         self.assertEqual(variant.shape.total_layers, 11)
         self.assertIn("schedule-aaaaapaaaaa", variant.label)
+
+    def test_attention_variant_tracks_shared_swa_schedule_in_label(self) -> None:
+        schedule = parse_layer_schedule_spec("AAAAAS")
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(total_layers=len(schedule)),
+            layer_schedule=schedule,
+        )
+
+        variant.validate()
+        self.assertEqual(variant.label, "attention-only-schedule-aaaaas")
 
     def test_path1_reuses_shared_state_transform_mode_contract(self) -> None:
         self.assertIs(PrimitiveStateTransformMode.BLOCK_DIAGONAL_2, SharedPrimitiveStateTransformMode.BLOCK_DIAGONAL_2)

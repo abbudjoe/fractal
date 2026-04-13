@@ -52,6 +52,7 @@ class BenchmarkReport:
     final_eval: EvalSummary
     runtime: RuntimeSummary
     train_steps: list[TrainStepRecord]
+    diagnostics: dict[str, Any] = field(default_factory=dict)
     report_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -69,4 +70,3 @@ def append_ledger_entry(path: Path, entry: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(to_jsonable(entry), sort_keys=True) + "\n")
-
