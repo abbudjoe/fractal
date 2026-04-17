@@ -44,6 +44,19 @@ class SymbolicDatasetTests(unittest.TestCase):
             self.assertTrue(dataset.extrapolation.finite())
             self.assertIn("source_formula", dataset.metadata()["task"])
 
+    def test_default_tasks_support_larger_depth_bins(self) -> None:
+        spec = SymbolicDatasetSpec(train_samples=8, validation_samples=10, extrapolation_samples=10, tasks_per_depth=4)
+        spec.validate()
+        tasks = default_symbolic_tasks(tasks_per_depth=4)
+
+        self.assertEqual(len(tasks), 16)
+        self.assertEqual({depth: sum(task.difficulty_depth == depth for task in tasks) for depth in (1, 2, 3, 4)}, {1: 4, 2: 4, 3: 4, 4: 4})
+        for task in tasks:
+            dataset = sample_symbolic_dataset(task, spec, seed=456)
+            self.assertTrue(dataset.train.finite())
+            self.assertTrue(dataset.validation.finite())
+            self.assertTrue(dataset.extrapolation.finite())
+
     def test_tier0_tasks_are_shallow_and_finite(self) -> None:
         spec = SymbolicDatasetSpec(train_samples=8, validation_samples=10, extrapolation_samples=10)
         tasks = tier0_exact_recovery_tasks()

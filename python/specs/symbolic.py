@@ -36,8 +36,8 @@ class SymbolicDatasetSpec:
         ensure_positive(self.validation_samples, "symbolic_dataset.validation_samples")
         ensure_positive(self.extrapolation_samples, "symbolic_dataset.extrapolation_samples")
         ensure_positive(self.tasks_per_depth, "symbolic_dataset.tasks_per_depth")
-        if self.tasks_per_depth > 2:
-            raise ValidationError("symbolic_dataset.tasks_per_depth currently supports at most 2")
+        if self.tasks_per_depth > 4:
+            raise ValidationError("symbolic_dataset.tasks_per_depth currently supports at most 4")
 
 
 @dataclass(frozen=True)

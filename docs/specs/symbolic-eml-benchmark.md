@@ -852,3 +852,88 @@ Updated recommendation:
   adapter/router harness and keep the no-safe abstention cases in the training
   mixture. Do not relax the unsafe-call gate just because the router is more
   capable.
+
+## Larger Compact Scaling Run
+
+The next scaling pass lifted the compact generator to four tasks per depth and
+ran three seeds on Torch/MPS. This keeps the same depth bins and benchmark
+contracts, but doubles the formula families per depth and adds a third seed.
+
+Large symbolic artifact:
+
+```text
+artifacts/symbolic-benchmark/symbolic-compact-torch-mps-large-v1/
+```
+
+Command:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_benchmark.py \
+  --preset compact \
+  --run-label symbolic-compact-torch-mps-large-v1 \
+  --output-dir artifacts/symbolic-benchmark/symbolic-compact-torch-mps-large-v1 \
+  --seeds 3 \
+  --tasks-per-depth 4 \
+  --steps 240 \
+  --tree-learning-rate 0.05 \
+  --tree-optimizer torch-autodiff \
+  --backend mps \
+  --paper-restarts 6 \
+  --output table
+```
+
+| model | soft val RMSE | hard val RMSE | hard extrap RMSE | exact | near exact | harden | export | compile |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `generic-tree` | 0.3427 | 0.3428 | 0.4480 | 0.00 | 0.00 | 1.00 | 1.00 | 1.00 |
+| `paper-complex-eml` | 0.0963 | 6.557e-05 | 8.859e-04 | 0.44 | 0.56 | 1.00 | 1.00 | 1.00 |
+| `small-mlp` | 0.0109 | 0.0518 | 0.1941 | 0.00 | 0.02 | 0.71 | 0.00 | 1.00 |
+| `stable-real-eml` | 0.0161 | 0.0209 | 0.0879 | 0.00 | 0.15 | 1.00 | 1.00 | 1.00 |
+
+Large bridge artifact:
+
+```text
+artifacts/symbolic-bridge/symbolic-bridge-compact-large-v1/
+```
+
+| model | validation token accuracy | extrap token accuracy | validation RMSE | extrap RMSE | source exact |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `generic-tree` | 0.062 | 0.062 | 0.3428 | 0.4480 | 0.00 |
+| `paper-complex-eml` | 1.000 | 0.969 | 6.557e-05 | 8.859e-04 | 0.44 |
+| `small-mlp` | 0.297 | 0.010 | 0.05184 | 0.1941 | 0.00 |
+| `stable-real-eml` | 0.599 | 0.099 | 0.02085 | 0.08788 | 0.00 |
+
+Large bridge table:
+
+```text
+feature rows: 16128
+split counts: train=2304, safety_calibration=4608, validation=4608, extrapolation=4608
+safe coverage: train=0.988, safety_calibration=0.714, validation=0.991, extrapolation=0.747
+fit_abstain_target_rate: 0.195
+```
+
+Large bridge-LM artifacts:
+
+```text
+artifacts/symbolic-bridge-lm/symbolic-bridge-lm-compact-large-control-t99999-v1/
+artifacts/symbolic-bridge-lm/symbolic-bridge-lm-compact-large-c5-t99999-v1/
+artifacts/symbolic-bridge-lm/symbolic-bridge-lm-compact-large-control-t80-v1/
+```
+
+| condition | extrap final accuracy | extrap LM accuracy | router extrap accuracy | expert call rate | unsafe call rate | abstain recall | contract |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| strict threshold | 0.864 | 0.760 | 0.807 | 0.573 | 0.008 | 0.986 | true |
+| call/abstain loss + strict threshold | 0.877 | 0.773 | 0.817 | 0.582 | 0.008 | 0.985 | true |
+| threshold `0.8` negative control | 0.872 | 0.756 | 0.887 | 0.710 | 0.038 | 0.901 | false |
+
+Scaling verdict:
+
+- The paper-complex arm scales better than the practical surrogate on symbolic
+  recovery. On the larger run it is no longer just the hardening leader; it is
+  also the hardened extrapolation leader.
+- The strict calibrated router contract holds on the larger table even though
+  extrapolation has more no-safe cases (`0.253` abstain target rate).
+- The call/abstain loss is now the best candidate for the next bridge run:
+  it improves extrapolation from `0.864` to `0.877` while preserving the strict
+  unsafe-call gate at `0.008`.
+- The `0.8` threshold remains a useful negative control: it is capable, but
+  unsafe. The bridge should continue with the strict calibrated call boundary.
