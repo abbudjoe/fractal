@@ -733,21 +733,23 @@ Updated bridge artifacts:
 
 ```text
 artifacts/symbolic-bridge/symbolic-bridge-tier0-both-v4/
-artifacts/symbolic-bridge/symbolic-bridge-compact-both-v5/
+artifacts/symbolic-bridge/symbolic-bridge-compact-both-v7/
 ```
 
 | preset | train rows | safety rows | validation rows | extrap rows | safety safe-expert coverage | extrap safe-expert coverage |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | tier-0 | 640 | 640 | 1280 | 1280 | 1.000 | 1.000 |
-| compact | 768 | 768 | 1536 | 1536 | 0.785 | 0.783 |
+| compact v5 | 768 | 768 | 1536 | 1536 | 0.785 | 0.783 |
+| compact v7 | 768 | 1536 | 1536 | 1536 | 0.786 | 0.783 |
 
-The compact v5 table uses a deliberately pessimistic safety-calibration sample:
-when no-safe candidates exist, it targets an abstain-heavy safety split and then
-prefers out-of-training-range safe examples for the remaining rows. This makes
-the fit split closer to extrapolation: `fit_abstain_target_rate=0.107` versus
-`0.217` on extrapolation. The earlier compact v4 table had only
-`fit_abstain_target_rate=0.063`, which was too mild for the extrapolation
-safety boundary.
+The compact v7 table keeps the deliberately pessimistic no-safe calibration
+sample, expands safety calibration to the validation/extrapolation sequence
+length, and prefers out-of-training-range safe rows nearest to no-safe rows. The
+LM batch contract now masks variable-length sequences, so the expanded safety
+split can train together with the shorter train split without treating padding
+as data. This moves the fit split closer to extrapolation:
+`fit_abstain_target_rate=0.142` versus `0.217` on extrapolation. The earlier
+compact v5 table had only `fit_abstain_target_rate=0.107`.
 
 Safety-calibrated bridge commands:
 
@@ -760,8 +762,8 @@ python scripts/symbolic_bridge.py \
 
 python scripts/symbolic_bridge.py \
   --symbolic-summary artifacts/symbolic-benchmark/symbolic-compact-torch-mps-sparse-loglift-v2/summary.json \
-  --run-label symbolic-bridge-compact-both-v5 \
-  --output-dir artifacts/symbolic-bridge/symbolic-bridge-compact-both-v5 \
+  --run-label symbolic-bridge-compact-both-v7 \
+  --output-dir artifacts/symbolic-bridge/symbolic-bridge-compact-both-v7 \
   --token-bins 32
 ```
 
@@ -780,67 +782,73 @@ artifacts/symbolic-bridge-lm/symbolic-bridge-lm-tier0-safety-v1/
 Compact safety-calibrated LM artifact:
 
 ```text
-artifacts/symbolic-bridge-lm/symbolic-bridge-lm-compact-safety-v5-threshold80-v1/
+artifacts/symbolic-bridge-lm/symbolic-bridge-lm-compact-v7-c5-t99999-v1/
 ```
 
-| run | threshold | extrap final accuracy | extrap LM accuracy | router extrap accuracy | expert call rate | unsafe call rate | abstain recall |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `lm-token-only` | n/a | 0.656 | 0.656 | n/a | 0.000 | 0.000 | n/a |
-| `lm-x-task` | n/a | 0.680 | 0.680 | n/a | 0.000 | 0.000 | n/a |
-| `lm-frozen-side-channel` | n/a | 0.712 | 0.712 | n/a | 0.000 | 0.000 | n/a |
-| `lm-router-hard-call` | 0.8 | 0.831 | 0.680 | 0.889 | 0.711 | 0.020 | 0.913 |
+| run | call/abstain loss | threshold | extrap final accuracy | extrap LM accuracy | router extrap accuracy | expert call rate | unsafe call rate | abstain recall |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `lm-token-only` | n/a | n/a | 0.599 | 0.599 | n/a | 0.000 | 0.000 | n/a |
+| `lm-x-task` | n/a | n/a | 0.555 | 0.555 | n/a | 0.000 | 0.000 | n/a |
+| `lm-frozen-side-channel` | n/a | n/a | 0.600 | 0.600 | n/a | 0.000 | 0.000 | n/a |
+| `lm-router-hard-call` | 5.0 | 0.99999 | 0.865 | 0.647 | 0.792 | 0.588 | 0.007 | 0.970 |
 
 Safety-calibrated LM command:
 
 ```bash
 uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
-  --bridge-summary artifacts/symbolic-bridge/symbolic-bridge-compact-both-v5/summary.json \
-  --run-label symbolic-bridge-lm-compact-safety-v5-threshold80-v1 \
-  --output-dir artifacts/symbolic-bridge-lm/symbolic-bridge-lm-compact-safety-v5-threshold80-v1 \
+  --bridge-summary artifacts/symbolic-bridge/symbolic-bridge-compact-both-v7/summary.json \
+  --run-label symbolic-bridge-lm-compact-v7-c5-t99999-v1 \
+  --output-dir artifacts/symbolic-bridge-lm/symbolic-bridge-lm-compact-v7-c5-t99999-v1 \
   --epochs 1800 \
   --learning-rate 0.004 \
   --hidden-units 96 \
   --router-loss-weight 10.0 \
-  --router-call-threshold 0.8 \
+  --call-abstain-loss-weight 5.0 \
+  --router-call-threshold 0.99999 \
   --device auto \
   --output table
 ```
 
-Additional compact calibration sweeps did not improve the safety frontier:
+Compact calibration sweep:
 
-| artifact | router loss weight | abstain class weight | unsafe loss weight | threshold | extrap final accuracy | unsafe call rate | abstain recall |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `symbolic-bridge-lm-compact-safety-rw30-v2` | 30.0 | 1.0 | 0.0 | 0.0 | 0.855 | 0.124 | 0.452 |
-| `symbolic-bridge-lm-compact-safety-threshold999-v1` | 10.0 | 1.0 | 0.0 | 0.999 | 0.840 | 0.049 | 0.775 |
-| `symbolic-bridge-lm-compact-calibrated-u1-a2-t80-v1` | 10.0 | 2.0 | 1.0 | 0.8 | 0.835 | 0.066 | 0.707 |
-| `symbolic-bridge-lm-compact-calibrated-u10-a4-t80-v1` | 10.0 | 4.0 | 10.0 | 0.8 | 0.859 | 0.088 | 0.611 |
+| artifact | router loss | abstain class | unsafe-prob loss | call/abstain loss | unsafe margin loss | threshold | extrap final accuracy | unsafe call rate | abstain recall | contract |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `symbolic-bridge-lm-compact-safety-v5-threshold80-v1` | 10.0 | 1.0 | 0.0 | 0.0 | 0.0 | 0.8 | 0.831 | 0.020 | 0.913 | false |
+| `symbolic-bridge-lm-compact-v7-control-t80-v1` | 10.0 | 1.0 | 0.0 | 0.0 | 0.0 | 0.8 | 0.884 | 0.053 | 0.763 | false |
+| `symbolic-bridge-lm-compact-v7-control-t9999-v1` | 10.0 | 1.0 | 0.0 | 0.0 | 0.0 | 0.9999 | 0.859 | 0.015 | 0.934 | false |
+| `symbolic-bridge-lm-compact-v7-control-t99999-v1` | 10.0 | 1.0 | 0.0 | 0.0 | 0.0 | 0.99999 | 0.859 | 0.008 | 0.967 | true |
+| `symbolic-bridge-lm-compact-v7-c5-t99999-v1` | 10.0 | 1.0 | 0.0 | 5.0 | 0.0 | 0.99999 | 0.865 | 0.007 | 0.970 | true |
+| `symbolic-bridge-lm-compact-v7-c5-m5-t80-v1` | 10.0 | 1.0 | 0.0 | 5.0 | 5.0 | 0.8 | 0.887 | 0.079 | 0.647 | false |
+| `symbolic-bridge-lm-compact-safety-rw30-v2` | 30.0 | 1.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.855 | 0.124 | 0.452 | false |
+| `symbolic-bridge-lm-compact-safety-threshold999-v1` | 10.0 | 1.0 | 0.0 | 0.0 | 0.0 | 0.999 | 0.840 | 0.049 | 0.775 | false |
+| `symbolic-bridge-lm-compact-calibrated-u1-a2-t80-v1` | 10.0 | 2.0 | 1.0 | 0.0 | 0.0 | 0.8 | 0.835 | 0.066 | 0.707 | false |
+| `symbolic-bridge-lm-compact-calibrated-u10-a4-t80-v1` | 10.0 | 4.0 | 10.0 | 0.0 | 0.0 | 0.8 | 0.859 | 0.088 | 0.611 | false |
 
 Safety-calibration verdict:
 
-- The data fix worked: compact fit now contains abstain examples
-  (`fit_abstain_target_rate=0.107`) and extrapolation no-safe cases are no
+- The data fix worked: compact fit now contains more abstain examples
+  (`fit_abstain_target_rate=0.142`) and extrapolation no-safe cases are no
   longer completely unseen.
 - The contract is now clearly capability-improving on compact: routed final
-  accuracy reaches `0.831`, above the frozen-side-channel LM (`0.712`) and
+  accuracy reaches `0.865`, above the frozen-side-channel LM (`0.600`) and
   above the best global expert under the same safe-call accounting (`0.772`).
   This happens because the LM fallback can answer some no-safe cases while
   expert calls handle recovered formulas.
-- Safe abstention is much better but still not fully confirmed. The best compact
-  run cuts unsafe calls from `0.228` before calibration to `0.020`, and raises
-  abstain recall to `0.913`, but it still fails the strict `<=0.01`
-  unsafe-call gate.
-- The attempted router-loss calibration terms were not enough. Increasing router
-  loss weight, adding abstain class weight, or penalizing unsafe expert
-  probability all either worsened unsafe calls or traded away too much
-  abstention precision. The main useful safety gain came from the typed
-  safety-calibration data, not from the auxiliary loss.
+- Safe abstention is now confirmed on compact. The best compact run cuts unsafe
+  calls from `0.228` before calibration to `0.007`, raises abstain recall to
+  `0.970`, and passes the strict `<=0.01` unsafe-call gate.
+- The useful recipe is expanded near-boundary safety data plus a calibrated call
+  threshold. A small call/abstain loss helps slightly at that strict threshold
+  (`0.865` vs `0.859` extrapolation, `0.007` vs `0.008` unsafe calls). The
+  unsafe-margin loss did not help in this setup and should remain experimental.
 
 Updated recommendation:
 
 - Keep the router-call bridge. The capability case is now stronger, not weaker.
-- Do not yet promote the compact bridge to broad LM tasks. Tier-0 is fully
-  confirmed, but compact still misses the strict unsafe-call gate.
-- The next bridge step should make the call boundary explicit rather than
-  asking a single router head to infer it indirectly: a separate safety head,
-  task-conditioned thresholds, or calibrated per-expert call margins are the
-  most direct candidates.
+- Promote the compact bridge only behind this safety contract: expanded
+  near-boundary calibration rows, a high calibrated call threshold, and
+  unsafe-call reporting as a hard gate.
+- The next bridge experiment should carry the same contract into a real LM-side
+  adapter/router harness and keep the no-safe abstention cases in the training
+  mixture. Do not relax the unsafe-call gate just because the router is more
+  capable.

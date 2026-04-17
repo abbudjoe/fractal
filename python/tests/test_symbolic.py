@@ -16,7 +16,7 @@ from python.specs.symbolic import (
     SymbolicTreeOptimizer,
 )
 from python.symbolic.autodiff import autodiff_loss_and_gradient
-from python.symbolic.bridge import TokenQuantizer, run_symbolic_bridge
+from python.symbolic.bridge import TokenQuantizer, run_symbolic_bridge, select_safety_calibration_rows
 from python.symbolic.bridge_canary import run_bridge_canary
 from python.symbolic.bridge_lm import run_symbolic_bridge_lm
 from python.symbolic.bridge_sequence import run_sequence_bridge
@@ -374,6 +374,21 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertIn("safety_calibration", {row["split"] for row in feature_rows})
             self.assertIn("split_safe_expert_coverage", report.summary["feature_table"])
 
+    def test_safety_calibration_prefers_out_of_range_safe_rows_near_abstain(self) -> None:
+        rows = [
+            {"index": 0, "x": -5.0, "in_training_range": False, "oracle_has_safe_expert": True},
+            {"index": 1, "x": 1.9, "in_training_range": False, "oracle_has_safe_expert": True},
+            {"index": 2, "x": 2.0, "in_training_range": False, "oracle_has_safe_expert": False},
+            {"index": 3, "x": 2.05, "in_training_range": True, "oracle_has_safe_expert": True},
+            {"index": 4, "x": 2.2, "in_training_range": False, "oracle_has_safe_expert": False},
+            {"index": 5, "x": 2.3, "in_training_range": False, "oracle_has_safe_expert": True},
+        ]
+
+        selected = select_safety_calibration_rows(rows, target_count=4)
+
+        selected_xs = {round(float(row["x"]), 2) for row in selected}
+        self.assertEqual(selected_xs, {1.9, 2.0, 2.2, 2.3})
+
     def test_token_quantizer_clamps_to_vocab_range(self) -> None:
         quantizer = TokenQuantizer.from_values((0.0, 1.0), bins=4)
 
@@ -627,6 +642,9 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 hidden_units=4,
                 abstain_class_weight=2.0,
                 unsafe_call_loss_weight=0.5,
+                call_abstain_loss_weight=0.75,
+                unsafe_margin_loss_weight=1.25,
+                unsafe_margin=0.4,
                 router_call_threshold=0.25,
                 device="cpu",
             )
@@ -634,6 +652,9 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertEqual(report.abstain_index, 2)
             self.assertEqual(report.abstain_class_weight, 2.0)
             self.assertEqual(report.unsafe_call_loss_weight, 0.5)
+            self.assertEqual(report.call_abstain_loss_weight, 0.75)
+            self.assertEqual(report.unsafe_margin_loss_weight, 1.25)
+            self.assertEqual(report.unsafe_margin, 0.4)
             self.assertEqual(report.router_call_threshold, 0.25)
             self.assertIn("router_contract_unsafe_call_rate", report.summary)
             self.assertIn("router_contract_abstain_recall", report.summary)

@@ -26,6 +26,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--router-loss-weight", type=float, default=0.5)
     parser.add_argument("--abstain-class-weight", type=float, default=1.0)
     parser.add_argument("--unsafe-call-loss-weight", type=float, default=0.0)
+    parser.add_argument("--call-abstain-loss-weight", type=float, default=0.0)
+    parser.add_argument("--unsafe-margin-loss-weight", type=float, default=0.0)
+    parser.add_argument("--unsafe-margin", type=float, default=0.5)
     parser.add_argument("--router-call-threshold", type=float, default=0.0)
     parser.add_argument("--device", choices=["auto", "cpu", "mps"], default="auto")
     parser.add_argument("--output", choices=["table", "json"], default="table")
@@ -46,6 +49,9 @@ def main(argv: list[str] | None = None) -> int:
         router_loss_weight=args.router_loss_weight,
         abstain_class_weight=args.abstain_class_weight,
         unsafe_call_loss_weight=args.unsafe_call_loss_weight,
+        call_abstain_loss_weight=args.call_abstain_loss_weight,
+        unsafe_margin_loss_weight=args.unsafe_margin_loss_weight,
+        unsafe_margin=args.unsafe_margin,
         router_call_threshold=args.router_call_threshold,
         device=args.device,
     )

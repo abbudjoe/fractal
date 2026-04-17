@@ -108,6 +108,9 @@ class BridgeLmReport:
     router_loss_weight: float
     abstain_class_weight: float
     unsafe_call_loss_weight: float
+    call_abstain_loss_weight: float
+    unsafe_margin_loss_weight: float
+    unsafe_margin: float
     router_call_threshold: float
     device: str
     expert_ids: tuple[str, ...]
@@ -129,6 +132,9 @@ class BridgeLmReport:
             "router_loss_weight": self.router_loss_weight,
             "abstain_class_weight": self.abstain_class_weight,
             "unsafe_call_loss_weight": self.unsafe_call_loss_weight,
+            "call_abstain_loss_weight": self.call_abstain_loss_weight,
+            "unsafe_margin_loss_weight": self.unsafe_margin_loss_weight,
+            "unsafe_margin": self.unsafe_margin,
             "router_call_threshold": self.router_call_threshold,
             "device": self.device,
             "expert_ids": list(self.expert_ids),
@@ -151,6 +157,9 @@ def run_symbolic_bridge_lm(
     router_loss_weight: float = 0.5,
     abstain_class_weight: float = 1.0,
     unsafe_call_loss_weight: float = 0.0,
+    call_abstain_loss_weight: float = 0.0,
+    unsafe_margin_loss_weight: float = 0.0,
+    unsafe_margin: float = 0.5,
     router_call_threshold: float = 0.0,
     device: str = "auto",
 ) -> BridgeLmReport:
@@ -198,6 +207,9 @@ def run_symbolic_bridge_lm(
                 router_loss_weight=router_loss_weight,
                 abstain_class_weight=abstain_class_weight,
                 unsafe_call_loss_weight=unsafe_call_loss_weight,
+                call_abstain_loss_weight=call_abstain_loss_weight,
+                unsafe_margin_loss_weight=unsafe_margin_loss_weight,
+                unsafe_margin=unsafe_margin,
                 router_call_threshold=router_call_threshold,
                 device=selected_device,
             )
@@ -217,6 +229,9 @@ def run_symbolic_bridge_lm(
         router_loss_weight=router_loss_weight,
         abstain_class_weight=abstain_class_weight,
         unsafe_call_loss_weight=unsafe_call_loss_weight,
+        call_abstain_loss_weight=call_abstain_loss_weight,
+        unsafe_margin_loss_weight=unsafe_margin_loss_weight,
+        unsafe_margin=unsafe_margin,
         router_call_threshold=router_call_threshold,
         device=str(selected_device),
         expert_ids=expert_ids,
@@ -246,6 +261,9 @@ def train_lm_contract_variant(
     router_loss_weight: float,
     abstain_class_weight: float,
     unsafe_call_loss_weight: float,
+    call_abstain_loss_weight: float,
+    unsafe_margin_loss_weight: float,
+    unsafe_margin: float,
     router_call_threshold: float,
     device: Any,
 ) -> BridgeLmRun:
@@ -266,10 +284,7 @@ def train_lm_contract_variant(
         model.train()
         optimizer.zero_grad(set_to_none=True)
         token_logits, router_logits = model(fit_batch.previous_tokens, fit_batch.features)
-        token_loss = torch.nn.functional.cross_entropy(
-            token_logits.reshape(-1, token_logits.shape[-1]),
-            fit_batch.target_ids.reshape(-1),
-        )
+        token_loss = masked_cross_entropy(torch, token_logits, fit_batch.target_ids, fit_batch.symbolic_mask)
         if use_router:
             router_class_weights = router_loss_class_weights(
                 torch,
@@ -277,13 +292,40 @@ def train_lm_contract_variant(
                 abstain_class_weight=abstain_class_weight,
                 device=device,
             )
-            router_loss = torch.nn.functional.cross_entropy(
-                router_logits.reshape(-1, router_logits.shape[-1]),
-                fit_batch.router_targets.reshape(-1),
+            router_loss = masked_cross_entropy(
+                torch,
+                router_logits,
+                fit_batch.router_targets,
+                fit_batch.symbolic_mask,
                 weight=router_class_weights,
             )
-            unsafe_loss = router_unsafe_probability_loss(torch, router_logits, fit_batch.expert_safe_mask)
-            loss = token_loss + router_loss_weight * router_loss + unsafe_call_loss_weight * unsafe_loss
+            unsafe_loss = router_unsafe_probability_loss(
+                torch,
+                router_logits,
+                fit_batch.expert_safe_mask,
+                mask=fit_batch.symbolic_mask,
+            )
+            call_abstain_loss = router_call_abstain_loss(
+                torch,
+                router_logits,
+                fit_batch.expert_safe_mask,
+                abstain_weight=abstain_class_weight,
+                mask=fit_batch.symbolic_mask,
+            )
+            unsafe_margin_loss = router_unsafe_margin_loss(
+                torch,
+                router_logits,
+                fit_batch.expert_safe_mask,
+                margin=unsafe_margin,
+                mask=fit_batch.symbolic_mask,
+            )
+            loss = (
+                token_loss
+                + router_loss_weight * router_loss
+                + unsafe_call_loss_weight * unsafe_loss
+                + call_abstain_loss_weight * call_abstain_loss
+                + unsafe_margin_loss_weight * unsafe_margin_loss
+            )
         else:
             loss = token_loss
         loss.backward()
@@ -294,12 +336,11 @@ def train_lm_contract_variant(
     with torch.no_grad():
         for split, batch in splits.items():
             token_logits, router_logits = model(batch.previous_tokens, batch.features)
-            token_loss = torch.nn.functional.cross_entropy(
-                token_logits.reshape(-1, token_logits.shape[-1]),
-                batch.target_ids.reshape(-1),
-            )
+            token_loss = masked_cross_entropy(torch, token_logits, batch.target_ids, batch.symbolic_mask)
             router_loss_value = 0.0
             unsafe_loss_value = 0.0
+            call_abstain_loss_value = 0.0
+            unsafe_margin_loss_value = 0.0
             if use_router:
                 router_class_weights = router_loss_class_weights(
                     torch,
@@ -307,14 +348,37 @@ def train_lm_contract_variant(
                     abstain_class_weight=abstain_class_weight,
                     device=device,
                 )
-                router_loss = torch.nn.functional.cross_entropy(
-                    router_logits.reshape(-1, router_logits.shape[-1]),
-                    batch.router_targets.reshape(-1),
+                router_loss = masked_cross_entropy(
+                    torch,
+                    router_logits,
+                    batch.router_targets,
+                    batch.symbolic_mask,
                     weight=router_class_weights,
                 )
                 router_loss_value = float(router_loss.detach().cpu().item())
-                unsafe_loss = router_unsafe_probability_loss(torch, router_logits, batch.expert_safe_mask)
+                unsafe_loss = router_unsafe_probability_loss(
+                    torch,
+                    router_logits,
+                    batch.expert_safe_mask,
+                    mask=batch.symbolic_mask,
+                )
                 unsafe_loss_value = float(unsafe_loss.detach().cpu().item())
+                call_abstain_loss = router_call_abstain_loss(
+                    torch,
+                    router_logits,
+                    batch.expert_safe_mask,
+                    abstain_weight=abstain_class_weight,
+                    mask=batch.symbolic_mask,
+                )
+                call_abstain_loss_value = float(call_abstain_loss.detach().cpu().item())
+                unsafe_margin_loss = router_unsafe_margin_loss(
+                    torch,
+                    router_logits,
+                    batch.expert_safe_mask,
+                    margin=unsafe_margin,
+                    mask=batch.symbolic_mask,
+                )
+                unsafe_margin_loss_value = float(unsafe_margin_loss.detach().cpu().item())
             split_metrics[split] = evaluate_contract_outputs(
                 torch,
                 batch,
@@ -328,6 +392,8 @@ def train_lm_contract_variant(
                     float(token_loss.detach().cpu().item())
                     + router_loss_weight * router_loss_value
                     + unsafe_call_loss_weight * unsafe_loss_value
+                    + call_abstain_loss_weight * call_abstain_loss_value
+                    + unsafe_margin_loss_weight * unsafe_margin_loss_value
                 ),
             )
     return BridgeLmRun(
@@ -400,13 +466,86 @@ def router_loss_class_weights(
     return weights
 
 
-def router_unsafe_probability_loss(torch: Any, router_logits: Any, expert_safe_mask: Any) -> Any:
+def masked_cross_entropy(
+    torch: Any,
+    logits: Any,
+    targets: Any,
+    mask: Any,
+    *,
+    weight: Any | None = None,
+) -> Any:
+    flat_logits = logits.reshape(-1, logits.shape[-1])
+    flat_targets = targets.reshape(-1)
+    flat_mask = mask.reshape(-1)
+    if bool(flat_mask.any().detach().cpu().item()):
+        return torch.nn.functional.cross_entropy(flat_logits[flat_mask], flat_targets[flat_mask], weight=weight)
+    return flat_logits.sum() * 0.0
+
+
+def masked_mean(torch: Any, values: Any, mask: Any | None) -> Any:
+    if mask is None:
+        return values.mean()
+    weights = mask.float()
+    return (values * weights).sum() / weights.sum().clamp(min=1.0)
+
+
+def router_unsafe_probability_loss(torch: Any, router_logits: Any, expert_safe_mask: Any, *, mask: Any | None = None) -> Any:
     expert_count = int(expert_safe_mask.shape[-1])
     probabilities = torch.nn.functional.softmax(router_logits, dim=-1)[..., :expert_count]
     unsafe_mask = ~expert_safe_mask
     unsafe_mass = (probabilities * unsafe_mask.float()).sum(dim=-1)
     unsafe_mass = unsafe_mass.clamp(min=0.0, max=1.0 - 1.0e-6)
-    return -torch.log1p(-unsafe_mass).mean()
+    return masked_mean(torch, -torch.log1p(-unsafe_mass), mask)
+
+
+def router_call_abstain_loss(
+    torch: Any,
+    router_logits: Any,
+    expert_safe_mask: Any,
+    *,
+    abstain_weight: float,
+    mask: Any | None = None,
+) -> Any:
+    expert_count = int(expert_safe_mask.shape[-1])
+    probabilities = torch.nn.functional.softmax(router_logits, dim=-1)
+    call_probability = probabilities[..., :expert_count].sum(dim=-1).clamp(min=1.0e-6, max=1.0 - 1.0e-6)
+    call_target = expert_safe_mask.any(dim=-1).float()
+    weights = torch.where(
+        call_target > 0.5,
+        torch.ones_like(call_target),
+        torch.full_like(call_target, float(abstain_weight)),
+    )
+    loss = torch.nn.functional.binary_cross_entropy(call_probability, call_target, weight=weights, reduction="none")
+    return masked_mean(torch, loss, mask)
+
+
+def router_unsafe_margin_loss(
+    torch: Any,
+    router_logits: Any,
+    expert_safe_mask: Any,
+    *,
+    margin: float,
+    mask: Any | None = None,
+) -> Any:
+    expert_count = int(expert_safe_mask.shape[-1])
+    expert_logits = router_logits[..., :expert_count]
+    abstain_logits = router_logits[..., expert_count]
+    safe_mask = expert_safe_mask
+    unsafe_mask = ~safe_mask
+    has_safe = safe_mask.any(dim=-1)
+    has_unsafe = unsafe_mask.any(dim=-1)
+    very_negative = torch.finfo(router_logits.dtype).min / 4.0
+    safe_logits = expert_logits.masked_fill(~safe_mask, very_negative)
+    unsafe_logits = expert_logits.masked_fill(~unsafe_mask, very_negative)
+    safe_route_logits = torch.logsumexp(safe_logits, dim=-1)
+    unsafe_route_logits = torch.logsumexp(unsafe_logits, dim=-1)
+    allowed_route_logits = torch.where(has_safe, safe_route_logits, abstain_logits)
+    margin_loss = torch.nn.functional.softplus(unsafe_route_logits - allowed_route_logits + float(margin))
+    if mask is not None:
+        has_unsafe = has_unsafe & mask
+    if bool(has_unsafe.any().detach().cpu().item()):
+        return margin_loss[has_unsafe].mean()
+    return margin_loss.mean() * 0.0
 
 
 def build_contract_splits(
@@ -472,34 +611,52 @@ def batch_from_sequences(
     stats: tuple[list[float], list[float]],
     device: Any,
 ) -> SymbolicBridgeBatch:
-    target_ids = [[int(row["target_token"]) for row in sequence] for sequence in sequences]
-    previous_tokens = [[token_bins] + sequence[:-1] for sequence in target_ids]
-    features = [
-        [normalized_features(row, task_ids, expert_ids, feature_set, stats) for row in sequence]
-        for sequence in sequences
-    ]
-    expert_tokens = [
-        [[expert_token(row, expert) for expert in expert_ids] for row in sequence]
-        for sequence in sequences
-    ]
-    expert_values = [
-        [[expert_value(row, expert) for expert in expert_ids] for row in sequence]
-        for sequence in sequences
-    ]
-    expert_valid_mask = [
-        [[expert_valid(row, expert) for expert in expert_ids] for row in sequence]
-        for sequence in sequences
-    ]
-    expert_safe_mask = [
-        [[expert_safe(row, expert) for expert in expert_ids] for row in sequence]
-        for sequence in sequences
-    ]
-    router_targets = [
-        [router_target(row, expert_ids) for row in sequence]
-        for sequence in sequences
-    ]
-    x_values = [[[float(row["x"])] for row in sequence] for sequence in sequences]
-    symbolic_mask = [[True for _row in sequence] for sequence in sequences]
+    max_length = max(len(sequence) for sequence in sequences)
+    feature_dim = len(stats[0])
+    expert_count = len(expert_ids)
+    target_ids = []
+    previous_tokens = []
+    features = []
+    expert_tokens = []
+    expert_values = []
+    expert_valid_mask = []
+    expert_safe_mask = []
+    router_targets = []
+    x_values = []
+    symbolic_mask = []
+    for sequence in sequences:
+        sequence_targets = [int(row["target_token"]) for row in sequence]
+        sequence_previous = [token_bins] + sequence_targets[:-1]
+        sequence_features = [normalized_features(row, task_ids, expert_ids, feature_set, stats) for row in sequence]
+        sequence_expert_tokens = [[expert_token(row, expert) for expert in expert_ids] for row in sequence]
+        sequence_expert_values = [[expert_value(row, expert) for expert in expert_ids] for row in sequence]
+        sequence_expert_valid = [[expert_valid(row, expert) for expert in expert_ids] for row in sequence]
+        sequence_expert_safe = [[expert_safe(row, expert) for expert in expert_ids] for row in sequence]
+        sequence_router_targets = [router_target(row, expert_ids) for row in sequence]
+        sequence_x_values = [[float(row["x"])] for row in sequence]
+        sequence_mask = [True for _row in sequence]
+        pad_count = max_length - len(sequence)
+        if pad_count:
+            sequence_targets.extend([0] * pad_count)
+            sequence_previous.extend([token_bins] * pad_count)
+            sequence_features.extend([[0.0] * feature_dim for _index in range(pad_count)])
+            sequence_expert_tokens.extend([[0] * expert_count for _index in range(pad_count)])
+            sequence_expert_values.extend([[0.0] * expert_count for _index in range(pad_count)])
+            sequence_expert_valid.extend([[False] * expert_count for _index in range(pad_count)])
+            sequence_expert_safe.extend([[False] * expert_count for _index in range(pad_count)])
+            sequence_router_targets.extend([expert_count] * pad_count)
+            sequence_x_values.extend([[0.0] for _index in range(pad_count)])
+            sequence_mask.extend([False] * pad_count)
+        target_ids.append(sequence_targets)
+        previous_tokens.append(sequence_previous)
+        features.append(sequence_features)
+        expert_tokens.append(sequence_expert_tokens)
+        expert_values.append(sequence_expert_values)
+        expert_valid_mask.append(sequence_expert_valid)
+        expert_safe_mask.append(sequence_expert_safe)
+        router_targets.append(sequence_router_targets)
+        x_values.append(sequence_x_values)
+        symbolic_mask.append(sequence_mask)
     return SymbolicBridgeBatch(
         previous_tokens=torch.tensor(previous_tokens, dtype=torch.long, device=device),
         target_ids=torch.tensor(target_ids, dtype=torch.long, device=device),
@@ -552,19 +709,22 @@ def evaluate_contract_outputs(
     else:
         unsafe_call_mask = torch.zeros_like(batch.target_ids, dtype=torch.bool)
         effective_router_predictions = router_predictions
-    total = batch.target_ids.numel()
-    final_accuracy = float((final_predictions == batch.target_ids).float().mean().detach().cpu().item())
-    lm_accuracy = float((lm_predictions == batch.target_ids).float().mean().detach().cpu().item())
+    active_mask = batch.symbolic_mask
+    total = float(active_mask.float().sum().detach().cpu().item())
+    if total <= 0.0:
+        total = 1.0
+    final_accuracy = float(((final_predictions == batch.target_ids) & active_mask).float().sum().detach().cpu().item() / total)
+    lm_accuracy = float(((lm_predictions == batch.target_ids) & active_mask).float().sum().detach().cpu().item() / total)
     router_accuracy = None
     abstain_recall = None
     if use_router:
-        router_accuracy = float((effective_router_predictions == batch.router_targets).float().mean().detach().cpu().item())
-        abstain_target = batch.router_targets == expert_count
+        router_accuracy = float(((effective_router_predictions == batch.router_targets) & active_mask).float().sum().detach().cpu().item() / total)
+        abstain_target = (batch.router_targets == expert_count) & active_mask
         if bool(abstain_target.any().detach().cpu().item()):
             abstain_prediction = effective_router_predictions == expert_count
             abstain_recall = float((abstain_prediction & abstain_target).float().sum().detach().cpu().item() / abstain_target.float().sum().detach().cpu().item())
-    expert_call_rate = float(usable_call_mask.float().mean().detach().cpu().item()) if use_router else 0.0
-    unsafe_call_rate = float(unsafe_call_mask.float().sum().detach().cpu().item() / total) if use_router else 0.0
+    expert_call_rate = float((usable_call_mask & active_mask).float().sum().detach().cpu().item() / total) if use_router else 0.0
+    unsafe_call_rate = float((unsafe_call_mask & active_mask).float().sum().detach().cpu().item() / total) if use_router else 0.0
     return {
         "final_token_accuracy": final_accuracy,
         "lm_token_accuracy": lm_accuracy,
@@ -894,6 +1054,9 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
         f"Router loss weight: `{report.router_loss_weight}`",
         f"Abstain class weight: `{report.abstain_class_weight}`",
         f"Unsafe call loss weight: `{report.unsafe_call_loss_weight}`",
+        f"Call/abstain loss weight: `{report.call_abstain_loss_weight}`",
+        f"Unsafe margin loss weight: `{report.unsafe_margin_loss_weight}`",
+        f"Unsafe margin: `{report.unsafe_margin}`",
         f"Router call threshold: `{report.router_call_threshold}`",
         "",
         "| run | mode | features | val final acc | extrap final acc | extrap LM acc | router extrap acc | expert call rate | unsafe call rate | abstain recall |",

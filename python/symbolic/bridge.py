@@ -380,7 +380,8 @@ def build_bridge_feature_table(
         if not compiled:
             continue
         quantizer = quantizer_for_dataset(dataset, token_bins)
-        safety_split = sample_safety_calibration_split(dataset, target_count=len(dataset.train.xs))
+        safety_target_count = max(len(dataset.train.xs), len(dataset.validation.xs), len(dataset.extrapolation.xs))
+        safety_split = sample_safety_calibration_split(dataset, target_count=safety_target_count)
         for split_name, xs, ys in (("train", dataset.train.xs, dataset.train.ys),):
             feature_rows.extend(
                 feature_rows_for_split(
@@ -406,7 +407,7 @@ def build_bridge_feature_table(
             quantizer=quantizer,
             token_bins=token_bins,
         )
-        feature_rows.extend(select_safety_calibration_rows(safety_candidate_rows, target_count=len(dataset.train.xs)))
+        feature_rows.extend(select_safety_calibration_rows(safety_candidate_rows, target_count=safety_target_count))
         for split_name, xs, ys in (
             ("validation", dataset.validation.xs, dataset.validation.ys),
             ("extrapolation", dataset.extrapolation.xs, dataset.extrapolation.ys),
@@ -523,9 +524,21 @@ def sample_safety_calibration_split(dataset: FormulaDataset, *, target_count: in
 
 
 def select_safety_calibration_rows(rows: list[dict[str, Any]], *, target_count: int) -> list[dict[str, Any]]:
+    abstain_xs = [float(row["x"]) for row in rows if not row["oracle_has_safe_expert"]]
+
+    def nearest_abstain_distance(row: dict[str, Any]) -> float:
+        if not abstain_xs:
+            return 0.0
+        x_value = float(row["x"])
+        return min(abs(x_value - abstain_x) for abstain_x in abstain_xs)
+
     safe_rows = sorted(
         (row for row in rows if row["oracle_has_safe_expert"]),
-        key=lambda row: (bool(row["in_training_range"]), float(row["x"])),
+        key=lambda row: (
+            bool(row["in_training_range"]),
+            nearest_abstain_distance(row),
+            float(row["x"]),
+        ),
     )
     abstain_rows = sorted(
         (row for row in rows if not row["oracle_has_safe_expert"]),
