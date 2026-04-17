@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.profiler import record_function
 
-from python.models.common import PositionWiseFeedForward, SimpleRmsNorm, gated_sigmoid, one_minus
+from python.models.common import (
+    PositionWiseFeedForward,
+    ReluSquaredFeedForward,
+    SimpleRmsNorm,
+    gated_sigmoid,
+    one_minus,
+)
 from python.models.primitives import P20RotaryStateOutputRuntimeSequenceMixer
 from python.runtime.recurrent import (
     BlockDiagonalLinear,
@@ -39,6 +46,7 @@ class ResolvedReferenceSsmConfig:
     runtime_oriented: bool = False
     local_kernel_size: int = 4
     layer_index: int = 0
+    p20_ramp_init: float = 0.01
 
 
 def resolve_reference_ssm_config(
@@ -47,6 +55,7 @@ def resolve_reference_ssm_config(
     profile: ReferenceSsmProfile,
     dtype_mode: str,
     layer_index: int = 0,
+    p20_ramp_init: float = 0.01,
 ) -> ResolvedReferenceSsmConfig:
     if profile is ReferenceSsmProfile.MAMBA3_SISO_REFERENCE:
         chunk_size = 1
@@ -61,7 +70,13 @@ def resolve_reference_ssm_config(
         profile=profile,
         runtime_oriented=profile.runtime_oriented,
         layer_index=layer_index,
+        p20_ramp_init=p20_ramp_init,
     )
+
+
+def _safe_logit(probability: float) -> float:
+    clipped = min(max(float(probability), 1.0e-6), 1.0 - 1.0e-6)
+    return torch.logit(torch.tensor(clipped, dtype=torch.float32)).item()
 
 
 class OfficialMamba3SequenceMixer(nn.Module):
@@ -118,6 +133,401 @@ class FlaGatedDeltaNetSequenceMixer(nn.Module):
             return output[0]
         return output
 
+    def diagnostic_payload(self) -> dict[str, object]:
+        return {"kind": "gated-deltanet-fla"}
+
+
+class P20TinyControlConditioner(nn.Module):
+    """Small vector-state conditioner that perturbs GDN controls without owning readout."""
+
+    def __init__(
+        self,
+        d_model: int,
+        head_count: int,
+        *,
+        width_factor: float = 0.125,
+        ramp_init: float = 0.01,
+    ) -> None:
+        super().__init__()
+        if width_factor <= 0.0 or width_factor > 1.0:
+            raise ValueError(f"P20 control conditioner width_factor must be in (0, 1], got {width_factor}")
+        bottleneck_width = max(2, int(round(d_model * width_factor)))
+        if bottleneck_width % 2 != 0:
+            bottleneck_width -= 1
+        if bottleneck_width <= 0:
+            raise ValueError(f"P20 control conditioner bottleneck width must be positive, got {bottleneck_width}")
+        self.d_model = d_model
+        self.head_count = head_count
+        self.bottleneck_width = bottleneck_width
+        self.width_factor = width_factor
+        self.ramp_init = ramp_init
+        self.input_projection = nn.Linear(d_model, bottleneck_width, bias=False)
+        self.primitive = P20RotaryStateOutputRuntimeSequenceMixer(
+            bottleneck_width,
+            state_transform_mode=PrimitiveStateTransformMode.BLOCK_DIAGONAL_2,
+        )
+        self.norm = SimpleRmsNorm(bottleneck_width)
+        self.delta_projection = PackedLinearProjection(
+            bottleneck_width,
+            (
+                d_model,
+                d_model,
+                d_model,
+                head_count,
+            ),
+            bias=False,
+        )
+        self.qkv_ramp_logit = nn.Parameter(
+            torch.full((3, d_model), _safe_logit(ramp_init), dtype=torch.float32)
+        )
+        self.beta_ramp_logit = nn.Parameter(
+            torch.full((head_count,), _safe_logit(ramp_init), dtype=torch.float32)
+        )
+        self._init_parameters()
+
+    def _init_parameters(self) -> None:
+        nn.init.xavier_uniform_(self.input_projection.weight, gain=0.1)
+        with torch.no_grad():
+            self.delta_projection.weight.zero_()
+
+    def forward(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        with record_function("path1.reference_ssm.gdnp_control_tiny.p20_scan"):
+            projected = self.input_projection(hidden)
+            conditioner_state = self.primitive.scan(projected).emitted_outputs
+            conditioner_state = self.norm(conditioner_state)
+        with record_function("path1.reference_ssm.gdnp_control_tiny.delta_projection"):
+            query_delta, key_delta, value_delta, beta_delta = self.delta_projection(conditioner_state)
+        qkv_ramp = gated_sigmoid(self.qkv_ramp_logit).to(dtype=hidden.dtype)
+        beta_ramp = gated_sigmoid(self.beta_ramp_logit).to(dtype=hidden.dtype)
+        return (
+            query_delta * qkv_ramp[0].view(1, 1, self.d_model),
+            key_delta * qkv_ramp[1].view(1, 1, self.d_model),
+            value_delta * qkv_ramp[2].view(1, 1, self.d_model),
+            beta_delta * beta_ramp.view(1, 1, self.head_count),
+        )
+
+    def configure_runtime_policy(
+        self,
+        *,
+        compile_mode: str | None,
+        primitive_runtime_backend: str | None = "torch",
+    ) -> None:
+        self.primitive.configure_runtime_policy(
+            compile_mode=compile_mode,
+            primitive_runtime_backend=primitive_runtime_backend,
+        )
+
+    def diagnostic_payload(self) -> dict[str, object]:
+        return {
+            "kind": "p20-tiny-control-conditioner",
+            "d_model": self.d_model,
+            "head_count": self.head_count,
+            "bottleneck_width": self.bottleneck_width,
+            "width_factor": self.width_factor,
+            "ramp_init": self.ramp_init,
+            "state_transform_mode": self.primitive.state_transform_mode.value,
+            "delta_projection_zero_init": True,
+        }
+
+
+class FlaGdnpControlConditionedSequenceMixer(nn.Module):
+    """FLA GDN core with a tiny P20/vector-state conditioner on q/k/v/beta controls."""
+
+    def __init__(
+        self,
+        config: ResolvedReferenceSsmConfig,
+        *,
+        enable_p20_conditioner: bool = True,
+    ) -> None:
+        super().__init__()
+        if config.d_model % config.head_count != 0:
+            raise ValueError(
+                "FLA GDN control-shell block requires d_model divisible by "
+                f"head_count, got {config.d_model} and {config.head_count}"
+            )
+        self.d_model = config.d_model
+        self.head_count = config.head_count
+        self.head_dim = config.d_model // config.head_count
+        self.head_v_dim = self.head_dim
+        self.enable_p20_conditioner = enable_p20_conditioner
+        self._native_control_shell = self._try_init_native_control_shell(config)
+        if not self._native_control_shell:
+            self._init_torch_fallback_control_shell(config)
+        self.conditioner = None
+        if enable_p20_conditioner:
+            # Keep downstream layer initialization comparable to the no-conditioner shell.
+            with torch.random.fork_rng(devices=[]):
+                self.conditioner = P20TinyControlConditioner(
+                    config.d_model,
+                    config.head_count,
+                    ramp_init=config.p20_ramp_init,
+                )
+
+    def _try_init_native_control_shell(self, config: ResolvedReferenceSsmConfig) -> bool:
+        try:
+            from fla.modules import FusedRMSNormGated, ShortConvolution
+            from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+        except Exception:  # pragma: no cover - local CPU tests exercise the torch fallback
+            self._chunk_gated_delta_rule = None
+            return False
+
+        self._chunk_gated_delta_rule = chunk_gated_delta_rule
+        self.q_proj = nn.Linear(config.d_model, config.d_model, bias=False)
+        self.k_proj = nn.Linear(config.d_model, config.d_model, bias=False)
+        self.v_proj = nn.Linear(config.d_model, config.d_model, bias=False)
+        self.a_proj = nn.Linear(config.d_model, config.head_count, bias=False)
+        self.b_proj = nn.Linear(config.d_model, config.head_count, bias=False)
+        a_init = torch.empty(config.head_count, dtype=torch.float32).uniform_(0, 16)
+        self.A_log = nn.Parameter(torch.log(a_init))
+        self.A_log._no_weight_decay = True
+        dt_min = 0.001
+        dt_max = 0.1
+        dt_init_floor = 1.0e-4
+        dt = torch.exp(
+            torch.rand(config.head_count) * (math.log(dt_max) - math.log(dt_min))
+            + math.log(dt_min),
+        )
+        dt = torch.clamp(dt, min=dt_init_floor)
+        self.dt_bias = nn.Parameter(dt + torch.log(-torch.expm1(-dt)))
+        self.dt_bias._no_weight_decay = True
+        self.q_conv1d = ShortConvolution(
+            hidden_size=config.d_model,
+            kernel_size=config.local_kernel_size,
+            bias=False,
+            activation="silu",
+        )
+        self.k_conv1d = ShortConvolution(
+            hidden_size=config.d_model,
+            kernel_size=config.local_kernel_size,
+            bias=False,
+            activation="silu",
+        )
+        self.v_conv1d = ShortConvolution(
+            hidden_size=config.d_model,
+            kernel_size=config.local_kernel_size,
+            bias=False,
+            activation="silu",
+        )
+        self.g_proj = nn.Linear(config.d_model, config.d_model, bias=False)
+        self.o_norm = FusedRMSNormGated(self.head_v_dim, eps=1.0e-5)
+        self.o_proj = nn.Linear(config.d_model, config.d_model, bias=False)
+        return True
+
+    def _init_torch_fallback_control_shell(self, config: ResolvedReferenceSsmConfig) -> None:
+        self.control_projection = PackedLinearProjection(
+            config.d_model,
+            (
+                config.d_model,
+                config.d_model,
+                config.d_model,
+                config.head_count,
+                config.head_count,
+                config.d_model,
+            ),
+        )
+        self.q_local = ReferenceCausalDepthwiseConv1d(config.d_model, kernel_size=config.local_kernel_size)
+        self.k_local = ReferenceCausalDepthwiseConv1d(config.d_model, kernel_size=config.local_kernel_size)
+        self.v_local = ReferenceCausalDepthwiseConv1d(config.d_model, kernel_size=config.local_kernel_size)
+        self.output_norm = SimpleRmsNorm(self.head_dim)
+        self.output_projection = nn.Linear(config.d_model, config.d_model)
+        self._init_parameters()
+
+    def _init_parameters(self) -> None:
+        if self._native_control_shell:
+            return
+        with torch.no_grad():
+            if self.control_projection.bias is not None:
+                split = self.control_projection.bias.split(self.control_projection.split_sizes, dim=0)
+                decay_bias = split[3]
+                beta_bias = split[4]
+                output_gate_bias = split[5]
+                decay_bias.fill_(1.5)
+                beta_bias.fill_(-2.0)
+                output_gate_bias.fill_(-1.5)
+        nn.init.xavier_uniform_(self.output_projection.weight, gain=0.1)
+        if self.output_projection.bias is not None:
+            nn.init.zeros_(self.output_projection.bias)
+
+    def _reshape_heads(self, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.reshape(*tensor.shape[:-1], self.head_count, self.head_dim)
+
+    def _reshape_value_heads(self, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.reshape(*tensor.shape[:-1], self.head_count, self.head_v_dim)
+
+    def configure_runtime_policy(
+        self,
+        *,
+        compile_mode: str | None,
+        primitive_runtime_backend: str | None = "torch",
+    ) -> None:
+        if self.conditioner is not None:
+            self.conditioner.configure_runtime_policy(
+                compile_mode=compile_mode,
+                primitive_runtime_backend=primitive_runtime_backend,
+            )
+
+    def _control_deltas(
+        self,
+        hidden: torch.Tensor,
+    ) -> tuple[torch.Tensor | float, torch.Tensor | float, torch.Tensor | float, torch.Tensor | float]:
+        if self.conditioner is None:
+            return 0.0, 0.0, 0.0, 0.0
+        with record_function("path1.reference_ssm.gdnp_control_tiny.conditioner"):
+            return self.conditioner(hidden)
+
+    def _scan_torch(
+        self,
+        *,
+        queries: torch.Tensor,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+        decay: torch.Tensor,
+        beta: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, seq_len, _head_count, _head_dim = queries.shape
+        matrix_state = torch.zeros(
+            batch_size,
+            self.head_count,
+            self.head_dim,
+            self.head_dim,
+            device=queries.device,
+            dtype=queries.dtype,
+        )
+        matrix_reads = torch.empty_like(queries)
+        alpha = torch.exp(decay)
+        normed_queries = F.normalize(queries, p=2.0, dim=-1, eps=1.0e-6)
+        normed_keys = F.normalize(keys, p=2.0, dim=-1, eps=1.0e-6)
+        with record_function("path1.reference_ssm.gdnp_control_tiny.torch_delta_scan"):
+            for position in range(seq_len):
+                query = normed_queries[:, position, :, :]
+                key = normed_keys[:, position, :, :]
+                value = values[:, position, :, :]
+                alpha_step = alpha[:, position, :].view(-1, self.head_count, 1, 1)
+                beta_step = beta[:, position, :].view(-1, self.head_count, 1, 1)
+                old_value = torch.einsum("bhvk,bhk->bhv", matrix_state, key)
+                erase = torch.einsum("bhv,bhk->bhvk", old_value, key)
+                write = torch.einsum("bhv,bhk->bhvk", value, key)
+                matrix_state = alpha_step * (matrix_state - beta_step * erase) + beta_step * write
+                matrix_reads[:, position, :, :] = torch.einsum("bhvk,bhk->bhv", matrix_state, query)
+        return matrix_reads
+
+    def _forward_native_shell(self, hidden: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, _ = hidden.shape
+        query_delta, key_delta, value_delta, beta_delta = self._control_deltas(hidden)
+        with record_function("path1.reference_ssm.gdnp_control_tiny.native_short_conv"):
+            query_inputs, _query_conv_state = self.q_conv1d(self.q_proj(hidden))
+            key_inputs, _key_conv_state = self.k_conv1d(self.k_proj(hidden))
+            value_inputs, _value_conv_state = self.v_conv1d(self.v_proj(hidden))
+            query_inputs = query_inputs + query_delta
+            key_inputs = key_inputs + key_delta
+            value_inputs = value_inputs + value_delta
+        queries = self._reshape_heads(query_inputs)
+        keys = self._reshape_heads(key_inputs)
+        values = self._reshape_value_heads(value_inputs)
+        beta = torch.sigmoid(self.b_proj(hidden) + beta_delta)
+        decay = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden).float() + self.dt_bias)
+        assert self._chunk_gated_delta_rule is not None
+        with record_function("path1.reference_ssm.gdnp_control_tiny.native_chunk_gated_delta_rule"):
+            matrix_reads, _final_state = self._chunk_gated_delta_rule(
+                q=queries,
+                k=keys,
+                v=values,
+                g=decay,
+                beta=beta,
+                initial_state=None,
+                output_final_state=False,
+                use_qk_l2norm_in_kernel=True,
+            )
+        with record_function("path1.reference_ssm.gdnp_control_tiny.native_sequence_readout"):
+            output_gate = self._reshape_value_heads(self.g_proj(hidden))
+            normed = self.o_norm(matrix_reads, output_gate)
+            projected = self.o_proj(normed.reshape(batch_size, seq_len, self.d_model))
+        return projected
+
+    def _forward_torch_fallback_shell(self, hidden: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, _ = hidden.shape
+        query_delta, key_delta, value_delta, beta_delta = self._control_deltas(hidden)
+        with record_function("path1.reference_ssm.gdnp_control_tiny.control_projection"):
+            query_inputs, key_inputs, value_inputs, decay_inputs, beta_inputs, output_gate_inputs = (
+                self.control_projection(hidden)
+            )
+        with record_function("path1.reference_ssm.gdnp_control_tiny.short_conv"):
+            query_inputs = self.q_local(query_inputs) + query_delta
+            key_inputs = self.k_local(key_inputs) + key_delta
+            value_inputs = self.v_local(value_inputs) + value_delta
+
+        queries = self._reshape_heads(query_inputs)
+        keys = self._reshape_heads(key_inputs)
+        values = self._reshape_heads(value_inputs)
+        decay = F.logsigmoid(decay_inputs.float()).to(dtype=hidden.dtype)
+        beta = torch.sigmoid(beta_inputs + beta_delta)
+        if self._chunk_gated_delta_rule is not None:
+            with record_function("path1.reference_ssm.gdnp_control_tiny.chunk_gated_delta_rule"):
+                matrix_reads, _final_state = self._chunk_gated_delta_rule(
+                    q=queries,
+                    k=keys,
+                    v=values,
+                    g=decay,
+                    beta=beta,
+                    initial_state=None,
+                    output_final_state=False,
+                    use_qk_l2norm_in_kernel=True,
+                )
+        else:
+            matrix_reads = self._scan_torch(
+                queries=queries,
+                keys=keys,
+                values=values,
+                decay=decay,
+                beta=beta,
+            )
+        with record_function("path1.reference_ssm.gdnp_control_tiny.sequence_readout"):
+            normed_matrix_reads = self.output_norm(matrix_reads).reshape(batch_size, seq_len, self.d_model)
+            projected = self.output_projection(normed_matrix_reads)
+        return torch.sigmoid(output_gate_inputs) * projected
+
+    def forward(self, hidden: torch.Tensor, _attn_mask: torch.Tensor | None = None) -> torch.Tensor:
+        if self._native_control_shell:
+            return self._forward_native_shell(hidden)
+        return self._forward_torch_fallback_shell(hidden)
+
+    def diagnostic_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "kind": (
+                "fla-gdnp-control-conditioned"
+                if self.conditioner is not None
+                else "fla-gdn-control-shell"
+            ),
+            "gdn_kernel": (
+                "fla.chunk_gated_delta_rule"
+                if self._chunk_gated_delta_rule is not None
+                else "torch.loop_fallback"
+            ),
+            "shell_contract": (
+                "fla-native"
+                if self._native_control_shell
+                else "torch-fallback"
+            ),
+            "conditioned_controls": (
+                ("q", "k", "v", "beta")
+                if self.conditioner is not None
+                else ()
+            ),
+            "readout": "gdn-only",
+            "matrix_heads": self.head_count,
+            "matrix_head_dim": self.head_dim,
+        }
+        if self.conditioner is not None:
+            payload["conditioner"] = self.conditioner.diagnostic_payload()
+        return payload
+
+
+class FlaGatedDeltaNetControlShellSequenceMixer(FlaGdnpControlConditionedSequenceMixer):
+    """Matched custom FLA GDN shell with no P20 conditioner for wrapper diagnosis."""
+
+    def __init__(self, config: ResolvedReferenceSsmConfig) -> None:
+        super().__init__(config, enable_p20_conditioner=False)
+
 
 class FlaGdnpCompatibleSequenceMixer(nn.Module):
     """FLA-kernel GDN core conditioned by a P20 vector-state side channel."""
@@ -142,6 +552,7 @@ class FlaGdnpCompatibleSequenceMixer(nn.Module):
         self.head_dim = config.d_model // config.head_count
         self.law_kind = config.profile.fla_gdnp_compatible_law
         self.uses_multi_read = self.law_kind == "multi-read"
+        self.p20_ramp_init = config.p20_ramp_init
         self.p20 = P20SequencePrimitiveBranch(config.d_model)
         self.control_projection = PackedLinearProjection(
             config.d_model,
@@ -170,7 +581,9 @@ class FlaGdnpCompatibleSequenceMixer(nn.Module):
         self.v_local = ReferenceCausalDepthwiseConv1d(config.d_model, kernel_size=config.local_kernel_size)
         self.matrix_read_norm = SimpleRmsNorm(self.head_dim)
         self.vector_read_norm = SimpleRmsNorm(config.d_model)
-        self.p20_to_gdn_ramp_logit = nn.Parameter(torch.full((config.d_model,), -2.1972246))
+        self.p20_to_gdn_ramp_logit = nn.Parameter(
+            torch.full((config.d_model,), _safe_logit(config.p20_ramp_init))
+        )
         readout_width = config.d_model * (3 if self.uses_multi_read else 2)
         self.output_projection = nn.Linear(readout_width, config.d_model)
         self._init_parameters()
@@ -272,6 +685,7 @@ class FlaGdnpCompatibleSequenceMixer(nn.Module):
             "law": self.law_kind,
             "gdn_kernel": "fla.chunk_gated_delta_rule",
             "p20_conditioning": True,
+            "p20_ramp_init": self.p20_ramp_init,
             "uses_multi_read": self.uses_multi_read,
             "p20_branch": self.p20.diagnostic_payload(),
             "matrix_heads": self.head_count,
@@ -389,6 +803,13 @@ class TorchGatedDeltaNetSequenceMixer(nn.Module):
                 projected = self.output_projection(read)
                 outputs[:, position, :] = output_gates[:, position, :] * projected
         return outputs
+
+    def diagnostic_payload(self) -> dict[str, object]:
+        return {
+            "kind": "gated-deltanet-torch",
+            "matrix_heads": self.head_count,
+            "matrix_head_dim": self.head_dim,
+        }
 
 
 class P20SequencePrimitiveBranch(nn.Module):
@@ -928,23 +1349,31 @@ class ReferenceSsmHybridBlock(nn.Module):
         profile: ReferenceSsmProfile,
         dtype_mode: str,
         layer_index: int = 0,
+        use_pr5_scaffold: bool = False,
+        p20_ramp_init: float = 0.01,
     ) -> None:
         super().__init__()
         self.input_norm = SimpleRmsNorm(d_model)
         self.output_norm = SimpleRmsNorm(d_model)
         self.profile = profile
         self.layer_index = layer_index
+        self.use_pr5_scaffold = use_pr5_scaffold
         config = resolve_reference_ssm_config(
             d_model=d_model,
             head_count=head_count,
             profile=profile,
             dtype_mode=dtype_mode,
             layer_index=layer_index,
+            p20_ramp_init=p20_ramp_init,
         )
         if profile.is_composite:
             self.mixer = ParallelCompositeSequenceMixer(config, profile.composite_branches)
         elif profile.is_fla_gated_deltanet:
             self.mixer = FlaGatedDeltaNetSequenceMixer(config)
+        elif profile.is_fla_gdn_control_shell:
+            self.mixer = FlaGatedDeltaNetControlShellSequenceMixer(config)
+        elif profile.is_fla_gdnp_control_conditioned:
+            self.mixer = FlaGdnpControlConditionedSequenceMixer(config)
         elif profile.is_fla_gdnp_compatible:
             self.mixer = FlaGdnpCompatibleSequenceMixer(config)
         elif profile.is_gdnp_fused:
@@ -958,26 +1387,48 @@ class ReferenceSsmHybridBlock(nn.Module):
             )
         else:
             self.mixer = OfficialMamba3SequenceMixer(config)
-        self.feedforward = PositionWiseFeedForward(d_model, d_ff)
+        self.feedforward = (
+            ReluSquaredFeedForward(d_model, d_ff)
+            if use_pr5_scaffold
+            else PositionWiseFeedForward(d_model, d_ff)
+        )
+        if use_pr5_scaffold:
+            self.mixer_scale = nn.Parameter(torch.ones(d_model, dtype=torch.float32))
+            self.feedforward_scale = nn.Parameter(torch.ones(d_model, dtype=torch.float32))
+            self.residual_mix = nn.Parameter(torch.stack((torch.ones(d_model), torch.zeros(d_model))).float())
 
-    def forward(self, hidden: torch.Tensor, attn_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        attn_mask: torch.Tensor | None = None,
+        residual_anchor: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.use_pr5_scaffold:
+            if residual_anchor is None:
+                residual_anchor = hidden
+            mix = self.residual_mix.to(dtype=hidden.dtype)
+            hidden = mix[0].view(1, 1, -1) * hidden + mix[1].view(1, 1, -1) * residual_anchor
         with record_function("path1.reference_ssm.input_norm"):
             normed = self.input_norm(hidden)
         mixed = self.mixer(normed, attn_mask)
+        if self.use_pr5_scaffold:
+            mixed = self.mixer_scale.to(dtype=hidden.dtype).view(1, 1, -1) * mixed
         residual = hidden + mixed
         with record_function("path1.reference_ssm.feedforward"):
-            return residual + self.feedforward(self.output_norm(residual))
+            feedforward = self.feedforward(self.output_norm(residual))
+            if self.use_pr5_scaffold:
+                feedforward = self.feedforward_scale.to(dtype=hidden.dtype).view(1, 1, -1) * feedforward
+            return residual + feedforward
 
     def diagnostic_payload(self) -> dict[str, object]:
         mixer_diagnostic = getattr(self.mixer, "diagnostic_payload", None)
-        if not callable(mixer_diagnostic):
-            return {}
-        payload = mixer_diagnostic()
-        if not payload:
-            return {}
+        payload = mixer_diagnostic() if callable(mixer_diagnostic) else {}
+        if not isinstance(payload, dict):
+            payload = {}
         return {
             "layer_index": self.layer_index,
             "profile": self.profile.value,
+            "pr5_scaffold": self.use_pr5_scaffold,
             "mixer": payload,
         }
 

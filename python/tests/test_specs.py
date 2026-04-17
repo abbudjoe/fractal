@@ -17,7 +17,9 @@ from python.specs.mini_moe import (
     OneShotRouterSpec,
 )
 from python.specs.path1 import (
+    FeedForwardProfile,
     HybridAttentionLayerRole,
+    Path1ScaffoldProfile,
     PrimitiveExecutionProfile,
     PrimitiveNormMode,
     PrimitiveProfile,
@@ -27,7 +29,9 @@ from python.specs.path1 import (
     PrimitiveWrapperMode,
     ReferenceSsmProfile,
     layer_schedule_signature,
+    parse_layer_index_spec,
     parse_layer_schedule_spec,
+    parse_reference_ssm_profile_schedule_spec,
     phase1_attention_only_variant,
     phase1_baseline_matrix,
     Path1ModelShape,
@@ -72,6 +76,11 @@ class Path1SpecTests(unittest.TestCase):
             primitive_runtime_backend="triton",
         ).validate()
 
+    def test_runtime_spec_accepts_mps_fp32_only(self) -> None:
+        DeviceRuntimeSpec(backend="mps", dtype="fp32").validate()
+        with self.assertRaises(ValidationError):
+            DeviceRuntimeSpec(backend="mps", dtype="bf16").validate()
+
     def test_baseline_matrix_validates(self) -> None:
         matrix = phase1_baseline_matrix(
             reference_profile=ReferenceSsmProfile.MAMBA3_SISO_RUNTIME,
@@ -95,6 +104,67 @@ class Path1SpecTests(unittest.TestCase):
         variant.validate()
         self.assertTrue(variant.reference_ssm_profile.is_mimo)
         self.assertEqual(variant.label, "reference-ssm-hybrid-mamba3-mimo-reference")
+
+    def test_attention_only_surgical_feed_forward_profile_tracks_layers(self) -> None:
+        variant = phase1_attention_only_variant(
+            feed_forward_profile=FeedForwardProfile.MLP_EML_GATED,
+            feed_forward_layer_indices=(3, 4),
+            eml_slot_count=4,
+            eml_tree_depth=2,
+        )
+
+        variant.validate()
+
+        self.assertEqual(variant.feed_forward_layer_indices, (3, 4))
+        self.assertEqual(variant.label, "attention-only-mlp-eml-gated-slots4-depth2-layers3-4")
+
+    def test_parse_layer_index_spec_rejects_duplicate_indices(self) -> None:
+        self.assertEqual(parse_layer_index_spec("4, 3"), (3, 4))
+        with self.assertRaises(ValidationError):
+            parse_layer_index_spec("2 2")
+
+    def test_attention_only_routed_feed_forward_profile_tracks_route_fraction(self) -> None:
+        variant = phase1_attention_only_variant(
+            feed_forward_profile=FeedForwardProfile.MLP_EML_ROUTED,
+            feed_forward_layer_indices=(4,),
+            eml_slot_count=4,
+            eml_tree_depth=2,
+            eml_route_fraction=0.25,
+        )
+
+        variant.validate()
+
+        self.assertEqual(variant.feed_forward_layer_indices, (4,))
+        self.assertEqual(variant.eml_route_fraction, 0.25)
+        self.assertEqual(variant.label, "attention-only-mlp-eml-routed-slots4-depth2-route25pct-layers4")
+
+    def test_attention_only_parcae_scaffold_tracks_loop_count(self) -> None:
+        variant = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_LOOPED_ATTENTION,
+            parcae_loop_count=3,
+        )
+
+        variant.validate()
+
+        self.assertEqual(variant.scaffold_profile, Path1ScaffoldProfile.PARCAE_LOOPED_ATTENTION)
+        self.assertEqual(variant.parcae_loop_count, 3)
+        self.assertEqual(variant.label, "attention-only-parcae-looped-attention-loops3")
+
+    def test_attention_only_parcae_bx_and_p20_control_scaffolds_validate(self) -> None:
+        bx = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_BX_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+        )
+        p20 = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+        )
+
+        bx.validate()
+        p20.validate()
+
+        self.assertEqual(bx.label, "attention-only-parcae-bx-looped-attention-loops2")
+        self.assertEqual(p20.label, "attention-only-parcae-p20-control-looped-attention-loops2")
 
     def test_gated_deltanet_reference_variant_tracks_profile(self) -> None:
         variant = phase1_reference_ssm_variant(profile=ReferenceSsmProfile.GATED_DELTANET_TORCH)
@@ -134,6 +204,81 @@ class Path1SpecTests(unittest.TestCase):
                 self.assertTrue(variant.reference_ssm_profile.runtime_oriented)
                 self.assertEqual(variant.final_norm_kind, "rmsnorm")
                 self.assertIn(profile.value, variant.label)
+
+    def test_fla_gdnp_control_conditioned_reference_variant_tracks_runtime_profile(self) -> None:
+        variant = phase1_reference_ssm_variant(
+            profile=ReferenceSsmProfile.GATED_DELTANET_FLA_P20_CONTROL_TINY,
+        )
+
+        variant.validate()
+
+        self.assertTrue(variant.reference_ssm_profile.is_gated_deltanet)
+        self.assertTrue(variant.reference_ssm_profile.is_fla_gdnp_control_conditioned)
+        self.assertTrue(variant.reference_ssm_profile.runtime_oriented)
+        self.assertEqual(variant.final_norm_kind, "rmsnorm")
+        self.assertIn("gated-deltanet-fla-p20-control-tiny", variant.label)
+
+    def test_fla_gdn_control_shell_reference_variant_tracks_runtime_profile(self) -> None:
+        variant = phase1_reference_ssm_variant(
+            profile=ReferenceSsmProfile.GATED_DELTANET_FLA_CONTROL_SHELL,
+        )
+
+        variant.validate()
+
+        self.assertTrue(variant.reference_ssm_profile.is_gated_deltanet)
+        self.assertTrue(variant.reference_ssm_profile.is_fla_gdn_control_shell)
+        self.assertTrue(variant.reference_ssm_profile.runtime_oriented)
+        self.assertEqual(variant.final_norm_kind, "rmsnorm")
+        self.assertIn("gated-deltanet-fla-control-shell", variant.label)
+
+    def test_reference_variant_accepts_sparse_reference_profile_schedule(self) -> None:
+        layer_schedule = parse_layer_schedule_spec("RRRRRARRRRRS")
+        profile_schedule = parse_reference_ssm_profile_schedule_spec(
+            "gated-deltanet-torch gated-deltanet-torch gated-deltanet-torch "
+            "gated-deltanet-torch gated-deltanet-fla-control-shell "
+            "gated-deltanet-torch gated-deltanet-torch gated-deltanet-torch "
+            "gated-deltanet-torch gated-deltanet-torch"
+        )
+        variant = phase1_reference_ssm_variant(
+            shape=Path1ModelShape(total_layers=len(layer_schedule)),
+            profile=ReferenceSsmProfile.GATED_DELTANET_TORCH,
+            layer_schedule=layer_schedule,
+            profile_schedule=profile_schedule,
+            scaffold_profile=Path1ScaffoldProfile.PR5_HYBRID_GDN,
+        )
+
+        variant.validate()
+
+        self.assertEqual(variant.scaffold_profile, Path1ScaffoldProfile.PR5_HYBRID_GDN)
+        self.assertEqual(len(variant.reference_ssm_profile_schedule), 10)
+        self.assertEqual(
+            variant.reference_profile_for_ordinal(4),
+            ReferenceSsmProfile.GATED_DELTANET_FLA_CONTROL_SHELL,
+        )
+        self.assertEqual(variant.reference_p20_ramp_init, 0.01)
+        self.assertIn("pr5-hybrid-gdn", variant.label)
+        self.assertIn("profiles-gdnx4-gdn-fla-shell-gdnx5", variant.label)
+
+    def test_reference_variant_rejects_invalid_p20_ramp_init(self) -> None:
+        variant = phase1_reference_ssm_variant(
+            profile=ReferenceSsmProfile.GATED_DELTANET_FLA_P20_COMPAT,
+            reference_p20_ramp_init=1.0,
+        )
+
+        with self.assertRaisesRegex(ValidationError, "reference_p20_ramp_init"):
+            variant.validate()
+
+    def test_reference_variant_rejects_profile_schedule_length_mismatch(self) -> None:
+        layer_schedule = parse_layer_schedule_spec("RRRRRARRRRRS")
+        variant = phase1_reference_ssm_variant(
+            shape=Path1ModelShape(total_layers=len(layer_schedule)),
+            profile=ReferenceSsmProfile.GATED_DELTANET_TORCH,
+            layer_schedule=layer_schedule,
+            profile_schedule=(ReferenceSsmProfile.GATED_DELTANET_TORCH,),
+        )
+
+        with self.assertRaisesRegex(ValidationError, "reference_ssm_profile_schedule length"):
+            variant.validate()
 
     def test_gdnp_fused_reference_variant_tracks_profile(self) -> None:
         expected_laws = {

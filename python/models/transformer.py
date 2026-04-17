@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.profiler import record_function
 
-from python.models.common import PositionWiseFeedForward, build_linear
+from python.models.common import PositionWiseFeedForward, ReluSquaredFeedForward, SimpleRmsNorm, build_linear
 
 
 def local_causal_attention_bias(
@@ -97,3 +97,43 @@ class LocalCausalTransformerBlock(nn.Module):
         residual = hidden + self.attention(normed, attn_mask)
         with record_function("path1.attention.feedforward"):
             return residual + self.ffn(self.output_norm(residual))
+
+
+class Pr5LocalCausalTransformerBlock(nn.Module):
+    """PR5-style exact-mixing seam with residual anchor access."""
+
+    def __init__(
+        self,
+        d_model: int,
+        head_count: int,
+        d_ff: int,
+        *,
+        attention_module: LocalCausalSelfAttention | None = None,
+    ) -> None:
+        super().__init__()
+        self.input_norm = SimpleRmsNorm(d_model)
+        self.attention = attention_module if attention_module is not None else LocalCausalSelfAttention(d_model, head_count)
+        self.output_norm = SimpleRmsNorm(d_model)
+        self.ffn = ReluSquaredFeedForward(d_model, d_ff)
+        self.attention_scale = nn.Parameter(torch.ones(d_model, dtype=torch.float32))
+        self.ffn_scale = nn.Parameter(torch.ones(d_model, dtype=torch.float32))
+        self.residual_mix = nn.Parameter(torch.stack((torch.ones(d_model), torch.zeros(d_model))).float())
+
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        attn_mask: torch.Tensor | None = None,
+        residual_anchor: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if residual_anchor is None:
+            residual_anchor = hidden
+        mix = self.residual_mix.to(dtype=hidden.dtype)
+        mixed_hidden = mix[0].view(1, 1, -1) * hidden + mix[1].view(1, 1, -1) * residual_anchor
+        with record_function("path1.pr5_attention.input_norm"):
+            normed = self.input_norm(mixed_hidden)
+        attention_out = self.attention(normed, attn_mask)
+        residual = mixed_hidden + self.attention_scale.to(dtype=hidden.dtype).view(1, 1, -1) * attention_out
+        with record_function("path1.pr5_attention.feedforward"):
+            return residual + self.ffn_scale.to(dtype=hidden.dtype).view(1, 1, -1) * self.ffn(
+                self.output_norm(residual)
+            )

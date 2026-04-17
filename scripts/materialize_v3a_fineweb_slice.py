@@ -20,13 +20,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", default="train")
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--length", type=int, required=True)
+    parser.add_argument("--page-size", type=int, default=100)
     parser.add_argument("--train-rows", type=int, required=True)
     parser.add_argument("--eval-rows", type=int, required=True)
     parser.add_argument("--text-field", default="text")
     return parser.parse_args()
 
 
-def fetch_rows(dataset: str, config: str, split: str, offset: int, length: int) -> list[dict]:
+def fetch_row_page(dataset: str, config: str, split: str, offset: int, length: int) -> list[dict]:
     base = "https://datasets-server.huggingface.co/rows"
     params = {
         "dataset": dataset,
@@ -39,6 +40,23 @@ def fetch_rows(dataset: str, config: str, split: str, offset: int, length: int) 
     with urlopen(url, timeout=120) as response:
         payload = json.load(response)
     return payload["rows"]
+
+
+def fetch_rows(dataset: str, config: str, split: str, offset: int, length: int, page_size: int) -> list[dict]:
+    rows: list[dict] = []
+    while len(rows) < length:
+        page_offset = offset + len(rows)
+        page_length = min(page_size, length - len(rows))
+        page = fetch_row_page(dataset, config, split, page_offset, page_length)
+        if not page:
+            break
+        rows.extend(page)
+        print(
+            f"fetched {len(rows)}/{length} rows from {dataset}/{config}/{split}",
+            file=sys.stderr,
+            flush=True,
+        )
+    return rows
 
 
 def write_jsonl(path: Path, rows: list[dict], text_field: str) -> None:
@@ -56,6 +74,7 @@ def write_readme(
     split: str,
     offset: int,
     length: int,
+    page_size: int,
     train_rows: int,
     eval_rows: int,
     text_field: str,
@@ -70,6 +89,7 @@ def write_readme(
                 f"- config: `{config}`",
                 f"- split: `{split}`",
                 f"- rows fetched: `offset={offset},length={length}` on {fetched_at}",
+                f"- page size: `{page_size}`",
                 f"- train rows: first {train_rows}",
                 f"- eval rows: next {eval_rows}",
                 f"- text field: `{text_field}`",
@@ -84,6 +104,8 @@ def main() -> int:
     args = parse_args()
     if args.length <= 0:
         raise SystemExit("--length must be greater than zero")
+    if args.page_size <= 0:
+        raise SystemExit("--page-size must be greater than zero")
     if args.train_rows <= 0 or args.eval_rows <= 0:
         raise SystemExit("--train-rows and --eval-rows must be greater than zero")
     if args.train_rows + args.eval_rows > args.length:
@@ -92,7 +114,7 @@ def main() -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    rows = fetch_rows(args.dataset, args.config, args.split, args.offset, args.length)
+    rows = fetch_rows(args.dataset, args.config, args.split, args.offset, args.length, args.page_size)
     if len(rows) < args.train_rows + args.eval_rows:
         raise SystemExit(
             f"fetched {len(rows)} rows, but need at least {args.train_rows + args.eval_rows}"
@@ -110,6 +132,7 @@ def main() -> int:
         args.split,
         args.offset,
         args.length,
+        args.page_size,
         args.train_rows,
         args.eval_rows,
         args.text_field,

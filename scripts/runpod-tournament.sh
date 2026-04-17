@@ -29,6 +29,8 @@ Wrapper options:
   --binary-name NAME             Cargo target name or repo-relative Python script path. Default: tournament
   --python-requirements FILE     Repo-relative or local repo-root-backed requirements file for python runs
   --python-install-mode MODE     Python bootstrap mode: requirements-only, compile-safe, primitive-triton, or official-mamba3. Default: requirements-only
+  --forward-env NAME             Forward a local environment variable into the remote run without recording its value.
+                                 May be repeated. Intended for secrets such as HF_TOKEN.
   --no-compile                    Reuse a cached remote binary and fail if it is missing.
   --stop-after-run                Always stop the pod after the command finishes.
   --keep-pod                      Never stop the pod automatically.
@@ -90,6 +92,27 @@ quote_cmd() {
 
 require_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+validate_forward_env_vars() {
+    local name
+    for name in "${FORWARD_ENV_VARS[@]}"; do
+        if [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            die "invalid --forward-env name: $name"
+        fi
+        if [ -z "${!name:-}" ]; then
+            die "--forward-env $name requested but local environment variable is not set"
+        fi
+    done
+}
+
+emit_forward_env_exports() {
+    local name
+    local value
+    for name in "${FORWARD_ENV_VARS[@]}"; do
+        value="${!name}"
+        printf 'export %s=%q\n' "$name" "$value"
+    done
 }
 
 resolve_ssh_key() {
@@ -1072,20 +1095,39 @@ digest = hashlib.sha256()
 if binary_kind == "python":
     digest.update(f"python-install-mode:{python_install_mode}".encode())
     digest.update(b"\0")
+
+def skip_bulk_local_data(relpath: str) -> bool:
+    normalized = relpath.replace(os.sep, "/")
+    return (
+        normalized.startswith("experiments/stage0/assets/fineweb/fineweb-cc-main-2024-10-parquet-20gb/")
+        or normalized.endswith(".pt")
+        or normalized.endswith(".tar.zst")
+        or normalized.endswith(".tar.zst.sha256")
+        or normalized.endswith(".DS_Store")
+    )
+
 for rel in paths:
     full = os.path.join(root, rel)
     if not os.path.exists(full):
         continue
     if os.path.isfile(full):
-        entries = [(rel, full)]
+        entries = [] if skip_bulk_local_data(rel) else [(rel, full)]
     else:
         entries = []
         for dirpath, dirnames, filenames in os.walk(full):
             dirnames.sort()
             filenames.sort()
+            dirnames[:] = [
+                dirname
+                for dirname in dirnames
+                if not skip_bulk_local_data(os.path.relpath(os.path.join(dirpath, dirname), root) + "/")
+            ]
             for filename in filenames:
                 path = os.path.join(dirpath, filename)
-                entries.append((os.path.relpath(path, root), path))
+                relpath = os.path.relpath(path, root)
+                if skip_bulk_local_data(relpath):
+                    continue
+                entries.append((relpath, path))
 
     for relpath, path in entries:
         digest.update(relpath.encode())
@@ -1186,7 +1228,9 @@ PY
         | "${SSH_BASE[@]}" "mkdir -p ${state_dir_q}/manifests && cat > ${remote_launch_spec_path_q}"
 
     log "running remote CUDA ${BINARY_KIND}:${BINARY_NAME}"
-    "${SSH_BASE[@]}" bash -s -- "$remote_launch_spec_path" <<'REMOTE'
+    {
+        emit_forward_env_exports
+        cat <<'REMOTE'
 set -euo pipefail
 
 launch_spec_path="$1"
@@ -1484,6 +1528,7 @@ fi
 
 stdbuf -oL -eL "${run_command[@]}" 2>&1 | tee -a "$state_dir/logs/latest.log"
 REMOTE
+    } | "${SSH_BASE[@]}" bash -s -- "$remote_launch_spec_path"
 }
 
 cleanup() {
@@ -1557,6 +1602,7 @@ SSH_PORT=""
 VOLUME_MOUNT_PATH=""
 TOURNAMENT_ARGS=()
 SSH_BASE=()
+FORWARD_ENV_VARS=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -1644,6 +1690,10 @@ while [ $# -gt 0 ]; do
             PYTHON_INSTALL_MODE="$2"
             shift 2
             ;;
+        --forward-env)
+            FORWARD_ENV_VARS+=("$2")
+            shift 2
+            ;;
         --stop-after-run)
             STOP_MODE="always"
             shift
@@ -1676,6 +1726,8 @@ require_cmd python3
 require_cmd ssh
 require_cmd tar
 require_cmd git
+
+validate_forward_env_vars
 
 case "$BINARY_KIND" in
     example|bin|python)

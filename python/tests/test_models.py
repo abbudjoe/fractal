@@ -11,7 +11,15 @@ from python.models.mini_moe import (
     SparseTopKDispatcher,
 )
 from python.models.mini_moe import MiniMoeBackboneModel
-from python.models.common import leading_state_slice
+from python.models.common import (
+    GatedEmlFeedForward,
+    GenericTreeExpertFeedForward,
+    PositionWiseFeedForward,
+    RoutedEmlFeedForward,
+    TinyGluExpertFeedForward,
+    TinyMlpExpertFeedForward,
+    leading_state_slice,
+)
 from python.models.primitives import build_sequence_primitive
 from python.models.path1 import build_path1_model
 from python.models.reference_ssm import GdnpFusedSequenceMixer, resolve_reference_ssm_config
@@ -33,6 +41,8 @@ from python.specs.mini_moe import (
     OneShotRouterSpec,
 )
 from python.specs.path1 import (
+    FeedForwardProfile,
+    Path1ScaffoldProfile,
     PrimitiveExecutionProfile,
     PrimitiveNormMode,
     PrimitiveProfile,
@@ -55,6 +65,173 @@ class Path1ModelTests(unittest.TestCase):
         input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
         logits = model.forward_logits(input_ids)
         self.assertEqual(tuple(logits.shape), (2, 8, 257))
+
+    def test_attention_only_parcae_looped_scaffold_forward_cpu(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_LOOPED_ATTENTION,
+            parcae_loop_count=3,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertIn("parcae_looped_attention", diagnostics)
+        self.assertEqual(diagnostics["parcae_looped_attention"]["loop_count"], 3)
+        self.assertEqual(len(diagnostics["parcae_looped_attention"]["last_recurrent_state_norms"]), 3)
+
+    def test_attention_only_parcae_bx_and_p20_control_scaffolds_forward_cpu(self) -> None:
+        for scaffold_profile in (
+            Path1ScaffoldProfile.PARCAE_BX_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+        ):
+            with self.subTest(scaffold_profile=scaffold_profile.value):
+                variant = phase1_attention_only_variant(
+                    shape=Path1ModelShape(d_model=32, head_count=4, total_layers=6, ffn_multiplier=2),
+                    scaffold_profile=scaffold_profile,
+                    parcae_loop_count=2,
+                )
+                model = build_path1_model(variant, dtype_mode="fp32")
+                input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+                logits = model.forward_logits(input_ids)
+                diagnostics = model.diagnostic_payload()["parcae_looped_attention"]
+
+                self.assertEqual(tuple(logits.shape), (2, 8, 257))
+                self.assertTrue(torch.isfinite(logits).all())
+                self.assertEqual(diagnostics["profile"], scaffold_profile.value)
+                self.assertIsNotNone(diagnostics["last_injection_gate_mean"])
+                self.assertIsNotNone(diagnostics["last_injection_norm"])
+
+    def test_attention_only_parcae_p20_control_receives_runtime_policy(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+
+        self.assertIsNotNone(model.parcae_p20_controller)
+        self.assertIsNone(model.parcae_p20_controller._compiled_scan_impl)
+
+        model.configure_runtime_policy(
+            compile_mode="reduce-overhead",
+            primitive_runtime_backend="torch",
+        )
+
+        self.assertIsNotNone(model.parcae_p20_controller._compiled_scan_impl)
+
+    def test_attention_only_eml_tree_feed_forward_cpu(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=2, ffn_multiplier=2),
+            feed_forward_profile=FeedForwardProfile.EML_TREE,
+            eml_slot_count=6,
+            eml_tree_depth=2,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertIn("eml_tree", model.model_label)
+        self.assertEqual(diagnostics["feed_forward_profile"], "eml-tree")
+        self.assertEqual(diagnostics["eml_inspired_feed_forward"]["leaf_count"], 4)
+
+    def test_attention_only_gated_eml_feed_forward_cpu(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=2, ffn_multiplier=2),
+            feed_forward_profile=FeedForwardProfile.MLP_EML_GATED,
+            eml_slot_count=6,
+            eml_tree_depth=2,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertIn("mlp_eml_gated", model.model_label)
+
+    def test_attention_only_surgical_gated_eml_targets_selected_layer_only(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=4, ffn_multiplier=2),
+            feed_forward_profile=FeedForwardProfile.MLP_EML_GATED,
+            feed_forward_layer_indices=(2,),
+            eml_slot_count=4,
+            eml_tree_depth=2,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertIsInstance(model.blocks[0].ffn, PositionWiseFeedForward)
+        self.assertIsInstance(model.blocks[1].ffn, PositionWiseFeedForward)
+        self.assertIsInstance(model.blocks[2].ffn, GatedEmlFeedForward)
+        self.assertIsInstance(model.blocks[3].ffn, PositionWiseFeedForward)
+        self.assertEqual(diagnostics["eml_inspired_feed_forward"]["layer_indices"], (2,))
+
+    def test_attention_only_routed_eml_targets_selected_layer_only(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=4, ffn_multiplier=2),
+            feed_forward_profile=FeedForwardProfile.MLP_EML_ROUTED,
+            feed_forward_layer_indices=(2,),
+            eml_slot_count=4,
+            eml_tree_depth=2,
+            eml_route_fraction=0.25,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertIsInstance(model.blocks[0].ffn, PositionWiseFeedForward)
+        self.assertIsInstance(model.blocks[1].ffn, PositionWiseFeedForward)
+        self.assertIsInstance(model.blocks[2].ffn, RoutedEmlFeedForward)
+        self.assertIsInstance(model.blocks[3].ffn, PositionWiseFeedForward)
+        self.assertEqual(diagnostics["eml_inspired_feed_forward"]["layer_indices"], (2,))
+        self.assertEqual(diagnostics["eml_inspired_feed_forward"]["route_fraction"], 0.25)
+
+    def test_attention_only_expert_controls_target_selected_layer_only(self) -> None:
+        cases = (
+            (FeedForwardProfile.TINY_MLP_GATED, TinyMlpExpertFeedForward),
+            (FeedForwardProfile.TINY_GLU_GATED, TinyGluExpertFeedForward),
+            (FeedForwardProfile.GENERIC_TREE_GATED, GenericTreeExpertFeedForward),
+        )
+        for profile, expected_type in cases:
+            with self.subTest(profile=profile.value):
+                variant = phase1_attention_only_variant(
+                    shape=Path1ModelShape(d_model=32, head_count=4, total_layers=4, ffn_multiplier=2),
+                    feed_forward_profile=profile,
+                    feed_forward_layer_indices=(2,),
+                    eml_slot_count=4,
+                    eml_tree_depth=2,
+                )
+                model = build_path1_model(variant, dtype_mode="fp32")
+                input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+                logits = model.forward_logits(input_ids)
+                diagnostics = model.diagnostic_payload()
+
+                self.assertEqual(tuple(logits.shape), (2, 8, 257))
+                self.assertTrue(torch.isfinite(logits).all())
+                self.assertIsInstance(model.blocks[0].ffn, PositionWiseFeedForward)
+                self.assertIsInstance(model.blocks[2].ffn, expected_type)
+                self.assertEqual(diagnostics["feed_forward_experts"][0]["layer_index"], 2)
 
     def test_primitive_forward_cpu(self) -> None:
         variant = phase1_primitive_variant(
@@ -140,6 +317,170 @@ class Path1ModelTests(unittest.TestCase):
         self.assertIs(model.blocks[5].attention, model.blocks[11].attention)
         self.assertIsNot(model.blocks[5], model.blocks[11])
         self.assertIn("schedule_rrrrrarrrrrs", model.model_label)
+
+    def test_pr5_scaffold_gdn_topology_forward_cpu(self) -> None:
+        schedule = parse_layer_schedule_spec("RRRRRARRRRRS")
+        variant = phase1_reference_ssm_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=len(schedule), local_window=4),
+            profile=ReferenceSsmProfile.GATED_DELTANET_TORCH,
+            layer_schedule=schedule,
+            scaffold_profile=Path1ScaffoldProfile.PR5_HYBRID_GDN,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 6), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()
+
+        self.assertEqual(tuple(logits.shape), (2, 6, 257))
+        self.assertIs(model.blocks[5].attention, model.blocks[11].attention)
+        self.assertEqual(diagnostics["scaffold"]["profile"], "pr5-hybrid-gdn")
+        self.assertTrue(diagnostics["scaffold"]["hash_context_embedding"])
+        self.assertTrue(diagnostics["scaffold"]["smear_gate"])
+        self.assertTrue(diagnostics["reference_ssm_blocks"][0]["pr5_scaffold"])
+
+    def test_pr5_scaffold_sparse_p20_insertion_uses_only_selected_recurrent_slot(self) -> None:
+        schedule = parse_layer_schedule_spec("RRRRRARRRRRS")
+        profile_schedule = tuple(
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_MULTI_READ_TORCH
+            if ordinal == 4
+            else ReferenceSsmProfile.GATED_DELTANET_TORCH
+            for ordinal in range(10)
+        )
+        variant = phase1_reference_ssm_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=len(schedule), local_window=4),
+            profile=ReferenceSsmProfile.GATED_DELTANET_TORCH,
+            layer_schedule=schedule,
+            profile_schedule=profile_schedule,
+            scaffold_profile=Path1ScaffoldProfile.PR5_HYBRID_GDN,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(1, 5), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()
+
+        self.assertEqual(tuple(logits.shape), (1, 5, 257))
+        mixer_kinds = [block["mixer"]["kind"] for block in diagnostics["reference_ssm_blocks"]]
+        self.assertEqual(mixer_kinds.count("gdnp-fused"), 1)
+        self.assertEqual(mixer_kinds.count("parallel-composite"), 0)
+        self.assertEqual(diagnostics["reference_ssm_blocks"][4]["profile"], "gated-deltanet-p20-fused-multi-read-torch")
+
+    def test_pr5_scaffold_tiny_p20_conditioner_keeps_gdn_readout_owner(self) -> None:
+        schedule = parse_layer_schedule_spec("RRRRRARRRRRS")
+        profile_schedule = tuple(
+            ReferenceSsmProfile.GATED_DELTANET_FLA_P20_CONTROL_TINY
+            if ordinal == 4
+            else ReferenceSsmProfile.GATED_DELTANET_TORCH
+            for ordinal in range(10)
+        )
+        variant = phase1_reference_ssm_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=len(schedule), local_window=4),
+            profile=ReferenceSsmProfile.GATED_DELTANET_TORCH,
+            layer_schedule=schedule,
+            profile_schedule=profile_schedule,
+            scaffold_profile=Path1ScaffoldProfile.PR5_HYBRID_GDN,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(1, 5), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()
+
+        self.assertEqual(tuple(logits.shape), (1, 5, 257))
+        mixer = diagnostics["reference_ssm_blocks"][4]["mixer"]
+        self.assertEqual(mixer["kind"], "fla-gdnp-control-conditioned")
+        self.assertEqual(mixer["readout"], "gdn-only")
+        self.assertEqual(mixer["conditioned_controls"], ("q", "k", "v", "beta"))
+        self.assertEqual(mixer["conditioner"]["kind"], "p20-tiny-control-conditioner")
+        self.assertLess(mixer["conditioner"]["bottleneck_width"], 32)
+
+    def test_pr5_scaffold_control_shell_has_no_p20_conditioner(self) -> None:
+        schedule = parse_layer_schedule_spec("RRRRRARRRRRS")
+        profile_schedule = tuple(
+            ReferenceSsmProfile.GATED_DELTANET_FLA_CONTROL_SHELL
+            if ordinal == 4
+            else ReferenceSsmProfile.GATED_DELTANET_TORCH
+            for ordinal in range(10)
+        )
+        variant = phase1_reference_ssm_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=len(schedule), local_window=4),
+            profile=ReferenceSsmProfile.GATED_DELTANET_TORCH,
+            layer_schedule=schedule,
+            profile_schedule=profile_schedule,
+            scaffold_profile=Path1ScaffoldProfile.PR5_HYBRID_GDN,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(1, 5), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()
+
+        self.assertEqual(tuple(logits.shape), (1, 5, 257))
+        mixer = diagnostics["reference_ssm_blocks"][4]["mixer"]
+        self.assertEqual(mixer["kind"], "fla-gdn-control-shell")
+        self.assertEqual(mixer["readout"], "gdn-only")
+        self.assertEqual(mixer["conditioned_controls"], ())
+        self.assertNotIn("conditioner", mixer)
+
+    def test_pr5_scaffold_sparse_p20_insertion_is_causal(self) -> None:
+        schedule = parse_layer_schedule_spec("RRRRRARRRRRS")
+        profile_schedule = tuple(
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_MULTI_READ_TORCH
+            if ordinal == 4
+            else ReferenceSsmProfile.GATED_DELTANET_TORCH
+            for ordinal in range(10)
+        )
+        variant = phase1_reference_ssm_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=len(schedule), local_window=4),
+            profile=ReferenceSsmProfile.GATED_DELTANET_TORCH,
+            layer_schedule=schedule,
+            profile_schedule=profile_schedule,
+            scaffold_profile=Path1ScaffoldProfile.PR5_HYBRID_GDN,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        prefix = torch.randint(low=0, high=257, size=(1, 5), dtype=torch.long)
+        suffix_a = torch.randint(low=0, high=257, size=(1, 3), dtype=torch.long)
+        suffix_b = torch.randint(low=0, high=257, size=(1, 3), dtype=torch.long)
+
+        logits_a = model.forward_logits(torch.cat((prefix, suffix_a), dim=1))
+        logits_b = model.forward_logits(torch.cat((prefix, suffix_b), dim=1))
+
+        self.assertTrue(torch.allclose(logits_a[:, : prefix.shape[1], :], logits_b[:, : prefix.shape[1], :]))
+
+    def test_pr5_scaffold_optimizer_groups_are_disjoint(self) -> None:
+        schedule = parse_layer_schedule_spec("RRRRRARRRRRS")
+        profile_schedule = tuple(
+            ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_MULTI_READ_TORCH
+            if ordinal == 4
+            else ReferenceSsmProfile.GATED_DELTANET_TORCH
+            for ordinal in range(10)
+        )
+        variant = phase1_reference_ssm_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=len(schedule), local_window=4),
+            profile=ReferenceSsmProfile.GATED_DELTANET_TORCH,
+            layer_schedule=schedule,
+            profile_schedule=profile_schedule,
+            scaffold_profile=Path1ScaffoldProfile.PR5_HYBRID_GDN,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+
+        groups = model.optimizer_parameter_groups(1.0e-3)
+        group_names = {group["name"] for group in groups}
+        self.assertIn("pr5_context", group_names)
+        self.assertIn("pr5_recurrent", group_names)
+        self.assertIn("pr5_gates_controls", group_names)
+        self.assertIn("pr5_readout", group_names)
+        self.assertIn("pr5_scalars", group_names)
+        grouped_params = [param for group in groups for param in group["params"]]
+        self.assertEqual(len({id(param) for param in grouped_params}), len(grouped_params))
+        self.assertEqual(
+            {id(param) for param in model.parameters() if param.requires_grad},
+            {id(param) for param in grouped_params},
+        )
+        lr_by_name = {group["name"]: group["lr"] for group in groups}
+        self.assertEqual(lr_by_name["pr5_recurrent"], 5.0e-4)
+        self.assertEqual(lr_by_name["pr5_gates_controls"], 5.0e-4)
 
     def test_gated_deltanet_p20_composite_forward_cpu(self) -> None:
         variant = phase1_reference_ssm_variant(profile=ReferenceSsmProfile.GATED_DELTANET_P20_TORCH)

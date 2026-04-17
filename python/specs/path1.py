@@ -20,6 +20,24 @@ class Path1VariantKind(StringEnum):
     PRIMITIVE_HYBRID = "primitive-hybrid"
 
 
+class FeedForwardProfile(StringEnum):
+    STANDARD = "standard"
+    EML_TREE = "eml-tree"
+    MLP_EML_GATED = "mlp-eml-gated"
+    MLP_EML_ROUTED = "mlp-eml-routed"
+    TINY_MLP_GATED = "tiny-mlp-gated"
+    TINY_GLU_GATED = "tiny-glu-gated"
+    GENERIC_TREE_GATED = "generic-tree-gated"
+
+
+class Path1ScaffoldProfile(StringEnum):
+    STANDARD = "standard"
+    PR5_HYBRID_GDN = "pr5-hybrid-gdn"
+    PARCAE_LOOPED_ATTENTION = "parcae-looped-attention"
+    PARCAE_BX_LOOPED_ATTENTION = "parcae-bx-looped-attention"
+    PARCAE_P20_CONTROL_LOOPED_ATTENTION = "parcae-p20-control-looped-attention"
+
+
 class HybridAttentionLayerRole(StringEnum):
     EXACT_ATTENTION = "exact-attention"
     SHARED_EXACT_ATTENTION = "shared-exact-attention"
@@ -29,6 +47,8 @@ class HybridAttentionLayerRole(StringEnum):
 
 class ReferenceSsmProfile(StringEnum):
     GATED_DELTANET_FLA = "gated-deltanet-fla"
+    GATED_DELTANET_FLA_CONTROL_SHELL = "gated-deltanet-fla-control-shell"
+    GATED_DELTANET_FLA_P20_CONTROL_TINY = "gated-deltanet-fla-p20-control-tiny"
     GATED_DELTANET_FLA_P20_COMPAT = "gated-deltanet-fla-p20-compatible"
     GATED_DELTANET_FLA_P20_MULTI_READ = "gated-deltanet-fla-p20-multi-read"
     GATED_DELTANET_MAMBA3_TORCH = "gated-deltanet-mamba3-torch"
@@ -57,6 +77,8 @@ class ReferenceSsmProfile(StringEnum):
     def is_gated_deltanet(self) -> bool:
         return self in {
             ReferenceSsmProfile.GATED_DELTANET_FLA,
+            ReferenceSsmProfile.GATED_DELTANET_FLA_CONTROL_SHELL,
+            ReferenceSsmProfile.GATED_DELTANET_FLA_P20_CONTROL_TINY,
             ReferenceSsmProfile.GATED_DELTANET_FLA_P20_COMPAT,
             ReferenceSsmProfile.GATED_DELTANET_FLA_P20_MULTI_READ,
             ReferenceSsmProfile.GATED_DELTANET_MAMBA3_TORCH,
@@ -75,6 +97,14 @@ class ReferenceSsmProfile(StringEnum):
     @property
     def is_fla_gated_deltanet(self) -> bool:
         return self is ReferenceSsmProfile.GATED_DELTANET_FLA
+
+    @property
+    def is_fla_gdn_control_shell(self) -> bool:
+        return self is ReferenceSsmProfile.GATED_DELTANET_FLA_CONTROL_SHELL
+
+    @property
+    def is_fla_gdnp_control_conditioned(self) -> bool:
+        return self is ReferenceSsmProfile.GATED_DELTANET_FLA_P20_CONTROL_TINY
 
     @property
     def is_fla_gdnp_compatible(self) -> bool:
@@ -155,6 +185,8 @@ class ReferenceSsmProfile(StringEnum):
     def runtime_oriented(self) -> bool:
         return self in {
             ReferenceSsmProfile.GATED_DELTANET_FLA,
+            ReferenceSsmProfile.GATED_DELTANET_FLA_CONTROL_SHELL,
+            ReferenceSsmProfile.GATED_DELTANET_FLA_P20_CONTROL_TINY,
             ReferenceSsmProfile.GATED_DELTANET_FLA_P20_COMPAT,
             ReferenceSsmProfile.GATED_DELTANET_FLA_P20_MULTI_READ,
             ReferenceSsmProfile.GATED_DELTANET_MAMBA3_TORCH,
@@ -284,6 +316,8 @@ class Path1VariantSpec:
     shape: Path1ModelShape
     layer_schedule: tuple[HybridAttentionLayerRole, ...]
     reference_ssm_profile: ReferenceSsmProfile | None = None
+    reference_ssm_profile_schedule: tuple[ReferenceSsmProfile, ...] | None = None
+    reference_p20_ramp_init: float = 0.01
     primitive_profile: PrimitiveProfile | None = None
     primitive_residual_mode: PrimitiveResidualMode | None = None
     primitive_readout_mode: PrimitiveReadoutMode | None = None
@@ -291,10 +325,38 @@ class Path1VariantSpec:
     primitive_wrapper_mode: PrimitiveWrapperMode | None = None
     primitive_execution_profile: PrimitiveExecutionProfile | None = None
     primitive_state_transform_mode: PrimitiveStateTransformMode | None = None
+    feed_forward_profile: FeedForwardProfile = FeedForwardProfile.STANDARD
+    feed_forward_layer_indices: tuple[int, ...] | None = None
+    eml_slot_count: int = 8
+    eml_tree_depth: int = 3
+    eml_route_fraction: float = 0.25
+    parcae_loop_count: int = 2
     final_norm_kind: str = "identity"
+    scaffold_profile: Path1ScaffoldProfile = Path1ScaffoldProfile.STANDARD
 
     def validate(self) -> None:
         self.shape.validate()
+        ensure_positive(self.eml_slot_count, "path1_variant.eml_slot_count")
+        ensure_positive(self.eml_tree_depth, "path1_variant.eml_tree_depth")
+        ensure_positive(self.parcae_loop_count, "path1_variant.parcae_loop_count")
+        if not 0.0 < self.eml_route_fraction <= 1.0:
+            raise ValidationError(
+                "path1_variant.eml_route_fraction must be in (0, 1], "
+                f"got {self.eml_route_fraction}"
+            )
+        if self.feed_forward_profile is FeedForwardProfile.STANDARD and self.feed_forward_layer_indices is not None:
+            raise ValidationError("standard feed-forward profile must not set feed_forward_layer_indices")
+        if self.feed_forward_layer_indices is not None:
+            if not self.feed_forward_layer_indices:
+                raise ValidationError("feed_forward_layer_indices must not be empty when provided")
+            if len(set(self.feed_forward_layer_indices)) != len(self.feed_forward_layer_indices):
+                raise ValidationError("feed_forward_layer_indices must not contain duplicates")
+            for layer_index in self.feed_forward_layer_indices:
+                if layer_index < 0 or layer_index >= self.shape.total_layers:
+                    raise ValidationError(
+                        "feed_forward_layer_indices entries must be valid layer indices, "
+                        f"got {layer_index} for total_layers={self.shape.total_layers}"
+                    )
         if not self.label.strip():
             raise ValidationError("path1_variant.label must not be empty")
         if len(self.layer_schedule) != self.shape.total_layers:
@@ -309,6 +371,23 @@ class Path1VariantSpec:
         if self.kind is Path1VariantKind.ATTENTION_ONLY:
             if any(role not in _EXACT_ATTENTION_ROLES for role in self.layer_schedule):
                 raise ValidationError("attention-only variant must contain only exact-attention layers")
+            if self.feed_forward_layer_indices is not None:
+                for layer_index in self.feed_forward_layer_indices:
+                    if self.layer_schedule[layer_index] not in _EXACT_ATTENTION_ROLES:
+                        raise ValidationError(
+                            "feed_forward_layer_indices may only target exact-attention layers"
+                        )
+            if self.reference_ssm_profile_schedule is not None:
+                raise ValidationError("attention-only variant must not set reference_ssm_profile_schedule")
+            if self.scaffold_profile not in {
+                Path1ScaffoldProfile.STANDARD,
+                Path1ScaffoldProfile.PARCAE_LOOPED_ATTENTION,
+                Path1ScaffoldProfile.PARCAE_BX_LOOPED_ATTENTION,
+                Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            }:
+                raise ValidationError(
+                    "attention-only variant may only use standard or Parcae-family looped-attention scaffold"
+                )
             if any(
                 value is not None
                 for value in (
@@ -326,15 +405,39 @@ class Path1VariantSpec:
         elif self.kind is Path1VariantKind.REFERENCE_SSM_HYBRID:
             if self.reference_ssm_profile is None:
                 raise ValidationError("reference-ssm-hybrid variant must set reference_ssm_profile")
+            if self.feed_forward_layer_indices is not None:
+                for layer_index in self.feed_forward_layer_indices:
+                    if self.layer_schedule[layer_index] not in _EXACT_ATTENTION_ROLES:
+                        raise ValidationError(
+                            "feed_forward_layer_indices may only target exact-attention layers"
+                        )
             if self.primitive_profile is not None:
                 raise ValidationError("reference-ssm-hybrid variant must not set primitive_profile")
             if any(role not in {*_EXACT_ATTENTION_ROLES, HybridAttentionLayerRole.REFERENCE_SSM} for role in self.layer_schedule):
                 raise ValidationError("reference-ssm-hybrid schedule may contain only exact-attention and reference-SSM roles")
+            if self.reference_ssm_profile_schedule is not None:
+                reference_layer_count = sum(
+                    1 for role in self.layer_schedule if role is HybridAttentionLayerRole.REFERENCE_SSM
+                )
+                if len(self.reference_ssm_profile_schedule) != reference_layer_count:
+                    raise ValidationError(
+                        "reference_ssm_profile_schedule length must match the number of reference-SSM layers"
+                    )
         elif self.kind is Path1VariantKind.PRIMITIVE_HYBRID:
             if self.primitive_profile is None:
                 raise ValidationError("primitive-hybrid variant must set primitive_profile")
             if self.reference_ssm_profile is not None:
                 raise ValidationError("primitive-hybrid variant must not set reference_ssm_profile")
+            if self.reference_ssm_profile_schedule is not None:
+                raise ValidationError("primitive-hybrid variant must not set reference_ssm_profile_schedule")
+            if self.scaffold_profile is not Path1ScaffoldProfile.STANDARD:
+                raise ValidationError("primitive-hybrid variant must use the standard scaffold")
+            if self.feed_forward_layer_indices is not None:
+                for layer_index in self.feed_forward_layer_indices:
+                    if self.layer_schedule[layer_index] not in _EXACT_ATTENTION_ROLES:
+                        raise ValidationError(
+                            "feed_forward_layer_indices may only target exact-attention layers"
+                        )
             if any(role not in {*_EXACT_ATTENTION_ROLES, HybridAttentionLayerRole.PRIMITIVE} for role in self.layer_schedule):
                 raise ValidationError("primitive-hybrid schedule may contain only exact-attention and primitive roles")
             if any(
@@ -357,6 +460,18 @@ class Path1VariantSpec:
             raise ValidationError(
                 f"path1_variant.final_norm_kind must be identity|rmsnorm, got {self.final_norm_kind}"
             )
+        if not (0.0 < self.reference_p20_ramp_init < 1.0):
+            raise ValidationError(
+                "path1_variant.reference_p20_ramp_init must be in (0, 1), "
+                f"got {self.reference_p20_ramp_init}"
+            )
+
+    def reference_profile_for_ordinal(self, reference_ordinal: int) -> ReferenceSsmProfile:
+        if self.reference_ssm_profile_schedule is None:
+            if self.reference_ssm_profile is None:
+                raise ValidationError("reference profile requested for non-reference variant")
+            return self.reference_ssm_profile
+        return self.reference_ssm_profile_schedule[reference_ordinal]
 
 
 @dataclass(frozen=True)
@@ -417,9 +532,98 @@ def layer_schedule_signature(schedule: tuple[HybridAttentionLayerRole, ...]) -> 
     )
 
 
+def parse_reference_ssm_profile_schedule_spec(schedule: str) -> tuple[ReferenceSsmProfile, ...]:
+    tokens = tuple(token.strip() for token in schedule.replace(",", " ").split() if token.strip())
+    if not tokens:
+        raise ValidationError("reference SSM profile schedule override must not be empty")
+    try:
+        return tuple(ReferenceSsmProfile(token) for token in tokens)
+    except ValueError as exc:
+        raise ValidationError("reference SSM profile schedule contains an unknown profile") from exc
+
+
+def parse_layer_index_spec(indices: str) -> tuple[int, ...]:
+    tokens = tuple(token.strip() for token in indices.replace(",", " ").split() if token.strip())
+    if not tokens:
+        raise ValidationError("layer index override must not be empty")
+    try:
+        parsed = tuple(int(token) for token in tokens)
+    except ValueError as exc:
+        raise ValidationError("layer index override must contain only integers") from exc
+    if len(set(parsed)) != len(parsed):
+        raise ValidationError("layer index override must not contain duplicates")
+    if any(index < 0 for index in parsed):
+        raise ValidationError("layer index override must not contain negative indices")
+    return tuple(sorted(parsed))
+
+
+def layer_index_signature(indices: tuple[int, ...] | None) -> str:
+    if indices is None:
+        return "all"
+    return "-".join(str(index) for index in indices)
+
+
+def fraction_signature(value: float) -> str:
+    return f"{int(round(value * 100))}pct"
+
+
+_REFERENCE_PROFILE_LABEL_ALIASES = {
+    ReferenceSsmProfile.GATED_DELTANET_FLA: "gdn-fla",
+    ReferenceSsmProfile.GATED_DELTANET_FLA_CONTROL_SHELL: "gdn-fla-shell",
+    ReferenceSsmProfile.GATED_DELTANET_FLA_P20_CONTROL_TINY: "gdn-fla-p20-ctrl",
+    ReferenceSsmProfile.GATED_DELTANET_FLA_P20_COMPAT: "gdn-fla-p20",
+    ReferenceSsmProfile.GATED_DELTANET_FLA_P20_MULTI_READ: "gdn-fla-p20-mr",
+    ReferenceSsmProfile.GATED_DELTANET_MAMBA3_TORCH: "gdn-m3",
+    ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_ALL_TORCH: "gdnp-all",
+    ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_BETA_TORCH: "gdnp-beta",
+    ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_MULTI_READ_TORCH: "gdnp-mr",
+    ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_QKV_TORCH: "gdnp-qkv",
+    ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_RESIDUAL_READOUT_TORCH: "gdnp-rr",
+    ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_TORCH: "gdnp-value",
+    ReferenceSsmProfile.GATED_DELTANET_P20_MAMBA3_TORCH: "gdn-p20-m3",
+    ReferenceSsmProfile.GATED_DELTANET_P20_THIN_TORCH: "gdn-p20-thin",
+    ReferenceSsmProfile.GATED_DELTANET_P20_TORCH: "gdn-p20",
+    ReferenceSsmProfile.GATED_DELTANET_TORCH: "gdn",
+    ReferenceSsmProfile.MAMBA3_MIMO_REFERENCE: "m3-mimo-ref",
+    ReferenceSsmProfile.MAMBA3_SISO_REFERENCE: "m3-siso-ref",
+    ReferenceSsmProfile.MAMBA3_SISO_RUNTIME: "m3-siso-rt",
+    ReferenceSsmProfile.P20_MAMBA3_TORCH: "p20-m3",
+    ReferenceSsmProfile.P20_THIN_TORCH: "p20-thin",
+    ReferenceSsmProfile.P20_TORCH: "p20",
+}
+
+
+def reference_profile_schedule_signature(schedule: tuple[ReferenceSsmProfile, ...] | None) -> str:
+    if schedule is None:
+        return ""
+    segments: list[str] = []
+    current_token: str | None = None
+    current_count = 0
+    for profile in schedule:
+        token = _REFERENCE_PROFILE_LABEL_ALIASES[profile]
+        if token == current_token:
+            current_count += 1
+            continue
+        if current_token is not None:
+            segments.append(f"{current_token}x{current_count}" if current_count > 1 else current_token)
+        current_token = token
+        current_count = 1
+    if current_token is not None:
+        segments.append(f"{current_token}x{current_count}" if current_count > 1 else current_token)
+    return "profiles-" + "-".join(segments)
+
+
+
 def phase1_attention_only_variant(
     shape: Path1ModelShape = DEFAULT_PATH1_MODEL_SHAPE,
     layer_schedule: tuple[HybridAttentionLayerRole, ...] | None = None,
+    feed_forward_profile: FeedForwardProfile = FeedForwardProfile.STANDARD,
+    feed_forward_layer_indices: tuple[int, ...] | None = None,
+    eml_slot_count: int = 8,
+    eml_tree_depth: int = 3,
+    eml_route_fraction: float = 0.25,
+    scaffold_profile: Path1ScaffoldProfile = Path1ScaffoldProfile.STANDARD,
+    parcae_loop_count: int = 2,
 ) -> Path1VariantSpec:
     schedule = layer_schedule or _attention_schedule(shape.total_layers)
     default_schedule = _attention_schedule(shape.total_layers)
@@ -428,11 +632,49 @@ def phase1_attention_only_variant(
         if schedule != default_schedule
         else ""
     )
+    layer_suffix = (
+        f"layers{layer_index_signature(feed_forward_layer_indices)}"
+        if feed_forward_profile is not FeedForwardProfile.STANDARD and feed_forward_layer_indices is not None
+        else ""
+    )
+    route_suffix = (
+        f"route{fraction_signature(eml_route_fraction)}"
+        if feed_forward_profile is FeedForwardProfile.MLP_EML_ROUTED
+        else ""
+    )
+    ffn_suffix = (
+        _variant_label(
+            feed_forward_profile.value,
+            f"slots{eml_slot_count}",
+            f"depth{eml_tree_depth}",
+            route_suffix,
+            layer_suffix,
+        )
+        if feed_forward_profile is not FeedForwardProfile.STANDARD
+        else ""
+    )
+    scaffold_suffix = (
+        _variant_label(scaffold_profile.value, f"loops{parcae_loop_count}")
+        if scaffold_profile
+        in {
+            Path1ScaffoldProfile.PARCAE_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_BX_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+        }
+        else ""
+    )
     return Path1VariantSpec(
         kind=Path1VariantKind.ATTENTION_ONLY,
-        label=_variant_label("attention-only", schedule_suffix),
+        label=_variant_label("attention-only", scaffold_suffix, ffn_suffix, schedule_suffix),
         shape=shape,
         layer_schedule=schedule,
+        feed_forward_profile=feed_forward_profile,
+        feed_forward_layer_indices=feed_forward_layer_indices,
+        eml_slot_count=eml_slot_count,
+        eml_tree_depth=eml_tree_depth,
+        eml_route_fraction=eml_route_fraction,
+        scaffold_profile=scaffold_profile,
+        parcae_loop_count=parcae_loop_count,
     )
 
 
@@ -440,18 +682,30 @@ def phase1_reference_ssm_variant(
     shape: Path1ModelShape = DEFAULT_PATH1_MODEL_SHAPE,
     profile: ReferenceSsmProfile = ReferenceSsmProfile.MAMBA3_SISO_RUNTIME,
     layer_schedule: tuple[HybridAttentionLayerRole, ...] | None = None,
+    profile_schedule: tuple[ReferenceSsmProfile, ...] | None = None,
+    scaffold_profile: Path1ScaffoldProfile = Path1ScaffoldProfile.STANDARD,
+    reference_p20_ramp_init: float = 0.01,
+    feed_forward_profile: FeedForwardProfile = FeedForwardProfile.STANDARD,
+    feed_forward_layer_indices: tuple[int, ...] | None = None,
+    eml_slot_count: int = 8,
+    eml_tree_depth: int = 3,
+    eml_route_fraction: float = 0.25,
 ) -> Path1VariantSpec:
+    profiles_for_norm = profile_schedule or (profile,)
     final_norm = (
         "rmsnorm"
-        if profile.is_gated_deltanet
-        or profile
-        in {
-            ReferenceSsmProfile.MAMBA3_SISO_REFERENCE,
-            ReferenceSsmProfile.MAMBA3_SISO_RUNTIME,
-            ReferenceSsmProfile.P20_MAMBA3_TORCH,
-            ReferenceSsmProfile.P20_THIN_TORCH,
-            ReferenceSsmProfile.P20_TORCH,
-        }
+        if any(
+            candidate.is_gated_deltanet
+            or candidate
+            in {
+                ReferenceSsmProfile.MAMBA3_SISO_REFERENCE,
+                ReferenceSsmProfile.MAMBA3_SISO_RUNTIME,
+                ReferenceSsmProfile.P20_MAMBA3_TORCH,
+                ReferenceSsmProfile.P20_THIN_TORCH,
+                ReferenceSsmProfile.P20_TORCH,
+            }
+            for candidate in profiles_for_norm
+        )
         else "identity"
     )
     default_schedule = _alternating_schedule(shape.total_layers, HybridAttentionLayerRole.REFERENCE_SSM)
@@ -461,13 +715,44 @@ def phase1_reference_ssm_variant(
         if schedule != default_schedule
         else ""
     )
+    profile_schedule_suffix = (
+        reference_profile_schedule_signature(profile_schedule)
+        if profile_schedule is not None and any(candidate is not profile for candidate in profile_schedule)
+        else ""
+    )
+    scaffold_suffix = "" if scaffold_profile is Path1ScaffoldProfile.STANDARD else scaffold_profile.value
+    ffn_suffix = (
+        _variant_label(
+            feed_forward_profile.value,
+            f"slots{eml_slot_count}",
+            f"depth{eml_tree_depth}",
+            f"layers{layer_index_signature(feed_forward_layer_indices)}" if feed_forward_layer_indices is not None else "",
+        )
+        if feed_forward_profile is not FeedForwardProfile.STANDARD
+        else ""
+    )
     return Path1VariantSpec(
         kind=Path1VariantKind.REFERENCE_SSM_HYBRID,
-        label=_variant_label("reference-ssm-hybrid", profile.value, schedule_suffix),
+        label=_variant_label(
+            "reference-ssm-hybrid",
+            profile.value,
+            profile_schedule_suffix,
+            scaffold_suffix,
+            ffn_suffix,
+            schedule_suffix,
+        ),
         shape=shape,
         layer_schedule=schedule,
         reference_ssm_profile=profile,
+        reference_ssm_profile_schedule=profile_schedule,
+        reference_p20_ramp_init=reference_p20_ramp_init,
+        feed_forward_profile=feed_forward_profile,
+        feed_forward_layer_indices=feed_forward_layer_indices,
+        eml_slot_count=eml_slot_count,
+        eml_tree_depth=eml_tree_depth,
+        eml_route_fraction=eml_route_fraction,
         final_norm_kind=final_norm,
+        scaffold_profile=scaffold_profile,
     )
 
 
@@ -481,12 +766,27 @@ def phase1_primitive_variant(
     wrapper_mode: PrimitiveWrapperMode = PrimitiveWrapperMode.STANDARD,
     state_transform_mode: PrimitiveStateTransformMode = PrimitiveStateTransformMode.DENSE,
     layer_schedule: tuple[HybridAttentionLayerRole, ...] | None = None,
+    feed_forward_profile: FeedForwardProfile = FeedForwardProfile.STANDARD,
+    feed_forward_layer_indices: tuple[int, ...] | None = None,
+    eml_slot_count: int = 8,
+    eml_tree_depth: int = 3,
+    eml_route_fraction: float = 0.25,
 ) -> Path1VariantSpec:
     default_schedule = _alternating_schedule(shape.total_layers, HybridAttentionLayerRole.PRIMITIVE)
     schedule = layer_schedule or default_schedule
     schedule_suffix = (
         f"schedule-{layer_schedule_signature(schedule)}"
         if schedule != default_schedule
+        else ""
+    )
+    ffn_suffix = (
+        _variant_label(
+            feed_forward_profile.value,
+            f"slots{eml_slot_count}",
+            f"depth{eml_tree_depth}",
+            f"layers{layer_index_signature(feed_forward_layer_indices)}" if feed_forward_layer_indices is not None else "",
+        )
+        if feed_forward_profile is not FeedForwardProfile.STANDARD
         else ""
     )
     return Path1VariantSpec(
@@ -500,6 +800,7 @@ def phase1_primitive_variant(
             norm_mode.value,
             wrapper_mode.value,
             state_transform_mode.value,
+            ffn_suffix,
             schedule_suffix,
         ),
         shape=shape,
@@ -511,6 +812,11 @@ def phase1_primitive_variant(
         primitive_wrapper_mode=wrapper_mode,
         primitive_execution_profile=execution_profile,
         primitive_state_transform_mode=state_transform_mode,
+        feed_forward_profile=feed_forward_profile,
+        feed_forward_layer_indices=feed_forward_layer_indices,
+        eml_slot_count=eml_slot_count,
+        eml_tree_depth=eml_tree_depth,
+        eml_route_fraction=eml_route_fraction,
     )
 
 

@@ -23,6 +23,10 @@ def resolve_torch_device(runtime_spec: DeviceRuntimeSpec) -> torch.device:
     runtime_spec.validate()
     if runtime_spec.backend == "cpu":
         return torch.device("cpu")
+    if runtime_spec.backend == "mps":
+        if not torch.backends.mps.is_available():
+            raise RuntimeError("runtime.backend=mps requested but torch.backends.mps is not available")
+        return torch.device("mps")
     return torch.device(f"cuda:{runtime_spec.cuda_device}")
 
 
@@ -31,4 +35,3 @@ def resolve_autocast_dtype(runtime_spec: DeviceRuntimeSpec) -> torch.dtype | Non
     if runtime_spec.backend != "cuda":
         return None
     return torch.bfloat16 if runtime_spec.dtype == "bf16" else None
-

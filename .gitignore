@@ -3,5 +3,16 @@ artifacts/
 .DS_Store
 .runpod-local-logs/
 .runpod-local-pids/
+.modal-local-logs/
 __pycache__/
 *.py[cod]
+
+# Local multi-GB dataset caches. Keep dataset docs separate from generated
+# cache directories so experiments stay reproducible without risking accidental
+# commits of large data.
+experiments/stage0/assets/fineweb/fineweb-cc-main-2024-10-parquet-20gb/
+experiments/stage0/assets/fineweb/stage0-local-bench-*/
+experiments/stage0/assets/fineweb/*openllama-tokens*-v1/
+experiments/stage0/assets/fineweb/*openllama-tokens*/*.pt
+experiments/stage0/assets/fineweb/*openllama-tokens*.tar.zst
+experiments/stage0/assets/fineweb/*openllama-tokens*.tar.zst.sha256

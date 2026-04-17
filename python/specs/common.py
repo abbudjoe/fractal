@@ -55,6 +55,28 @@ class JsonlCorpusSpec:
 
 
 @dataclass(frozen=True)
+class TokenIdCorpusSpec:
+    manifest_path: Path
+
+    @property
+    def corpus_name(self) -> str:
+        if not self.manifest_path.exists():
+            return self.manifest_path.stem
+        try:
+            import json
+
+            payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return self.manifest_path.stem
+        corpus_name = payload.get("corpus_name")
+        return corpus_name if isinstance(corpus_name, str) and corpus_name else self.manifest_path.stem
+
+    def validate(self) -> None:
+        if not self.manifest_path.exists():
+            raise ValidationError(f"corpus.manifest_path does not exist: {self.manifest_path}")
+
+
+@dataclass(frozen=True)
 class BenchmarkBudgetSpec:
     seq_len: int = 32
     window_stride: int = 32
@@ -91,16 +113,16 @@ class DeviceRuntimeSpec:
     primitive_runtime_backend: str | None = "torch"
 
     def validate(self) -> None:
-        if self.backend not in {"cpu", "cuda"}:
+        if self.backend not in {"cpu", "cuda", "mps"}:
             raise ValidationError(
-                f"runtime.backend must be one of cpu|cuda, got {self.backend}"
+                f"runtime.backend must be one of cpu|cuda|mps, got {self.backend}"
             )
         ensure_non_negative(self.cuda_device, "runtime.cuda_device")
         if self.dtype not in {"fp32", "bf16"}:
             raise ValidationError(
                 f"runtime.dtype must be one of fp32|bf16, got {self.dtype}"
             )
-        if self.backend == "cpu" and self.dtype == "bf16":
+        if self.backend in {"cpu", "mps"} and self.dtype == "bf16":
             raise ValidationError("runtime.dtype=bf16 is only supported for backend=cuda")
         if self.env_kind not in {
             None,
@@ -140,7 +162,7 @@ class BenchmarkRunManifest:
     run_label: str
     implementation_kind: str
     seed_spec: SeedSpec
-    corpus: JsonlCorpusSpec
+    corpus: JsonlCorpusSpec | TokenIdCorpusSpec
     budget: BenchmarkBudgetSpec
     runtime: DeviceRuntimeSpec
     benchmark_name: str | None = None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import resource
+import sys
 import time
 from typing import Protocol
 
@@ -35,7 +36,10 @@ def materialize_batch(batch: TokenBatch, device: torch.device) -> TokenBatch:
 
 
 def process_peak_rss_bytes() -> int:
-    return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+    peak_rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    if sys.platform == "darwin":
+        return peak_rss
+    return peak_rss * 1024
 
 
 def cuda_memory_stats(device: torch.device) -> tuple[int, int]:
@@ -211,8 +215,12 @@ def run_training_benchmark(
     if device_type == "cuda":
         _, peak_cuda_used = cuda_memory_stats(device)
         device_props = torch.cuda.get_device_properties(device)
+        device_index = device.index if device.index is not None else torch.cuda.current_device()
         cuda_memory_payload = {
-            "device_index": device.index if device.index is not None else 0,
+            "device_index": int(device_index),
+            "device_name": str(device_props.name),
+            "compute_capability": f"{int(device_props.major)}.{int(device_props.minor)}",
+            "multiprocessor_count": int(device_props.multi_processor_count),
             "memory_metric": "torch_max_memory_allocated",
             "peak_used_bytes": int(peak_cuda_used),
             "peak_used_delta_bytes": int(max(0, peak_cuda_used - baseline_cuda_used)),

@@ -792,6 +792,162 @@ Interpretation:
   GDN and FLA GDN + P20 single-read on the same benchmark surface, then decide
   whether to spend effort on quality recovery or Parameter Golf integration.
 
+## PR5-Scaffold FLA GDN 5090 Baseline
+
+Date: 2026-04-13
+
+This pass aligned the Fractal Path 1 control surface with the current
+Parameter Golf GDN-Hybrid handoff before spending H100/GPTQ time.
+
+Shared contract:
+
+- RunPod GPU: `NVIDIA GeForce RTX 5090`
+- env: `primitive-triton`
+- seed: `42`
+- steps: `20`
+- eval batches: `1`
+- sequence length: `512`
+- batch size: `1`
+- dtype: `bf16`
+- shape: `d_model=512`, `heads=8`, `ffn_multiplier=3`
+- scaffold: `pr5-hybrid-gdn`
+- schedule: `RRRRRARRRRRS`
+- topology: `[5xR] -> exact attention seam -> [5xR] -> shared exact attention seam`
+- local window: `512`, so this smoke is effectively full-causal at the seam
+- P20 ramp init: `0.01`, matching the Parameter Golf lane contract
+
+Results:
+
+| lane | profile schedule | implementation | initial loss | final loss | train tok/s | CUDA peak MB | local report |
+|---|---|---|---:|---:|---:|---:|---|
+| PR5 scaffold pure FLA GDN | all `gated-deltanet-fla` | `python_reference_ssm_gated_deltanet_fla` | `5.7284` | `2.9513` | `8004.05` | `725.70` | `/Users/joseph/fractal/.runpod-local-logs/runpod-results/exp-22fc19447d5ac0a9/20260413T175636Z_a01/remote/artifacts/v3a-python-path1/20260413T175636Z_a01/reference-ssm-hybrid-gated-deltanet-fla-pr5-hybrid-gdn-schedule-rrrrrarrrrrs/report.json` |
+| PR5 scaffold one mid-slot P20 | `gdn-flax4-gdn-fla-p20-gdn-flax5` | `python_reference_ssm_profile_scheduled` | `5.5762` | `3.0598` | `6965.20` | `765.74` | `/Users/joseph/fractal/.runpod-local-logs/runpod-results/exp-22fc19447d5ac0a9/20260413T180726Z_a02/remote/artifacts/v3a-python-path1/20260413T180726Z_a02/reference-ssm-hybrid-gated-deltanet-fla-profiles-gdn-flax4-gdn-fla-p20-gdn-flax5-pr5-hybrid-gdn-schedule-rrrrrarrrrrs/report.json` |
+| PR5 scaffold one mid-slot fused multi-read P20 | `gdn-flax4-gdnp-mr-gdn-flax5` | `python_reference_ssm_profile_scheduled` | `5.7613` | `3.0193` | `6213.05` | `823.78` | `/Users/joseph/fractal/.runpod-local-logs/runpod-results/exp-22fc19447d5ac0a9/20260413T182529Z_a03/remote/artifacts/v3a-python-path1/20260413T182529Z_a03/reference-ssm-hybrid-gated-deltanet-fla-profiles-gdn-flax4-gdnp-mr-gdn-flax5-pr5-hybrid-gdn-schedule-rrrrrarrrrrs/report.json` |
+| PR5 scaffold one mid-slot tiny P20 control conditioner, pre-parity | `gdn-flax4-gdn-fla-p20-ctrl-gdn-flax5` | `python_reference_ssm_profile_scheduled` | `5.8054` | `3.0133` | `5655.78` | `735.16` | `/Users/joseph/fractal/.runpod-local-logs/runpod-results/exp-0af60d6bb2ef06c0/20260413T185252Z_a01/remote/artifacts/v3a-python-path1/20260413T185252Z_a01/reference-ssm-hybrid-gated-deltanet-fla-profiles-gdn-flax4-gdn-fla-p20-ctrl-gdn-flax5-pr5-hybrid-gdn-schedule-rrrrrarrrrrs/report.json` |
+| PR5 scaffold one mid-slot custom GDN control shell, pre-parity | `gdn-flax4-gdn-fla-shell-gdn-flax5` | `python_reference_ssm_profile_scheduled` | `5.6772` | `3.0137` | `4316.29` | `727.13` | `/Users/joseph/fractal/.runpod-local-logs/runpod-results/exp-0af60d6bb2ef06c0/20260413T195041Z_a02/remote/artifacts/v3a-python-path1/20260413T195041Z_a02/reference-ssm-hybrid-gated-deltanet-fla-profiles-gdn-flax4-gdn-fla-shell-gdn-flax5-pr5-hybrid-gdn-schedule-rrrrrarrrrrs/report.json` |
+| PR5 scaffold one mid-slot native FLA control shell | `gdn-flax4-gdn-fla-shell-gdn-flax5` | `python_reference_ssm_profile_scheduled` | `5.7284` | `2.9517` | `4473.38` | `725.70` | `/Users/joseph/fractal/.runpod-local-logs/runpod-results/exp-0af60d6bb2ef06c0/20260413T211634Z_a03/remote/artifacts/v3a-python-path1/20260413T211634Z_a03/reference-ssm-hybrid-gated-deltanet-fla-profiles-gdn-flax4-gdn-fla-shell-gdn-flax5-pr5-hybrid-gdn-schedule-rrrrrarrrrrs/report.json` |
+| PR5 scaffold one mid-slot native FLA tiny P20 control conditioner | `gdn-flax4-gdn-fla-p20-ctrl-gdn-flax5` | `python_reference_ssm_profile_scheduled` | `5.7281` | `2.9512` | `5040.92` | `733.06` | `/Users/joseph/fractal/.runpod-local-logs/runpod-results/exp-22fc19447d5ac0a9/20260413T213244Z_a05/remote/artifacts/v3a-python-path1/20260413T213244Z_a05/reference-ssm-hybrid-gated-deltanet-fla-profiles-gdn-flax4-gdn-fla-p20-ctrl-gdn-flax5-pr5-hybrid-gdn-schedule-rrrrrarrrrrs/report.json` |
+
+Diagnostics:
+
+- The pure lane exposed ten `gated-deltanet-fla` recurrent blocks and no P20
+  conditioning.
+- The one-slot lane exposed exactly one `fla-gdnp-compatible` mixer at
+  layer index `4`, profile `gated-deltanet-fla-p20-compatible`, and
+  `p20_ramp_init=0.01`.
+- Both lanes used the PR5 scaffold side channels: hash context embedding and
+  smear gate.
+
+Interpretation:
+
+- The aligned Fractal expression is stable on a 5090 and close enough in
+  runtime to be useful as a control-plane smoke.
+- The one-slot P20 lane is not an immediate quality win on this Fractal proxy:
+  final loss worsened by about `0.1085`, throughput fell by about `13%`, and
+  peak memory increased by about `40 MB`.
+- The out-of-order fused multi-read diagnostic also missed the promotion bar:
+  final loss worsened by about `0.0680`, throughput fell by about `22%`, and
+  peak memory increased by about `98 MB` relative to pure FLA GDN.
+- The step-1 tiny-control conditioner ran with the intended contract
+  (`q/k/v/beta` deltas, GDN-only readout, `width_factor=0.125`,
+  `gdn_kernel=fla.chunk_gated_delta_rule`), but also missed the promotion bar:
+  final loss worsened by about `0.0620`, throughput fell by about `29%`, and
+  peak memory increased by only about `9.46 MB` relative to pure FLA GDN.
+- The matched custom control-shell diagnosis produced nearly the same final
+  loss as the tiny-control conditioner (`3.0137` vs `3.0133`) with no P20
+  conditioner present. Diagnostics confirmed `fla-gdn-control-shell`,
+  `conditioned_controls=[]`, and `gdn_kernel=fla.chunk_gated_delta_rule`.
+  This strongly suggests the quality regression is dominated by the custom
+  shell/wrapper mismatch, not by the tiny P20 conditioner itself.
+- Inspecting `flash-linear-attention==0.4.2` showed the missing shell contract:
+  native GDN uses separate `q/k/v/a/b` projections, FLA `ShortConvolution`,
+  learned `A_log` and inverse-softplus `dt_bias`, sigmoid beta, native
+  `chunk_gated_delta_rule(..., use_qk_l2norm_in_kernel=True)`, and
+  `FusedRMSNormGated` readout. The custom shell was not a faithful wrapper.
+- After aligning the shell to that native FLA contract, the no-P20 control shell
+  recovered quality parity with pure FLA GDN: `2.9517` vs `2.9513` final loss
+  with identical peak memory on this 20-step smoke. Throughput is still lower
+  (`4473.38` vs `8004.05 tok/s`), so the wrapper is quality-faithful but not yet
+  a systems replacement for the native FLA layer.
+- Rerunning the tiny P20 control conditioner on the native shell also recovered
+  parity: `2.9512` final loss with `conditioned_controls=[q,k,v,beta]`,
+  `shell_contract=fla-native`, zero-init control deltas, and the FLA chunk
+  kernel. The old `3.0133` result is therefore not a fair indictment of P20; it
+  measured the pre-parity shell mismatch.
+- The tiny P20 conditioner is neutral on this 20-step Fractal smoke, not yet
+  positive. It adds about `7.36 MB` peak memory versus the native no-P20 shell
+  and remains slower than pure native FLA GDN, so the next value test should be
+  longer and post-quant-aware rather than another tiny float-loss read.
+- This does not close the Parameter Golf experiment, because post-quant BPB is
+  the real objective and the Fractal surface lacks SP1024, EMA, MuonEq-R,
+  GPTQ, zstd, and the exact PR training contract.
+- It does argue against jumping straight to a full 590s H100 GPTQ run without
+  either a cheaper Parameter Golf smoke or one small one-axis Fractal/PG
+  ablation.
+
+Recommended next gate:
+
+- The one-slot tiny P20 control conditioner has passed the native-shell early
+  drag gate. The next fair gate is Parameter Golf, not more tiny Fractal
+  wrapper diagnosis: run a bounded post-quant smoke against the fixed pure GDN
+  baseline. If post-quant BPB is neutral or better, promote to the 590s GPTQ
+  comparison. If it regresses, test one smaller contribution axis
+  (`GDN_P20_RAMP_INIT=0.001`, reduced P20 LR, beta-only, or value-only
+  conditioning).
+
+## GDN/P20 Integration Roadmap Realignment
+
+Date: 2026-04-13
+
+The one-slot `gated-deltanet-fla-p20-compatible` lane was a side-channel readout
+test, not the smallest integration-first test. It paid for a P20 branch and then
+concatenated P20 readout into the output projection, which made it a poor proxy
+for "can a tiny recurrent state improve the GDN update law?"
+
+Corrected roadmap:
+
+- Step 1: add a tiny P20/vector-state conditioner to one GDN block's
+  `q/k/v/beta` controls while keeping GDN as the matrix-state and readout owner.
+- Step 2: add a Mamba-like input-selective transition adapter before one
+  attention seam.
+- Step 3: reuse one shared P20 conditioner across multiple GDN blocks instead
+  of instantiating separate P20 branches per layer.
+- Step 4: replace one GDN block with a P20-style transition block only if the
+  parameter/artifact budget requires a swap rather than an add.
+- Step 5: only after a recurrent augmentation passes the quality gate, test
+  whether the exact attention seam can be reduced or localized without hurting
+  BPB.
+
+Implementation status:
+
+- Added profile `gated-deltanet-fla-p20-control-tiny` as the step-1 candidate.
+- The profile uses a bottleneck P20 vector state (`width_factor=0.125`) and
+  zero-initialized control-delta projection.
+- It conditions only `q/k/v/beta`; it does not append a P20 readout branch.
+- Contribution is ramped from `reference_p20_ramp_init`, default `0.01`.
+- Local CPU tests use a Torch delta-scan fallback; CUDA/FLA runs should report
+  `gdn_kernel=fla.chunk_gated_delta_rule` in diagnostics.
+- The heavier `gated-deltanet-p20-fused-multi-read-torch` lane remains useful as
+  an out-of-order quality-oracle/replacement diagnostic, not as step 1.
+- The first 5090 step-1 smoke confirmed the intended profile and kernel path,
+  but quality did not improve. Memory cost was small; speed cost was not.
+- Wrapper diagnosis added `gated-deltanet-fla-control-shell`, which keeps the
+  same custom projection/conv/readout shell but disables P20. The shell alone
+  reproduced essentially all of the tiny-control quality drag, so the next
+  architectural fix is to align the shell with native FLA GDN before judging
+  P20's contribution.
+- The native-shell fix has now passed the no-P20 gate. The shell reports
+  `shell_contract=fla-native`, `conditioned_controls=[]`, and
+  `gdn_kernel=fla.chunk_gated_delta_rule`; it matches pure FLA GDN quality on
+  the PR5-scaffold smoke. The next fair test is the same one-slot P20 control
+  conditioner with the native shell active.
+- The matched one-slot P20 control conditioner also passed the native-shell
+  early drag gate. It reports `shell_contract=fla-native`,
+  `conditioned_controls=[q,k,v,beta]`, and a zero-initialized
+  `p20-tiny-control-conditioner`; it matched pure FLA GDN quality on the same
+  PR5-scaffold smoke. This makes the next decision a post-quant usefulness
+  question, not a wrapper-parity question.
+
 ## Reproduction
 
 ```bash

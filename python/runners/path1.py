@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 
-from python.data.byte_corpus import load_byte_corpus
+from python.data import load_byte_corpus, load_tokenized_corpus
 from python.models.path1 import build_path1_model
 from python.reporting.render import render_path1_table
 from python.reporting.schema import BenchmarkReport, append_ledger_entry, write_report
@@ -18,7 +18,7 @@ from python.runtime import (
     run_training_benchmark,
     warmup_model,
 )
-from python.specs.common import BenchmarkRunManifest, repo_relative, to_jsonable
+from python.specs.common import BenchmarkRunManifest, JsonlCorpusSpec, TokenIdCorpusSpec, ValidationError, repo_relative, to_jsonable
 from python.specs.path1 import BYTE_LEVEL_PAD_TOKEN, Path1VariantSpec
 
 
@@ -73,15 +73,36 @@ def run_path1_variant(request: Path1RunnerRequest) -> BenchmarkReport:
     configure_reproducibility(request.manifest.seed_spec, request.manifest.runtime)
     device = resolve_torch_device(request.manifest.runtime)
     autocast_dtype = resolve_autocast_dtype(request.manifest.runtime)
-    corpus = load_byte_corpus(
-        request.manifest.corpus,
-        seq_len=request.manifest.budget.seq_len,
-        window_stride=request.manifest.budget.window_stride,
-        batch_size=request.manifest.budget.batch_size,
-        data_seed=request.manifest.seed_spec.data_seed,
-        shuffle_train=request.manifest.seed_spec.data_seed is not None,
-        pin_memory=request.manifest.runtime.backend == "cuda",
-    )
+    if isinstance(request.manifest.corpus, JsonlCorpusSpec):
+        corpus = load_byte_corpus(
+            request.manifest.corpus,
+            seq_len=request.manifest.budget.seq_len,
+            window_stride=request.manifest.budget.window_stride,
+            batch_size=request.manifest.budget.batch_size,
+            data_seed=request.manifest.seed_spec.data_seed,
+            shuffle_train=request.manifest.seed_spec.data_seed is not None,
+            pin_memory=request.manifest.runtime.backend == "cuda",
+        )
+        pad_token = BYTE_LEVEL_PAD_TOKEN
+    elif isinstance(request.manifest.corpus, TokenIdCorpusSpec):
+        corpus = load_tokenized_corpus(
+            request.manifest.corpus,
+            seq_len=request.manifest.budget.seq_len,
+            window_stride=request.manifest.budget.window_stride,
+            batch_size=request.manifest.budget.batch_size,
+            data_seed=request.manifest.seed_spec.data_seed,
+            shuffle_train=request.manifest.seed_spec.data_seed is not None,
+            pin_memory=request.manifest.runtime.backend == "cuda",
+        )
+        corpus_vocab_size = int(corpus.corpus_stats["vocab_size"])
+        if request.variant.shape.vocab_size != corpus_vocab_size:
+            raise ValidationError(
+                "token-id corpus vocab_size must match Path1ModelShape.vocab_size: "
+                f"corpus={corpus_vocab_size}, model={request.variant.shape.vocab_size}"
+            )
+        pad_token = int(corpus.corpus_stats.get("pad_token_id", -100))
+    else:
+        raise TypeError(f"unsupported corpus spec type: {type(request.manifest.corpus)!r}")
     train_steps = len(corpus.train_batches) if request.manifest.budget.full_train_pass else request.manifest.budget.train_steps
     eval_batch_count = len(corpus.eval_batches) if request.manifest.budget.full_eval_pass else request.manifest.budget.eval_batches
 
@@ -99,7 +120,7 @@ def run_path1_variant(request: Path1RunnerRequest) -> BenchmarkReport:
         min(request.manifest.budget.warmup_eval_batches, len(corpus.eval_batches)),
         request.manifest.budget.warmup_train_steps,
         autocast_dtype,
-        pad_token=BYTE_LEVEL_PAD_TOKEN,
+        pad_token=pad_token,
         device=device,
         device_type=device.type,
     )
@@ -114,7 +135,7 @@ def run_path1_variant(request: Path1RunnerRequest) -> BenchmarkReport:
         train_steps=train_steps,
         eval_batch_count=eval_batch_count,
         autocast_dtype=autocast_dtype,
-        pad_token=BYTE_LEVEL_PAD_TOKEN,
+        pad_token=pad_token,
         device=device,
         report_model_label=model.model_label,
         implementation_kind=request.manifest.implementation_kind,
