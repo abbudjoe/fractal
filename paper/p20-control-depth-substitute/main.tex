@@ -17,7 +17,11 @@
   urlcolor=blue
 }
 
-\newcommand{\pcontrol}{P20-control}
+\newcommand{\pshort}{P20}
+\newcommand{\pname}{P2.0 rotary state-output}
+\newcommand{\pcontrol}{P2.0 rotary state-output control}
+\newcommand{\pctrlshort}{P2.0 control}
+\newcommand{\preposhort}{P20-control}
 \newcommand{\parcae}{Parcae}
 \newcommand{\bx}{B(x)}
 \newcommand{\tokens}{\mathrm{tokens}}
@@ -31,14 +35,15 @@
 
 \begin{abstract}
 We report a bounded H100 proof ladder for a small recurrent control primitive,
-\pcontrol{}, inserted into a looped middle-depth causal language-model scaffold.
+\pcontrol{} (repository shorthand: \preposhort{}), inserted into a looped
+middle-depth causal language-model scaffold.
 The goal is not to claim that the primitive generally beats Transformers.
 The narrower question is whether the primitive provides useful depth-like
 computation under a fixed tiny-model experimental contract. In a 9.87M
 parameter model trained for 491.52M OpenLLaMA-tokenized FineWeb tokens,
-\pcontrol{} beats the strongest non-P20 looped control across three seeds,
+\pcontrol{} beats the strongest non-\pshort{} looped control across three seeds,
 survives a speed-compensated control check, and remains ahead after a bounded
-learning-rate sweep of non-P20 looped baselines. Against pure attention,
+learning-rate sweep of non-\pshort{} looped baselines. Against pure attention,
 \pcontrol{} beats 9L, 10L, and 12L attention controls on the seed-42 depth
 screen and falls into a three-seed tie band with 14L attention while using
 about 10\% fewer parameters. A 16L attention model, however, beats \pcontrol{}
@@ -64,10 +69,12 @@ optimized attention baseline.
 The experiment reported here asks a narrower question than ``can a recurrent
 primitive replace attention?'' We instead test whether a recurrent primitive
 can act as a control mechanism for repeated middle-depth computation inside a
-causal decoder. The primitive is called \pcontrol{}. It is not inserted as a
-full attention replacement. It controls the injection path of a looped
-middle-depth scaffold, where a small set of middle attention blocks is reused
-for multiple recurrent passes.
+causal decoder. The primitive is the \pname{} recurrent primitive, abbreviated
+as \pshort{} in the repository because it is the runtime-frozen `P2.0' member
+of the broader P2 predictive-core family. It is not inserted as a full
+attention replacement. It controls the injection path of a looped middle-depth
+scaffold, where a small set of middle attention blocks is reused for multiple
+recurrent passes.
 
 The practical motivation is simple. If a small control primitive lets a model
 reach the quality of a deeper pure-attention model with fewer parameters or
@@ -116,6 +123,41 @@ the middle attention blocks, and updates the recurrent state through a bounded
 nonlinear delta. This is a stable looped-compute scaffold, not a faithful
 reproduction of any external looped language-model paper.
 
+\subsection{P2.0 rotary state-output primitive}
+
+The name \pshort{} is internal shorthand, not a public architectural
+description. The underlying primitive is a \pname{} recurrent scan. It descends
+from the project's earlier contractive recurrent primitive line, but adds the
+two contracts that the simpler P1-style update lacked: a transformed carry path
+before the update and an emitted output that is distinct from the latent state.
+
+For an input token representation $x_t$ and prior latent state $s_{t-1}$, the
+primitive computes packed input projections
+\[
+  (a_t,\theta_t,c_t,r_t) = W_{\mathrm{in}} x_t
+\]
+and applies a gated transformed-state update
+\[
+  u_t = \operatorname{Rot}(W_s s_{t-1}, \theta_t),
+\]
+\[
+  s_t = g(a_t) \odot u_t + (1 - g(a_t)) \odot \tanh(c_t),
+\]
+\[
+  o_t = g(r_t) \odot s_t.
+\]
+Here $g(\cdot)$ is the bounded gate used by the primitive implementation,
+$W_s$ is the recurrent state transform, $\operatorname{Rot}$ applies the
+input-conditioned pairwise rotary transform, $s_t$ is latent memory, and $o_t$
+is the emitted output returned to the surrounding model. The fast frozen
+runtime used in the earlier Path 1 work exposes $W_{\mathrm{in}}$ as one packed
+projection and uses a block-diagonal recurrent state transform for the Triton
+scan path.
+
+In this report, \pcontrol{} means that this \pname{} scan is used as a control
+producer for the looped scaffold. It should not be read as a claim that the
+primitive replaces attention inside the reported model.
+
 \subsection{Control variants}
 
 We evaluate four relevant variants:
@@ -127,8 +169,9 @@ We evaluate four relevant variants:
   \item[\parcae{} \bx{} looped attention.] The same scaffold with a learned
     value projection and gate for the injected prelude stream.
   \item[\parcae{} \pcontrol{} looped attention.] The same scaffold with a
-    P20 recurrent scan over the prelude stream. The P20 output is normalized
-    and used to produce the injected value and gate for the middle loop.
+    \pname{} recurrent scan over the prelude stream. The primitive output is
+    normalized and used to produce the injected value and gate for the middle
+    loop.
 \end{description}
 
 The \pcontrol{} path is intentionally not a standalone sequence mixer in this
@@ -178,7 +221,7 @@ Lane & Params & Final loss & tok/s & Peak MB \\
 8L attention-only & 9.78M & 5.9347 & 1,067,937 & 6,774.79 \\
 \parcae{} looped attention & 9.78M & 4.4132 & 878,842 & 6,983.55 \\
 \parcae{} \bx{} looped attention & 9.81M & 4.3842 & 866,260 & 6,991.98 \\
-\parcae{} \pcontrol{} looped attention & 9.87M & 4.3012 & 793,615 & 7,046.88 \\
+\parcae{} \pctrlshort{} looped attention & 9.87M & 4.3012 & 793,615 & 7,046.88 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -195,7 +238,7 @@ three seeds.
 \label{tab:bx}
 \begin{tabular}{rrrrrr}
 \toprule
-Seed & \bx{} loss & \pcontrol{} loss & Delta & \bx{} tok/s & \pcontrol{} tok/s \\
+Seed & \bx{} loss & \pctrlshort{} loss & Delta & \bx{} tok/s & \pctrlshort{} tok/s \\
 \midrule
 42 & 4.3842 & 4.3012 & -0.0830 & 866,260 & 793,615 \\
 43 & 4.4658 & 4.2972 & -0.1687 & 908,138 & 832,650 \\
@@ -209,7 +252,7 @@ Mean & 4.4006 & 4.2983 & -0.1023 & 879,217 & 806,233 \\
 The mean loss delta is -0.1023 in favor of \pcontrol{}, corresponding to a
 perplexity ratio of $\exp(-0.1023) \approx 0.9027$. In this scaffold, the
 primitive is not merely adding noise or capacity; it provides a repeatable
-control advantage over the strongest non-P20 looped injection path.
+control advantage over the strongest non-\pshort{} looped injection path.
 
 \subsection{Speed-compensated \bx{} pressure check}
 
@@ -240,15 +283,15 @@ fact, the speed-compensated \bx{} runs were worse than their 30k-step
 counterparts at this learning rate, suggesting that simply extending the
 control lane at fixed LR was not enough.
 
-\subsection{Tuned non-P20 controls}
+\subsection{Tuned non-\pshort{} controls}
 
-We next gave non-P20 looped controls a bounded learning-rate sweep on seed 42:
-3e-4, 6e-4, 1e-3, and 1.5e-3. The best non-P20 setting was plain \parcae{}
+We next gave non-\pshort{} looped controls a bounded learning-rate sweep on seed 42:
+3e-4, 6e-4, 1e-3, and 1.5e-3. The best non-\pshort{} setting was plain \parcae{}
 looped attention at LR 6e-4. It still lost to \pcontrol{} across three seeds.
 
 \begin{table}[h]
 \centering
-\caption{Seed-42 learning-rate sweep for non-P20 looped controls.}
+\caption{Seed-42 learning-rate sweep for non-\pshort{} looped controls.}
 \label{tab:lrsweep}
 \begin{tabular}{rrr}
 \toprule
@@ -264,7 +307,7 @@ LR & \parcae{} looped loss & \bx{} looped loss \\
 
 \begin{table}[h]
 \centering
-\caption{Best tuned non-P20 control versus \pcontrol{}.}
+\caption{Best tuned non-\pshort{} control versus \pcontrol{}.}
 \label{tab:tuned}
 \begin{tabular}{rrrrr}
 \toprule
@@ -322,7 +365,7 @@ to \pcontrol{}.
 \label{tab:14l}
 \begin{tabular}{rrrrrr}
 \toprule
-Seed & 14L loss & \pcontrol{} loss & Delta & 14L tok/s & \pcontrol{} tok/s \\
+Seed & 14L loss & \pctrlshort{} loss & Delta & 14L tok/s & \pctrlshort{} tok/s \\
 \midrule
 42 & 4.3044 & 4.3012 & -0.0032 & 773,922 & 793,615 \\
 43 & 4.2960 & 4.2972 & +0.0011 & 772,807 & 832,650 \\
@@ -354,7 +397,7 @@ collapse once attention is strengthened. Instead, it occupies a useful middle
 ground:
 
 \begin{itemize}
-  \item It reliably beats same-scaffold non-P20 controls.
+  \item It reliably beats same-scaffold non-\pshort{} controls.
   \item It beats parameter-near and compute-near attention controls.
   \item It sits in a tie band with a much deeper 14L attention model.
   \item It loses to 16L attention at this context length and token budget.
@@ -418,7 +461,7 @@ The control set should include:
   \item the scaled \pcontrol{} scaffold,
   \item a parameter-near attention baseline,
   \item a stronger depth-near attention baseline,
-  \item optionally a looped non-P20 control if budget allows.
+  \item optionally a looped non-\pshort{} control if budget allows.
 \end{itemize}
 
 One H100 is sufficient for this next rung. Multi-GPU training is not required
@@ -439,7 +482,7 @@ A bounded compute request of 50-100 H100-hours would cover:
 
 \pcontrol{} is not yet a transformer replacement result. It is a credible
 efficient-depth result. In a controlled tiny-LM H100 ladder, \pcontrol{}
-improves a looped middle-depth attention scaffold beyond matched non-P20
+improves a looped middle-depth attention scaffold beyond matched non-\pshort{}
 controls, reaches the 14L attention boundary with fewer parameters, and remains
 competitive until pure attention is made substantially deeper. The next
 scientific question is whether this role survives at 30M-50M parameters and

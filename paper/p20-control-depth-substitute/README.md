@@ -1,7 +1,7 @@
-# P20-Control Depth Substitute Report
+# P2.0 Rotary State-Output Control Report
 
 This folder contains a buildable LaTeX technical report for the first Path 1
-Parcae/P20-control H100 proof ladder.
+Parcae/P2.0 rotary state-output control H100 proof ladder.
 
 ## Build
 
@@ -15,7 +15,8 @@ TinyTeX is sufficient on the local Mac environment.
 
 The report is intentionally framed as a technical report / compute-grant
 artifact, not as a final architecture paper. The supported claim is narrow:
-P20-control behaves like an efficient depth substitute in the current tiny-LM
+the P2.0 rotary state-output recurrent control, called `P20-control` in the
+repository, behaves like an efficient depth substitute in the current tiny-LM
 Path 1 benchmark, while much deeper pure attention can still pass it.
 
 The primary source of truth for run artifacts is:
