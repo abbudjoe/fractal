@@ -330,7 +330,7 @@ class Path1HybridLanguageModel(nn.Module):
     def model_label(self) -> str:
         return f"path1_{self.variant.label.replace('-', '_')}"
 
-    def forward_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def forward_hidden(self, input_ids: torch.Tensor) -> torch.Tensor:
         hidden = self.embedding(input_ids)
         if self.context_embedding is not None:
             hidden = hidden + self.context_embedding(input_ids)
@@ -358,6 +358,10 @@ class Path1HybridLanguageModel(nn.Module):
                 else:
                     hidden = block(hidden, mask)
         hidden = self.final_norm(hidden)
+        return hidden
+
+    def forward_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
+        hidden = self.forward_hidden(input_ids)
         return self.output(hidden)
 
     def _forward_parcae_loop(self, hidden: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:

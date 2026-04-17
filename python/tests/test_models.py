@@ -66,6 +66,20 @@ class Path1ModelTests(unittest.TestCase):
         logits = model.forward_logits(input_ids)
         self.assertEqual(tuple(logits.shape), (2, 8, 257))
 
+    def test_attention_only_forward_hidden_cpu(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=2, ffn_multiplier=2),
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        hidden = model.forward_hidden(input_ids)
+        logits = model.forward_logits(input_ids)
+
+        self.assertEqual(tuple(hidden.shape), (2, 8, 32))
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertTrue(torch.isfinite(hidden).all())
+
     def test_attention_only_parcae_looped_scaffold_forward_cpu(self) -> None:
         variant = phase1_attention_only_variant(
             shape=Path1ModelShape(d_model=32, head_count=4, total_layers=6, ffn_multiplier=2),

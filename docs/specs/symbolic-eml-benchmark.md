@@ -937,3 +937,66 @@ Scaling verdict:
   unsafe-call gate at `0.008`.
 - The `0.8` threshold remains a useful negative control: it is capable, but
   unsafe. The bridge should continue with the strict calibrated call boundary.
+
+## Path1 LM-Side Bridge
+
+The LM-side integration replaces the tiny GRU contract model with the repo's
+Path1 attention LM backbone. The integration exposes a hidden-state surface on
+`Path1HybridLanguageModel`:
+
+```text
+Path1 hidden state + frozen compiled-expert features -> router over experts/ABSTAIN
+```
+
+The normal token head still trains as the fallback LM path. The symbolic expert
+path is a hard call only when the calibrated router crosses the call threshold;
+otherwise the Path1 token head decides.
+
+Path1 bridge artifacts:
+
+```text
+artifacts/symbolic-bridge-path1/symbolic-bridge-path1-compact-large-c5-t99999-v1/
+artifacts/symbolic-bridge-path1/symbolic-bridge-path1-compact-large-c5-t9999-v1/
+artifacts/symbolic-bridge-path1/symbolic-bridge-path1-compact-large-c5-t80-v1/
+```
+
+Primary command:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_path1.py \
+  --bridge-summary artifacts/symbolic-bridge/symbolic-bridge-compact-large-v1/summary.json \
+  --run-label symbolic-bridge-path1-compact-large-c5-t9999-v1 \
+  --output-dir artifacts/symbolic-bridge-path1/symbolic-bridge-path1-compact-large-c5-t9999-v1 \
+  --epochs 900 \
+  --learning-rate 0.003 \
+  --d-model 96 \
+  --total-layers 4 \
+  --head-count 4 \
+  --ffn-multiplier 2 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 5.0 \
+  --router-call-threshold 0.9999 \
+  --device auto \
+  --output table
+```
+
+| condition | threshold | extrap final accuracy | extrap LM accuracy | router extrap accuracy | expert call rate | unsafe call rate | abstain recall | contract |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| strict Path1 | 0.99999 | 0.772 | 0.729 | 0.503 | 0.257 | 0.002 | 0.995 | false |
+| calibrated Path1 | 0.9999 | 0.802 | 0.739 | 0.609 | 0.365 | 0.002 | 0.992 | true |
+| loose Path1 negative control | 0.8 | 0.845 | 0.763 | 0.782 | 0.655 | 0.062 | 0.814 | false |
+
+Path1 bridge verdict:
+
+- The router-gated compiled expert path works inside the Path1 LM surface. It
+  improves extrapolation over token-only, x-task, and frozen side-channel Path1
+  baselines while keeping the base LM fallback intact.
+- The best safe Path1 setting is less aggressive than the tiny GRU bridge:
+  `0.9999` is the right threshold on this run. `0.99999` is too conservative
+  and falls just under the capability-gain gate.
+- The loose threshold control confirms the safety boundary: it reaches higher
+  accuracy but violates the unsafe-call gate (`0.062`).
+- This is the first actual LM-side bridge contract in this track. It is not yet
+  a broad language-corpus result; it is a Path1-backed symbolic-token bridge
+  showing that the compiled expert bank can be called safely from a real repo LM
+  backbone.
