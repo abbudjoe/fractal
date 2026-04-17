@@ -1,0 +1,453 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue
+}
+
+\newcommand{\pcontrol}{P20-control}
+\newcommand{\parcae}{Parcae}
+\newcommand{\bx}{B(x)}
+\newcommand{\tokens}{\mathrm{tokens}}
+
+\title{\pcontrol{} as an Efficient Depth Substitute in Tiny Causal Language Models}
+\author{Fractal Research Notes}
+\date{April 16, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We report a bounded H100 proof ladder for a small recurrent control primitive,
+\pcontrol{}, inserted into a looped middle-depth causal language-model scaffold.
+The goal is not to claim that the primitive generally beats Transformers.
+The narrower question is whether the primitive provides useful depth-like
+computation under a fixed tiny-model experimental contract. In a 9.87M
+parameter model trained for 491.52M OpenLLaMA-tokenized FineWeb tokens,
+\pcontrol{} beats the strongest non-P20 looped control across three seeds,
+survives a speed-compensated control check, and remains ahead after a bounded
+learning-rate sweep of non-P20 looped baselines. Against pure attention,
+\pcontrol{} beats 9L, 10L, and 12L attention controls on the seed-42 depth
+screen and falls into a three-seed tie band with 14L attention while using
+about 10\% fewer parameters. A 16L attention model, however, beats \pcontrol{}
+on seed 42 while using more parameters, more memory, and lower throughput.
+These results support a modest but useful claim: in this tiny-LM regime,
+\pcontrol{} behaves like an efficient depth substitute, but it has not yet
+shown a general advantage over sufficiently deeper attention. We close with a
+proposed 30M-50M parameter experiment needed to determine whether the effect
+survives beyond tiny scale.
+\end{abstract}
+
+\section{Motivation}
+
+Transformer decoders remain the default architecture for language modeling
+because causal self-attention provides exact content-based token interaction
+and scales well with modern GPU kernels \cite{vaswani2017attention,
+dao2022flashattention}. Recurrent and state-space alternatives, including
+selective state-space models such as Mamba \cite{gu2023mamba}, offer a
+different tradeoff: they can provide recurrent state updates and efficient
+sequence processing, but they must compete with a very strong and highly
+optimized attention baseline.
+
+The experiment reported here asks a narrower question than ``can a recurrent
+primitive replace attention?'' We instead test whether a recurrent primitive
+can act as a control mechanism for repeated middle-depth computation inside a
+causal decoder. The primitive is called \pcontrol{}. It is not inserted as a
+full attention replacement. It controls the injection path of a looped
+middle-depth scaffold, where a small set of middle attention blocks is reused
+for multiple recurrent passes.
+
+The practical motivation is simple. If a small control primitive lets a model
+reach the quality of a deeper pure-attention model with fewer parameters or
+similar wall-clock cost, then it may provide a useful architectural axis for
+small and mid-scale language models. If the effect disappears when pure
+attention is tuned or deepened, then the result is still useful: it defines the
+boundary at which ordinary depth catches the recurrent-control scaffold.
+
+\section{Architecture}
+
+\subsection{Base model}
+
+All runs use a causal decoder language model trained for next-token prediction.
+The base tiny model has:
+
+\begin{itemize}
+  \item vocabulary size 32,000 using an OpenLLaMA SentencePiece tokenizer,
+  \item model width $d=128$,
+  \item four attention heads,
+  \item local context length 256,
+  \item feed-forward multiplier 4,
+  \item eight physical transformer blocks unless otherwise stated.
+\end{itemize}
+
+The pure attention baseline is an ordinary stack of local causal attention
+blocks. The \parcae{} family preserves the same language-model objective and
+tokenization, but changes the execution scaffold.
+
+\subsection{Looped middle-depth scaffold}
+
+The \parcae{} scaffold splits the physical transformer stack into a prelude, a
+middle recurrent segment, and a coda. For the default 8-layer model, the split
+is:
+
+\[
+  3\ \text{prelude blocks}
+  \rightarrow
+  2\ \text{middle blocks looped twice}
+  \rightarrow
+  3\ \text{coda blocks}.
+\]
+
+The scaffold maintains a recurrent middle state. At each loop, it combines a
+bounded injection from the prelude stream with a decayed previous state, applies
+the middle attention blocks, and updates the recurrent state through a bounded
+nonlinear delta. This is a stable looped-compute scaffold, not a faithful
+reproduction of any external looped language-model paper.
+
+\subsection{Control variants}
+
+We evaluate four relevant variants:
+
+\begin{description}
+  \item[Attention-only.] A standard local causal attention stack.
+  \item[\parcae{} looped attention.] The looped middle scaffold with a shared,
+    learned scalar/channel injection.
+  \item[\parcae{} \bx{} looped attention.] The same scaffold with a learned
+    value projection and gate for the injected prelude stream.
+  \item[\parcae{} \pcontrol{} looped attention.] The same scaffold with a
+    P20 recurrent scan over the prelude stream. The P20 output is normalized
+    and used to produce the injected value and gate for the middle loop.
+\end{description}
+
+The \pcontrol{} path is intentionally not a standalone sequence mixer in this
+experiment. It is a control primitive attached to a looped attention scaffold.
+This distinction matters for the claim boundary.
+
+\section{Experimental Contract}
+
+The H100 proof ladder used:
+
+\begin{itemize}
+  \item Modal 1x NVIDIA H100 80GB HBM3,
+  \item PyTorch 2.10.0 with CUDA 12.8,
+  \item bf16 training,
+  \item Triton primitive backend,
+  \item OpenLLaMA-tokenized FineWeb CC-MAIN-2024-10 cache,
+  \item 750,000,544 train tokens and 10,029,403 eval tokens,
+  \item sequence length 256,
+  \item batch size 64,
+  \item 64 eval batches,
+  \item deterministic seed and data-seed pairs.
+\end{itemize}
+
+Each 30,000-step lane sees
+\[
+  30{,}000 \times 64 \times 256 = 491{,}520{,}000
+\]
+training tokens, about 65.5\% of the train split. The runner enforces a
+no-repeat cap, so these runs do not wrap the training cache.
+
+\section{Results}
+
+\subsection{Initial four-lane promotion}
+
+Table~\ref{tab:promotion} shows the seed-42 promotion run. Plain looped
+middle-depth accounts for most of the gain over the weak 8L attention baseline.
+\bx{} improves the looped scaffold slightly. \pcontrol{} improves it further.
+
+\begin{table}[h]
+\centering
+\caption{Seed-42 four-lane H100 promotion, 30k steps.}
+\label{tab:promotion}
+\begin{tabular}{lrrrr}
+\toprule
+Lane & Params & Final loss & tok/s & Peak MB \\
+\midrule
+8L attention-only & 9.78M & 5.9347 & 1,067,937 & 6,774.79 \\
+\parcae{} looped attention & 9.78M & 4.4132 & 878,842 & 6,983.55 \\
+\parcae{} \bx{} looped attention & 9.81M & 4.3842 & 866,260 & 6,991.98 \\
+\parcae{} \pcontrol{} looped attention & 9.87M & 4.3012 & 793,615 & 7,046.88 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Equal-step comparison against \bx{}}
+
+The cleanest same-scaffold comparison is \bx{} versus \pcontrol{}. Table
+\ref{tab:bx} shows the three-seed equal-step result. \pcontrol{} wins all
+three seeds.
+
+\begin{table}[h]
+\centering
+\caption{Equal-step finalist repeat, 30k steps.}
+\label{tab:bx}
+\begin{tabular}{rrrrrr}
+\toprule
+Seed & \bx{} loss & \pcontrol{} loss & Delta & \bx{} tok/s & \pcontrol{} tok/s \\
+\midrule
+42 & 4.3842 & 4.3012 & -0.0830 & 866,260 & 793,615 \\
+43 & 4.4658 & 4.2972 & -0.1687 & 908,138 & 832,650 \\
+44 & 4.3518 & 4.2965 & -0.0553 & 863,253 & 792,434 \\
+\midrule
+Mean & 4.4006 & 4.2983 & -0.1023 & 879,217 & 806,233 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The mean loss delta is -0.1023 in favor of \pcontrol{}, corresponding to a
+perplexity ratio of $\exp(-0.1023) \approx 0.9027$. In this scaffold, the
+primitive is not merely adding noise or capacity; it provides a repeatable
+control advantage over the strongest non-P20 looped injection path.
+
+\subsection{Speed-compensated \bx{} pressure check}
+
+Because \pcontrol{} is slower than \bx{}, we also gave \bx{} additional steps
+to spend its speed advantage. This is not an exact stopwatch-identical test,
+because observed H100 throughput varies by run, but it is a useful practical
+pressure check.
+
+\begin{table}[h]
+\centering
+\caption{Speed-compensated \bx{} pressure check.}
+\label{tab:bxspeed}
+\begin{tabular}{rrrrrr}
+\toprule
+Seed & \bx{} steps & \bx{} loss & \pcontrol{} loss & Delta & \bx{} train min \\
+\midrule
+42 & 32,750 & 4.4223 & 4.3012 & -0.1211 & 9.39 \\
+43 & 32,725 & 4.5352 & 4.2972 & -0.2380 & 9.45 \\
+44 & 32,685 & 4.4055 & 4.2965 & -0.1090 & 10.33 \\
+\midrule
+Mean & -- & 4.4543 & 4.2983 & -0.1560 & 9.72 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The faster \bx{} control did not catch \pcontrol{} when given extra steps. In
+fact, the speed-compensated \bx{} runs were worse than their 30k-step
+counterparts at this learning rate, suggesting that simply extending the
+control lane at fixed LR was not enough.
+
+\subsection{Tuned non-P20 controls}
+
+We next gave non-P20 looped controls a bounded learning-rate sweep on seed 42:
+3e-4, 6e-4, 1e-3, and 1.5e-3. The best non-P20 setting was plain \parcae{}
+looped attention at LR 6e-4. It still lost to \pcontrol{} across three seeds.
+
+\begin{table}[h]
+\centering
+\caption{Seed-42 learning-rate sweep for non-P20 looped controls.}
+\label{tab:lrsweep}
+\begin{tabular}{rrr}
+\toprule
+LR & \parcae{} looped loss & \bx{} looped loss \\
+\midrule
+3e-4 & 4.5403 & 4.5320 \\
+6e-4 & 4.3712 & 4.3890 \\
+1e-3 & 4.4132 & 4.3842 \\
+1.5e-3 & 7.7104 & 5.7993 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Best tuned non-P20 control versus \pcontrol{}.}
+\label{tab:tuned}
+\begin{tabular}{rrrrr}
+\toprule
+Seed & Tuned looped loss & \pcontrol{} loss & Delta & Tuned tok/s \\
+\midrule
+42 & 4.3712 & 4.3012 & -0.0700 & 935,472 \\
+43 & 4.3771 & 4.2972 & -0.0800 & 913,677 \\
+44 & 4.3781 & 4.2965 & -0.0816 & 856,470 \\
+\midrule
+Mean & 4.3755 & 4.2983 & -0.0772 & 901,873 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The mean perplexity ratio from the mean loss delta is
+$\exp(-0.0772) \approx 0.9257$. \pcontrol{} therefore survives the first
+tuned-control rung, although it remains slower than the tuned looped control.
+
+\subsection{Pure attention depth boundary}
+
+The strongest caveat comes from deeper pure attention. We screened attention
+depth at the same width and context length, using LR 6e-4 for the deeper
+attention controls. Table~\ref{tab:depth} shows seed 42.
+
+\begin{table}[h]
+\centering
+\caption{Pure attention depth screen, seed 42.}
+\label{tab:depth}
+\begin{tabular}{lrrrr}
+\toprule
+Lane & Params & Final loss & tok/s & Train min \\
+\midrule
+8L attention, LR 1e-3 & 9.78M & 5.9347 & 1,067,937 & 7.67 \\
+9L attention, LR 6e-4 & 9.98M & 4.4459 & 1,091,606 & 7.50 \\
+10L attention, LR 6e-4 & 10.17M & 4.3649 & 981,974 & 8.34 \\
+12L attention, LR 6e-4 & 10.57M & 4.3304 & 897,467 & 9.13 \\
+14L attention, LR 6e-4 & 10.97M & 4.3044 & 773,922 & 10.59 \\
+16L attention, LR 6e-4 & 11.36M & 4.2758 & 721,719 & 11.35 \\
+\pcontrol{}, LR 1e-3 & 9.87M & 4.3012 & 793,615 & 10.32 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This screen shows the boundary clearly. \pcontrol{} beats the 9L, 10L, and
+12L attention controls. It is essentially tied with 14L attention and loses to
+16L attention on seed 42. The 16L model is larger, slower, and uses more CUDA
+memory, but it has better loss.
+
+We repeated the 14L comparison across seeds because it is the boundary closest
+to \pcontrol{}.
+
+\begin{table}[h]
+\centering
+\caption{14L attention boundary repeat.}
+\label{tab:14l}
+\begin{tabular}{rrrrrr}
+\toprule
+Seed & 14L loss & \pcontrol{} loss & Delta & 14L tok/s & \pcontrol{} tok/s \\
+\midrule
+42 & 4.3044 & 4.3012 & -0.0032 & 773,922 & 793,615 \\
+43 & 4.2960 & 4.2972 & +0.0011 & 772,807 & 832,650 \\
+44 & 4.3061 & 4.2965 & -0.0097 & 847,395 & 792,434 \\
+\midrule
+Mean & 4.3022 & 4.2983 & -0.0039 & 798,041 & 806,233 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The mean \pcontrol{} edge over 14L attention is only -0.0039 loss, a
+perplexity ratio of about 0.9961. This should be interpreted as a tie band, not
+a decisive quality win. The practical result is nevertheless meaningful:
+\pcontrol{} reaches the 14L attention boundary with about 10\% fewer
+parameters and similar throughput.
+
+\subsection{Speed-spend pressure against 16L attention}
+
+We also let \pcontrol{} spend some of its speed advantage against the 16L
+attention model. A 33k-step run reached 4.2835 loss, and a 34k-step run reached
+4.2812 loss. Both narrowed the gap but did not catch the 16L attention result
+of 4.2758 on seed 42.
+
+\section{Discussion}
+
+The core result is best described as an efficient-depth signal. The
+\pcontrol{} scaffold does not simply beat all attention. It also does not
+collapse once attention is strengthened. Instead, it occupies a useful middle
+ground:
+
+\begin{itemize}
+  \item It reliably beats same-scaffold non-P20 controls.
+  \item It beats parameter-near and compute-near attention controls.
+  \item It sits in a tie band with a much deeper 14L attention model.
+  \item It loses to 16L attention at this context length and token budget.
+\end{itemize}
+
+This is the first result in this line of work that looks like a credible
+architectural role rather than a primitive leaderboard curiosity. The primitive
+is not replacing attention. It is controlling repeated middle-depth computation
+and acting as a compact substitute for some ordinary depth.
+
+There are two immediate interpretations. The optimistic interpretation is that
+\pcontrol{} supplies a recurrent control state that helps the looped middle
+blocks refine hidden representations more efficiently than adding several
+ordinary attention layers. The skeptical interpretation is that looped middle
+depth itself provides most of the gain, and \pcontrol{} is a small regularizer
+or gating improvement whose advantage may vanish at larger scale or longer
+training. The current data favors the first interpretation within the tiny
+contract, but it cannot settle the scaling question.
+
+\section{Limitations}
+
+The result should not be overstated.
+
+\begin{itemize}
+  \item The models are tiny: roughly 10M parameters.
+  \item Context length is only 256 tokens.
+  \item The attention baselines were tuned only lightly.
+  \item The strongest pure attention model tested, 16L, beat \pcontrol{}.
+  \item We do not yet have a 30M-50M scale result.
+  \item We do not yet have long-context evidence.
+  \item We have not shown generation quality, downstream task quality, or
+    quantization behavior for this specific scaffold.
+\end{itemize}
+
+The supported claim is therefore:
+
+\begin{quote}
+In the current 10M-parameter, 256-context Path 1 benchmark, \pcontrol{} acts as
+an efficient depth substitute inside a looped attention scaffold. It beats
+same-scaffold controls and reaches the 14L pure-attention boundary with fewer
+parameters, but it does not beat sufficiently deeper attention.
+\end{quote}
+
+\section{Next Experiment}
+
+To determine whether this is more than a tiny-model artifact, the next
+experiment should move to 30M-50M parameters. A practical first target is:
+
+\begin{itemize}
+  \item width $d=320$,
+  \item 16 physical layers for the \pcontrol{} scaffold,
+  \item 8 heads,
+  \item roughly 40.8M parameters,
+  \item 1.0B to 1.25B training tokens,
+  \item fixed OpenLLaMA tokenizer and FineWeb-derived train/eval split.
+\end{itemize}
+
+The control set should include:
+
+\begin{itemize}
+  \item the scaled \pcontrol{} scaffold,
+  \item a parameter-near attention baseline,
+  \item a stronger depth-near attention baseline,
+  \item optionally a looped non-P20 control if budget allows.
+\end{itemize}
+
+One H100 is sufficient for this next rung. Multi-GPU training is not required
+because the models fit comfortably on one H100 and the current harness is
+single-GPU. If parallel compute is available, it should be used for independent
+lanes or seeds rather than distributed training.
+
+A bounded compute request of 50-100 H100-hours would cover:
+
+\begin{itemize}
+  \item token-cache preparation and smoke tests,
+  \item one-seed 30M-50M screening,
+  \item finalist promotion to a larger token budget,
+  \item seed repeats only if the first screen remains alive.
+\end{itemize}
+
+\section{Conclusion}
+
+\pcontrol{} is not yet a transformer replacement result. It is a credible
+efficient-depth result. In a controlled tiny-LM H100 ladder, \pcontrol{}
+improves a looped middle-depth attention scaffold beyond matched non-P20
+controls, reaches the 14L attention boundary with fewer parameters, and remains
+competitive until pure attention is made substantially deeper. The next
+scientific question is whether this role survives at 30M-50M parameters and
+longer context. If it does, the primitive deserves a more serious scaling-law
+study. If it does not, the current work still clarifies where recurrent control
+helps and where ordinary attention depth catches up.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}
