@@ -1223,3 +1223,60 @@ Bridge Corpus V1 verdict:
   soft-fusion calibration on answer spans: unsafe-mass penalty by role, explicit
   prose/context abstention loss, and a loss report that gates on math-answer NLL
   plus unsafe answer mass.
+
+## Role-Calibrated Soft Fusion
+
+The bridge LM now supports two role-aware router penalties:
+
+- `answer_unsafe_loss_weight`: penalizes unsafe expert probability mass on
+  `math_answer` and `math_only` positions.
+- `non_answer_abstain_loss_weight`: pushes the router to abstain on `prose` and
+  `math_context` positions.
+
+These losses default to zero, so previous runs remain comparable. The first
+calibrated bridge-corpus setting used:
+
+```text
+answer_unsafe_loss_weight=5.0
+non_answer_abstain_loss_weight=3.0
+router_loss_weight=10.0
+call_abstain_loss_weight=5.0
+```
+
+Calibrated artifacts:
+
+```text
+artifacts/bridge-corpus-v1-lm/bridge-corpus-v1-pure-language-transformer-calibrated-v1/
+artifacts/bridge-corpus-v1-lm/bridge-corpus-v1-language-math-transformer-calibrated-v2/
+artifacts/bridge-corpus-v1-lm/bridge-corpus-v1-math-only-transformer-calibrated-v1/
+```
+
+Calibration results:
+
+| corpus | run | base acc | calibrated acc | base NLL | calibrated NLL | base unsafe | calibrated unsafe |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| pure language | `lm-router-prob-mixture` | 0.460 | 0.455 | 4.600 | 4.573 | 0.000 | 0.000 |
+| language + math | `lm-router-prob-mixture` overall | 0.947 | 0.942 | 0.617 | 0.657 | 0.007 | 0.005 |
+| language + math | `lm-router-prob-mixture` math_answer | 0.863 | 0.872 | 1.638 | 1.639 | 0.075 | 0.058 |
+| language + math | `lm-router-logit-fusion` math_answer | 0.769 | 0.756 | 1.971 | 1.881 | 0.090 | 0.029 |
+| math only | `lm-router-prob-mixture` | 0.869 | 0.874 | 1.457 | 1.441 | 0.043 | 0.027 |
+| math only | `lm-router-hard-call` | 0.801 | 0.829 | 1.610 | 1.380 | 0.001 | 0.002 |
+
+Role-calibration verdict:
+
+- The role-aware objective works in the direction intended. It reduces unsafe
+  expert mass on answer/math positions without introducing prose calls.
+- On `language + math`, probability mixture keeps the answer-span capability
+  gain and slightly improves answer accuracy (`0.863 -> 0.872`) while reducing
+  answer unsafe mass (`0.075 -> 0.058`). Its answer NLL is essentially flat.
+- On `math only`, probability mixture improves on all three key axes:
+  extrapolation accuracy (`0.869 -> 0.874`), extrapolation NLL
+  (`1.457 -> 1.441`), and unsafe mass (`0.043 -> 0.027`).
+- Logit fusion is more safety-responsive than probability mixture on
+  `language + math` answer tokens (`0.090 -> 0.029` unsafe mass), but loses
+  answer accuracy. It is a useful calibration control, not the current best
+  bridge candidate.
+- The remaining issue is not abstention on prose/context; that is already clean.
+  The remaining issue is answer-token expert selection quality. The next run
+  should add an answer-role objective that prefers safe expert mass over merely
+  reducing unsafe mass, so the router does not solve safety by becoming timid.
