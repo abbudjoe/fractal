@@ -14,6 +14,25 @@ from python.symbolic.bridge_canary import load_feature_rows, resolve_feature_tab
 
 EXPERT_IDS = ("generic-tree", "paper-complex-eml", "small-mlp", "stable-real-eml")
 
+TRAIN_LANGUAGE_MATH_TEMPLATES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "seen-direct",
+        ("for", "formula", "FORMULA", "at", "x", "XBIN", "the", "value", "is", "NUM", "."),
+    ),
+    ("seen-result", ("formula", "FORMULA", "with", "x", "XBIN", "gives", "NUM", ".")),
+)
+HELDOUT_LANGUAGE_MATH_TEMPLATES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "heldout-answer-first",
+        ("answer", "NUM", "when", "x", "equals", "XBIN", "under", "formula", "FORMULA", "."),
+    ),
+    (
+        "heldout-query",
+        ("please", "solve", "formula", "FORMULA", "where", "x", "is", "XBIN", "result", "NUM", "."),
+    ),
+    ("heldout-output", ("using", "input", "x", "XBIN", "and", "formula", "FORMULA", "output", "NUM", ".")),
+)
+
 
 @dataclass(frozen=True)
 class BridgeCorpusReport:
@@ -70,6 +89,7 @@ def run_bridge_corpus(
     language_eval_per_group: int = 20,
 ) -> BridgeCorpusReport:
     transform_summary: dict[str, Any] | None = None
+    corpus_extra_summary: dict[str, Any] = {}
     if corpus_kind == "pure-language":
         rows, token_bins, vocabulary, source_path = build_pure_language_rows(
             seed=seed,
@@ -84,6 +104,19 @@ def run_bridge_corpus(
             safety_per_group=language_safety_per_group,
             eval_per_group=language_eval_per_group,
         )
+    elif corpus_kind == "language-math-heldout-templates":
+        if source_bridge_summary_path is None:
+            raise ValueError(
+                "language-math-heldout-templates corpus requires source_bridge_summary_path"
+            )
+        rows, token_bins, vocabulary, source_path, heldout_summary = build_language_math_heldout_template_rows(
+            source_bridge_summary_path,
+            train_per_group=language_train_per_group,
+            safety_per_group=language_safety_per_group,
+            eval_per_group=language_eval_per_group,
+            seed=seed,
+        )
+        corpus_extra_summary["heldout_template"] = heldout_summary
     elif corpus_kind == "math-only":
         if source_bridge_summary_path is None:
             raise ValueError("math-only corpus requires source_bridge_summary_path")
@@ -107,7 +140,9 @@ def run_bridge_corpus(
         }
     else:
         raise ValueError(
-            "corpus_kind must be one of pure-language|language-math|math-only|expert-ablation|expert-shuffle"
+            "corpus_kind must be one of "
+            "pure-language|language-math|language-math-heldout-templates|"
+            "math-only|expert-ablation|expert-shuffle"
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -123,6 +158,7 @@ def run_bridge_corpus(
     )
     if transform_summary is not None:
         summary["expert_transform"] = transform_summary
+    summary.update(corpus_extra_summary)
     report = BridgeCorpusReport(
         run_label=run_label,
         corpus_kind=corpus_kind,
@@ -243,6 +279,193 @@ def build_language_math_rows(
             )
         )
     return rows, len(vocab), vocab.labels(), repo_relative(source_bridge_summary_path)
+
+
+def build_language_math_heldout_template_rows(
+    source_bridge_summary_path: Path,
+    *,
+    train_per_group: int,
+    safety_per_group: int,
+    eval_per_group: int,
+    seed: int,
+) -> tuple[list[dict[str, Any]], int, list[str], str, dict[str, Any]]:
+    source_summary = json.loads(source_bridge_summary_path.read_text())
+    source_feature_path = resolve_feature_table_path(source_summary, source_bridge_summary_path)
+    source_rows = load_feature_rows(source_feature_path)
+    token_bins = int(source_summary.get("token_bins") or source_rows[0]["token_bins"])
+    vocab = base_language_vocabulary()
+    register_language_math_templates(vocab)
+    formula_tokens = {
+        task_id: vocab.token(f"FORMULA_{task_id}")
+        for task_id in sorted({str(row["task_id"]) for row in source_rows})
+    }
+    for index in range(token_bins):
+        vocab.token(f"XBIN_{index:02d}")
+    number_offset = len(vocab)
+    for index in range(token_bins):
+        vocab.token(f"NUM_{index:02d}")
+
+    seen_tasks, heldout_tasks = split_seen_heldout_formula_tasks(sorted(formula_tokens))
+    selected = select_source_rows(
+        [
+            row
+            for row in source_rows
+            if (
+                (
+                    str(row["split"]) in {"train", "safety_calibration"}
+                    and str(row["task_id"]) in seen_tasks
+                )
+                or (
+                    str(row["split"]) in {"validation", "extrapolation"}
+                    and str(row["task_id"]) in heldout_tasks
+                )
+            )
+        ],
+        train_per_group=train_per_group,
+        safety_per_group=safety_per_group,
+        eval_per_group=eval_per_group,
+    )
+    rows: list[dict[str, Any]] = []
+    for source_row in selected:
+        split = str(source_row["split"])
+        task_id = str(source_row["task_id"])
+        template_pool = (
+            TRAIN_LANGUAGE_MATH_TEMPLATES
+            if split in {"train", "safety_calibration"}
+            else HELDOUT_LANGUAGE_MATH_TEMPLATES
+        )
+        template_id, template = select_language_math_template(template_pool, source_row, seed=seed)
+        sequence_rows = language_math_template_sequence_rows(
+            source_row,
+            vocab=vocab,
+            formula_token=formula_tokens[task_id],
+            x_token=x_bin_token(vocab, source_row, token_bins),
+            number_offset=number_offset,
+            template=template,
+            task_id=task_id,
+            sequence_id=f"{split}-{source_row['seed']}-{source_row['index']}-{template_id}",
+        )
+        formula_split = "seen_formula" if task_id in seen_tasks else "heldout_formula"
+        language_split = (
+            "seen_language_template"
+            if split in {"train", "safety_calibration"}
+            else "heldout_language_template"
+        )
+        for row in sequence_rows:
+            row["template_id"] = template_id
+            row["formula_template_split"] = formula_split
+            row["language_template_split"] = language_split
+        rows.extend(sequence_rows)
+
+    heldout_summary = {
+        "seen_formula_tasks": list(seen_tasks),
+        "heldout_formula_tasks": list(heldout_tasks),
+        "seen_language_templates": [template_id for template_id, _template in TRAIN_LANGUAGE_MATH_TEMPLATES],
+        "heldout_language_templates": [template_id for template_id, _template in HELDOUT_LANGUAGE_MATH_TEMPLATES],
+        "split_contract": {
+            "train": "seen formulas and seen language templates",
+            "safety_calibration": "seen formulas and seen language templates",
+            "validation": "held-out formulas and held-out language templates",
+            "extrapolation": "held-out formulas and held-out language templates",
+        },
+    }
+    return rows, len(vocab), vocab.labels(), repo_relative(source_bridge_summary_path), heldout_summary
+
+
+def select_language_math_template(
+    template_pool: tuple[tuple[str, tuple[str, ...]], ...],
+    source_row: dict[str, Any],
+    *,
+    seed: int,
+) -> tuple[str, tuple[str, ...]]:
+    stable_hash = sum(ord(character) for character in str(source_row["task_id"]))
+    index = (
+        stable_hash
+        + int(source_row["index"])
+        + 17 * int(source_row["seed"])
+        + 31 * seed
+    ) % len(template_pool)
+    return template_pool[index]
+
+
+def register_language_math_templates(vocab: Vocabulary) -> None:
+    for _template_id, template in TRAIN_LANGUAGE_MATH_TEMPLATES + HELDOUT_LANGUAGE_MATH_TEMPLATES:
+        for token in template:
+            if token not in {"FORMULA", "XBIN", "NUM"}:
+                vocab.token(token)
+
+
+def split_seen_heldout_formula_tasks(task_ids: list[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    grouped: dict[str, list[str]] = {}
+    for task_id in task_ids:
+        grouped.setdefault(formula_depth_prefix(task_id), []).append(task_id)
+    seen: list[str] = []
+    heldout: list[str] = []
+    for _depth, group in sorted(grouped.items()):
+        group = sorted(group)
+        if len(group) == 1:
+            seen.extend(group)
+            continue
+        midpoint = max(1, len(group) // 2)
+        seen.extend(group[:midpoint])
+        heldout.extend(group[midpoint:])
+    if not heldout and len(task_ids) > 1:
+        seen = task_ids[::2]
+        heldout = task_ids[1::2]
+    if not seen or not heldout:
+        raise ValueError("language-math-heldout-templates requires at least two formula tasks")
+    return tuple(sorted(seen)), tuple(sorted(heldout))
+
+
+def formula_depth_prefix(task_id: str) -> str:
+    if len(task_id) > 1 and task_id[0] == "d":
+        index = 1
+        while index < len(task_id) and task_id[index].isdigit():
+            index += 1
+        if index > 1:
+            return task_id[:index]
+    return "unknown"
+
+
+def language_math_template_sequence_rows(
+    source_row: dict[str, Any],
+    *,
+    vocab: Vocabulary,
+    formula_token: int,
+    x_token: int,
+    number_offset: int,
+    template: tuple[str, ...],
+    task_id: str,
+    sequence_id: str,
+) -> list[dict[str, Any]]:
+    tokens: list[int] = []
+    roles: list[str] = []
+    source_token = int(source_row["target_token"])
+    for template_token in template:
+        if template_token == "FORMULA":
+            tokens.append(formula_token)
+            roles.append("math_context")
+        elif template_token == "XBIN":
+            tokens.append(x_token)
+            roles.append("math_context")
+        elif template_token == "NUM":
+            tokens.append(number_offset + source_token)
+            roles.append("math_answer")
+        else:
+            tokens.append(vocab.token(template_token))
+            roles.append("math_context" if template_token == "x" else "prose")
+    return text_sequence_rows(
+        tokens,
+        vocab=vocab,
+        task_id=task_id,
+        sequence_id=sequence_id,
+        seed=int(source_row["seed"]),
+        split=str(source_row["split"]),
+        eval_roles=roles,
+        x_values=[float(source_row["x"])] * len(tokens),
+        answer_source_row=source_row,
+        number_offset=number_offset,
+    )
 
 
 def build_math_only_rows(source_bridge_summary_path: Path) -> tuple[list[dict[str, Any]], int, list[str], str]:
@@ -647,20 +870,27 @@ def summarize_corpus_rows(
     for split in sorted(split_counts):
         split_rows = [row for row in rows if row["split"] == split]
         safe_by_split[split] = mean(1.0 if row["oracle_has_safe_expert"] else 0.0 for row in split_rows)
+    feature_table = {
+        "row_count": len(rows),
+        "split_counts": split_counts,
+        "role_counts": role_counts,
+        "split_role_counts": split_role_counts,
+        "role_safe_expert_coverage": role_safe,
+        "split_role_safe_expert_coverage": split_role_safe,
+        "split_safe_expert_coverage": safe_by_split,
+        "safe_expert_coverage": mean(1.0 if row["oracle_has_safe_expert"] else 0.0 for row in rows),
+    }
+    if any("template_id" in row for row in rows):
+        feature_table["template_counts"] = count_by(rows, "template_id")
+        feature_table["formula_template_split_counts"] = count_by(rows, "formula_template_split")
+        feature_table["language_template_split_counts"] = count_by(rows, "language_template_split")
+        answer_rows = [row for row in rows if str(row.get("eval_role")) == "math_answer"]
+        feature_table["math_answer_index_counts"] = count_by(answer_rows, "index")
     return {
         "corpus_kind": corpus_kind,
         "source_bridge_summary_path": source_bridge_summary_path,
         "vocabulary": vocabulary,
-        "feature_table": {
-            "row_count": len(rows),
-            "split_counts": split_counts,
-            "role_counts": role_counts,
-            "split_role_counts": split_role_counts,
-            "role_safe_expert_coverage": role_safe,
-            "split_role_safe_expert_coverage": split_role_safe,
-            "split_safe_expert_coverage": safe_by_split,
-            "safe_expert_coverage": mean(1.0 if row["oracle_has_safe_expert"] else 0.0 for row in rows),
-        },
+        "feature_table": feature_table,
     }
 
 
@@ -691,6 +921,15 @@ def render_corpus_markdown(report: BridgeCorpusReport) -> str:
         lines.extend(
             [
                 f"Expert transform: `{report.summary['expert_transform']}`",
+                "",
+            ]
+        )
+    if "heldout_template" in report.summary:
+        lines.extend(
+            [
+                f"Held-out template contract: `{report.summary['heldout_template']}`",
+                f"Template counts: `{feature_table.get('template_counts', {})}`",
+                f"Math answer index counts: `{feature_table.get('math_answer_index_counts', {})}`",
                 "",
             ]
         )

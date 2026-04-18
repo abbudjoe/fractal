@@ -894,6 +894,115 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertTrue((root / "language-math" / "feature_table.jsonl").exists())
             self.assertTrue((root / "language-math" / "summary.json").exists())
 
+    def test_bridge_corpus_heldout_templates_separate_formula_and_language_splits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_feature_table = root / "source_feature_table.jsonl"
+            source_summary = root / "source_summary.json"
+            source_rows = []
+            task_ids = ("d1_alpha", "d1_beta", "d2_alpha", "d2_beta")
+            for task_offset, task_id in enumerate(task_ids):
+                for split in ("train", "safety_calibration", "validation", "extrapolation"):
+                    for index in range(3):
+                        target_token = (task_offset + index) % 4
+                        source_rows.append(
+                            {
+                                "task_id": task_id,
+                                "seed": 1,
+                                "split": split,
+                                "index": index,
+                                "x": 0.25 + index,
+                                "target_y": float(target_token),
+                                "target_token": target_token,
+                                "token_bins": 4,
+                                "quantizer": {"minimum": 0.0, "maximum": 4.0},
+                                "in_training_range": split in {"train", "validation"},
+                                "best_expert_id": "paper-complex-eml",
+                                "oracle_has_safe_expert": True,
+                                "safe_expert_mask": {
+                                    "generic-tree": False,
+                                    "paper-complex-eml": True,
+                                    "small-mlp": False,
+                                    "stable-real-eml": False,
+                                },
+                                "experts": {
+                                    "generic-tree": {
+                                        "prediction": 0.0,
+                                        "token": 0,
+                                        "residual": 1.0,
+                                        "abs_residual": 1.0,
+                                        "token_match": False,
+                                    },
+                                    "paper-complex-eml": {
+                                        "prediction": float(target_token),
+                                        "token": target_token,
+                                        "residual": 0.0,
+                                        "abs_residual": 0.0,
+                                        "token_match": True,
+                                    },
+                                    "small-mlp": {
+                                        "prediction": 1.0,
+                                        "token": 1,
+                                        "residual": 1.0,
+                                        "abs_residual": 1.0,
+                                        "token_match": False,
+                                    },
+                                    "stable-real-eml": {
+                                        "prediction": 1.0,
+                                        "token": 1,
+                                        "residual": 1.0,
+                                        "abs_residual": 1.0,
+                                        "token_match": False,
+                                    },
+                                },
+                            }
+                        )
+            with source_feature_table.open("w") as handle:
+                for row in source_rows:
+                    handle.write(json.dumps(row) + "\n")
+            source_summary.write_text(
+                json.dumps(
+                    {
+                        "token_bins": 4,
+                        "summary": {
+                            "feature_table": {
+                                "path": str(source_feature_table),
+                                "row_count": len(source_rows),
+                            }
+                        },
+                    }
+                )
+            )
+
+            report = run_bridge_corpus(
+                root / "heldout",
+                run_label="unit-heldout",
+                corpus_kind="language-math-heldout-templates",
+                source_bridge_summary_path=source_summary,
+                seed=5,
+                language_train_per_group=2,
+                language_safety_per_group=2,
+                language_eval_per_group=2,
+            )
+            with Path(report.feature_table_path).open() as handle:
+                rows = [json.loads(line) for line in handle if line.strip()]
+            train_tasks = {row["task_id"] for row in rows if row["split"] in {"train", "safety_calibration"}}
+            eval_tasks = {row["task_id"] for row in rows if row["split"] in {"validation", "extrapolation"}}
+            self.assertTrue(train_tasks)
+            self.assertTrue(eval_tasks)
+            self.assertTrue(train_tasks.isdisjoint(eval_tasks))
+            self.assertEqual(
+                {row["formula_template_split"] for row in rows if row["split"] == "train"},
+                {"seen_formula"},
+            )
+            self.assertEqual(
+                {row["language_template_split"] for row in rows if row["split"] == "extrapolation"},
+                {"heldout_language_template"},
+            )
+            self.assertIn("heldout_template", report.summary)
+            self.assertIn("math_answer_index_counts", report.summary["feature_table"])
+            self.assertGreater(len(report.summary["feature_table"]["math_answer_index_counts"]), 1)
+
     @unittest.skipUnless(importlib.util.find_spec("torch") is not None, "PyTorch is optional for default unit tests")
     def test_symbolic_bridge_lm_transformer_backbone_runs_true_token_control(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1382,3 +1382,54 @@ Null-test verdict:
   than the all-four calibrated bank (`0.058`). The next bridge should optimize
   safe expert mass on answer tokens directly rather than only penalizing unsafe
   mass.
+
+## Null-Hypothesis Gate Ledger
+
+The bridge result is now tracked through an explicit gate ledger:
+
+```text
+docs/specs/symbolic-bridge-null-gates.md
+```
+
+Current status:
+
+| gate | status | short verdict |
+| --- | --- | --- |
+| 1. Expert-bank ablation and shuffle controls | passed | The effect follows aligned `paper-complex-eml`; non-EML and shuffled controls do not reproduce it. |
+| 2. Held-out formula/language templates | mixed, safety failed | Probability mixture keeps math-answer capability on held-out templates, but unsafe soft mass is too high. |
+| 3. Target/random-label and wrong-expert controls | pending | Not run yet. |
+| 4. Seed/template variance | pending | Not run yet. |
+| 5. More natural mixed corpus | pending | Not run yet. |
+
+Gate 2 artifact bundle:
+
+```text
+artifacts/bridge-corpus-v1/bridge-corpus-v1-language-math-heldout-templates/
+artifacts/bridge-corpus-v1-lm/bridge-corpus-v1-language-math-heldout-templates-transformer-calibrated-v1/
+```
+
+Gate 2 held out formula families `d1_exp_soft`, `d2_reciprocal_shift`,
+`d3_ratio_product`, and `d4_nested_ratio_exp`; held out all validation and
+extrapolation language wrappers; and varied math-answer positions across
+indices `1`, `6`, `8`, and `9`.
+
+Language+math held-out-template extrapolation, math-answer role:
+
+| run | math-answer acc | math-answer NLL | expert mass/call | unsafe mass/call |
+| --- | ---: | ---: | ---: | ---: |
+| `lm-token-only` | 0.000 | 11.094 | 0.000 | 0.000 |
+| `lm-x-task` | 0.013 | 8.926 | 0.000 | 0.000 |
+| `lm-frozen-side-channel` | 0.031 | 8.410 | 0.000 | 0.000 |
+| `lm-router-hard-call` | 0.006 | 9.350 | 0.000 | 0.000 |
+| `lm-router-logit-fusion` | 0.163 | 5.972 | 0.747 | 0.279 |
+| `lm-router-prob-mixture` | 0.625 | 6.703 | 1.000 | 0.375 |
+
+Gate 2 verdict:
+
+- Capability partially survives. The probability-mixture hybrid recovers many
+  held-out-template math answers (`0.625`) while the token-only transformer is
+  at `0.000`.
+- The safety contract does not survive. Unsafe answer mass rises to `0.375`,
+  and the hard-call route stays safe only by abstaining away the gain.
+- This blocks promotion to broader LM runs until the answer-token objective
+  learns safe expert mass under held-out-style template/formula diversity.

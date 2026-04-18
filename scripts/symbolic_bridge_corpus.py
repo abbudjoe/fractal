@@ -18,7 +18,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build bridge-corpus-v1 feature tables.")
     parser.add_argument(
         "--corpus-kind",
-        choices=["pure-language", "language-math", "math-only", "expert-ablation", "expert-shuffle"],
+        choices=[
+            "pure-language",
+            "language-math",
+            "language-math-heldout-templates",
+            "math-only",
+            "expert-ablation",
+            "expert-shuffle",
+        ],
         required=True,
     )
     parser.add_argument("--source-bridge-summary", type=Path)
@@ -66,6 +73,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"split_counts={feature_table['split_counts']}")
         print(f"role_counts={feature_table['role_counts']}")
         print(f"split_safe_expert_coverage={feature_table['split_safe_expert_coverage']}")
+        if "heldout_template" in report.summary:
+            print(f"heldout_template={report.summary['heldout_template']}")
+            print(f"template_counts={feature_table.get('template_counts', {})}")
+            print(f"math_answer_index_counts={feature_table.get('math_answer_index_counts', {})}")
         if "expert_transform" in report.summary:
             print(f"expert_transform={report.summary['expert_transform']}")
         print(f"summary_path={output_dir / 'summary.json'}")
