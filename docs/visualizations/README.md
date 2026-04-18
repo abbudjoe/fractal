@@ -1,10 +1,11 @@
 # Architecture Visualization Bundle
 
-This directory contains seven standalone HTML pages for thinking through the
+This directory contains eight standalone HTML pages for thinking through the
 architecture pivot visually:
 
 - `gpt.html`
 - `hybrid.html`
+- `p20.html`
 - `fractal-v1.html`
 - `fractal-v2.html`
 - `native-internal-search.html`
@@ -18,6 +19,7 @@ They are not benchmark dashboards.
 Most are 3D mental-model tools for comparing:
 - transformer-style token memory
 - hybrid attention/state designs
+- the P20 rotary gated recurrent control lane
 - the single-root recursive design we tried
 - the new recursive-memory architecture direction
 
@@ -27,6 +29,11 @@ Most are 3D mental-model tools for comparing:
 `v3a-hybrid-attention.html` is a rendered Mermaid page for the current
 predictive-core Path 1 hybrid stack: local exact attention interleaved with the
 reference SSM lane or the `P2` contender lane under a matched budget.
+
+`p20.html` is a 3D page inspired by Brendan Bycroft's llm-viz style. It shows
+the P20 proof-ladder model as a component-level flow: prelude residual stream,
+packed recurrent controls, rotary gated state update, emitted control readout,
+and looped-middle attention injection seam.
 
 `thought-channel-hybrid.html` is a rendered Mermaid page for a more speculative
 native-search architecture: a shared attention trunk plus multiple active

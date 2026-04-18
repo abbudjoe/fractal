@@ -230,6 +230,8 @@ function buildScene(type, stage, config) {
             return buildGptScene(stage, config);
         case "hybrid":
             return buildHybridScene(stage, config);
+        case "p20":
+            return buildP20Scene(stage, config);
         case "fractal-v1":
             return buildFractalV1Scene(stage, config);
         case "fractal-v2":
@@ -569,6 +571,329 @@ function buildHybridScene(stage, config) {
                 edge.pulse.position.copy(edge.start.clone().lerp(edge.end, u));
             });
             root.rotation.y = Math.sin(t * 0.16) * 0.08;
+        },
+    };
+}
+
+function buildP20Scene(stage, config) {
+    const root = new THREE.Group();
+    stage.add(root);
+
+    const tokenGroup = new THREE.Group();
+    const preludeGroup = new THREE.Group();
+    const projectionGroup = new THREE.Group();
+    const stateGroup = new THREE.Group();
+    const loopGroup = new THREE.Group();
+    const outputGroup = new THREE.Group();
+    const backwardGroup = new THREE.Group();
+    const boundaryGroup = new THREE.Group();
+    root.add(tokenGroup, preludeGroup, projectionGroup, stateGroup, loopGroup, outputGroup, backwardGroup, boundaryGroup);
+
+    const tokenPositions = [];
+    for (let i = 0; i < 12; i += 1) {
+        const x = -8.4 + i * 1.15;
+        const z = -3.8 + Math.sin(i * 0.45) * 0.22;
+        tokenPositions.push(new THREE.Vector3(x, -4.8, z));
+        const token = box({
+            width: 0.62,
+            height: 0.36,
+            depth: 0.62,
+            color: config.accent,
+            opacity: 0.82,
+            emissive: 0.24,
+        });
+        token.position.copy(tokenPositions[i]);
+        token.userData.baseY = token.position.y;
+        tokenGroup.add(token);
+    }
+
+    const preludeSlabs = [];
+    for (let i = 0; i < 3; i += 1) {
+        const slab = box({
+            width: 12.6,
+            height: 0.28,
+            depth: 2.2,
+            color: i % 2 === 0 ? config.accent2 : config.success,
+            opacity: 0.13,
+            emissive: 0.12,
+        });
+        slab.position.set(-3.1, -3.2 + i * 0.75, -0.3);
+        preludeSlabs.push(slab);
+        preludeGroup.add(slab);
+    }
+
+    const packedProj = box({
+        width: 1.5,
+        height: 2.6,
+        depth: 1.0,
+        color: config.warning,
+        opacity: 0.24,
+        emissive: 0.22,
+    });
+    packedProj.position.set(-3.6, -0.6, 0.1);
+    projectionGroup.add(packedProj);
+
+    const inputCurve = new THREE.CatmullRomCurve3([
+        tokenPositions[0].clone(),
+        new THREE.Vector3(-6.2, -3.8, -2.4),
+        new THREE.Vector3(-4.8, -2.0, -0.8),
+        packedProj.position.clone(),
+    ]);
+    const inputLine = curveLine(inputCurve, config.accent, 0.55);
+    const inputPulse = pulseSphere(config.accent, 0.14);
+    tokenGroup.add(inputLine, inputPulse);
+
+    const controls = [];
+    const controlSpecs = [
+        { name: "update", color: config.warning, position: new THREE.Vector3(-1.8, 1.7, -1.9) },
+        { name: "angle", color: config.accent2, position: new THREE.Vector3(-1.1, 0.4, -2.4) },
+        { name: "candidate", color: config.success, position: new THREE.Vector3(-1.4, -1.0, -2.0) },
+        { name: "output", color: config.danger, position: new THREE.Vector3(-2.1, -2.2, -1.2) },
+    ];
+    const stateCenter = new THREE.Vector3(0.3, -0.2, 0.3);
+    controlSpecs.forEach((spec, index) => {
+        const node = box({
+            width: 0.72,
+            height: 0.72,
+            depth: 0.72,
+            color: spec.color,
+            opacity: 0.26,
+            emissive: 0.2,
+        });
+        node.position.copy(spec.position);
+        const fromPacked = straightLine(packedProj.position, spec.position, spec.color, 0.36);
+        const toState = straightLine(spec.position, stateCenter, spec.color, 0.38);
+        const pulse = pulseSphere(spec.color, 0.09);
+        projectionGroup.add(node, fromPacked, toState, pulse);
+        controls.push({ spec, node, pulse, speed: 0.18 + index * 0.028 });
+    });
+
+    const stateOrb = new THREE.Mesh(
+        new THREE.IcosahedronGeometry(1.1, 1),
+        new THREE.MeshStandardMaterial({
+            color: hex(config.success),
+            transparent: true,
+            opacity: 0.32,
+            emissive: hex(config.success),
+            emissiveIntensity: 0.34,
+            roughness: 0.22,
+            metalness: 0.14,
+        }),
+    );
+    stateOrb.position.copy(stateCenter);
+    stateGroup.add(stateOrb);
+
+    const rings = [];
+    for (let i = 0; i < 4; i += 1) {
+        const ring = new THREE.Mesh(
+            new THREE.TorusGeometry(1.5 + i * 0.22, 0.045, 10, 90),
+            new THREE.MeshStandardMaterial({
+                color: i % 2 === 0 ? hex(config.accent2) : hex(config.warning),
+                transparent: true,
+                opacity: 0.42,
+                emissive: i % 2 === 0 ? hex(config.accent2) : hex(config.warning),
+                emissiveIntensity: 0.2,
+            }),
+        );
+        ring.position.copy(stateCenter);
+        ring.rotation.set(i * 0.55, i * 0.32, i * 0.7);
+        stateGroup.add(ring);
+        rings.push(ring);
+    }
+
+    const recurrentCarry = new THREE.CatmullRomCurve3([
+        new THREE.Vector3(-1.2, -0.2, 0.3),
+        new THREE.Vector3(-0.9, 1.8, 1.1),
+        new THREE.Vector3(1.4, 1.6, 0.9),
+        new THREE.Vector3(1.7, -0.2, 0.3),
+        new THREE.Vector3(0.3, -0.2, 0.3),
+    ]);
+    const carryLine = curveLine(recurrentCarry, config.success, 0.5);
+    const carryPulse = pulseSphere(config.success, 0.13);
+    stateGroup.add(carryLine, carryPulse);
+
+    const loopChamber = box({
+        width: 4.9,
+        height: 3.0,
+        depth: 3.3,
+        color: config.accent2,
+        opacity: 0.08,
+        emissive: 0.12,
+    });
+    loopChamber.position.set(5.2, 0.1, 0.2);
+    loopGroup.add(loopChamber);
+
+    const middleBlocks = [];
+    for (let i = 0; i < 4; i += 1) {
+        const slab = box({
+            width: 4.4,
+            height: 0.26,
+            depth: 2.5,
+            color: i % 2 === 0 ? config.accent2 : config.success,
+            opacity: 0.18,
+            emissive: 0.14,
+        });
+        slab.position.set(5.2, -1.05 + i * 0.7, 0.2);
+        loopGroup.add(slab);
+        middleBlocks.push(slab);
+    }
+
+    const controlCurve = new THREE.CatmullRomCurve3([
+        stateCenter.clone(),
+        new THREE.Vector3(2.0, 0.8, 1.6),
+        new THREE.Vector3(3.7, 1.2, 1.2),
+        loopChamber.position.clone(),
+    ]);
+    const controlLine = curveLine(controlCurve, config.success, 0.58);
+    const controlPulse = pulseSphere(config.success, 0.16);
+    loopGroup.add(controlLine, controlPulse);
+
+    const loopCurves = [];
+    for (let i = 0; i < 3; i += 1) {
+        const y = -0.75 + i * 0.7;
+        const curve = new THREE.CatmullRomCurve3([
+            new THREE.Vector3(3.1, y, -1.0),
+            new THREE.Vector3(5.2, y + 1.0, -1.8),
+            new THREE.Vector3(7.3, y, -1.0),
+            new THREE.Vector3(5.2, y - 0.9, 1.7),
+            new THREE.Vector3(3.1, y, -1.0),
+        ], true);
+        const line = curveLine(curve, config.accent2, 0.34);
+        const pulse = pulseSphere(config.accent2, 0.1);
+        loopGroup.add(line, pulse);
+        loopCurves.push({ curve, pulse, speed: 0.13 + i * 0.035 });
+    }
+
+    const coda = box({
+        width: 2.4,
+        height: 1.2,
+        depth: 2.0,
+        color: config.accent,
+        opacity: 0.18,
+        emissive: 0.14,
+    });
+    coda.position.set(8.7, 1.2, 0.2);
+    outputGroup.add(coda);
+
+    const lmHead = box({
+        width: 1.4,
+        height: 1.7,
+        depth: 1.4,
+        color: config.warning,
+        opacity: 0.25,
+        emissive: 0.2,
+    });
+    lmHead.position.set(10.2, 2.7, 1.2);
+    outputGroup.add(lmHead);
+    const outputLine = straightLine(loopChamber.position, coda.position, config.accent, 0.45);
+    const lmLine = straightLine(coda.position, lmHead.position, config.warning, 0.42);
+    const outputPulse = pulseSphere(config.accent, 0.11);
+    outputGroup.add(outputLine, lmLine, outputPulse);
+
+    const backwardEdges = [];
+    for (let i = 0; i < 8; i += 1) {
+        const start = new THREE.Vector3(9.5 - i * 1.1, 2.7 - i * 0.32, 2.0 - i * 0.26);
+        const end = new THREE.Vector3(-4.2 + i * 0.7, -3.5, -1.3 + i * 0.12);
+        const line = straightLine(start, end, config.danger, 0.24);
+        const pulse = pulseSphere(config.danger, 0.1);
+        backwardGroup.add(line, pulse);
+        backwardEdges.push({ start, end, pulse, speed: 0.22 + i * 0.018 });
+    }
+
+    const boundaryBars = [
+        { label: "12L", loss: 4.3304, x: -1.8, color: config.accent },
+        { label: "14L", loss: 4.3022, x: 0.0, color: config.warning },
+        { label: "P20", loss: 4.2983, x: 1.8, color: config.success },
+        { label: "16L", loss: 4.2758, x: 3.6, color: config.danger },
+    ];
+    boundaryBars.forEach((entry) => {
+        const height = 1.0 + (4.36 - entry.loss) * 10;
+        const bar = box({
+            width: 0.7,
+            height,
+            depth: 0.7,
+            color: entry.color,
+            opacity: 0.34,
+            emissive: 0.18,
+        });
+        bar.position.set(entry.x, -4.9 + height * 0.5, 4.2);
+        bar.userData.baseHeight = height;
+        boundaryGroup.add(bar);
+    });
+    boundaryGroup.add(straightLine(new THREE.Vector3(-2.4, -4.9, 4.2), new THREE.Vector3(4.2, -4.9, 4.2), config.warning, 0.28));
+
+    return {
+        setMode(mode) {
+            projectionGroup.visible = mode !== "loop" && mode !== "boundary";
+            preludeGroup.visible = mode !== "boundary";
+            tokenGroup.visible = mode !== "boundary";
+            loopGroup.visible = mode !== "scan" && mode !== "boundary";
+            outputGroup.visible = mode !== "scan" && mode !== "boundary";
+            backwardGroup.visible = mode === "training";
+            boundaryGroup.visible = mode === "boundary";
+        },
+        update(t, mode) {
+            tokenGroup.children.forEach((child, index) => {
+                if (!child.geometry || !child.userData) {
+                    return;
+                }
+                if (child.userData.baseY !== undefined) {
+                    child.position.y = child.userData.baseY + Math.sin(t * 1.4 + index * 0.4) * 0.05;
+                    child.material.emissiveIntensity = mode === "scan" ? 0.34 : 0.22;
+                }
+            });
+            inputPulse.position.copy(inputCurve.getPointAt((t * 0.2) % 1));
+            preludeSlabs.forEach((slab, index) => {
+                slab.material.opacity = 0.11 + 0.06 * (0.5 + 0.5 * Math.sin(t * 1.6 + index));
+            });
+            controls.forEach((control, index) => {
+                const phase = (t * control.speed + index * 0.15) % 1;
+                const start = phase < 0.45
+                    ? packedProj.position
+                    : control.spec.position;
+                const end = phase < 0.45
+                    ? control.spec.position
+                    : stateCenter;
+                const u = phase < 0.45 ? phase / 0.45 : (phase - 0.45) / 0.55;
+                control.pulse.position.copy(start.clone().lerp(end, u));
+                control.node.material.opacity =
+                    mode === "anatomy" || mode === "scan"
+                        ? 0.26 + 0.12 * Math.sin(t * 2.0 + index)
+                        : 0.16;
+            });
+            stateOrb.rotation.x += 0.004;
+            stateOrb.rotation.y += 0.006;
+            stateOrb.material.emissiveIntensity = mode === "scan" ? 0.55 : 0.34;
+            rings.forEach((ring, index) => {
+                ring.rotation.x += 0.003 + index * 0.0007;
+                ring.rotation.z += 0.005 + index * 0.001;
+                ring.material.opacity = mode === "scan" ? 0.55 : 0.4;
+            });
+            carryPulse.position.copy(recurrentCarry.getPointAt((t * 0.18) % 1));
+            controlPulse.position.copy(controlCurve.getPointAt((t * 0.16) % 1));
+            middleBlocks.forEach((slab, index) => {
+                slab.material.opacity =
+                    mode === "loop"
+                        ? 0.22 + 0.08 * (0.5 + 0.5 * Math.sin(t * 1.8 + index))
+                        : 0.16;
+            });
+            loopCurves.forEach((entry, index) => {
+                const u = (t * entry.speed + index * 0.14) % 1;
+                entry.pulse.position.copy(entry.curve.getPointAt(u));
+            });
+            const outputU = (t * 0.18) % 1;
+            outputPulse.position.copy(loopChamber.position.clone().lerp(coda.position, outputU));
+            backwardEdges.forEach((edge, index) => {
+                const u = 1 - ((t * edge.speed + index * 0.08) % 1);
+                edge.pulse.position.copy(edge.start.clone().lerp(edge.end, u));
+            });
+            boundaryGroup.children.forEach((child, index) => {
+                if (child.material && child.userData.baseHeight) {
+                    child.scale.y = 1 + 0.04 * Math.sin(t * 1.7 + index);
+                    child.material.opacity = 0.28 + 0.08 * (0.5 + 0.5 * Math.sin(t * 1.2 + index));
+                }
+            });
+            root.rotation.y = Math.sin(t * 0.14) * 0.08;
         },
     };
 }

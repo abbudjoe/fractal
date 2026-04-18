@@ -1,6 +1,7 @@
 window.FRACTAL_VISUAL_PAGES = [
     { key: "gpt", href: "./gpt.html", label: "GPT / Transformer" },
     { key: "hybrid", href: "./hybrid.html", label: "Hybrid / Jamba" },
+    { key: "p20", href: "./p20.html", label: "P20 / Recurrent Control" },
     { key: "fractal-v1", href: "./fractal-v1.html", label: "Fractal v1" },
     { key: "fractal-v2", href: "./fractal-v2.html", label: "Fractal v2" },
 ];
@@ -190,6 +191,115 @@ window.FRACTAL_VISUAL_CONFIGS = {
                     focus: "Gate state evidence against selective retrieved evidence",
                     memory: "Two complementary representations",
                     compute: "Selective fusion, not always-on global comparison",
+                },
+            },
+        },
+    },
+    p20: {
+        key: "p20",
+        sceneType: "p20",
+        tag: "Rotary Gated Recurrent Control",
+        title: "P20 / Rotary Gated Recurrent Control",
+        subtitle:
+            "A 3D walkthrough of the model we tested: prelude token features feed one packed recurrent primitive, the primitive scans across the sequence, and its emitted control gates what enters a looped middle attention scaffold.",
+        accent: "#78ecff",
+        accent2: "#9a7bff",
+        success: "#55f2b8",
+        warning: "#ffd166",
+        danger: "#ff6f91",
+        sceneHint:
+            "Follow the bottom token ribbon into the packed projection, then watch the central recurrent state drive the looped attention chamber.",
+        structure: [
+            "Prelude attention blocks turn raw tokens into residual-stream features.",
+            "A packed input projection splits each token into update gate, rotary angle, candidate state, and output gate.",
+            "A latent recurrent state is transformed, rotated, gated, and blended with the fresh candidate at each time step.",
+            "The emitted recurrent output becomes a control signal for the looped middle attention scaffold, not a full attention replacement.",
+        ],
+        legend: [
+            { color: "#78ecff", label: "Token/residual stream from the prelude" },
+            { color: "#ffd166", label: "Packed control projections and gates" },
+            { color: "#55f2b8", label: "Latent recurrent state and emitted control" },
+            { color: "#9a7bff", label: "Looped middle attention chamber" },
+            { color: "#ff6f91", label: "Backward pressure and proof-boundary caveats" },
+        ],
+        facts: [
+            {
+                title: "What P20 means here",
+                body: "P20 is the project shorthand for this rotary gated recurrent state update primitive. Publicly, the important idea is the recurrence: transformed carry, rotary angle, candidate blend, and gated emitted output.",
+            },
+            {
+                title: "Why the page looks different from GPT",
+                body: "A transformer layer shows explicit token-to-token retrieval. This primitive shows a compressed latent state plus a control readout, so the visualization emphasizes the state update law and the injection seam.",
+            },
+            {
+                title: "What the result currently supports",
+                body: "The recurrent-control scaffold acts like an efficient depth substitute at tiny scale, but deeper attention still catches it. This page visualizes the mechanism, not a proof of broad transformer replacement.",
+            },
+        ],
+        modes: {
+            anatomy: {
+                label: "Anatomy",
+                short: "Packed projections + state law",
+                caption:
+                    "The primitive turns each prelude token feature into four streams: update gate, rotary angle, candidate state, and output gate. Those streams control one recurrent state update.",
+                insight:
+                    "The crucial design is not just recurrence. It is a typed recurrence with separate control projections and a distinct emitted output.",
+                metrics: {
+                    focus: "Packed in-projection to gated rotary recurrence",
+                    memory: "One latent state vector plus emitted control",
+                    compute: "Projection-heavy front end, cheap scan update",
+                },
+            },
+            scan: {
+                label: "Sequence Scan",
+                short: "State flows token by token",
+                caption:
+                    "During scan, the state is updated causally from left to right. The previous state is transformed and rotated before it competes with the fresh candidate.",
+                insight:
+                    "This is the Mamba/GDN-adjacent part of the story: the model processes sequence history through a persistent latent state rather than a full KV table.",
+                metrics: {
+                    focus: "Causal step/scan equivalence",
+                    memory: "Compressed recurrent state",
+                    compute: "Linear in sequence length, kernel quality matters",
+                },
+            },
+            loop: {
+                label: "Loop Control",
+                short: "Inject into middle depth",
+                caption:
+                    "The emitted recurrent output is normalized and converted into a value/gate pair that feeds the looped middle attention chamber.",
+                insight:
+                    "This is why the current result is an efficient-depth result: the primitive controls repeated computation rather than replacing every attention layer.",
+                metrics: {
+                    focus: "Control signal into looped middle blocks",
+                    memory: "Loop state plus recurrent control",
+                    compute: "Fewer physical layers, repeated middle compute",
+                },
+            },
+            training: {
+                label: "Training",
+                short: "Shared recurrence under BPTT",
+                caption:
+                    "Gradients must pass through the looped scaffold and the shared recurrent scan. Stable gates and explicit projection contracts matter because the same primitive is reused many times.",
+                insight:
+                    "The visual trick from llm-viz is useful here: separate the forward objects from the backward pressure so we do not mistake an elegant diagram for a free training path.",
+                metrics: {
+                    focus: "Looped scaffold + recurrent scan gradients",
+                    memory: "Activations for looped attention and scan",
+                    compute: "Slower than the simplest looped control, faster than sufficiently deeper attention in the tested band",
+                },
+            },
+            boundary: {
+                label: "Proof Boundary",
+                short: "What the data does and does not say",
+                caption:
+                    "The current H100 ladder says the recurrent-control path reaches the 14-layer attention boundary with fewer parameters, but a 16-layer attention model still wins on loss.",
+                insight:
+                    "This is the honest conclusion: promising enough for a grant-scale follow-up, not enough to claim a general transformer replacement.",
+                metrics: {
+                    focus: "Evidence boundary, not architecture hype",
+                    memory: "Lower than deeper attention at comparable quality band",
+                    compute: "Needs 30M-50M validation before stronger claims",
                 },
             },
         },
