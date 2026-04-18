@@ -112,6 +112,7 @@ class BridgeLmReport:
     unsafe_margin_loss_weight: float
     unsafe_margin: float
     router_call_threshold: float
+    expert_logit_scale: float
     device: str
     expert_ids: tuple[str, ...]
     abstain_index: int
@@ -136,6 +137,7 @@ class BridgeLmReport:
             "unsafe_margin_loss_weight": self.unsafe_margin_loss_weight,
             "unsafe_margin": self.unsafe_margin,
             "router_call_threshold": self.router_call_threshold,
+            "expert_logit_scale": self.expert_logit_scale,
             "device": self.device,
             "expert_ids": list(self.expert_ids),
             "abstain_index": self.abstain_index,
@@ -161,6 +163,7 @@ def run_symbolic_bridge_lm(
     unsafe_margin_loss_weight: float = 0.0,
     unsafe_margin: float = 0.5,
     router_call_threshold: float = 0.0,
+    expert_logit_scale: float = 6.0,
     device: str = "auto",
 ) -> BridgeLmReport:
     torch = import_torch()
@@ -184,12 +187,14 @@ def run_symbolic_bridge_lm(
         evaluate_oracle_abstain_router(rows, expert_ids, token_bins),
     ]
     model_specs = (
-        ("lm-token-only", "token-only", False),
-        ("lm-x-task", "x-task", False),
-        ("lm-frozen-side-channel", "side-channel", False),
-        ("lm-router-hard-call", "side-channel", True),
+        ("lm-token-only", "token-only", False, "none"),
+        ("lm-x-task", "x-task", False, "none"),
+        ("lm-frozen-side-channel", "side-channel", False, "none"),
+        ("lm-router-hard-call", "side-channel", True, "hard-call"),
+        ("lm-router-logit-fusion", "side-channel", True, "logit-fusion"),
+        ("lm-router-prob-mixture", "side-channel", True, "prob-mixture"),
     )
-    for offset, (name, feature_set, use_router) in enumerate(model_specs):
+    for offset, (name, feature_set, use_router, fusion_mode) in enumerate(model_specs):
         runs.append(
             train_lm_contract_variant(
                 torch,
@@ -200,6 +205,7 @@ def run_symbolic_bridge_lm(
                 feature_set=feature_set,
                 name=name,
                 use_router=use_router,
+                fusion_mode=fusion_mode,
                 seed=seed + 11 + offset,
                 epochs=epochs,
                 learning_rate=learning_rate,
@@ -211,6 +217,7 @@ def run_symbolic_bridge_lm(
                 unsafe_margin_loss_weight=unsafe_margin_loss_weight,
                 unsafe_margin=unsafe_margin,
                 router_call_threshold=router_call_threshold,
+                expert_logit_scale=expert_logit_scale,
                 device=selected_device,
             )
         )
@@ -233,6 +240,7 @@ def run_symbolic_bridge_lm(
         unsafe_margin_loss_weight=unsafe_margin_loss_weight,
         unsafe_margin=unsafe_margin,
         router_call_threshold=router_call_threshold,
+        expert_logit_scale=expert_logit_scale,
         device=str(selected_device),
         expert_ids=expert_ids,
         abstain_index=abstain_index,
@@ -254,6 +262,7 @@ def train_lm_contract_variant(
     feature_set: str,
     name: str,
     use_router: bool,
+    fusion_mode: str,
     seed: int,
     epochs: int,
     learning_rate: float,
@@ -265,6 +274,7 @@ def train_lm_contract_variant(
     unsafe_margin_loss_weight: float,
     unsafe_margin: float,
     router_call_threshold: float,
+    expert_logit_scale: float,
     device: Any,
 ) -> BridgeLmRun:
     torch.manual_seed(seed)
@@ -284,7 +294,22 @@ def train_lm_contract_variant(
         model.train()
         optimizer.zero_grad(set_to_none=True)
         token_logits, router_logits = model(fit_batch.previous_tokens, fit_batch.features)
-        token_loss = masked_cross_entropy(torch, token_logits, fit_batch.target_ids, fit_batch.symbolic_mask)
+        final_logits, final_probabilities, _router_stats = fused_token_outputs(
+            torch,
+            fit_batch,
+            token_logits,
+            router_logits,
+            token_bins,
+            fusion_mode=fusion_mode,
+            expert_logit_scale=expert_logit_scale,
+        )
+        token_loss = masked_token_nll(
+            torch,
+            final_logits,
+            final_probabilities,
+            fit_batch.target_ids,
+            fit_batch.symbolic_mask,
+        )
         if use_router:
             router_class_weights = router_loss_class_weights(
                 torch,
@@ -336,7 +361,22 @@ def train_lm_contract_variant(
     with torch.no_grad():
         for split, batch in splits.items():
             token_logits, router_logits = model(batch.previous_tokens, batch.features)
-            token_loss = masked_cross_entropy(torch, token_logits, batch.target_ids, batch.symbolic_mask)
+            final_logits, final_probabilities, _router_stats = fused_token_outputs(
+                torch,
+                batch,
+                token_logits,
+                router_logits,
+                token_bins,
+                fusion_mode=fusion_mode,
+                expert_logit_scale=expert_logit_scale,
+            )
+            token_loss = masked_token_nll(
+                torch,
+                final_logits,
+                final_probabilities,
+                batch.target_ids,
+                batch.symbolic_mask,
+            )
             router_loss_value = 0.0
             unsafe_loss_value = 0.0
             call_abstain_loss_value = 0.0
@@ -387,6 +427,9 @@ def train_lm_contract_variant(
                 expert_ids,
                 token_bins,
                 use_router=use_router,
+                fusion_mode=fusion_mode,
+                final_logits=final_logits,
+                final_probabilities=final_probabilities,
                 router_call_threshold=router_call_threshold,
                 loss=(
                     float(token_loss.detach().cpu().item())
@@ -398,7 +441,7 @@ def train_lm_contract_variant(
             )
     return BridgeLmRun(
         name=name,
-        mode="hard-call" if use_router else "lm",
+        mode=fusion_mode if use_router else "lm",
         feature_set=feature_set,
         train_final_token_accuracy=split_metrics["train"]["final_token_accuracy"],
         validation_final_token_accuracy=split_metrics["validation"]["final_token_accuracy"],
@@ -425,6 +468,48 @@ def train_lm_contract_variant(
         validation_final_nll=split_metrics["validation"]["final_nll"],
         extrapolation_final_nll=split_metrics["extrapolation"]["final_nll"],
     )
+
+
+def fused_token_outputs(
+    torch: Any,
+    batch: SymbolicBridgeBatch,
+    token_logits: Any,
+    router_logits: Any,
+    token_bins: int,
+    *,
+    fusion_mode: str,
+    expert_logit_scale: float,
+) -> tuple[Any | None, Any | None, dict[str, Any]]:
+    if fusion_mode in {"none", "hard-call"}:
+        return token_logits, None, {}
+    if fusion_mode not in {"logit-fusion", "prob-mixture"}:
+        raise ValueError("fusion_mode must be one of none|hard-call|logit-fusion|prob-mixture")
+    router_probabilities = torch.nn.functional.softmax(router_logits, dim=-1)
+    expert_count = int(batch.expert_tokens.shape[-1])
+    expert_probabilities = router_probabilities[..., :expert_count]
+    valid_mask = batch.expert_valid_mask & (batch.expert_tokens >= 0)
+    valid_probabilities = expert_probabilities * valid_mask.float()
+    token_indices = batch.expert_tokens.clamp(min=0, max=max(0, token_bins - 1))
+    expert_token_mass = torch.zeros(
+        (*batch.target_ids.shape, token_bins),
+        dtype=token_logits.dtype,
+        device=token_logits.device,
+    )
+    expert_token_mass.scatter_add_(-1, token_indices, valid_probabilities.to(token_logits.dtype))
+    expert_mass = expert_token_mass.sum(dim=-1, keepdim=True).clamp(min=0.0, max=1.0)
+    unsafe_mass = (
+        expert_probabilities * (~batch.expert_safe_mask).float()
+    ).sum(dim=-1)
+    stats = {
+        "expert_mass": expert_mass.squeeze(-1),
+        "unsafe_mass": unsafe_mass,
+    }
+    if fusion_mode == "logit-fusion":
+        return token_logits + float(expert_logit_scale) * expert_token_mass, None, stats
+    lm_probabilities = torch.nn.functional.softmax(token_logits, dim=-1)
+    final_probabilities = (1.0 - expert_mass) * lm_probabilities + expert_token_mass
+    final_probabilities = final_probabilities / final_probabilities.sum(dim=-1, keepdim=True).clamp(min=1.0e-8)
+    return None, final_probabilities, stats
 
 
 def build_symbolic_bridge_lm_model(
@@ -480,6 +565,22 @@ def masked_cross_entropy(
     if bool(flat_mask.any().detach().cpu().item()):
         return torch.nn.functional.cross_entropy(flat_logits[flat_mask], flat_targets[flat_mask], weight=weight)
     return flat_logits.sum() * 0.0
+
+
+def masked_token_nll(
+    torch: Any,
+    logits: Any | None,
+    probabilities: Any | None,
+    targets: Any,
+    mask: Any,
+) -> Any:
+    if probabilities is None:
+        if logits is None:
+            raise ValueError("masked_token_nll requires logits or probabilities")
+        return masked_cross_entropy(torch, logits, targets, mask)
+    selected = probabilities.gather(-1, targets.unsqueeze(-1)).squeeze(-1).clamp(min=1.0e-8)
+    losses = -torch.log(selected)
+    return masked_mean(torch, losses, mask)
 
 
 def masked_mean(torch: Any, values: Any, mask: Any | None) -> Any:
@@ -680,6 +781,9 @@ def evaluate_contract_outputs(
     token_bins: int,
     *,
     use_router: bool,
+    fusion_mode: str = "hard-call",
+    final_logits: Any | None = None,
+    final_probabilities: Any | None = None,
     router_call_threshold: float,
     loss: float,
 ) -> dict[str, float | None]:
@@ -687,10 +791,19 @@ def evaluate_contract_outputs(
     lm_predictions = token_logits.argmax(dim=-1)
     abstain_index = batch.expert_tokens.shape[-1]
     router_predictions = router_logits.argmax(dim=-1) if use_router else torch.full_like(batch.target_ids, abstain_index)
-    final_predictions = lm_predictions.clone()
+    if fusion_mode == "prob-mixture":
+        if final_probabilities is None:
+            raise ValueError("prob-mixture evaluation requires final probabilities")
+        final_predictions = final_probabilities.argmax(dim=-1)
+    elif fusion_mode == "logit-fusion":
+        if final_logits is None:
+            raise ValueError("logit-fusion evaluation requires final logits")
+        final_predictions = final_logits.argmax(dim=-1)
+    else:
+        final_predictions = lm_predictions.clone()
     expert_count = int(abstain_index)
     expert_call_mask = router_predictions < expert_count
-    if use_router:
+    if use_router and fusion_mode == "hard-call":
         router_probabilities = torch.nn.functional.softmax(router_logits, dim=-1)
         router_confidence = router_probabilities.gather(-1, router_predictions.unsqueeze(-1)).squeeze(-1)
         confident_call_mask = expert_call_mask & (router_confidence >= router_call_threshold)
@@ -706,9 +819,25 @@ def evaluate_contract_outputs(
         final_predictions = torch.where(usable_call_mask, selected_tokens, lm_predictions)
         selected_safe = batch.expert_safe_mask.gather(-1, selected).squeeze(-1)
         unsafe_call_mask = usable_call_mask & ~selected_safe
+        expert_call_metric = usable_call_mask.float()
+        unsafe_call_metric = unsafe_call_mask.float()
+    elif use_router:
+        router_probabilities = torch.nn.functional.softmax(router_logits, dim=-1)
+        router_confidence = router_probabilities.gather(-1, router_predictions.unsqueeze(-1)).squeeze(-1)
+        confident_call_mask = expert_call_mask & (router_confidence >= router_call_threshold)
+        effective_router_predictions = torch.where(
+            confident_call_mask | (router_predictions == expert_count),
+            router_predictions,
+            torch.full_like(router_predictions, expert_count),
+        )
+        expert_probabilities = router_probabilities[..., :expert_count]
+        valid_mask = batch.expert_valid_mask & (batch.expert_tokens >= 0)
+        expert_call_metric = (expert_probabilities * valid_mask.float()).sum(dim=-1).clamp(min=0.0, max=1.0)
+        unsafe_call_metric = (expert_probabilities * (~batch.expert_safe_mask).float()).sum(dim=-1).clamp(min=0.0, max=1.0)
     else:
-        unsafe_call_mask = torch.zeros_like(batch.target_ids, dtype=torch.bool)
         effective_router_predictions = router_predictions
+        expert_call_metric = torch.zeros_like(batch.target_ids, dtype=torch.float32)
+        unsafe_call_metric = torch.zeros_like(batch.target_ids, dtype=torch.float32)
     active_mask = batch.symbolic_mask
     total = float(active_mask.float().sum().detach().cpu().item())
     if total <= 0.0:
@@ -723,8 +852,20 @@ def evaluate_contract_outputs(
         if bool(abstain_target.any().detach().cpu().item()):
             abstain_prediction = effective_router_predictions == expert_count
             abstain_recall = float((abstain_prediction & abstain_target).float().sum().detach().cpu().item() / abstain_target.float().sum().detach().cpu().item())
-    expert_call_rate = float((usable_call_mask & active_mask).float().sum().detach().cpu().item() / total) if use_router else 0.0
-    unsafe_call_rate = float((unsafe_call_mask & active_mask).float().sum().detach().cpu().item() / total) if use_router else 0.0
+    expert_call_rate = float((expert_call_metric * active_mask.float()).sum().detach().cpu().item() / total) if use_router else 0.0
+    unsafe_call_rate = float((unsafe_call_metric * active_mask.float()).sum().detach().cpu().item() / total) if use_router else 0.0
+    if fusion_mode == "hard-call":
+        final_nll = deterministic_token_nll(final_accuracy, token_bins)
+    else:
+        final_nll = float(
+            masked_token_nll(
+                torch,
+                final_logits,
+                final_probabilities,
+                batch.target_ids,
+                active_mask,
+            ).detach().cpu().item()
+        )
     return {
         "final_token_accuracy": final_accuracy,
         "lm_token_accuracy": lm_accuracy,
@@ -733,7 +874,7 @@ def evaluate_contract_outputs(
         "unsafe_call_rate": unsafe_call_rate,
         "abstain_recall": abstain_recall,
         "loss": loss,
-        "final_nll": deterministic_token_nll(final_accuracy, token_bins),
+        "final_nll": final_nll,
     }
 
 
@@ -953,8 +1094,10 @@ def safe_coverage(rows: list[dict[str, Any]], split: str) -> float:
 
 
 def summarize_lm_contract(runs: list[BridgeLmRun], rows: list[dict[str, Any]]) -> dict[str, Any]:
-    trained = [run for run in runs if run.mode in {"lm", "hard-call"}]
+    trained = [run for run in runs if run.mode in {"lm", "hard-call", "logit-fusion", "prob-mixture"}]
     router = next((run for run in runs if run.name == "lm-router-hard-call"), None)
+    logit_fusion = next((run for run in runs if run.name == "lm-router-logit-fusion"), None)
+    prob_mixture = next((run for run in runs if run.name == "lm-router-prob-mixture"), None)
     side = next((run for run in runs if run.name == "lm-frozen-side-channel"), None)
     x_task = next((run for run in runs if run.name == "lm-x-task"), None)
     token_only = next((run for run in runs if run.name == "lm-token-only"), None)
@@ -1000,6 +1143,29 @@ def summarize_lm_contract(runs: list[BridgeLmRun], rows: list[dict[str, Any]]) -
         "best_validation_final_token_accuracy": max(runs, key=lambda run: run.validation_final_token_accuracy).name,
         "best_extrapolation_final_token_accuracy": max(runs, key=lambda run: run.extrapolation_final_token_accuracy).name,
         "best_trained_extrapolation_final_token_accuracy": max(trained, key=lambda run: run.extrapolation_final_token_accuracy).name,
+        "best_validation_final_nll": min(runs, key=lambda run: run.validation_final_nll).name,
+        "best_extrapolation_final_nll": min(runs, key=lambda run: run.extrapolation_final_nll).name,
+        "best_trained_extrapolation_final_nll": min(trained, key=lambda run: run.extrapolation_final_nll).name,
+        "logit_fusion_extrapolation_nll_delta_vs_side_channel": (
+            side.extrapolation_final_nll - logit_fusion.extrapolation_final_nll
+            if side is not None and logit_fusion is not None
+            else 0.0
+        ),
+        "prob_mixture_extrapolation_nll_delta_vs_side_channel": (
+            side.extrapolation_final_nll - prob_mixture.extrapolation_final_nll
+            if side is not None and prob_mixture is not None
+            else 0.0
+        ),
+        "logit_fusion_extrapolation_accuracy_delta_vs_side_channel": (
+            logit_fusion.extrapolation_final_token_accuracy - side.extrapolation_final_token_accuracy
+            if side is not None and logit_fusion is not None
+            else 0.0
+        ),
+        "prob_mixture_extrapolation_accuracy_delta_vs_side_channel": (
+            prob_mixture.extrapolation_final_token_accuracy - side.extrapolation_final_token_accuracy
+            if side is not None and prob_mixture is not None
+            else 0.0
+        ),
         "router_contract_extrapolation_gain_vs_token_only": (
             router.extrapolation_final_token_accuracy - token_only.extrapolation_final_token_accuracy
             if router is not None and token_only is not None
@@ -1058,9 +1224,10 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
         f"Unsafe margin loss weight: `{report.unsafe_margin_loss_weight}`",
         f"Unsafe margin: `{report.unsafe_margin}`",
         f"Router call threshold: `{report.router_call_threshold}`",
+        f"Expert logit scale: `{report.expert_logit_scale}`",
         "",
-        "| run | mode | features | val final acc | extrap final acc | extrap LM acc | router extrap acc | expert call rate | unsafe call rate | abstain recall |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| run | mode | features | val final acc | extrap final acc | val final NLL | extrap final NLL | extrap LM acc | router extrap acc | expert call rate | unsafe call rate | abstain recall |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for run in report.runs:
         lines.append(
@@ -1070,6 +1237,8 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
             f"{run.feature_set} | "
             f"{run.validation_final_token_accuracy:.3f} | "
             f"{run.extrapolation_final_token_accuracy:.3f} | "
+            f"{run.validation_final_nll:.4g} | "
+            f"{run.extrapolation_final_nll:.4g} | "
             f"{run.extrapolation_lm_token_accuracy:.3f} | "
             f"{format_optional(run.extrapolation_router_accuracy)} | "
             f"{run.extrapolation_expert_call_rate:.3f} | "
@@ -1084,6 +1253,13 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
             f"Best validation final token accuracy: `{report.summary['best_validation_final_token_accuracy']}`",
             f"Best extrapolation final token accuracy: `{report.summary['best_extrapolation_final_token_accuracy']}`",
             f"Best trained extrapolation final token accuracy: `{report.summary['best_trained_extrapolation_final_token_accuracy']}`",
+            f"Best validation final NLL: `{report.summary['best_validation_final_nll']}`",
+            f"Best extrapolation final NLL: `{report.summary['best_extrapolation_final_nll']}`",
+            f"Best trained extrapolation final NLL: `{report.summary['best_trained_extrapolation_final_nll']}`",
+            f"Logit-fusion extrapolation NLL delta vs frozen side-channel: `{report.summary['logit_fusion_extrapolation_nll_delta_vs_side_channel']:.4g}`",
+            f"Prob-mixture extrapolation NLL delta vs frozen side-channel: `{report.summary['prob_mixture_extrapolation_nll_delta_vs_side_channel']:.4g}`",
+            f"Logit-fusion extrapolation accuracy delta vs frozen side-channel: `{report.summary['logit_fusion_extrapolation_accuracy_delta_vs_side_channel']:.3f}`",
+            f"Prob-mixture extrapolation accuracy delta vs frozen side-channel: `{report.summary['prob_mixture_extrapolation_accuracy_delta_vs_side_channel']:.3f}`",
             f"Router contract gain vs token-only extrapolation: `{report.summary['router_contract_extrapolation_gain_vs_token_only']:.3f}`",
             f"Router contract gain vs x-task extrapolation: `{report.summary['router_contract_extrapolation_gain_vs_x_task']:.3f}`",
             f"Router contract gain vs frozen side-channel extrapolation: `{report.summary['router_contract_extrapolation_gain_vs_side_channel']:.3f}`",

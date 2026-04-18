@@ -725,6 +725,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 unsafe_margin_loss_weight=1.25,
                 unsafe_margin=0.4,
                 router_call_threshold=0.25,
+                expert_logit_scale=3.0,
                 device="cpu",
             )
 
@@ -735,8 +736,15 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertEqual(report.unsafe_margin_loss_weight, 1.25)
             self.assertEqual(report.unsafe_margin, 0.4)
             self.assertEqual(report.router_call_threshold, 0.25)
+            self.assertEqual(report.expert_logit_scale, 3.0)
+            run_names = {run.name for run in report.runs}
+            self.assertIn("lm-router-logit-fusion", run_names)
+            self.assertIn("lm-router-prob-mixture", run_names)
             self.assertIn("router_contract_unsafe_call_rate", report.summary)
             self.assertIn("router_contract_abstain_recall", report.summary)
+            self.assertIn("best_extrapolation_final_nll", report.summary)
+            self.assertIn("logit_fusion_extrapolation_nll_delta_vs_side_channel", report.summary)
+            self.assertIn("prob_mixture_extrapolation_nll_delta_vs_side_channel", report.summary)
             self.assertTrue((output_dir / "summary.json").exists())
             self.assertTrue((output_dir / "runs.jsonl").exists())
             self.assertTrue((output_dir / "summary.md").exists())

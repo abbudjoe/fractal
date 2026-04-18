@@ -1001,3 +1001,64 @@ Path1 bridge verdict:
   a broad language-corpus result; it is a Path1-backed symbolic-token bridge
   showing that the compiled expert bank can be called safely from a real repo LM
   backbone.
+
+## Softmax Fusion A/B
+
+The LM bridge now tests two softmax-native expert integrations in parallel with
+the existing hard-call router:
+
+```text
+logit-fusion: z_final = z_lm + scale * z_expert
+prob-mixture: p_final = (1 - expert_mass) * softmax(z_lm) + p_expert
+```
+
+Both modes use the same compiled expert token bank and router head. Expert
+tokens are injected as sparse vocabulary-aligned distributions; invalid expert
+tokens contribute no mass. For fusion modes, final NLL is measured on the fused
+distribution, not on deterministic hard-call accuracy.
+
+Compact A/B artifact:
+
+```text
+artifacts/symbolic-bridge-lm/symbolic-bridge-lm-compact-fusion-ab-v1/
+```
+
+Command:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary artifacts/symbolic-bridge/symbolic-bridge-compact-runpod-cuda-v1/summary.json \
+  --run-label symbolic-bridge-lm-compact-fusion-ab-v1 \
+  --output-dir artifacts/symbolic-bridge-lm/symbolic-bridge-lm-compact-fusion-ab-v1 \
+  --epochs 1800 \
+  --learning-rate 0.004 \
+  --hidden-units 96 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 5.0 \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --device auto \
+  --output table
+```
+
+| run | mode | extrap final accuracy | extrap final NLL | extrap LM accuracy | router extrap accuracy | expert mass/call | unsafe mass/call |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `lm-frozen-side-channel` | LM side-channel | 0.602 | 3.508 | 0.602 | n/a | 0.000 | 0.000 |
+| `lm-router-hard-call` | hard call | 0.703 | 2.394 | 0.646 | 0.571 | 0.354 | 0.000 |
+| `lm-router-logit-fusion` | logit fusion | 0.714 | 1.945 | 0.573 | 0.855 | 0.830 | 0.058 |
+| `lm-router-prob-mixture` | probability mixture | 0.865 | 1.117 | 0.223 | 0.953 | 0.806 | 0.034 |
+
+Softmax fusion verdict:
+
+- Probability mixture is the best first softmax-native integration. It improves
+  compact extrapolation from `0.602` to `0.865` accuracy and lowers extrapolation
+  NLL from `3.508` to `1.117` versus the frozen side-channel LM.
+- Logit fusion is alive but less convincing on this surface: it improves NLL and
+  accuracy over side-channel, but trails probability mixture and assigns more
+  soft mass to unsafe experts.
+- The fusion unsafe columns are soft probability mass, not hard unsafe calls.
+  Probability mixture therefore needs a calibration follow-up before it replaces
+  the strict hard-call router in safety-sensitive runs.
+- This supports the user's proposed architecture: an EML expert can contribute
+  directly to the final softmax distribution, and loss comparison is meaningful
+  when measured on the fused token distribution.
