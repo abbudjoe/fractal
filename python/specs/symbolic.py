@@ -97,10 +97,10 @@ class SymbolicBenchmarkManifest:
             raise ValidationError("symbolic_manifest.seeds must not be empty")
         for seed in self.seeds:
             ensure_non_negative(seed, "symbolic_manifest.seed")
-        if self.backend not in {"cpu", "mps", "auto"}:
-            raise ValidationError("symbolic benchmark backend must be one of cpu|mps|auto")
+        if self.backend not in {"cpu", "cuda", "mps", "auto"}:
+            raise ValidationError("symbolic benchmark backend must be one of cpu|cuda|mps|auto")
         if self.backend != "cpu" and self.train.tree_optimizer is not SymbolicTreeOptimizer.TORCH_AUTODIFF:
-            raise ValidationError("symbolic benchmark backend=mps|auto requires tree_optimizer=torch-autodiff")
+            raise ValidationError("symbolic benchmark backend=cuda|mps|auto requires tree_optimizer=torch-autodiff")
         self.dataset.validate()
         self.train.validate()
 

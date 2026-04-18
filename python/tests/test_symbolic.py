@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from python.specs.common import ValidationError
 from python.specs.symbolic import (
     SymbolicBenchmarkManifest,
     SymbolicDatasetSpec,
@@ -17,7 +18,7 @@ from python.specs.symbolic import (
 )
 from python.symbolic.autodiff import autodiff_loss_and_gradient
 from python.symbolic.bridge import TokenQuantizer, run_symbolic_bridge, select_safety_calibration_rows
-from python.symbolic.bridge_canary import run_bridge_canary
+from python.symbolic.bridge_canary import resolve_device, run_bridge_canary
 from python.symbolic.bridge_lm import run_symbolic_bridge_lm
 from python.symbolic.bridge_sequence import run_sequence_bridge
 from python.symbolic.formulas import default_symbolic_tasks, sample_symbolic_dataset, tier0_exact_recovery_tasks
@@ -29,6 +30,24 @@ from python.symbolic.runner import (
     run_symbolic_benchmark,
     run_single_symbolic_case,
 )
+from python.symbolic.torch_backend import resolve_torch_device
+
+
+class _FakeAvailability:
+    def __init__(self, available: bool) -> None:
+        self._available = available
+
+    def is_available(self) -> bool:
+        return self._available
+
+
+class _FakeTorch:
+    def __init__(self, *, cuda_available: bool, mps_available: bool) -> None:
+        self.cuda = _FakeAvailability(cuda_available)
+        self.backends = type("Backends", (), {"mps": _FakeAvailability(mps_available)})()
+
+    def device(self, name: str) -> str:
+        return name
 
 
 class SymbolicDatasetTests(unittest.TestCase):
@@ -73,6 +92,53 @@ class SymbolicDatasetTests(unittest.TestCase):
 
 
 class SymbolicModelTests(unittest.TestCase):
+    def test_torch_backend_auto_prefers_cuda_then_mps_then_cpu(self) -> None:
+        self.assertEqual(resolve_torch_device(_FakeTorch(cuda_available=True, mps_available=True), "auto"), "cuda")
+        self.assertEqual(resolve_torch_device(_FakeTorch(cuda_available=False, mps_available=True), "auto"), "mps")
+        self.assertEqual(resolve_torch_device(_FakeTorch(cuda_available=False, mps_available=False), "auto"), "cpu")
+
+    def test_torch_backend_cuda_request_requires_cuda(self) -> None:
+        self.assertEqual(resolve_torch_device(_FakeTorch(cuda_available=True, mps_available=False), "cuda"), "cuda")
+        with self.assertRaisesRegex(RuntimeError, "backend=cuda requested"):
+            resolve_torch_device(_FakeTorch(cuda_available=False, mps_available=False), "cuda")
+
+    def test_bridge_device_auto_prefers_cuda_then_mps_then_cpu(self) -> None:
+        self.assertEqual(resolve_device(_FakeTorch(cuda_available=True, mps_available=True), "auto"), "cuda")
+        self.assertEqual(resolve_device(_FakeTorch(cuda_available=False, mps_available=True), "auto"), "mps")
+        self.assertEqual(resolve_device(_FakeTorch(cuda_available=False, mps_available=False), "auto"), "cpu")
+
+    def test_bridge_device_cuda_request_requires_cuda(self) -> None:
+        self.assertEqual(resolve_device(_FakeTorch(cuda_available=True, mps_available=False), "cuda"), "cuda")
+        with self.assertRaisesRegex(RuntimeError, "requested device=cuda"):
+            resolve_device(_FakeTorch(cuda_available=False, mps_available=False), "cuda")
+
+    def test_symbolic_manifest_accepts_cuda_for_torch_autodiff(self) -> None:
+        manifest = SymbolicBenchmarkManifest(
+            run_label="unit-cuda",
+            preset=SymbolicPreset.SMOKE,
+            model_families=(SymbolicModelFamily.PAPER_COMPLEX_EML,),
+            seeds=(1,),
+            dataset=SymbolicDatasetSpec(tasks_per_depth=1),
+            train=SymbolicTrainSpec(tree_optimizer=SymbolicTreeOptimizer.TORCH_AUTODIFF),
+            backend="cuda",
+        )
+
+        manifest.validate()
+
+    def test_symbolic_manifest_requires_torch_autodiff_for_cuda(self) -> None:
+        manifest = SymbolicBenchmarkManifest(
+            run_label="unit-cuda",
+            preset=SymbolicPreset.SMOKE,
+            model_families=(SymbolicModelFamily.PAPER_COMPLEX_EML,),
+            seeds=(1,),
+            dataset=SymbolicDatasetSpec(tasks_per_depth=1),
+            train=SymbolicTrainSpec(tree_optimizer=SymbolicTreeOptimizer.AUTODIFF),
+            backend="cuda",
+        )
+
+        with self.assertRaisesRegex(ValidationError, "backend=cuda"):
+            manifest.validate()
+
     def test_all_model_families_forward_and_harden(self) -> None:
         xs = (-0.5, 0.0, 0.5)
         for family in SymbolicModelFamily:

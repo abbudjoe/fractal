@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seeds", type=int, default=2)
     parser.add_argument("--seed-start", type=int, default=42)
-    parser.add_argument("--backend", choices=["cpu", "mps", "auto"], default=None)
+    parser.add_argument("--backend", choices=["cpu", "cuda", "mps", "auto"], default=None)
     parser.add_argument("--steps", type=int)
     parser.add_argument("--train-samples", type=int)
     parser.add_argument("--validation-samples", type=int)

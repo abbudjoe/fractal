@@ -528,16 +528,22 @@ def normalize_features(features: list[list[float]], train_indices: list[int]) ->
 
 def resolve_device(torch: Any, requested: str) -> Any:
     if requested == "auto":
+        if hasattr(torch, "cuda") and torch.cuda.is_available():
+            return torch.device("cuda")
         if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             return torch.device("mps")
         return torch.device("cpu")
+    if requested == "cuda":
+        if not (hasattr(torch, "cuda") and torch.cuda.is_available()):
+            raise RuntimeError("requested device=cuda, but torch CUDA is not available")
+        return torch.device("cuda")
     if requested == "mps":
         if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
             raise RuntimeError("requested device=mps, but torch MPS is not available")
         return torch.device("mps")
     if requested == "cpu":
         return torch.device("cpu")
-    raise ValueError("device must be one of auto|cpu|mps")
+    raise ValueError("device must be one of auto|cpu|cuda|mps")
 
 
 def split_indices(rows: list[dict[str, Any]]) -> dict[str, list[int]]:

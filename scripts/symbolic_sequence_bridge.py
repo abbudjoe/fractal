@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=600)
     parser.add_argument("--learning-rate", type=float, default=0.015)
     parser.add_argument("--hidden-units", type=int, default=32)
-    parser.add_argument("--device", choices=["auto", "cpu", "mps"], default="auto")
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto")
     parser.add_argument("--output", choices=["table", "json"], default="table")
     return parser
 

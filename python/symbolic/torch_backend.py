@@ -204,7 +204,11 @@ def import_torch() -> Any:
 def resolve_torch_device(torch: Any, backend: str) -> Any:
     if backend == "cpu":
         return torch.device("cpu")
-    if backend in {"mps", "auto"} and torch.backends.mps.is_available():
+    if backend in {"cuda", "auto"} and hasattr(torch, "cuda") and torch.cuda.is_available():
+        return torch.device("cuda")
+    if backend == "cuda":
+        raise RuntimeError("backend=cuda requested but torch.cuda.is_available() is false")
+    if backend in {"mps", "auto"} and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return torch.device("mps")
     if backend == "mps":
         raise RuntimeError("backend=mps requested but torch.backends.mps is not available")

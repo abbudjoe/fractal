@@ -53,9 +53,10 @@ the track runnable immediately, the benchmark uses only the standard library:
 - tree families default to a small forward-mode autodiff engine with Adam-style
   moments over soft selectors, readout parameters, and tree-local operator
   parameters
-- `--tree-optimizer torch-autodiff` uses PyTorch autograd and can run on MPS via
-  `--backend mps`; use `uv run --python 3.12 --with torch --with numpy ...`
-  because the repo's default Python is 3.14
+- `--tree-optimizer torch-autodiff` uses PyTorch autograd and can run on CUDA or
+  MPS via `--backend cuda` / `--backend mps`; use
+  `uv run --python 3.12 --with torch --with numpy ...` because the repo's
+  default Python is 3.14
 - the previous deterministic SPSA optimizer is still available through
   `--tree-optimizer spsa` for before/after comparisons
 - `small-mlp` uses an analytic tanh MLP gradient with Adam-style moments
@@ -63,7 +64,7 @@ the track runnable immediately, the benchmark uses only the standard library:
   and snaps near-simple scalar values
 - compiled execution uses a restricted Python lambda over safe helper functions
 
-The Torch/MPS path reuses the same dataset, hardening, export, and report
+The Torch CUDA/MPS path reuses the same dataset, hardening, export, and report
 contracts as the CPU path. For the paper-complex arm, the Torch path also
 supports deterministic EML-native restarts and scores candidate restarts after
 hardening/readout refit on the train split, because the paper claim is about
