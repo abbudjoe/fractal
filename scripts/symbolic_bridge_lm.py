@@ -17,6 +17,13 @@ from python.symbolic.bridge_lm import run_symbolic_bridge_lm  # noqa: E402
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Confirm the symbolic router contract on a tiny LM-style model.")
     parser.add_argument("--bridge-summary", type=Path, required=True)
+    parser.add_argument(
+        "--extra-fit-bridge-summary",
+        type=Path,
+        action="append",
+        default=[],
+        help="Additional bridge corpus summary whose train/safety_calibration rows are used only for fitting.",
+    )
     parser.add_argument("--run-label", default=f"symbolic-bridge-lm-{int(time.time())}")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--seed", type=int, default=777)
@@ -27,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--abstain-class-weight", type=float, default=1.0)
     parser.add_argument("--unsafe-call-loss-weight", type=float, default=0.0)
     parser.add_argument("--call-abstain-loss-weight", type=float, default=0.0)
+    parser.add_argument("--answer-call-abstain-loss-weight", type=float, default=0.0)
     parser.add_argument("--answer-unsafe-loss-weight", type=float, default=0.0)
     parser.add_argument("--non-answer-abstain-loss-weight", type=float, default=0.0)
     parser.add_argument("--unsafe-margin-loss-weight", type=float, default=0.0)
@@ -57,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         abstain_class_weight=args.abstain_class_weight,
         unsafe_call_loss_weight=args.unsafe_call_loss_weight,
         call_abstain_loss_weight=args.call_abstain_loss_weight,
+        answer_call_abstain_loss_weight=args.answer_call_abstain_loss_weight,
         answer_unsafe_loss_weight=args.answer_unsafe_loss_weight,
         non_answer_abstain_loss_weight=args.non_answer_abstain_loss_weight,
         unsafe_margin_loss_weight=args.unsafe_margin_loss_weight,
@@ -68,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         transformer_heads=args.transformer_heads,
         transformer_ffn_multiplier=args.transformer_ffn_multiplier,
         device=args.device,
+        extra_fit_bridge_summary_paths=tuple(args.extra_fit_bridge_summary),
     )
     if args.output == "json":
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
@@ -95,6 +105,10 @@ def main(argv: list[str] | None = None) -> int:
                 f"{format_optional(run.extrapolation_abstain_recall)}"
             )
         safe = report.summary["safe_expert_coverage"]
+        print(f"extra_fit_bridge_summaries={report.extra_fit_bridge_summary_paths}")
+        print(f"extra_fit_feature_tables={report.extra_fit_feature_table_paths}")
+        print(f"fit_row_count={report.summary['fit_row_count']}")
+        print(f"extra_fit_row_count={report.summary['extra_fit_row_count']}")
         print(f"best_validation_final_token_accuracy={report.summary['best_validation_final_token_accuracy']}")
         print(f"best_extrapolation_final_token_accuracy={report.summary['best_extrapolation_final_token_accuracy']}")
         print(f"best_trained_extrapolation_final_token_accuracy={report.summary['best_trained_extrapolation_final_token_accuracy']}")
@@ -118,6 +132,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"capability_gain_confirmed={report.summary['capability_gain_confirmed']}")
         print(f"safe_abstention_confirmed={report.summary['safe_abstention_confirmed']}")
         print(f"contract_confirmed={report.summary['contract_confirmed']}")
+        print(
+            "prob_mixture_math_answer_accuracy_delta_vs_controls="
+            f"{report.summary['prob_mixture_math_answer_accuracy_delta_vs_controls']:.3f}"
+        )
+        print(
+            "prob_mixture_math_answer_unsafe_call_rate="
+            f"{report.summary['prob_mixture_math_answer_unsafe_call_rate']:.3f}"
+        )
+        print(
+            "prob_mixture_math_answer_contract_confirmed="
+            f"{report.summary['prob_mixture_math_answer_contract_confirmed']}"
+        )
         print(
             "safe_expert_coverage="
             f"train={safe['train']:.3f}"

@@ -1405,9 +1405,9 @@ Current status:
 | gate | status | short verdict |
 | --- | --- | --- |
 | 1. Expert-bank ablation and shuffle controls | passed | The effect follows aligned `paper-complex-eml`; non-EML and shuffled controls do not reproduce it. |
-| 2. Held-out formula/language templates | mixed, safety failed | Probability mixture keeps math-answer capability on held-out templates, but unsafe soft mass is too high. |
+| 2. Held-out formula/language templates | repaired for math-answer probability mixture | Multi-split calibration plus an answer-token call/abstain loss reduces unsafe mass while keeping useful held-out answer accuracy. |
 | 3. Target/random-label and wrong-expert controls | passed | Broken labels and wrong expert pairings collapse the hybrid gain. |
-| 4. Seed/template variance | failed, blocks promotion | Capability is unstable across rotated formula/template splits; no variance run confirms the contract. |
+| 4. Seed/template variance | repaired for math-answer probability mixture | Probability-mixture math-answer gains become stable across the three frozen variance splits. |
 | 5. More natural mixed corpus | pending | Not run yet. |
 
 Gate 2 artifact bundle:
@@ -1492,3 +1492,59 @@ Gate 4 verdict:
   expert mass/call averages `0.291`, with a minimum of `0.042`.
 - No variance run confirms the full contract. This blocks broader LM promotion
   until held-out-style calibration repairs both safety and robustness.
+
+Gate 2/4 repair artifact bundle:
+
+```text
+artifacts/bridge-corpus-v1-repair/
+artifacts/bridge-corpus-v1-repair-lm/
+```
+
+Repair recipe:
+
+```text
+extra fit summaries: calibration rotations 20260430, 20260431, 20260432, 20260433
+epochs: 600
+backbone: 2-layer causal transformer
+router_loss_weight: 10.0
+call_abstain_loss_weight: 1.0
+answer_call_abstain_loss_weight: 8.0
+answer_unsafe_loss_weight: 5.0
+non_answer_abstain_loss_weight: 2.0
+router_call_threshold: 0.99999
+expert_logit_scale: 6.0
+device: mps
+```
+
+Frozen Gate 2 repair, extrapolation math-answer role:
+
+| condition | prob-mixture acc | prob-mixture NLL | expert mass | unsafe mass | role-aware contract |
+| --- | ---: | ---: | ---: | ---: | --- |
+| original calibrated | 0.625 | 6.703 | 1.000 | 0.375 | false |
+| multi-split calibration only | 0.419 | 4.159 | 0.362 | 0.054 | false |
+| multi-split + answer call/abstain | 0.562 | 2.859 | 0.468 | 0.049 | true |
+
+Frozen Gate 4 repair, extrapolation math-answer role:
+
+| condition | prob-mixture acc | prob-mixture NLL | expert mass | unsafe mass | role-aware contract |
+| --- | ---: | ---: | ---: | ---: | --- |
+| original `20260419` | 0.225 | 4.338 | 0.320 | 0.055 | false |
+| original `20260420` | 0.087 | 4.554 | 0.042 | 0.010 | false |
+| original `20260421` | 0.394 | 3.866 | 0.511 | 0.090 | false |
+| repaired `20260419` | 0.719 | 1.607 | 0.643 | 0.011 | true |
+| repaired `20260420` | 0.606 | 1.875 | 0.493 | 0.021 | true |
+| repaired `20260421` | 0.731 | 1.471 | 0.691 | 0.013 | true |
+
+Repair verdict:
+
+- The Gate 4 failure was mostly a calibration/objective problem, not evidence
+  that the EML bridge signal disappears under rotation.
+- Probability-mixture math-answer accuracy improves from mean `0.235` to
+  `0.685`, and worst-case accuracy improves from `0.087` to `0.606`.
+- Unsafe math-answer mass drops from worst-case `0.090` to `0.021` on Gate 4;
+  on frozen Gate 2 it drops from `0.375` to `0.049`.
+- The hard-call path remains a control, not the main bridge claim. It can be
+  safe by abstaining too much. The current positive claim belongs to the
+  probability-mixture path with role-aware safety metrics.
+- Gate 5 is now worth running, but the claim should remain narrow until a more
+  natural mixed corpus confirms that this survives beyond synthetic templates.

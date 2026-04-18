@@ -649,6 +649,8 @@ class SymbolicEvaluationTests(unittest.TestCase):
             root = Path(tmpdir)
             feature_table = root / "feature_table.jsonl"
             bridge_summary = root / "summary.json"
+            extra_feature_table = root / "extra_feature_table.jsonl"
+            extra_bridge_summary = root / "extra_summary.json"
             output_dir = root / "bridge-lm"
             rows = []
             for split, values in {
@@ -712,6 +714,68 @@ class SymbolicEvaluationTests(unittest.TestCase):
                     }
                 )
             )
+            extra_rows = []
+            for split, values in {
+                "train": (-0.9, 0.9),
+                "safety_calibration": (-1.1, 1.1),
+            }.items():
+                for index, x_value in enumerate(values):
+                    target_token = 0 if x_value < 0.0 else 1
+                    has_safe_expert = abs(x_value) <= 1.0
+                    extra_rows.append(
+                        {
+                            "task_id": "toy_sign",
+                            "seed": 2,
+                            "split": split,
+                            "sequence_id": f"extra-{split}",
+                            "index": index,
+                            "x": x_value,
+                            "target_y": float(target_token),
+                            "target_token": target_token,
+                            "token_bins": 2,
+                            "quantizer": {"minimum": 0.0, "maximum": 1.0},
+                            "in_training_range": split == "train",
+                            "best_expert_id": "paper-complex-eml" if has_safe_expert else "generic-tree",
+                            "oracle_has_safe_expert": has_safe_expert,
+                            "safe_expert_mask": {
+                                "generic-tree": False,
+                                "paper-complex-eml": has_safe_expert,
+                            },
+                            "experts": {
+                                "generic-tree": {
+                                    "prediction": 1.0 - float(target_token),
+                                    "token": 1 - target_token,
+                                    "residual": 0.0,
+                                    "abs_residual": 1.0,
+                                    "token_match": False,
+                                },
+                                "paper-complex-eml": {
+                                    "prediction": float(target_token),
+                                    "token": target_token,
+                                    "residual": 0.0,
+                                    "abs_residual": 0.0,
+                                    "token_match": has_safe_expert,
+                                },
+                            },
+                        }
+                    )
+            with extra_feature_table.open("w") as handle:
+                for row in extra_rows:
+                    handle.write(json.dumps(row) + "\n")
+            extra_bridge_summary.write_text(
+                json.dumps(
+                    {
+                        "token_bins": 2,
+                        "summary": {
+                            "feature_table": {
+                                "path": str(extra_feature_table),
+                                "row_count": len(extra_rows),
+                                "safe_expert_coverage": 0.5,
+                            }
+                        },
+                    }
+                )
+            )
 
             report = run_symbolic_bridge_lm(
                 bridge_summary,
@@ -723,6 +787,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 abstain_class_weight=2.0,
                 unsafe_call_loss_weight=0.5,
                 call_abstain_loss_weight=0.75,
+                answer_call_abstain_loss_weight=0.8,
                 answer_unsafe_loss_weight=0.6,
                 non_answer_abstain_loss_weight=0.7,
                 unsafe_margin_loss_weight=1.25,
@@ -730,6 +795,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 router_call_threshold=0.25,
                 expert_logit_scale=3.0,
                 device="cpu",
+                extra_fit_bridge_summary_paths=(extra_bridge_summary,),
             )
 
             self.assertEqual(report.backbone, "gru")
@@ -738,12 +804,17 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertEqual(report.abstain_class_weight, 2.0)
             self.assertEqual(report.unsafe_call_loss_weight, 0.5)
             self.assertEqual(report.call_abstain_loss_weight, 0.75)
+            self.assertEqual(report.answer_call_abstain_loss_weight, 0.8)
             self.assertEqual(report.answer_unsafe_loss_weight, 0.6)
             self.assertEqual(report.non_answer_abstain_loss_weight, 0.7)
             self.assertEqual(report.unsafe_margin_loss_weight, 1.25)
             self.assertEqual(report.unsafe_margin, 0.4)
             self.assertEqual(report.router_call_threshold, 0.25)
             self.assertEqual(report.expert_logit_scale, 3.0)
+            self.assertEqual(report.extra_fit_bridge_summary_paths, (str(extra_bridge_summary.resolve()),))
+            self.assertEqual(report.extra_fit_feature_table_paths, (str(extra_feature_table.resolve()),))
+            self.assertEqual(report.summary["extra_fit_row_count"], len(extra_rows))
+            self.assertEqual(report.summary["fit_row_count"], 4 + len(extra_rows))
             run_names = {run.name for run in report.runs}
             self.assertIn("lm-router-logit-fusion", run_names)
             self.assertIn("lm-router-prob-mixture", run_names)
@@ -757,6 +828,8 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertIn("logit_fusion_extrapolation_nll_delta_vs_side_channel", report.summary)
             self.assertIn("prob_mixture_extrapolation_nll_delta_vs_side_channel", report.summary)
             self.assertIn("prob_mixture_extrapolation_nll_delta_vs_token_only", report.summary)
+            self.assertIn("math_answer_extrapolation_metrics", report.summary)
+            self.assertIn("prob_mixture_math_answer_contract_confirmed", report.summary)
             self.assertTrue((output_dir / "summary.json").exists())
             self.assertTrue((output_dir / "runs.jsonl").exists())
             self.assertTrue((output_dir / "summary.md").exists())

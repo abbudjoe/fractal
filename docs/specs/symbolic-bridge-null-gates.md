@@ -10,18 +10,18 @@ records stay below it.
 | gate | question | status | current answer |
 | --- | --- | --- | --- |
 | 1. Expert-bank ablation and shuffle controls | Does the gain follow aligned EML expert predictions, or can any/shuffled expert bank fake it? | passed | The gain follows `paper-complex-eml`; non-EML and shuffled controls do not reproduce it. |
-| 2. Held-out formula/language templates | Does the bridge survive unseen formula families, unseen wrappers, and varied answer positions? | mixed, safety failed | Capability partially survives on math answers, but soft unsafe expert mass is too high. |
+| 2. Held-out formula/language templates | Does the bridge survive unseen formula families, unseen wrappers, and varied answer positions? | repaired for math-answer probability mixture | Multi-split calibration plus answer-token call/abstain loss keeps most capability while reducing unsafe mass below the role-aware gate. |
 | 3. Target/random-label and wrong-expert controls | Does the harness leak target identity through labels, routing, or feature construction? | passed | Broken labels and wrong expert pairings collapse the hybrid gain. |
-| 4. Seed/template variance | Is the positive result stable across seeds and template draws? | failed, blocks promotion | Capability is not stable across rotated formula/template splits; no variance run passes the contract. |
+| 4. Seed/template variance | Is the positive result stable across seeds and template draws? | repaired for math-answer probability mixture | Multi-split calibration turns the unstable variance result into stable math-answer gains with low unsafe mass. |
 | 5. More natural mixed corpus | Does the contract hold beyond the synthetic grammar? | pending | Not run yet. |
 
-Current recommendation: continue null testing, but do not promote the bridge as a
-general LM improvement yet. Gate 1 supports the paper-complex signal. Gate 2
-shows that held-out-template capability is real enough to keep testing, but the
-calibration contract does not generalize safely to unseen formulas/templates.
-Gate 3 does not show evidence of target-label or expert-pairing leakage.
-Gate 4 shows that the held-out-template capability is not stable across formula
-split/template seeds.
+Current recommendation: proceed to Gate 5, but keep the claim narrow. Gate 1
+supports the paper-complex signal. Gate 3 does not show evidence of target-label
+or expert-pairing leakage. The first Gate 2/4 pass failed because calibration
+was brittle; the repair pass shows that broader multi-split calibration and an
+answer-token call/abstain objective make the probability-mixture bridge much
+more stable on math-answer tokens. This does not yet establish a general LM
+improvement.
 
 ## Resolution Block Contract
 
@@ -207,8 +207,8 @@ Resolution block:
 | --- | --- |
 | Resolution needed | Determine whether the bridge generalizes beyond the fixed language wrapper, fixed answer position, and train-seen formula families. |
 | Promotion condition | On the frozen held-out-template eval, the hybrid must materially beat token-only and side-channel controls on math-answer accuracy/NLL while keeping unsafe answer mass/calls below the existing safety gate. |
-| Current blocker | Capability partially survives (`0.625` probability-mixture math-answer accuracy), but unsafe answer mass is too high (`0.375`), so the safety contract fails. |
-| Next action | Add held-out-style safety calibration or an explicit safe-expert-mass objective, then rerun Gate 2 against the same frozen held-out formula/template split. |
+| Current blocker | Initial pass failed safety (`0.375` unsafe mass). Repair pass lowers probability-mixture unsafe answer mass to `0.049` while retaining `0.562` math-answer accuracy, so the role-aware probability-mixture blocker is resolved. |
+| Next action | Carry the repaired probability-mixture calibration into Gate 5, while keeping hard-call and overall prose behavior as separate controls. |
 
 ## Gate 3: Target/Random-Label And Wrong-Expert Controls
 
@@ -382,8 +382,115 @@ Resolution block:
 | --- | --- |
 | Resolution needed | Establish whether the bridge result is robust or an accident of one formula/template split. |
 | Promotion condition | The capability gain and safety behavior must be stable enough across seeds/templates that the mean result is useful and the worst-case unsafe mass/call rate is acceptable. |
-| Current blocker | Gate 4 fails. Capability is unstable across formula/template splits, and the router trades off capability against safety by abstaining too aggressively on some splits. |
-| Next action | Add held-out-style safety/capability calibration that includes multiple formula split rotations in the fit mixture, then rerun Gate 2 and Gate 4 against frozen eval splits. |
+| Current blocker | Initial pass failed. Repair pass resolves the math-answer probability-mixture blocker: variance mean accuracy rises from `0.235` to `0.685`, worst-case accuracy rises from `0.087` to `0.606`, and worst-case unsafe mass falls to `0.021`. Overall hard-call contract remains weaker and should stay a control, not the primary bridge claim. |
+| Next action | Proceed to Gate 5 with the repaired probability-mixture recipe and preserve token-only, side-channel, hard-call, and logit-fusion controls. |
+
+## Gate 2/4 Repair: Multi-Split Calibration
+
+Question:
+
+> Can broader synthetic pretraining repair the Gate 2 safety failure and Gate 4
+> variance failure without changing the core bridge architecture?
+
+Code changes:
+
+- The LM runner now accepts extra fit-only bridge summaries. Their
+  `train`/`safety_calibration` rows are used for fitting, while the primary
+  gate corpus remains the frozen evaluation target.
+- Extra fit rows are sequence-namespaced before batching so multiple rotations
+  cannot accidentally merge sequences with the same source IDs.
+- The router objective now has an answer-token call/abstain term, separate from
+  global call/abstain and non-answer abstention. This avoids letting prose and
+  context tokens dominate the decision that matters for math answers.
+- Reports now expose a role-aware probability-mixture math-answer contract
+  instead of burying it inside per-role metrics.
+
+Artifacts:
+
+```text
+artifacts/bridge-corpus-v1-repair/
+artifacts/bridge-corpus-v1-repair-lm/
+```
+
+Calibration corpus command shape:
+
+```bash
+python scripts/symbolic_bridge_corpus.py \
+  --corpus-kind language-math-heldout-variance \
+  --source-bridge-summary artifacts/symbolic-bridge/symbolic-bridge-compact-runpod-cuda-v1/summary.json \
+  --run-label bridge-corpus-v1-language-math-calibration-s<seed> \
+  --output-dir artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s<seed> \
+  --seed <seed> \
+  --language-train-per-group 32 \
+  --language-safety-per-group 96 \
+  --language-eval-per-group 4
+```
+
+Repair LM command shape:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary <frozen-gate-summary.json> \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260430/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260431/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260432/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260433/summary.json \
+  --backbone transformer \
+  --transformer-layers 2 \
+  --transformer-heads 4 \
+  --transformer-ffn-multiplier 2 \
+  --epochs 600 \
+  --learning-rate 0.004 \
+  --hidden-units 64 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 1.0 \
+  --answer-call-abstain-loss-weight 8.0 \
+  --answer-unsafe-loss-weight 5.0 \
+  --non-answer-abstain-loss-weight 2.0 \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --device mps
+```
+
+Frozen Gate 2, extrapolation math-answer role:
+
+| condition | prob-mixture acc | prob-mixture NLL | prob expert mass | prob unsafe mass | role-aware contract |
+| --- | ---: | ---: | ---: | ---: | --- |
+| original calibrated | 0.625 | 6.703 | 1.000 | 0.375 | false |
+| multi-split calibration only | 0.419 | 4.159 | 0.362 | 0.054 | false |
+| multi-split + answer call/abstain | 0.562 | 2.859 | 0.468 | 0.049 | true |
+
+Frozen Gate 4, extrapolation math-answer role:
+
+| condition | prob-mixture acc | prob-mixture NLL | prob expert mass | prob unsafe mass | role-aware contract |
+| --- | ---: | ---: | ---: | ---: | --- |
+| original variance `20260419` | 0.225 | 4.338 | 0.320 | 0.055 | false |
+| original variance `20260420` | 0.087 | 4.554 | 0.042 | 0.010 | false |
+| original variance `20260421` | 0.394 | 3.866 | 0.511 | 0.090 | false |
+| repaired variance `20260419` | 0.719 | 1.607 | 0.643 | 0.011 | true |
+| repaired variance `20260420` | 0.606 | 1.875 | 0.493 | 0.021 | true |
+| repaired variance `20260421` | 0.731 | 1.471 | 0.691 | 0.013 | true |
+
+Variance aggregate:
+
+| metric | original mean | original min | original max | repaired mean | repaired min | repaired max |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| prob-mixture math-answer acc | 0.235 | 0.087 | 0.394 | 0.685 | 0.606 | 0.731 |
+| prob-mixture math-answer NLL | 4.253 | 3.866 | 4.554 | 1.651 | 1.471 | 1.875 |
+| prob-mixture expert mass/call | 0.291 | 0.042 | 0.511 | 0.609 | 0.493 | 0.691 |
+| prob-mixture unsafe mass | 0.052 | 0.010 | 0.090 | 0.015 | 0.011 | 0.021 |
+
+Verdict:
+
+- The repair materially improves the paper-aligned bridge question. Gate 4 is
+  no longer an instability story on the math-answer probability-mixture metric.
+- Gate 2 safety is substantially repaired: unsafe mass drops from `0.375` to
+  `0.049`, with accuracy still far above token-only and side-channel controls.
+- The improvement comes from calibration data and objective shape, not from a
+  bigger LM or a new expert architecture.
+- Caveat: the top-level hard-call contract is still weaker and sometimes passes
+  by abstaining. The bridge claim should therefore stay attached to the
+  probability-mixture path plus role-aware safety metrics.
 
 ## Gate 5: More Natural Mixed Corpus
 
@@ -408,5 +515,5 @@ Resolution block:
 | --- | --- |
 | Resolution needed | Determine whether the EML bridge is useful outside the controlled synthetic language/math grammar. |
 | Promotion condition | The hybrid must improve math-answer accuracy/NLL without degrading pure-language/prose behavior and without violating unsafe-call or unsafe-mass gates. |
-| Current blocker | Gate 2 already exposed safety generalization failure under held-out templates, so a more natural corpus is premature until that is addressed. |
-| Next action | After Gate 2 safety is repaired and Gate 3 leakage controls pass, build a small mixed naturalistic math-language corpus with frozen eval prompts. |
+| Current blocker | Gate 2/4 role-aware probability-mixture repair is complete enough to make Gate 5 informative. Remaining risk is that the repair may depend on the synthetic grammar. |
+| Next action | Build a small mixed naturalistic math-language corpus with frozen eval prompts and run the repaired probability-mixture recipe against token-only, side-channel, hard-call, and logit-fusion controls. |

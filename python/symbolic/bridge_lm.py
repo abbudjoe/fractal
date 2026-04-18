@@ -105,6 +105,8 @@ class BridgeLmRun:
 class BridgeLmReport:
     bridge_summary_path: str
     feature_table_path: str
+    extra_fit_bridge_summary_paths: tuple[str, ...]
+    extra_fit_feature_table_paths: tuple[str, ...]
     run_label: str
     backbone: str
     backbone_config: dict[str, Any]
@@ -117,6 +119,7 @@ class BridgeLmReport:
     abstain_class_weight: float
     unsafe_call_loss_weight: float
     call_abstain_loss_weight: float
+    answer_call_abstain_loss_weight: float
     answer_unsafe_loss_weight: float
     non_answer_abstain_loss_weight: float
     unsafe_margin_loss_weight: float
@@ -134,6 +137,8 @@ class BridgeLmReport:
         return {
             "bridge_summary_path": self.bridge_summary_path,
             "feature_table_path": self.feature_table_path,
+            "extra_fit_bridge_summary_paths": list(self.extra_fit_bridge_summary_paths),
+            "extra_fit_feature_table_paths": list(self.extra_fit_feature_table_paths),
             "run_label": self.run_label,
             "backbone": self.backbone,
             "backbone_config": self.backbone_config,
@@ -146,6 +151,7 @@ class BridgeLmReport:
             "abstain_class_weight": self.abstain_class_weight,
             "unsafe_call_loss_weight": self.unsafe_call_loss_weight,
             "call_abstain_loss_weight": self.call_abstain_loss_weight,
+            "answer_call_abstain_loss_weight": self.answer_call_abstain_loss_weight,
             "answer_unsafe_loss_weight": self.answer_unsafe_loss_weight,
             "non_answer_abstain_loss_weight": self.non_answer_abstain_loss_weight,
             "unsafe_margin_loss_weight": self.unsafe_margin_loss_weight,
@@ -174,6 +180,7 @@ def run_symbolic_bridge_lm(
     abstain_class_weight: float = 1.0,
     unsafe_call_loss_weight: float = 0.0,
     call_abstain_loss_weight: float = 0.0,
+    answer_call_abstain_loss_weight: float = 0.0,
     answer_unsafe_loss_weight: float = 0.0,
     non_answer_abstain_loss_weight: float = 0.0,
     unsafe_margin_loss_weight: float = 0.0,
@@ -185,6 +192,7 @@ def run_symbolic_bridge_lm(
     transformer_heads: int = 4,
     transformer_ffn_multiplier: int = 2,
     device: str = "auto",
+    extra_fit_bridge_summary_paths: tuple[Path, ...] = (),
 ) -> BridgeLmReport:
     torch = import_torch()
     validate_bridge_lm_backbone(
@@ -199,13 +207,19 @@ def run_symbolic_bridge_lm(
     rows = load_feature_rows(feature_table_path)
     if not rows:
         raise ValueError(f"bridge feature table has no rows: {feature_table_path}")
+    extra_fit_rows, extra_fit_feature_table_paths = load_extra_fit_rows(
+        bridge_summary,
+        bridge_summary_path,
+        extra_fit_bridge_summary_paths,
+    )
+    fit_rows = rows + extra_fit_rows
 
     random.seed(seed)
     torch.manual_seed(seed)
     selected_device = resolve_device(torch, device)
     token_bins = int(bridge_summary.get("token_bins") or rows[0]["token_bins"])
-    task_ids = tuple(sorted({str(row["task_id"]) for row in rows}))
-    expert_ids = tuple(sorted({str(expert) for row in rows for expert in row["experts"]}))
+    task_ids = tuple(sorted({str(row["task_id"]) for row in fit_rows}))
+    expert_ids = tuple(sorted({str(expert) for row in fit_rows for expert in row["experts"]}))
     abstain_index = len(expert_ids)
 
     runs: list[BridgeLmRun] = [
@@ -229,6 +243,7 @@ def run_symbolic_bridge_lm(
                 task_ids,
                 expert_ids,
                 token_bins,
+                fit_rows=fit_rows,
                 feature_set=feature_set,
                 name=name,
                 use_router=use_router,
@@ -241,6 +256,7 @@ def run_symbolic_bridge_lm(
                 abstain_class_weight=abstain_class_weight,
                 unsafe_call_loss_weight=unsafe_call_loss_weight,
                 call_abstain_loss_weight=call_abstain_loss_weight,
+                answer_call_abstain_loss_weight=answer_call_abstain_loss_weight,
                 answer_unsafe_loss_weight=answer_unsafe_loss_weight,
                 non_answer_abstain_loss_weight=non_answer_abstain_loss_weight,
                 unsafe_margin_loss_weight=unsafe_margin_loss_weight,
@@ -255,11 +271,13 @@ def run_symbolic_bridge_lm(
             )
         )
 
-    summary = summarize_lm_contract(runs, rows)
+    summary = summarize_lm_contract(runs, rows, fit_rows=fit_rows)
     output_dir.mkdir(parents=True, exist_ok=True)
     report = BridgeLmReport(
         bridge_summary_path=repo_relative(bridge_summary_path),
         feature_table_path=repo_relative(feature_table_path),
+        extra_fit_bridge_summary_paths=tuple(repo_relative(path) for path in extra_fit_bridge_summary_paths),
+        extra_fit_feature_table_paths=tuple(repo_relative(path) for path in extra_fit_feature_table_paths),
         run_label=run_label,
         backbone=backbone,
         backbone_config=bridge_lm_backbone_config(
@@ -278,6 +296,7 @@ def run_symbolic_bridge_lm(
         abstain_class_weight=abstain_class_weight,
         unsafe_call_loss_weight=unsafe_call_loss_weight,
         call_abstain_loss_weight=call_abstain_loss_weight,
+        answer_call_abstain_loss_weight=answer_call_abstain_loss_weight,
         answer_unsafe_loss_weight=answer_unsafe_loss_weight,
         non_answer_abstain_loss_weight=non_answer_abstain_loss_weight,
         unsafe_margin_loss_weight=unsafe_margin_loss_weight,
@@ -302,6 +321,7 @@ def train_lm_contract_variant(
     expert_ids: tuple[str, ...],
     token_bins: int,
     *,
+    fit_rows: list[dict[str, Any]] | None = None,
     feature_set: str,
     name: str,
     use_router: bool,
@@ -314,6 +334,7 @@ def train_lm_contract_variant(
     abstain_class_weight: float,
     unsafe_call_loss_weight: float,
     call_abstain_loss_weight: float,
+    answer_call_abstain_loss_weight: float,
     answer_unsafe_loss_weight: float,
     non_answer_abstain_loss_weight: float,
     unsafe_margin_loss_weight: float,
@@ -327,7 +348,16 @@ def train_lm_contract_variant(
     device: Any,
 ) -> BridgeLmRun:
     torch.manual_seed(seed)
-    splits = build_contract_splits(torch, rows, task_ids, expert_ids, token_bins, feature_set, device)
+    splits = build_contract_splits(
+        torch,
+        rows,
+        task_ids,
+        expert_ids,
+        token_bins,
+        feature_set,
+        device,
+        fit_rows=fit_rows,
+    )
     feature_dim = int(splits["fit"].features.shape[-1])
     max_sequence_length = max(int(batch.previous_tokens.shape[1]) for batch in splits.values())
     model = build_symbolic_bridge_lm_model(
@@ -392,6 +422,13 @@ def train_lm_contract_variant(
                 abstain_weight=abstain_class_weight,
                 mask=fit_batch.symbolic_mask,
             )
+            answer_call_abstain_loss = router_call_abstain_loss(
+                torch,
+                router_logits,
+                fit_batch.expert_safe_mask,
+                abstain_weight=abstain_class_weight,
+                mask=role_mask(torch, fit_batch, ("math_answer", "math_only")),
+            )
             unsafe_margin_loss = router_unsafe_margin_loss(
                 torch,
                 router_logits,
@@ -415,6 +452,7 @@ def train_lm_contract_variant(
                 + router_loss_weight * router_loss
                 + unsafe_call_loss_weight * unsafe_loss
                 + call_abstain_loss_weight * call_abstain_loss
+                + answer_call_abstain_loss_weight * answer_call_abstain_loss
                 + answer_unsafe_loss_weight * answer_unsafe_loss
                 + non_answer_abstain_loss_weight * non_answer_abstain_loss
                 + unsafe_margin_loss_weight * unsafe_margin_loss
@@ -448,6 +486,7 @@ def train_lm_contract_variant(
             router_loss_value = 0.0
             unsafe_loss_value = 0.0
             call_abstain_loss_value = 0.0
+            answer_call_abstain_loss_value = 0.0
             answer_unsafe_loss_value = 0.0
             non_answer_abstain_loss_value = 0.0
             unsafe_margin_loss_value = 0.0
@@ -481,6 +520,14 @@ def train_lm_contract_variant(
                     mask=batch.symbolic_mask,
                 )
                 call_abstain_loss_value = float(call_abstain_loss.detach().cpu().item())
+                answer_call_abstain_loss = router_call_abstain_loss(
+                    torch,
+                    router_logits,
+                    batch.expert_safe_mask,
+                    abstain_weight=abstain_class_weight,
+                    mask=role_mask(torch, batch, ("math_answer", "math_only")),
+                )
+                answer_call_abstain_loss_value = float(answer_call_abstain_loss.detach().cpu().item())
                 unsafe_margin_loss = router_unsafe_margin_loss(
                     torch,
                     router_logits,
@@ -519,6 +566,7 @@ def train_lm_contract_variant(
                     + router_loss_weight * router_loss_value
                     + unsafe_call_loss_weight * unsafe_loss_value
                     + call_abstain_loss_weight * call_abstain_loss_value
+                    + answer_call_abstain_loss_weight * answer_call_abstain_loss_value
                     + answer_unsafe_loss_weight * answer_unsafe_loss_value
                     + non_answer_abstain_loss_weight * non_answer_abstain_loss_value
                     + unsafe_margin_loss_weight * unsafe_margin_loss_value
@@ -758,6 +806,48 @@ def bridge_lm_backbone_config(
     }
 
 
+def load_extra_fit_rows(
+    primary_summary: dict[str, Any],
+    primary_summary_path: Path,
+    extra_fit_bridge_summary_paths: tuple[Path, ...],
+) -> tuple[list[dict[str, Any]], tuple[Path, ...]]:
+    if not extra_fit_bridge_summary_paths:
+        return [], ()
+    primary_token_bins = int(primary_summary.get("token_bins") or 0)
+    primary_vocabulary = primary_summary.get("summary", {}).get("vocabulary")
+    extra_rows: list[dict[str, Any]] = []
+    feature_table_paths: list[Path] = []
+    for source_index, summary_path in enumerate(extra_fit_bridge_summary_paths):
+        summary = json.loads(summary_path.read_text())
+        token_bins = int(summary.get("token_bins") or 0)
+        if token_bins != primary_token_bins:
+            raise ValueError(
+                f"extra fit bridge summary token_bins mismatch: {summary_path} has {token_bins}, "
+                f"primary {primary_summary_path} has {primary_token_bins}"
+            )
+        vocabulary = summary.get("summary", {}).get("vocabulary")
+        if isinstance(primary_vocabulary, list) and isinstance(vocabulary, list) and vocabulary != primary_vocabulary:
+            raise ValueError(
+                f"extra fit bridge summary vocabulary mismatch: {summary_path} does not match {primary_summary_path}"
+            )
+        feature_table_path = resolve_feature_table_path(summary, summary_path)
+        feature_table_paths.append(feature_table_path)
+        source_rows = load_feature_rows(feature_table_path)
+        extra_rows.extend(
+            namespace_extra_fit_row(row, source_index=source_index)
+            for row in source_rows
+            if str(row["split"]) in {"train", "safety_calibration"}
+        )
+    return extra_rows, tuple(feature_table_paths)
+
+
+def namespace_extra_fit_row(row: dict[str, Any], *, source_index: int) -> dict[str, Any]:
+    row_copy = dict(row)
+    sequence_id = str(row_copy.get("sequence_id", "default"))
+    row_copy["sequence_id"] = f"extra-fit-{source_index}:{sequence_id}"
+    return row_copy
+
+
 def router_loss_class_weights(
     torch: Any,
     *,
@@ -892,18 +982,24 @@ def build_contract_splits(
     token_bins: int,
     feature_set: str,
     device: Any,
+    *,
+    fit_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, SymbolicBridgeBatch]:
     grouped = group_rows(rows)
-    role_names = tuple(sorted({str(row.get("eval_role", "symbolic")) for row in rows}))
-    fit_rows = [
+    fit_source_rows = rows if fit_rows is None else fit_rows
+    fit_grouped = group_rows(fit_source_rows)
+    role_names = tuple(
+        sorted({str(row.get("eval_role", "symbolic")) for row in rows + fit_source_rows})
+    )
+    fit_stat_rows = [
         row
-        for key, sequence in grouped.items()
+        for key, sequence in fit_grouped.items()
         if key[2] in {"train", "safety_calibration"}
         for row in sequence
     ]
-    if not fit_rows:
-        fit_rows = [row for key, sequence in grouped.items() if key[2] == "train" for row in sequence]
-    stats = feature_normalization_stats(fit_rows, task_ids, expert_ids, feature_set)
+    if not fit_stat_rows:
+        fit_stat_rows = [row for key, sequence in fit_grouped.items() if key[2] == "train" for row in sequence]
+    stats = feature_normalization_stats(fit_stat_rows, task_ids, expert_ids, feature_set)
     splits: dict[str, SymbolicBridgeBatch] = {}
     for split in ("train", "safety_calibration", "validation", "extrapolation"):
         sequences = [sequence for key, sequence in sorted(grouped.items()) if key[2] == split]
@@ -921,11 +1017,11 @@ def build_contract_splits(
             )
     fit_sequences = [
         sequence
-        for key, sequence in sorted(grouped.items())
+        for key, sequence in sorted(fit_grouped.items())
         if key[2] in {"train", "safety_calibration"}
     ]
     if not fit_sequences:
-        fit_sequences = [sequence for key, sequence in sorted(grouped.items()) if key[2] == "train"]
+        fit_sequences = [sequence for key, sequence in sorted(fit_grouped.items()) if key[2] == "train"]
     splits["fit"] = batch_from_sequences(
         torch,
         fit_sequences,
@@ -1414,7 +1510,12 @@ def safe_coverage(rows: list[dict[str, Any]], split: str) -> float:
     return mean(1.0 if bool(row["oracle_has_safe_expert"]) else 0.0 for row in split_rows)
 
 
-def summarize_lm_contract(runs: list[BridgeLmRun], rows: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize_lm_contract(
+    runs: list[BridgeLmRun],
+    rows: list[dict[str, Any]],
+    *,
+    fit_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     trained = [run for run in runs if run.mode in {"lm", "hard-call", "logit-fusion", "prob-mixture"}]
     router = next((run for run in runs if run.name == "lm-router-hard-call"), None)
     logit_fusion = next((run for run in runs if run.name == "lm-router-logit-fusion"), None)
@@ -1430,11 +1531,12 @@ def summarize_lm_contract(runs: list[BridgeLmRun], rows: list[dict[str, Any]]) -
     )
     safe = {split: safe_coverage(rows, split) for split in reported_splits}
     abstain_target_rate = {split: 1.0 - value for split, value in safe.items()}
-    fit_rows = [row for row in rows if row["split"] in {"train", "safety_calibration"}]
+    effective_fit_rows = rows if fit_rows is None else fit_rows
+    selected_fit_rows = [row for row in effective_fit_rows if row["split"] in {"train", "safety_calibration"}]
     fit_abstain_target_rate = mean(
         0.0 if row["oracle_has_safe_expert"] else 1.0
-        for row in fit_rows
-    ) if fit_rows else abstain_target_rate.get("train", 0.0)
+        for row in selected_fit_rows
+    ) if selected_fit_rows else abstain_target_rate.get("train", 0.0)
     router_gain_vs_side = (
         router.extrapolation_final_token_accuracy - side.extrapolation_final_token_accuracy
         if router is not None and side is not None
@@ -1455,9 +1557,25 @@ def summarize_lm_contract(runs: list[BridgeLmRun], rows: list[dict[str, Any]]) -
         failure_modes.append("fit split contains no abstain targets while extrapolation does")
     if router_unsafe > 0.01:
         failure_modes.append("router makes unsafe expert calls")
+    math_answer_metrics = extrapolation_role_metrics(runs, "math_answer")
+    prob_math = math_answer_metrics.get("lm-router-prob-mixture", {})
+    side_math = math_answer_metrics.get("lm-frozen-side-channel", {})
+    token_math = math_answer_metrics.get("lm-token-only", {})
+    prob_math_accuracy = float(prob_math.get("final_token_accuracy", 0.0))
+    prob_math_unsafe = float(prob_math.get("unsafe_call_rate", 1.0))
+    math_answer_gain = prob_math_accuracy - max(
+        float(side_math.get("final_token_accuracy", 0.0)),
+        float(token_math.get("final_token_accuracy", 0.0)),
+    )
+    math_answer_contract_confirmed = math_answer_gain > 0.05 and prob_math_unsafe <= 0.05
     return {
         "total_rows": len(rows),
         "sequence_count": len(group_rows(rows)),
+        "fit_row_count": len(selected_fit_rows),
+        "fit_sequence_count": len(
+            group_rows(selected_fit_rows)
+        ) if selected_fit_rows else 0,
+        "extra_fit_row_count": max(0, len(selected_fit_rows) - sum(1 for row in rows if row["split"] in {"train", "safety_calibration"})),
         "safe_expert_coverage": safe,
         "abstain_target_rate": abstain_target_rate,
         "fit_abstain_target_rate": fit_abstain_target_rate,
@@ -1533,8 +1651,28 @@ def summarize_lm_contract(runs: list[BridgeLmRun], rows: list[dict[str, Any]]) -
         "capability_gain_confirmed": router_gain_vs_side > 0.05,
         "safe_abstention_confirmed": safe_abstention_confirmed,
         "contract_confirmed": router_gain_vs_side > 0.05 and safe_abstention_confirmed,
+        "math_answer_extrapolation_metrics": math_answer_metrics,
+        "prob_mixture_math_answer_accuracy_delta_vs_controls": math_answer_gain,
+        "prob_mixture_math_answer_unsafe_call_rate": prob_math_unsafe,
+        "prob_mixture_math_answer_contract_confirmed": math_answer_contract_confirmed,
         "failure_modes": failure_modes,
     }
+
+
+def extrapolation_role_metrics(
+    runs: list[BridgeLmRun],
+    role: str,
+) -> dict[str, dict[str, float]]:
+    metrics: dict[str, dict[str, float]] = {}
+    for run in runs:
+        role_metrics = run.role_metrics or {}
+        split_metrics = role_metrics.get("extrapolation", {})
+        if role in split_metrics:
+            metrics[run.name] = {
+                key: float(value)
+                for key, value in split_metrics[role].items()
+            }
+    return metrics
 
 
 def write_bridge_lm_report(report: BridgeLmReport, output_dir: Path) -> None:
@@ -1551,6 +1689,8 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
         "",
         f"Bridge summary: `{report.bridge_summary_path}`",
         f"Feature table: `{report.feature_table_path}`",
+        f"Extra fit bridge summaries: `{list(report.extra_fit_bridge_summary_paths)}`",
+        f"Extra fit feature tables: `{list(report.extra_fit_feature_table_paths)}`",
         f"Backbone: `{report.backbone}`",
         f"Backbone config: `{report.backbone_config}`",
         f"Token bins: `{report.token_bins}`",
@@ -1564,6 +1704,7 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
         f"Abstain class weight: `{report.abstain_class_weight}`",
         f"Unsafe call loss weight: `{report.unsafe_call_loss_weight}`",
         f"Call/abstain loss weight: `{report.call_abstain_loss_weight}`",
+        f"Answer call/abstain loss weight: `{report.answer_call_abstain_loss_weight}`",
         f"Answer unsafe loss weight: `{report.answer_unsafe_loss_weight}`",
         f"Non-answer abstain loss weight: `{report.non_answer_abstain_loss_weight}`",
         f"Unsafe margin loss weight: `{report.unsafe_margin_loss_weight}`",
@@ -1625,6 +1766,8 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
             f"Best validation final token accuracy: `{report.summary['best_validation_final_token_accuracy']}`",
             f"Best extrapolation final token accuracy: `{report.summary['best_extrapolation_final_token_accuracy']}`",
             f"Best trained extrapolation final token accuracy: `{report.summary['best_trained_extrapolation_final_token_accuracy']}`",
+            f"Fit rows: `{report.summary['fit_row_count']}`",
+            f"Extra fit rows: `{report.summary['extra_fit_row_count']}`",
             f"Best validation final NLL: `{report.summary['best_validation_final_nll']}`",
             f"Best extrapolation final NLL: `{report.summary['best_extrapolation_final_nll']}`",
             f"Best trained extrapolation final NLL: `{report.summary['best_trained_extrapolation_final_nll']}`",
@@ -1646,6 +1789,9 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
             f"Capability gain confirmed: `{report.summary['capability_gain_confirmed']}`",
             f"Safe abstention confirmed: `{report.summary['safe_abstention_confirmed']}`",
             f"Contract confirmed: `{report.summary['contract_confirmed']}`",
+            f"Prob-mixture math-answer accuracy delta vs controls: `{report.summary['prob_mixture_math_answer_accuracy_delta_vs_controls']:.3f}`",
+            f"Prob-mixture math-answer unsafe call rate: `{report.summary['prob_mixture_math_answer_unsafe_call_rate']:.3f}`",
+            f"Prob-mixture math-answer contract confirmed: `{report.summary['prob_mixture_math_answer_contract_confirmed']}`",
             f"Safe-expert coverage by split: `train={safe['train']:.3f}, validation={safe['validation']:.3f}, extrapolation={safe['extrapolation']:.3f}`",
             f"Safety-calibration safe-expert coverage: `{format_optional(safe.get('safety_calibration'))}`",
             f"Abstain target rate by split: `train={abstain_rate['train']:.3f}, safety_calibration={format_optional(abstain_rate.get('safety_calibration'))}, validation={abstain_rate['validation']:.3f}, extrapolation={abstain_rate['extrapolation']:.3f}`",

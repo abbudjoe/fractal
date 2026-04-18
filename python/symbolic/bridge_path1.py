@@ -122,6 +122,8 @@ def run_symbolic_bridge_path1(
     report = BridgeLmReport(
         bridge_summary_path=repo_relative(bridge_summary_path),
         feature_table_path=repo_relative(feature_table_path),
+        extra_fit_bridge_summary_paths=(),
+        extra_fit_feature_table_paths=(),
         run_label=run_label,
         backbone="path1",
         backbone_config={
@@ -140,6 +142,7 @@ def run_symbolic_bridge_path1(
         abstain_class_weight=abstain_class_weight,
         unsafe_call_loss_weight=unsafe_call_loss_weight,
         call_abstain_loss_weight=call_abstain_loss_weight,
+        answer_call_abstain_loss_weight=0.0,
         answer_unsafe_loss_weight=0.0,
         non_answer_abstain_loss_weight=0.0,
         unsafe_margin_loss_weight=unsafe_margin_loss_weight,
