@@ -9,6 +9,7 @@ from python.jax_tpu import (
     JaxTpuModelShape,
     JaxTpuParallelismSpec,
     JaxTpuRunBudget,
+    JaxTpuTokenizerSpec,
     build_maxtext_command,
     get_candidate,
     render_shell_command,
@@ -37,6 +38,7 @@ class JaxTpuContractTests(unittest.TestCase):
         self.assertIn("base_num_decoder_layers=4", rendered)
         self.assertIn("base_num_query_heads=4", rendered)
         self.assertIn("base_num_kv_heads=4", rendered)
+        self.assertIn("vocab_size=32000", rendered)
         self.assertNotIn("base_num_heads=", rendered)
         self.assertNotIn("enable_profiler=", rendered)
 
@@ -77,6 +79,43 @@ class JaxTpuContractTests(unittest.TestCase):
 
         dataset.validate()
         self.assertEqual(dataset.to_overrides()["dataset_type"], "tfds")
+
+    def test_hf_dataset_requires_path_and_tokenizer(self) -> None:
+        with self.assertRaises(ValidationError):
+            JaxTpuDatasetSpec(dataset_type=JaxTpuDatasetType.HF).validate()
+
+        spec = JaxTpuBenchmarkSpec(
+            run_name="hf-ingress",
+            base_output_directory="gs://fractal-maxtext-runs",
+            candidate=get_candidate("attention-baseline"),
+            shape=JaxTpuModelShape(vocab_size=50_257, sequence_length=256, d_model=256, num_layers=4, num_heads=4),
+            dataset=JaxTpuDatasetSpec(dataset_type=JaxTpuDatasetType.HF, hf_path="roneneldan/TinyStories"),
+        )
+        with self.assertRaises(ValidationError):
+            build_maxtext_command(spec)
+
+        command = build_maxtext_command(
+            JaxTpuBenchmarkSpec(
+                run_name="hf-ingress",
+                base_output_directory="gs://fractal-maxtext-runs",
+                candidate=get_candidate("attention-baseline"),
+                shape=JaxTpuModelShape(
+                    vocab_size=50_257,
+                    sequence_length=256,
+                    d_model=256,
+                    num_layers=4,
+                    num_heads=4,
+                ),
+                dataset=JaxTpuDatasetSpec(dataset_type=JaxTpuDatasetType.HF, hf_path="roneneldan/TinyStories"),
+                tokenizer=JaxTpuTokenizerSpec(tokenizer_type="huggingface", tokenizer_path="gpt2"),
+            )
+        )
+        rendered = render_shell_command(command)
+        self.assertIn("dataset_type=hf", rendered)
+        self.assertIn("hf_path=roneneldan/TinyStories", rendered)
+        self.assertIn("tokenizer_type=huggingface", rendered)
+        self.assertIn("tokenizer_path=gpt2", rendered)
+        self.assertIn("vocab_size=50257", rendered)
 
     def test_shape_and_parallelism_validate_explicit_contracts(self) -> None:
         JaxTpuModelShape(d_model=512, num_heads=8, moe_experts=16, moe_top_k=2).validate()

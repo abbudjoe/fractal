@@ -8,6 +8,7 @@ from .contracts import (
     JaxTpuModelShape,
     JaxTpuParallelismSpec,
     JaxTpuRunBudget,
+    JaxTpuTokenizerSpec,
     candidate_registry,
     get_candidate,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "JaxTpuModelShape",
     "JaxTpuParallelismSpec",
     "JaxTpuRunBudget",
+    "JaxTpuTokenizerSpec",
     "build_maxtext_command",
     "candidate_registry",
     "get_candidate",

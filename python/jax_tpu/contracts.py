@@ -15,6 +15,7 @@ class JaxTpuArchitectureFamily(StringEnum):
 
 class JaxTpuDatasetType(StringEnum):
     SYNTHETIC = "synthetic"
+    HF = "hf"
     TFDS = "tfds"
 
 
@@ -144,9 +145,21 @@ class JaxTpuDatasetSpec:
     dataset_name: str | None = None
     train_split: str = "train"
     eval_split: str | None = None
+    hf_path: str | None = None
+    hf_name: str | None = None
+    hf_data_dir: str | None = None
+    hf_train_files: str | None = None
+    hf_eval_split: str | None = None
+    hf_eval_files: str | None = None
 
     def validate(self) -> None:
         if self.dataset_type is JaxTpuDatasetType.SYNTHETIC:
+            return
+        if self.dataset_type is JaxTpuDatasetType.HF:
+            if not self.hf_path:
+                raise ValidationError("dataset.hf_path is required for dataset_type=hf")
+            if not self.train_split.strip():
+                raise ValidationError("dataset.train_split must not be empty")
             return
         if self.dataset_type is JaxTpuDatasetType.TFDS:
             if not self.dataset_path:
@@ -168,6 +181,40 @@ class JaxTpuDatasetSpec:
             overrides["train_split"] = self.train_split
         if self.eval_split:
             overrides["eval_split"] = self.eval_split
+        if self.hf_path:
+            overrides["hf_path"] = self.hf_path
+        if self.hf_name:
+            overrides["hf_name"] = self.hf_name
+        if self.hf_data_dir:
+            overrides["hf_data_dir"] = self.hf_data_dir
+        if self.hf_train_files:
+            overrides["hf_train_files"] = self.hf_train_files
+        if self.hf_eval_split:
+            overrides["hf_eval_split"] = self.hf_eval_split
+        if self.hf_eval_files:
+            overrides["hf_eval_files"] = self.hf_eval_files
+        return overrides
+
+
+@dataclass(frozen=True)
+class JaxTpuTokenizerSpec:
+    tokenizer_type: str | None = None
+    tokenizer_path: str | None = None
+
+    def validate(self) -> None:
+        if self.tokenizer_type is not None and self.tokenizer_type not in {"huggingface", "sentencepiece", "tiktoken"}:
+            raise ValidationError("tokenizer.tokenizer_type must be one of huggingface|sentencepiece|tiktoken")
+        if self.tokenizer_type and not self.tokenizer_path:
+            raise ValidationError("tokenizer.tokenizer_path is required when tokenizer.tokenizer_type is set")
+        if self.tokenizer_path and not self.tokenizer_type:
+            raise ValidationError("tokenizer.tokenizer_type is required when tokenizer.tokenizer_path is set")
+
+    def to_overrides(self) -> dict[str, str]:
+        overrides: dict[str, str] = {}
+        if self.tokenizer_type:
+            overrides["tokenizer_type"] = self.tokenizer_type
+        if self.tokenizer_path:
+            overrides["tokenizer_path"] = self.tokenizer_path
         return overrides
 
 
@@ -201,6 +248,7 @@ class JaxTpuBenchmarkSpec:
     shape: JaxTpuModelShape = field(default_factory=JaxTpuModelShape)
     parallelism: JaxTpuParallelismSpec = field(default_factory=JaxTpuParallelismSpec)
     dataset: JaxTpuDatasetSpec = field(default_factory=JaxTpuDatasetSpec)
+    tokenizer: JaxTpuTokenizerSpec = field(default_factory=JaxTpuTokenizerSpec)
     budget: JaxTpuRunBudget = field(default_factory=JaxTpuRunBudget)
     dtype: str = "bfloat16"
     extra_overrides: dict[str, str | int | float | bool] = field(default_factory=dict)
@@ -216,7 +264,10 @@ class JaxTpuBenchmarkSpec:
         self.shape.validate()
         self.parallelism.validate()
         self.dataset.validate()
+        self.tokenizer.validate()
         self.budget.validate()
+        if self.dataset.dataset_type is JaxTpuDatasetType.HF and not self.tokenizer.tokenizer_path:
+            raise ValidationError("benchmark.tokenizer is required for dataset_type=hf")
 
     def to_maxtext_overrides(self, *, include_adapter_overrides: bool = False) -> dict[str, str | int | float | bool]:
         self.validate()
@@ -224,6 +275,7 @@ class JaxTpuBenchmarkSpec:
             "run_name": self.run_name,
             "base_output_directory": self.base_output_directory,
             "max_target_length": self.shape.sequence_length,
+            "vocab_size": self.shape.vocab_size,
             "base_emb_dim": self.shape.d_model,
             "base_num_decoder_layers": self.shape.num_layers,
             "base_num_query_heads": self.shape.num_heads,
@@ -241,6 +293,7 @@ class JaxTpuBenchmarkSpec:
             overrides["fractal_adapter_module"] = self.candidate.adapter_module
         overrides.update(self.parallelism.to_overrides())
         overrides.update(self.dataset.to_overrides())
+        overrides.update(self.tokenizer.to_overrides())
         overrides.update(self.budget.to_overrides())
         overrides.update(self.extra_overrides)
         return overrides

@@ -12,6 +12,7 @@ from .contracts import (
     JaxTpuModelShape,
     JaxTpuParallelismSpec,
     JaxTpuRunBudget,
+    JaxTpuTokenizerSpec,
     get_candidate,
 )
 from .maxtext import build_maxtext_command, render_shell_command
@@ -29,6 +30,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-name")
     parser.add_argument("--train-split", default="train")
     parser.add_argument("--eval-split")
+    parser.add_argument("--hf-path")
+    parser.add_argument("--hf-name")
+    parser.add_argument("--hf-data-dir")
+    parser.add_argument("--hf-train-files")
+    parser.add_argument("--hf-eval-split")
+    parser.add_argument("--hf-eval-files")
+    parser.add_argument("--tokenizer-type")
+    parser.add_argument("--tokenizer-path")
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--per-device-batch-size", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=1.0e-3)
@@ -84,6 +93,16 @@ def spec_from_args(args: argparse.Namespace) -> JaxTpuBenchmarkSpec:
             dataset_name=args.dataset_name,
             train_split=args.train_split,
             eval_split=args.eval_split,
+            hf_path=args.hf_path,
+            hf_name=args.hf_name,
+            hf_data_dir=args.hf_data_dir,
+            hf_train_files=args.hf_train_files,
+            hf_eval_split=args.hf_eval_split,
+            hf_eval_files=args.hf_eval_files,
+        ),
+        tokenizer=JaxTpuTokenizerSpec(
+            tokenizer_type=args.tokenizer_type,
+            tokenizer_path=args.tokenizer_path,
         ),
         budget=JaxTpuRunBudget(
             steps=args.steps,

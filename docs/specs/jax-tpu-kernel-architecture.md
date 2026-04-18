@@ -105,6 +105,25 @@ Without `--allow-patched-maxtext`, patched candidates fail loudly. This is
 intentional: it prevents us from accidentally claiming a custom architecture ran
 when only an unchanged MaxText baseline did.
 
+Emit a tiny HF real-data ingress smoke command:
+
+```sh
+python -m python.jax_tpu.cli \
+  --candidate attention-baseline \
+  --run-name fractal-hf-ingress-tinystories \
+  --base-output-directory gs://fractal-maxtext-runs-81f2add4 \
+  --dataset-type hf \
+  --hf-path roneneldan/TinyStories \
+  --tokenizer-type huggingface \
+  --tokenizer-path gpt2 \
+  --vocab-size 50257 \
+  --steps 5 \
+  --seq-len 256 \
+  --d-model 256 \
+  --layers 4 \
+  --heads 4
+```
+
 ## First TPU Scout Result
 
 Validated on 2026-04-18 with:
@@ -161,18 +180,77 @@ Result:
 This proves the TPU/MaxText baseline lane is operational. It does not yet prove
 anything about Fractal recurrent candidates.
 
+## First Real-Data Ingress Result
+
+Validated on 2026-04-18 with the same `v5litepod-1` spot TPU/runtime and bucket.
+
+Dataset choice:
+
+- `dataset_type=hf`
+- `hf_path=roneneldan/TinyStories`
+- `train_split=train`
+- `tokenizer_type=huggingface`
+- `tokenizer_path=gpt2`
+- `vocab_size=50257`
+
+This run intentionally used public text data instead of
+`joebud/fractal-fineweb-openllama-tokens`. The Fractal token cache is currently
+stored as compressed archive artifacts, not Hub-native parquet/arrow rows, so
+MaxText cannot stream it as an HF dataset without a conversion step.
+
+The successful ingress smoke used:
+
+```sh
+python3 -m maxtext.trainers.pre_train.train \
+  base_emb_dim=256 \
+  base_mlp_dim=1024 \
+  base_num_decoder_layers=4 \
+  base_num_query_heads=4 \
+  base_num_kv_heads=4 \
+  vocab_size=50257 \
+  tokenizer_type=huggingface \
+  tokenizer_path=gpt2 \
+  base_output_directory=gs://fractal-maxtext-runs-81f2add4 \
+  dataset_type=hf \
+  hf_path=roneneldan/TinyStories \
+  train_split=train \
+  dtype=bfloat16 \
+  enable_checkpointing=false \
+  learning_rate=0.001 \
+  max_target_length=256 \
+  per_device_batch_size=1 \
+  run_name=fractal-hf-ingress-tinystories \
+  steps=5 \
+  log_period=1
+```
+
+Result:
+
+- MaxText streamed HF data and downloaded the GPT-2 tokenizer successfully.
+- MaxText used packed variable-length examples; `total_weights` varied by step.
+- model size reported by MaxText: `0.031` billion parameters
+- memory after parameter initialization: `0.36 / 15.75 GB`
+- step 0: `17.349 tokens/s/device`, loss `11.221`
+- final logged step 4: `4192.803 tokens/s/device`, `0.469 TFLOP/s/device`,
+  loss `9.890`
+
+This proves the TPU lane can ingest real text through MaxText. It is not a
+quality result and should not be compared against the synthetic scout.
+
 ## First Proof Ladder
 
 1. Run `attention-baseline` on synthetic data for 10 steps to verify install,
    TPU visibility, GCS output, logs, compile time, and command shape.
-2. Run `attention-baseline` on the intended token/text input path with a tiny
-   step count to verify data ingress.
-3. Add the `rotary-gated-recurrent-state-update` JAX adapter under
+2. Run `attention-baseline` on a real token/text input path with a tiny step
+   count to verify data ingress.
+3. Convert the Fractal HF token archives into a MaxText-native parquet or Grain
+   dataset before using them as the recurring proof-ladder data source.
+4. Add the `rotary-gated-recurrent-state-update` JAX adapter under
    `python/jax_tpu/adapters/` and a matching MaxText patch.
-4. Run baseline and P20 with equal shape, sequence length, batch, optimizer,
+5. Run baseline and P20 with equal shape, sequence length, batch, optimizer,
    data, and steps.
-5. Report compile-inclusive throughput separately from steady-state throughput.
-6. Only after correctness and signal are visible, test a Pallas/custom lowering.
+6. Report compile-inclusive throughput separately from steady-state throughput.
+7. Only after correctness and signal are visible, test a Pallas/custom lowering.
 
 ## Non-Goals
 
