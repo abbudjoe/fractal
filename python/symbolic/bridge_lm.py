@@ -31,6 +31,8 @@ class SymbolicBridgeBatch:
     router_targets: Any
     symbolic_mask: Any
     features: Any
+    role_ids: Any
+    role_names: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -62,9 +64,10 @@ class BridgeLmRun:
     train_final_nll: float
     validation_final_nll: float
     extrapolation_final_nll: float
+    role_metrics: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "name": self.name,
             "mode": self.mode,
             "feature_set": self.feature_set,
@@ -93,6 +96,9 @@ class BridgeLmRun:
             "validation_final_nll": self.validation_final_nll,
             "extrapolation_final_nll": self.extrapolation_final_nll,
         }
+        if self.role_metrics is not None:
+            payload["role_metrics"] = self.role_metrics
+        return payload
 
 
 @dataclass(frozen=True)
@@ -504,6 +510,11 @@ def train_lm_contract_variant(
         train_final_nll=split_metrics["train"]["final_nll"],
         validation_final_nll=split_metrics["validation"]["final_nll"],
         extrapolation_final_nll=split_metrics["extrapolation"]["final_nll"],
+        role_metrics={
+            split: split_metrics[split].get("role_metrics", {})
+            for split in ("train", "safety_calibration", "validation", "extrapolation")
+            if split in split_metrics
+        },
     )
 
 
@@ -825,6 +836,7 @@ def build_contract_splits(
     device: Any,
 ) -> dict[str, SymbolicBridgeBatch]:
     grouped = group_rows(rows)
+    role_names = tuple(sorted({str(row.get("eval_role", "symbolic")) for row in rows}))
     fit_rows = [
         row
         for key, sequence in grouped.items()
@@ -846,6 +858,7 @@ def build_contract_splits(
                 token_bins,
                 feature_set,
                 stats,
+                role_names,
                 device,
             )
     fit_sequences = [
@@ -863,6 +876,7 @@ def build_contract_splits(
         token_bins,
         feature_set,
         stats,
+        role_names,
         device,
     )
     return splits
@@ -876,11 +890,13 @@ def batch_from_sequences(
     token_bins: int,
     feature_set: str,
     stats: tuple[list[float], list[float]],
+    role_names: tuple[str, ...],
     device: Any,
 ) -> SymbolicBridgeBatch:
     max_length = max(len(sequence) for sequence in sequences)
     feature_dim = len(stats[0])
     expert_count = len(expert_ids)
+    role_index = {role: index for index, role in enumerate(role_names)}
     target_ids = []
     previous_tokens = []
     features = []
@@ -891,6 +907,7 @@ def batch_from_sequences(
     router_targets = []
     x_values = []
     symbolic_mask = []
+    role_ids = []
     for sequence in sequences:
         sequence_targets = [int(row["target_token"]) for row in sequence]
         sequence_previous = [token_bins] + sequence_targets[:-1]
@@ -902,6 +919,7 @@ def batch_from_sequences(
         sequence_router_targets = [router_target(row, expert_ids) for row in sequence]
         sequence_x_values = [[float(row["x"])] for row in sequence]
         sequence_mask = [True for _row in sequence]
+        sequence_roles = [role_index[str(row.get("eval_role", "symbolic"))] for row in sequence]
         pad_count = max_length - len(sequence)
         if pad_count:
             sequence_targets.extend([0] * pad_count)
@@ -914,6 +932,7 @@ def batch_from_sequences(
             sequence_router_targets.extend([expert_count] * pad_count)
             sequence_x_values.extend([[0.0] for _index in range(pad_count)])
             sequence_mask.extend([False] * pad_count)
+            sequence_roles.extend([0] * pad_count)
         target_ids.append(sequence_targets)
         previous_tokens.append(sequence_previous)
         features.append(sequence_features)
@@ -924,6 +943,7 @@ def batch_from_sequences(
         router_targets.append(sequence_router_targets)
         x_values.append(sequence_x_values)
         symbolic_mask.append(sequence_mask)
+        role_ids.append(sequence_roles)
     return SymbolicBridgeBatch(
         previous_tokens=torch.tensor(previous_tokens, dtype=torch.long, device=device),
         target_ids=torch.tensor(target_ids, dtype=torch.long, device=device),
@@ -935,6 +955,8 @@ def batch_from_sequences(
         router_targets=torch.tensor(router_targets, dtype=torch.long, device=device),
         symbolic_mask=torch.tensor(symbolic_mask, dtype=torch.bool, device=device),
         features=torch.tensor(features, dtype=torch.float32, device=device),
+        role_ids=torch.tensor(role_ids, dtype=torch.long, device=device),
+        role_names=role_names,
     )
 
 
@@ -1032,6 +1054,20 @@ def evaluate_contract_outputs(
                 active_mask,
             ).detach().cpu().item()
         )
+    role_metrics = evaluate_role_metrics(
+        torch,
+        batch,
+        token_logits,
+        final_logits,
+        final_probabilities,
+        final_predictions,
+        lm_predictions,
+        expert_call_metric,
+        unsafe_call_metric,
+        token_bins,
+        use_router=use_router,
+        fusion_mode=fusion_mode,
+    )
     return {
         "final_token_accuracy": final_accuracy,
         "lm_token_accuracy": lm_accuracy,
@@ -1041,7 +1077,60 @@ def evaluate_contract_outputs(
         "abstain_recall": abstain_recall,
         "loss": loss,
         "final_nll": final_nll,
+        "role_metrics": role_metrics,
     }
+
+
+def evaluate_role_metrics(
+    torch: Any,
+    batch: SymbolicBridgeBatch,
+    token_logits: Any,
+    final_logits: Any | None,
+    final_probabilities: Any | None,
+    final_predictions: Any,
+    lm_predictions: Any,
+    expert_call_metric: Any,
+    unsafe_call_metric: Any,
+    token_bins: int,
+    *,
+    use_router: bool,
+    fusion_mode: str,
+) -> dict[str, dict[str, float]]:
+    metrics: dict[str, dict[str, float]] = {}
+    for index, role in enumerate(batch.role_names):
+        role_mask = batch.symbolic_mask & (batch.role_ids == index)
+        if not bool(role_mask.any().detach().cpu().item()):
+            continue
+        total = role_mask.float().sum().detach().cpu().item()
+        final_accuracy = float(((final_predictions == batch.target_ids) & role_mask).float().sum().detach().cpu().item() / total)
+        lm_accuracy = float(((lm_predictions == batch.target_ids) & role_mask).float().sum().detach().cpu().item() / total)
+        if fusion_mode == "hard-call":
+            final_nll = deterministic_token_nll(final_accuracy, token_bins)
+        else:
+            final_nll = float(
+                masked_token_nll(
+                    torch,
+                    final_logits,
+                    final_probabilities,
+                    batch.target_ids,
+                    role_mask,
+                ).detach().cpu().item()
+            )
+        if use_router:
+            expert_call_rate = float((expert_call_metric * role_mask.float()).sum().detach().cpu().item() / total)
+            unsafe_call_rate = float((unsafe_call_metric * role_mask.float()).sum().detach().cpu().item() / total)
+        else:
+            expert_call_rate = 0.0
+            unsafe_call_rate = 0.0
+        metrics[role] = {
+            "count": float(total),
+            "final_token_accuracy": final_accuracy,
+            "lm_token_accuracy": lm_accuracy,
+            "final_nll": final_nll,
+            "expert_call_rate": expert_call_rate,
+            "unsafe_call_rate": unsafe_call_rate,
+        }
+    return metrics
 
 
 def evaluate_majority_baseline(rows: list[dict[str, Any]], token_bins: int) -> BridgeLmRun:
@@ -1156,10 +1245,18 @@ def baseline_run(
     )
 
 
-def group_rows(rows: list[dict[str, Any]]) -> dict[tuple[str, int, str], list[dict[str, Any]]]:
-    grouped: dict[tuple[str, int, str], list[dict[str, Any]]] = {}
+def group_rows(rows: list[dict[str, Any]]) -> dict[tuple[str, int, str, str], list[dict[str, Any]]]:
+    grouped: dict[tuple[str, int, str, str], list[dict[str, Any]]] = {}
     for row in rows:
-        grouped.setdefault((str(row["task_id"]), int(row["seed"]), str(row["split"])), []).append(row)
+        grouped.setdefault(
+            (
+                str(row["task_id"]),
+                int(row["seed"]),
+                str(row["split"]),
+                str(row.get("sequence_id", "default")),
+            ),
+            [],
+        ).append(row)
     return {key: sorted(sequence, key=lambda row: int(row["index"])) for key, sequence in grouped.items()}
 
 
@@ -1433,6 +1530,33 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
             f"{run.extrapolation_unsafe_call_rate:.3f} | "
             f"{format_optional(run.extrapolation_abstain_recall)} |"
         )
+    role_rows = []
+    for run in report.runs:
+        role_metrics = run.role_metrics or {}
+        for role, metrics in sorted(role_metrics.get("extrapolation", {}).items()):
+            role_rows.append((run, role, metrics))
+    if role_rows:
+        lines.extend(
+            [
+                "",
+                "## Extrapolation Role Metrics",
+                "",
+                "| run | role | count | final acc | final NLL | LM acc | expert call | unsafe call/mass |",
+                "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for run, role, metrics in role_rows:
+            lines.append(
+                "| "
+                f"`{run.name}` | "
+                f"{role} | "
+                f"{metrics['count']:.0f} | "
+                f"{metrics['final_token_accuracy']:.3f} | "
+                f"{metrics['final_nll']:.4g} | "
+                f"{metrics['lm_token_accuracy']:.3f} | "
+                f"{metrics['expert_call_rate']:.3f} | "
+                f"{metrics['unsafe_call_rate']:.3f} |"
+            )
     safe = report.summary["safe_expert_coverage"]
     abstain_rate = report.summary["abstain_target_rate"]
     lines.extend(

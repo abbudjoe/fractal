@@ -19,6 +19,7 @@ from python.specs.symbolic import (
 from python.symbolic.autodiff import autodiff_loss_and_gradient
 from python.symbolic.bridge import TokenQuantizer, run_symbolic_bridge, select_safety_calibration_rows
 from python.symbolic.bridge_canary import resolve_device, run_bridge_canary
+from python.symbolic.bridge_corpus import run_bridge_corpus
 from python.symbolic.bridge_lm import run_symbolic_bridge_lm
 from python.symbolic.bridge_sequence import run_sequence_bridge
 from python.symbolic.formulas import default_symbolic_tasks, sample_symbolic_dataset, tier0_exact_recovery_tasks
@@ -742,6 +743,10 @@ class SymbolicEvaluationTests(unittest.TestCase):
             run_names = {run.name for run in report.runs}
             self.assertIn("lm-router-logit-fusion", run_names)
             self.assertIn("lm-router-prob-mixture", run_names)
+            prob_mixture = next(run for run in report.runs if run.name == "lm-router-prob-mixture")
+            self.assertIsNotNone(prob_mixture.role_metrics)
+            assert prob_mixture.role_metrics is not None
+            self.assertIn("symbolic", prob_mixture.role_metrics["extrapolation"])
             self.assertIn("router_contract_unsafe_call_rate", report.summary)
             self.assertIn("router_contract_abstain_recall", report.summary)
             self.assertIn("best_extrapolation_final_nll", report.summary)
@@ -751,6 +756,113 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertTrue((output_dir / "summary.json").exists())
             self.assertTrue((output_dir / "runs.jsonl").exists())
             self.assertTrue((output_dir / "summary.md").exists())
+
+    def test_bridge_corpus_v1_generates_language_math_and_math_only_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_feature_table = root / "source_feature_table.jsonl"
+            source_summary = root / "source_summary.json"
+            source_rows = []
+            for split in ("train", "safety_calibration", "validation", "extrapolation"):
+                target_token = 2 if split != "extrapolation" else 3
+                source_rows.append(
+                    {
+                        "task_id": "toy_formula",
+                        "seed": 1,
+                        "split": split,
+                        "index": 0,
+                        "x": 0.5,
+                        "target_y": float(target_token),
+                        "target_token": target_token,
+                        "token_bins": 4,
+                        "quantizer": {"minimum": 0.0, "maximum": 4.0},
+                        "in_training_range": split in {"train", "validation"},
+                        "best_expert_id": "paper-complex-eml",
+                        "oracle_has_safe_expert": True,
+                        "safe_expert_mask": {
+                            "generic-tree": False,
+                            "paper-complex-eml": True,
+                            "small-mlp": False,
+                            "stable-real-eml": False,
+                        },
+                        "experts": {
+                            "generic-tree": {
+                                "prediction": 0.0,
+                                "token": 0,
+                                "residual": 1.0,
+                                "abs_residual": 1.0,
+                                "token_match": False,
+                            },
+                            "paper-complex-eml": {
+                                "prediction": float(target_token),
+                                "token": target_token,
+                                "residual": 0.0,
+                                "abs_residual": 0.0,
+                                "token_match": True,
+                            },
+                            "small-mlp": {
+                                "prediction": 1.0,
+                                "token": 1,
+                                "residual": 1.0,
+                                "abs_residual": 1.0,
+                                "token_match": False,
+                            },
+                            "stable-real-eml": {
+                                "prediction": 1.0,
+                                "token": 1,
+                                "residual": 1.0,
+                                "abs_residual": 1.0,
+                                "token_match": False,
+                            },
+                        },
+                    }
+                )
+            with source_feature_table.open("w") as handle:
+                for row in source_rows:
+                    handle.write(json.dumps(row) + "\n")
+            source_summary.write_text(
+                json.dumps(
+                    {
+                        "token_bins": 4,
+                        "summary": {
+                            "feature_table": {
+                                "path": str(source_feature_table),
+                                "row_count": len(source_rows),
+                            }
+                        },
+                    }
+                )
+            )
+
+            language_report = run_bridge_corpus(
+                root / "language-math",
+                run_label="unit-language-math",
+                corpus_kind="language-math",
+                source_bridge_summary_path=source_summary,
+                language_train_per_group=1,
+                language_safety_per_group=1,
+                language_eval_per_group=1,
+            )
+            math_report = run_bridge_corpus(
+                root / "math-only",
+                run_label="unit-math-only",
+                corpus_kind="math-only",
+                source_bridge_summary_path=source_summary,
+            )
+            pure_report = run_bridge_corpus(
+                root / "pure-language",
+                run_label="unit-pure-language",
+                corpus_kind="pure-language",
+                pure_sequences_per_split=2,
+            )
+
+            self.assertIn("math_answer", language_report.summary["feature_table"]["role_counts"])
+            self.assertGreater(language_report.summary["feature_table"]["split_safe_expert_coverage"]["train"], 0.0)
+            self.assertEqual(math_report.summary["feature_table"]["role_counts"], {"math_only": 4})
+            self.assertEqual(pure_report.summary["feature_table"]["role_counts"]["prose"], 72)
+            self.assertEqual(pure_report.summary["feature_table"]["safe_expert_coverage"], 0.0)
+            self.assertTrue((root / "language-math" / "feature_table.jsonl").exists())
+            self.assertTrue((root / "language-math" / "summary.json").exists())
 
     @unittest.skipUnless(importlib.util.find_spec("torch") is not None, "PyTorch is optional for default unit tests")
     def test_symbolic_bridge_lm_transformer_backbone_runs_true_token_control(self) -> None:

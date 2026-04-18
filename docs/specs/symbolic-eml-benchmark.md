@@ -1141,3 +1141,85 @@ Transformer-control verdict:
   improvement on natural text; it shows that, under the bridge contract, a
   decoder-only transformer can use the compiled EML expert bank to improve
   extrapolative symbolic prediction.
+
+## Bridge Corpus V1
+
+The bridge now has a three-rung corpus ladder:
+
+1. `pure-language`: synthetic prose only. There are no safe expert calls.
+2. `language-math`: prose-wrapped formula examples with a single math answer
+   token per example. Expert calls should happen on `math_answer` tokens and
+   abstain on prose/context tokens.
+3. `math-only`: the existing symbolic-token bridge corpus, annotated as
+   `math_only`.
+
+Corpus artifacts:
+
+```text
+artifacts/bridge-corpus-v1/bridge-corpus-v1-pure-language/
+artifacts/bridge-corpus-v1/bridge-corpus-v1-language-math/
+artifacts/bridge-corpus-v1/bridge-corpus-v1-math-only/
+```
+
+LM artifacts:
+
+```text
+artifacts/bridge-corpus-v1-lm/bridge-corpus-v1-pure-language-transformer/
+artifacts/bridge-corpus-v1-lm/bridge-corpus-v1-language-math-transformer/
+artifacts/bridge-corpus-v1-lm/bridge-corpus-v1-math-only-transformer/
+```
+
+All three LM runs used the same 2-layer causal transformer control surface:
+`hidden_units=64`, `transformer_heads=4`, `epochs=900`, `learning_rate=0.004`,
+MPS selected by `--device auto`.
+
+Corpus sizes:
+
+| corpus | rows | token bins | extrap roles | extrap safe expert coverage |
+| --- | ---: | ---: | --- | ---: |
+| pure language | 5,760 | 37 | prose: 1,440 | 0.000 |
+| language + math | 11,968 | 109 | prose: 2,240; math_context: 960; math_answer: 320 | overall 0.075; math_answer 0.825 |
+| math only | 5,376 | 32 | math_only: 1,536 | 0.783 |
+
+Extrapolation headline metrics:
+
+| corpus | run | extrap acc | extrap NLL | expert call | unsafe call/mass |
+| --- | --- | ---: | ---: | ---: | ---: |
+| pure language | `lm-token-only` | 0.461 | 3.773 | 0.000 | 0.000 |
+| pure language | `lm-router-prob-mixture` | 0.460 | 4.600 | 0.000 | 0.000 |
+| language + math | `lm-token-only` | 0.808 | 0.998 | 0.000 | 0.000 |
+| language + math | `lm-router-logit-fusion` | 0.942 | 0.578 | 0.080 | 0.008 |
+| language + math | `lm-router-prob-mixture` | 0.947 | 0.617 | 0.079 | 0.007 |
+| math only | `lm-token-only` | 0.615 | 3.208 | 0.000 | 0.000 |
+| math only | `lm-router-hard-call` | 0.801 | 1.610 | 0.526 | 0.001 |
+| math only | `lm-router-prob-mixture` | 0.869 | 1.457 | 0.815 | 0.043 |
+
+Language+math answer-span metrics:
+
+| run | math-answer acc | math-answer NLL | answer expert call | answer unsafe mass |
+| --- | ---: | ---: | ---: | ---: |
+| `lm-token-only` | 0.394 | 4.325 | 0.000 | 0.000 |
+| `lm-frozen-side-channel` | 0.559 | 2.741 | 0.000 | 0.000 |
+| `lm-router-logit-fusion` | 0.769 | 1.971 | 0.875 | 0.090 |
+| `lm-router-prob-mixture` | 0.863 | 1.638 | 0.866 | 0.075 |
+
+Bridge Corpus V1 verdict:
+
+- The pure-language rung is a useful negative control. The router abstains
+  everywhere and makes zero unsafe calls. The hybrid does not invent a fake
+  language gain; token-only remains the best NLL.
+- The language+math rung is the first actual bridge-shaped win. Probability
+  mixture improves overall extrapolation accuracy from `0.808` to `0.947`; on
+  math-answer tokens it improves from `0.394` to `0.863`, while prose stays at
+  `1.000` accuracy and near-zero NLL.
+- The math-only rung reproduces the symbolic-token story under the shared
+  900-epoch transformer setting. Probability mixture reaches `0.869`
+  extrapolation accuracy versus `0.615` for token-only.
+- The current failure mode is calibration on soft fusion. Language+math
+  probability mixture assigns `0.075` unsafe expert mass on answer tokens, and
+  math-only assigns `0.043` unsafe mass overall. Hard-call is much safer on
+  math-only (`0.001`) but less accurate than probability mixture.
+- The next bridge step should not be a larger model first. It should tighten
+  soft-fusion calibration on answer spans: unsafe-mass penalty by role, explicit
+  prose/context abstention loss, and a loss report that gates on math-answer NLL
+  plus unsafe answer mass.
