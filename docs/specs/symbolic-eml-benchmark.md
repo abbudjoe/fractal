@@ -1280,3 +1280,105 @@ Role-calibration verdict:
   The remaining issue is answer-token expert selection quality. The next run
   should add an answer-role objective that prefers safe expert mass over merely
   reducing unsafe mass, so the router does not solve safety by becoming timid.
+
+## Expert-Bank Ablation And Shuffle Controls
+
+The next null test keeps the calibrated `language + math` corpus and transformer
+bridge recipe fixed, then changes only the available expert bank:
+
+- single-expert ablations: `paper-complex-eml`, `stable-real-eml`,
+  `generic-tree`, `small-mlp`
+- grouped ablations: symbolic trees only, non-EML controls only
+- shuffled-all control: same four experts and token distribution, but expert
+  payloads are shuffled within split and role before safety metadata is
+  recomputed
+
+This tests whether the bridge gain follows the paper-aligned expert payloads, or
+whether any extra predictor/shuffled token prior can reproduce it.
+
+Ablation corpus artifacts:
+
+```text
+artifacts/bridge-corpus-v1-ablation/
+```
+
+Representative corpus-build commands:
+
+```bash
+python scripts/symbolic_bridge_corpus.py \
+  --corpus-kind expert-ablation \
+  --source-corpus-summary artifacts/bridge-corpus-v1/bridge-corpus-v1-language-math/summary.json \
+  --experts paper-complex-eml \
+  --run-label language-math-paper-complex-only \
+  --output-dir artifacts/bridge-corpus-v1-ablation/language-math-paper-complex-only
+
+python scripts/symbolic_bridge_corpus.py \
+  --corpus-kind expert-shuffle \
+  --source-corpus-summary artifacts/bridge-corpus-v1/bridge-corpus-v1-language-math/summary.json \
+  --run-label language-math-shuffled-all \
+  --output-dir artifacts/bridge-corpus-v1-ablation/language-math-shuffled-all \
+  --shuffle-seed 20260418
+```
+
+Ablation LM artifacts:
+
+```text
+artifacts/bridge-corpus-v1-ablation-lm/
+```
+
+All LM ablations used the same calibrated transformer recipe as
+`bridge-corpus-v1-language-math-transformer-calibrated-v2`:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary <ablation-summary.json> \
+  --backbone transformer \
+  --transformer-layers 2 \
+  --transformer-heads 4 \
+  --transformer-ffn-multiplier 2 \
+  --epochs 900 \
+  --learning-rate 0.004 \
+  --hidden-units 64 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 5.0 \
+  --answer-unsafe-loss-weight 5.0 \
+  --non-answer-abstain-loss-weight 3.0 \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --device mps \
+  --output table
+```
+
+Language+math extrapolation, math-answer role only:
+
+| condition | experts | safe answer coverage | token-only acc | token-only NLL | prob-mixture acc | prob-mixture NLL | logit-fusion acc | logit-fusion NLL | prob unsafe mass |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| all-four calibrated baseline | generic, paper-complex, small-mlp, stable-real | 0.825 | 0.375 | 4.321 | 0.872 | 1.639 | 0.756 | 1.881 | 0.058 |
+| paper-complex only | paper-complex | 0.812 | 0.375 | 4.317 | 0.881 | 1.515 | 0.769 | 1.660 | 0.082 |
+| stable-real only | stable-real | 0.394 | 0.375 | 4.361 | 0.444 | 4.323 | 0.494 | 3.159 | 0.040 |
+| generic-tree only | generic-tree | 0.016 | 0.394 | 4.222 | 0.503 | 4.181 | 0.463 | 3.519 | 0.012 |
+| small-mlp only | small-mlp | 0.069 | 0.394 | 4.298 | 0.447 | 3.980 | 0.497 | 3.985 | 0.010 |
+| symbolic trees | generic, paper-complex, stable-real | 0.825 | 0.394 | 4.294 | 0.753 | 1.791 | 0.819 | 1.477 | 0.019 |
+| non-EML control | generic, small-mlp | 0.084 | 0.375 | 4.297 | 0.450 | 4.795 | 0.422 | 3.666 | 0.015 |
+| shuffled all | generic, paper-complex, small-mlp, stable-real | 0.206 | 0.375 | 4.287 | 0.362 | 3.883 | 0.394 | 3.865 | 0.039 |
+
+Null-test verdict:
+
+- The effect follows `paper-complex-eml`. Paper-complex-only is at least as good
+  as the all-four calibrated bank on math-answer accuracy (`0.881` vs `0.872`)
+  and better on answer NLL (`1.515` vs `1.639`).
+- The practical `stable-real-eml` surrogate preserves some structure but not the
+  bridge result. Its answer accuracy is only `0.444`, close to the token-only
+  baseline, and its NLL remains high.
+- The non-EML controls do not explain the gain. `generic-tree`, `small-mlp`, and
+  their combined control all trail the x/task transformer and do not produce a
+  useful probability-mixture answer head.
+- The shuffled-all control collapses. Keeping the same expert ids and token
+  distribution while breaking per-example alignment drops probability-mixture
+  answer accuracy below token-only (`0.362` vs `0.375`). That is strong evidence
+  against a token-prior or router-leak explanation.
+- The remaining risk is calibration, not capability. Paper-complex-only has the
+  best answer NLL and accuracy, but assigns more unsafe answer mass (`0.082`)
+  than the all-four calibrated bank (`0.058`). The next bridge should optimize
+  safe expert mass on answer tokens directly rather than only penalizing unsafe
+  mass.

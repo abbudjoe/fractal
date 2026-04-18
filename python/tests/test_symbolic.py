@@ -768,59 +768,60 @@ class SymbolicEvaluationTests(unittest.TestCase):
             source_summary = root / "source_summary.json"
             source_rows = []
             for split in ("train", "safety_calibration", "validation", "extrapolation"):
-                target_token = 2 if split != "extrapolation" else 3
-                source_rows.append(
-                    {
-                        "task_id": "toy_formula",
-                        "seed": 1,
-                        "split": split,
-                        "index": 0,
-                        "x": 0.5,
-                        "target_y": float(target_token),
-                        "target_token": target_token,
-                        "token_bins": 4,
-                        "quantizer": {"minimum": 0.0, "maximum": 4.0},
-                        "in_training_range": split in {"train", "validation"},
-                        "best_expert_id": "paper-complex-eml",
-                        "oracle_has_safe_expert": True,
-                        "safe_expert_mask": {
-                            "generic-tree": False,
-                            "paper-complex-eml": True,
-                            "small-mlp": False,
-                            "stable-real-eml": False,
-                        },
-                        "experts": {
-                            "generic-tree": {
-                                "prediction": 0.0,
-                                "token": 0,
-                                "residual": 1.0,
-                                "abs_residual": 1.0,
-                                "token_match": False,
+                for index in range(2):
+                    target_token = 2 + index if split != "extrapolation" else 3 - index
+                    source_rows.append(
+                        {
+                            "task_id": "toy_formula",
+                            "seed": 1,
+                            "split": split,
+                            "index": index,
+                            "x": 0.5 + index,
+                            "target_y": float(target_token),
+                            "target_token": target_token,
+                            "token_bins": 4,
+                            "quantizer": {"minimum": 0.0, "maximum": 4.0},
+                            "in_training_range": split in {"train", "validation"},
+                            "best_expert_id": "paper-complex-eml",
+                            "oracle_has_safe_expert": True,
+                            "safe_expert_mask": {
+                                "generic-tree": False,
+                                "paper-complex-eml": True,
+                                "small-mlp": False,
+                                "stable-real-eml": False,
                             },
-                            "paper-complex-eml": {
-                                "prediction": float(target_token),
-                                "token": target_token,
-                                "residual": 0.0,
-                                "abs_residual": 0.0,
-                                "token_match": True,
+                            "experts": {
+                                "generic-tree": {
+                                    "prediction": 0.0,
+                                    "token": 0,
+                                    "residual": 1.0,
+                                    "abs_residual": 1.0,
+                                    "token_match": False,
+                                },
+                                "paper-complex-eml": {
+                                    "prediction": float(target_token),
+                                    "token": target_token,
+                                    "residual": 0.0,
+                                    "abs_residual": 0.0,
+                                    "token_match": True,
+                                },
+                                "small-mlp": {
+                                    "prediction": 1.0,
+                                    "token": 1,
+                                    "residual": 1.0,
+                                    "abs_residual": 1.0,
+                                    "token_match": False,
+                                },
+                                "stable-real-eml": {
+                                    "prediction": 1.0,
+                                    "token": 1,
+                                    "residual": 1.0,
+                                    "abs_residual": 1.0,
+                                    "token_match": False,
+                                },
                             },
-                            "small-mlp": {
-                                "prediction": 1.0,
-                                "token": 1,
-                                "residual": 1.0,
-                                "abs_residual": 1.0,
-                                "token_match": False,
-                            },
-                            "stable-real-eml": {
-                                "prediction": 1.0,
-                                "token": 1,
-                                "residual": 1.0,
-                                "abs_residual": 1.0,
-                                "token_match": False,
-                            },
-                        },
-                    }
-                )
+                        }
+                    )
             with source_feature_table.open("w") as handle:
                 for row in source_rows:
                     handle.write(json.dumps(row) + "\n")
@@ -843,9 +844,9 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 run_label="unit-language-math",
                 corpus_kind="language-math",
                 source_bridge_summary_path=source_summary,
-                language_train_per_group=1,
-                language_safety_per_group=1,
-                language_eval_per_group=1,
+                language_train_per_group=2,
+                language_safety_per_group=2,
+                language_eval_per_group=2,
             )
             math_report = run_bridge_corpus(
                 root / "math-only",
@@ -859,12 +860,37 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 corpus_kind="pure-language",
                 pure_sequences_per_split=2,
             )
+            ablation_report = run_bridge_corpus(
+                root / "paper-only",
+                run_label="unit-paper-only",
+                corpus_kind="expert-ablation",
+                source_corpus_summary_path=root / "language-math" / "summary.json",
+                expert_subset=("paper-complex-eml",),
+            )
+            shuffle_report = run_bridge_corpus(
+                root / "paper-shuffled",
+                run_label="unit-paper-shuffled",
+                corpus_kind="expert-shuffle",
+                source_corpus_summary_path=root / "language-math" / "summary.json",
+                expert_subset=("paper-complex-eml",),
+                shuffle_seed=9,
+            )
 
             self.assertIn("math_answer", language_report.summary["feature_table"]["role_counts"])
             self.assertGreater(language_report.summary["feature_table"]["split_safe_expert_coverage"]["train"], 0.0)
-            self.assertEqual(math_report.summary["feature_table"]["role_counts"], {"math_only": 4})
+            self.assertEqual(math_report.summary["feature_table"]["role_counts"], {"math_only": 8})
             self.assertEqual(pure_report.summary["feature_table"]["role_counts"]["prose"], 72)
             self.assertEqual(pure_report.summary["feature_table"]["safe_expert_coverage"], 0.0)
+            self.assertEqual(ablation_report.summary["expert_transform"]["selected_experts"], ["paper-complex-eml"])
+            self.assertEqual(shuffle_report.summary["expert_transform"]["shuffle_seed"], 9)
+            with Path(ablation_report.feature_table_path).open() as handle:
+                ablation_rows = [json.loads(line) for line in handle if line.strip()]
+            with Path(shuffle_report.feature_table_path).open() as handle:
+                shuffled_rows = [json.loads(line) for line in handle if line.strip()]
+            self.assertTrue(all(tuple(row["experts"]) == ("paper-complex-eml",) for row in ablation_rows))
+            self.assertTrue(all(tuple(row["safe_expert_mask"]) == ("paper-complex-eml",) for row in shuffled_rows))
+            shuffled_answers = [row for row in shuffled_rows if row["eval_role"] == "math_answer"]
+            self.assertTrue(any(not row["oracle_has_safe_expert"] for row in shuffled_answers))
             self.assertTrue((root / "language-math" / "feature_table.jsonl").exists())
             self.assertTrue((root / "language-math" / "summary.json").exists())
 

@@ -60,12 +60,16 @@ def run_bridge_corpus(
     run_label: str,
     corpus_kind: str,
     source_bridge_summary_path: Path | None = None,
+    source_corpus_summary_path: Path | None = None,
+    expert_subset: tuple[str, ...] | None = None,
     seed: int = 123,
+    shuffle_seed: int | None = None,
     pure_sequences_per_split: int = 160,
     language_train_per_group: int = 12,
     language_safety_per_group: int = 16,
     language_eval_per_group: int = 20,
 ) -> BridgeCorpusReport:
+    transform_summary: dict[str, Any] | None = None
     if corpus_kind == "pure-language":
         rows, token_bins, vocabulary, source_path = build_pure_language_rows(
             seed=seed,
@@ -84,8 +88,27 @@ def run_bridge_corpus(
         if source_bridge_summary_path is None:
             raise ValueError("math-only corpus requires source_bridge_summary_path")
         rows, token_bins, vocabulary, source_path = build_math_only_rows(source_bridge_summary_path)
+    elif corpus_kind in {"expert-ablation", "expert-shuffle"}:
+        transform_source_path = source_corpus_summary_path or source_bridge_summary_path
+        if transform_source_path is None:
+            raise ValueError(f"{corpus_kind} corpus requires source_corpus_summary_path")
+        effective_shuffle_seed = seed if shuffle_seed is None else shuffle_seed
+        rows, token_bins, vocabulary, source_path, selected_experts = build_expert_transform_rows(
+            transform_source_path,
+            expert_subset=expert_subset,
+            shuffle_experts=corpus_kind == "expert-shuffle",
+            seed=effective_shuffle_seed,
+        )
+        transform_summary = {
+            "source_corpus_summary_path": source_path,
+            "selected_experts": list(selected_experts),
+            "shuffle_experts": corpus_kind == "expert-shuffle",
+            "shuffle_seed": effective_shuffle_seed if corpus_kind == "expert-shuffle" else None,
+        }
     else:
-        raise ValueError("corpus_kind must be one of pure-language|language-math|math-only")
+        raise ValueError(
+            "corpus_kind must be one of pure-language|language-math|math-only|expert-ablation|expert-shuffle"
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     feature_table_path = output_dir / "feature_table.jsonl"
@@ -98,6 +121,8 @@ def run_bridge_corpus(
         source_bridge_summary_path=source_path,
         vocabulary=vocabulary,
     )
+    if transform_summary is not None:
+        summary["expert_transform"] = transform_summary
     report = BridgeCorpusReport(
         run_label=run_label,
         corpus_kind=corpus_kind,
@@ -233,6 +258,169 @@ def build_math_only_rows(source_bridge_summary_path: Path) -> tuple[list[dict[st
         rows.append(row_copy)
     vocabulary = [f"NUM_{index:02d}" for index in range(token_bins)]
     return rows, token_bins, vocabulary, repo_relative(source_bridge_summary_path)
+
+
+def build_expert_transform_rows(
+    source_corpus_summary_path: Path,
+    *,
+    expert_subset: tuple[str, ...] | None,
+    shuffle_experts: bool,
+    seed: int,
+) -> tuple[list[dict[str, Any]], int, list[str], str, tuple[str, ...]]:
+    source_summary = json.loads(source_corpus_summary_path.read_text())
+    source_feature_path = resolve_feature_table_path(source_summary, source_corpus_summary_path)
+    source_rows = load_feature_rows(source_feature_path)
+    if not source_rows:
+        raise ValueError(f"source corpus feature table has no rows: {source_feature_path}")
+    selected_experts = resolve_expert_subset(source_rows, expert_subset)
+    rows = transform_expert_rows(
+        source_rows,
+        selected_experts=selected_experts,
+        shuffle_experts=shuffle_experts,
+        seed=seed,
+    )
+    token_bins = int(source_summary.get("token_bins") or source_rows[0]["token_bins"])
+    vocabulary = source_summary.get("summary", {}).get("vocabulary")
+    if not isinstance(vocabulary, list) or len(vocabulary) != token_bins:
+        vocabulary = [f"TOKEN_{index:02d}" for index in range(token_bins)]
+    return (
+        rows,
+        token_bins,
+        [str(token) for token in vocabulary],
+        repo_relative(source_corpus_summary_path),
+        selected_experts,
+    )
+
+
+def resolve_expert_subset(rows: list[dict[str, Any]], expert_subset: tuple[str, ...] | None) -> tuple[str, ...]:
+    available = tuple(
+        sorted({str(expert) for row in rows for expert in row.get("experts", {})})
+    )
+    if not available:
+        raise ValueError("source corpus rows do not contain any experts")
+    if expert_subset is None:
+        return available
+    selected = tuple(str(expert).strip() for expert in expert_subset if str(expert).strip())
+    if not selected:
+        raise ValueError("expert_subset must contain at least one expert")
+    unknown = sorted(set(selected) - set(available))
+    if unknown:
+        raise ValueError(
+            f"expert_subset contains unknown experts: {unknown}; "
+            f"available experts: {list(available)}"
+        )
+    return selected
+
+
+def transform_expert_rows(
+    rows: list[dict[str, Any]],
+    *,
+    selected_experts: tuple[str, ...],
+    shuffle_experts: bool,
+    seed: int,
+) -> list[dict[str, Any]]:
+    transformed = [copy_row_with_selected_experts(row, selected_experts) for row in rows]
+    if shuffle_experts:
+        shuffled_by_expert = shuffled_payloads_by_expert(transformed, selected_experts, seed)
+        for row_index, row in enumerate(transformed):
+            experts = {
+                expert: retarget_expert_payload(
+                    shuffled_by_expert[expert][row_index],
+                    target_token=int(row["target_token"]),
+                    target_y=float(row["target_y"]),
+                )
+                for expert in selected_experts
+            }
+            row["experts"] = experts
+            refresh_expert_metadata(row, selected_experts)
+    return transformed
+
+
+def copy_row_with_selected_experts(row: dict[str, Any], selected_experts: tuple[str, ...]) -> dict[str, Any]:
+    row_copy = dict(row)
+    experts = {
+        expert: retarget_expert_payload(
+            row.get("experts", {}).get(expert, invalid_expert_payload()),
+            target_token=int(row["target_token"]),
+            target_y=float(row["target_y"]),
+        )
+        for expert in selected_experts
+    }
+    row_copy["experts"] = experts
+    refresh_expert_metadata(row_copy, selected_experts)
+    return row_copy
+
+
+def shuffled_payloads_by_expert(
+    rows: list[dict[str, Any]],
+    selected_experts: tuple[str, ...],
+    seed: int,
+) -> dict[str, list[dict[str, Any]]]:
+    rng = random.Random(seed)
+    shuffled: dict[str, list[dict[str, Any]]] = {
+        expert: [invalid_expert_payload() for _row in rows]
+        for expert in selected_experts
+    }
+    for expert in selected_experts:
+        grouped_indices: dict[tuple[str, str], list[int]] = {}
+        for index, row in enumerate(rows):
+            key = (str(row["split"]), str(row.get("eval_role", "symbolic")))
+            grouped_indices.setdefault(key, []).append(index)
+        for group_number, indices in enumerate(grouped_indices.values()):
+            payloads = [dict(rows[index]["experts"][expert]) for index in indices]
+            original_payloads = [dict(payload) for payload in payloads]
+            group_rng = random.Random(rng.randrange(2**63) + group_number)
+            group_rng.shuffle(payloads)
+            if len(payloads) > 1 and payloads == original_payloads:
+                payloads = payloads[1:] + payloads[:1]
+            for index, payload in zip(indices, payloads):
+                shuffled[expert][index] = payload
+    return shuffled
+
+
+def refresh_expert_metadata(row: dict[str, Any], selected_experts: tuple[str, ...]) -> None:
+    safe_mask = {
+        expert: bool(row["experts"][expert].get("token_match", False))
+        for expert in selected_experts
+    }
+    row["safe_expert_mask"] = safe_mask
+    row["oracle_has_safe_expert"] = any(safe_mask.values())
+    row["best_expert_id"] = best_expert_id(row["experts"])
+
+
+def retarget_expert_payload(
+    payload: dict[str, Any],
+    *,
+    target_token: int,
+    target_y: float,
+) -> dict[str, Any]:
+    token = payload.get("token", -1)
+    try:
+        token = int(token)
+    except (TypeError, ValueError):
+        token = -1
+    prediction = payload.get("prediction")
+    prediction_is_valid = isinstance(prediction, (int, float)) and math.isfinite(float(prediction))
+    if token < 0 or not prediction_is_valid:
+        return invalid_expert_payload()
+    residual = float(prediction) - target_y
+    return {
+        "prediction": float(prediction),
+        "token": token,
+        "residual": residual,
+        "abs_residual": abs(residual),
+        "token_match": token == target_token,
+    }
+
+
+def invalid_expert_payload() -> dict[str, Any]:
+    return {
+        "prediction": None,
+        "token": -1,
+        "residual": None,
+        "abs_residual": 1.0e300,
+        "token_match": False,
+    }
 
 
 def base_language_vocabulary() -> Vocabulary:
@@ -499,4 +687,11 @@ def render_corpus_markdown(report: BridgeCorpusReport) -> str:
         f"Safe expert coverage by role: `{feature_table['role_safe_expert_coverage']}`",
         "",
     ]
+    if "expert_transform" in report.summary:
+        lines.extend(
+            [
+                f"Expert transform: `{report.summary['expert_transform']}`",
+                "",
+            ]
+        )
     return "\n".join(lines)

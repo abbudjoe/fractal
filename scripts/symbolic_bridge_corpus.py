@@ -16,8 +16,15 @@ from python.symbolic.bridge_corpus import run_bridge_corpus  # noqa: E402
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build bridge-corpus-v1 feature tables.")
-    parser.add_argument("--corpus-kind", choices=["pure-language", "language-math", "math-only"], required=True)
+    parser.add_argument(
+        "--corpus-kind",
+        choices=["pure-language", "language-math", "math-only", "expert-ablation", "expert-shuffle"],
+        required=True,
+    )
     parser.add_argument("--source-bridge-summary", type=Path)
+    parser.add_argument("--source-corpus-summary", type=Path)
+    parser.add_argument("--experts", default="", help="Comma-separated expert ids for ablation/shuffle corpora.")
+    parser.add_argument("--shuffle-seed", type=int)
     parser.add_argument("--run-label", default=f"bridge-corpus-{int(time.time())}")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--seed", type=int, default=123)
@@ -32,12 +39,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     output_dir = args.output_dir or (REPO_ROOT / "artifacts" / "bridge-corpus-v1" / args.run_label)
+    expert_subset = tuple(expert.strip() for expert in args.experts.split(",") if expert.strip()) or None
     report = run_bridge_corpus(
         output_dir,
         run_label=args.run_label,
         corpus_kind=args.corpus_kind,
         source_bridge_summary_path=args.source_bridge_summary,
+        source_corpus_summary_path=args.source_corpus_summary,
+        expert_subset=expert_subset,
         seed=args.seed,
+        shuffle_seed=args.shuffle_seed,
         pure_sequences_per_split=args.pure_sequences_per_split,
         language_train_per_group=args.language_train_per_group,
         language_safety_per_group=args.language_safety_per_group,
@@ -55,6 +66,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"split_counts={feature_table['split_counts']}")
         print(f"role_counts={feature_table['role_counts']}")
         print(f"split_safe_expert_coverage={feature_table['split_safe_expert_coverage']}")
+        if "expert_transform" in report.summary:
+            print(f"expert_transform={report.summary['expert_transform']}")
         print(f"summary_path={output_dir / 'summary.json'}")
         print(f"markdown_path={output_dir / 'summary.md'}")
     return 0
