@@ -1410,6 +1410,21 @@ Current status:
 | 4. Seed/template variance | repaired for math-answer probability mixture | Probability-mixture math-answer gains become stable across the three frozen variance splits. |
 | 5. More natural mixed corpus | pending | Not run yet. |
 
+Metric note for the bridge tables below:
+
+- `acc` means token accuracy on the listed slice; higher is better.
+- `NLL` means negative log likelihood of the correct token; lower is better.
+- `token-only` is the pure decoder-only transformer control.
+- `side-channel` means frozen expert features are visible to the LM, but expert
+  predictions are not fused into the final token distribution.
+- `prob-mixture` is the main hybrid path: the final distribution mixes LM token
+  probabilities with expert-token probability mass.
+- `expert mass` is soft expert probability mass for fusion rows and a hard call
+  rate for hard-call rows.
+- `unsafe mass` is mass assigned to experts whose predicted token is wrong.
+- `math-answer role` means only the answer token positions, excluding prose and
+  math-context tokens.
+
 Gate 2 artifact bundle:
 
 ```text
@@ -1422,7 +1437,9 @@ Gate 2 held out formula families `d1_exp_soft`, `d2_reciprocal_shift`,
 extrapolation language wrappers; and varied math-answer positions across
 indices `1`, `6`, `8`, and `9`.
 
-Language+math held-out-template extrapolation, math-answer role:
+Caption: Original Gate 2 held-out-template result on only extrapolation
+`math_answer` tokens. This table asks whether the bridge can answer unseen
+formula/template combinations, and whether it does so safely.
 
 | run | math-answer acc | math-answer NLL | expert mass/call | unsafe mass/call |
 | --- | ---: | ---: | ---: | ---: |
@@ -1450,7 +1467,9 @@ artifacts/bridge-corpus-v1-gate3/
 artifacts/bridge-corpus-v1-gate3-lm/
 ```
 
-Language+math Gate 3 controls, extrapolation math-answer role:
+Caption: Gate 3 leakage controls on extrapolation `math_answer` tokens.
+Target-randomized breaks answer labels; wrong-expert breaks row/expert
+alignment. The bridge should not retain its gain under either control.
 
 | condition | token-only acc | side-channel acc | prob-mixture acc | prob-mixture NLL | prob unsafe mass |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -1474,7 +1493,9 @@ artifacts/bridge-corpus-v1-gate4/
 artifacts/bridge-corpus-v1-gate4-lm/
 ```
 
-Language+math held-out-template variance, extrapolation math-answer role:
+Caption: Original Gate 4 variance sweep on extrapolation `math_answer` tokens.
+Each seed rotates formula splits and template choices; `contract` records
+whether that run met the pre-repair capability+safety gate.
 
 | condition | token-only acc | side-channel acc | prob-mixture acc | prob-mixture NLL | prob unsafe mass | contract |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
@@ -1516,7 +1537,9 @@ expert_logit_scale: 6.0
 device: mps
 ```
 
-Frozen Gate 2 repair, extrapolation math-answer role:
+Caption: Gate 2 repair on the same frozen held-out-template `math_answer`
+evaluation slice. The rows separate extra multi-split calibration from the
+answer-token call/abstain objective so the source of the repair is visible.
 
 | condition | prob-mixture acc | prob-mixture NLL | expert mass | unsafe mass | role-aware contract |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -1524,7 +1547,9 @@ Frozen Gate 2 repair, extrapolation math-answer role:
 | multi-split calibration only | 0.419 | 4.159 | 0.362 | 0.054 | false |
 | multi-split + answer call/abstain | 0.562 | 2.859 | 0.468 | 0.049 | true |
 
-Frozen Gate 4 repair, extrapolation math-answer role:
+Caption: Gate 4 repair on the same frozen variance `math_answer` slices. The
+important comparison is original versus repaired behavior for the same seeds,
+not just the absolute score.
 
 | condition | prob-mixture acc | prob-mixture NLL | expert mass | unsafe mass | role-aware contract |
 | --- | ---: | ---: | ---: | ---: | --- |

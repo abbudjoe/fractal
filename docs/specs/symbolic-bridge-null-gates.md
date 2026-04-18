@@ -23,6 +23,25 @@ answer-token call/abstain objective make the probability-mixture bridge much
 more stable on math-answer tokens. This does not yet establish a general LM
 improvement.
 
+## Metric Glossary
+
+The bridge tables use compact metric names. Read them this way:
+
+| shorthand | meaning | direction |
+| --- | --- | --- |
+| `acc` | Accuracy: fraction of evaluated tokens whose final predicted token equals the target token. | Higher is better. |
+| `NLL` | Negative log likelihood assigned to the correct token. This measures calibrated probability, not just argmax correctness. | Lower is better. |
+| `token-only` | Pure decoder-only transformer path with no symbolic expert signal. | Control baseline. |
+| `side-channel` | Transformer sees frozen expert features as input, but expert predictions are not fused into the final distribution. | Control baseline. |
+| `hard-call` | Router either selects one compiled expert token or abstains back to the LM. | Safety-oriented control. |
+| `logit-fusion` | Expert token mass is added as a logit bonus before softmax. | Hybrid variant. |
+| `prob-mixture` | Final probability is a mixture of the LM softmax and expert token probabilities. | Main positive bridge variant. |
+| `expert mass` / `call mass` | Average probability mass assigned to valid expert predictions. In hard-call rows this is a call rate; in soft-fusion rows this is soft probability mass. | Needs balance: too low means timid, too high can be unsafe. |
+| `unsafe mass` / `unsafe call` | Average probability mass or hard calls assigned to experts whose token does not match the target. | Lower is better. |
+| `safe answer coverage` | Fraction of math-answer rows where at least one expert has the correct token available. | Upper bound context. |
+| `math-answer role` | Only the token positions containing the numeric/formula answer, excluding prose and context tokens. | The bridge-critical slice. |
+| `role-aware contract` | Pass/fail for the math-answer probability-mixture gate: useful gain over token-only/side-channel controls with unsafe answer mass at or below the safety threshold used here. | `true` is better. |
+
 ## Resolution Block Contract
 
 Each gate records the same operational block:
@@ -54,7 +73,10 @@ artifacts/bridge-corpus-v1-ablation/
 artifacts/bridge-corpus-v1-ablation-lm/
 ```
 
-Language+math extrapolation, math-answer role:
+Caption: Gate 1 compares expert-bank variants on only the extrapolation
+`math_answer` tokens. The purpose is to see whether the probability-mixture gain
+comes from aligned `paper-complex-eml` experts or from generic/shuffled expert
+capacity.
 
 | condition | safe answer coverage | token-only acc | prob-mixture acc | prob-mixture NLL | unsafe mass |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -167,7 +189,11 @@ uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm
   --device mps
 ```
 
-Extrapolation, math-answer role:
+Caption: Gate 2 original held-out-template result on the frozen extrapolation
+`math_answer` slice. `final acc`/`final NLL` are the model's fused output;
+`LM-only acc` is the same model's decoder prediction before expert fusion;
+`expert mass/call` and `unsafe mass/call` are soft mass for fusion rows and hard
+call rates for hard-call rows.
 
 | run | final acc | final NLL | LM-only acc | expert mass/call | unsafe mass/call |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -254,7 +280,10 @@ The target-randomized corpus changed `0.819` of math-answer labels. The
 wrong-expert corpus paired answer rows with a different task `1.000` of the
 time.
 
-Extrapolation, math-answer role:
+Caption: Gate 3 leakage controls on the extrapolation `math_answer` slice.
+Target-randomized changes answer labels; wrong-expert pairs rows with expert
+payloads from other tasks. If the bridge still won here, the benchmark would be
+leaky.
 
 | condition | safe answer coverage | token-only acc | side-channel acc | prob-mixture acc | prob-mixture NLL | prob unsafe mass |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -343,7 +372,9 @@ uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm
   --device mps
 ```
 
-Extrapolation, math-answer role:
+Caption: Gate 4 original variance sweep on the extrapolation `math_answer`
+slice. Each variance row rotates which formulas are seen during fit versus held
+out during eval. `contract` is the pre-repair gate verdict for that run.
 
 | condition | held-out formulas | safe answer coverage | token-only acc | side-channel acc | prob-mixture acc | prob-mixture NLL | prob call/mass | prob unsafe mass | contract |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
@@ -352,7 +383,9 @@ Extrapolation, math-answer role:
 | variance `20260420` | `d1_affine`, `d2_reciprocal_shift`, `d3_log_quadratic`, `d4_nested_ratio_exp` | 0.825 | 0.000 | 0.000 | 0.087 | 4.554 | 0.042 | 0.010 | false |
 | variance `20260421` | `d1_exp_soft`, `d2_quadratic_mix`, `d3_ratio_product`, `d4_exp_log_product` | 0.825 | 0.000 | 0.000 | 0.394 | 3.866 | 0.511 | 0.090 | false |
 
-Variance-only aggregate:
+Caption: Aggregate of the three original Gate 4 variance rows above. This
+summarizes stability: the mean tells us typical behavior, while min/max show the
+worst and best split.
 
 | metric | mean | std | min | max |
 | --- | ---: | ---: | ---: | ---: |
@@ -452,7 +485,10 @@ uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm
   --device mps
 ```
 
-Frozen Gate 2, extrapolation math-answer role:
+Caption: Gate 2 repair on the same frozen held-out-template extrapolation
+`math_answer` slice as the original Gate 2 table. The first repair adds
+multi-split calibration data only; the second also adds the answer-token
+call/abstain objective.
 
 | condition | prob-mixture acc | prob-mixture NLL | prob expert mass | prob unsafe mass | role-aware contract |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -460,7 +496,9 @@ Frozen Gate 2, extrapolation math-answer role:
 | multi-split calibration only | 0.419 | 4.159 | 0.362 | 0.054 | false |
 | multi-split + answer call/abstain | 0.562 | 2.859 | 0.468 | 0.049 | true |
 
-Frozen Gate 4, extrapolation math-answer role:
+Caption: Gate 4 repair on the same frozen variance extrapolation `math_answer`
+slices. Rows compare original versus repaired probability-mixture behavior for
+each held-out split seed.
 
 | condition | prob-mixture acc | prob-mixture NLL | prob expert mass | prob unsafe mass | role-aware contract |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -471,7 +509,9 @@ Frozen Gate 4, extrapolation math-answer role:
 | repaired variance `20260420` | 0.606 | 1.875 | 0.493 | 0.021 | true |
 | repaired variance `20260421` | 0.731 | 1.471 | 0.691 | 0.013 | true |
 
-Variance aggregate:
+Caption: Aggregate of the original and repaired Gate 4 variance runs. The key
+question is whether the repair improves both average behavior and worst-case
+behavior without increasing unsafe expert mass.
 
 | metric | original mean | original min | original max | repaired mean | repaired min | repaired max |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
