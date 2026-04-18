@@ -104,10 +104,10 @@ def run_bridge_corpus(
             safety_per_group=language_safety_per_group,
             eval_per_group=language_eval_per_group,
         )
-    elif corpus_kind == "language-math-heldout-templates":
+    elif corpus_kind in {"language-math-heldout-templates", "language-math-heldout-variance"}:
         if source_bridge_summary_path is None:
             raise ValueError(
-                "language-math-heldout-templates corpus requires source_bridge_summary_path"
+                f"{corpus_kind} corpus requires source_bridge_summary_path"
             )
         rows, token_bins, vocabulary, source_path, heldout_summary = build_language_math_heldout_template_rows(
             source_bridge_summary_path,
@@ -115,6 +115,7 @@ def run_bridge_corpus(
             safety_per_group=language_safety_per_group,
             eval_per_group=language_eval_per_group,
             seed=seed,
+            rotate_formula_split=corpus_kind == "language-math-heldout-variance",
         )
         corpus_extra_summary["heldout_template"] = heldout_summary
     elif corpus_kind == "math-only":
@@ -149,7 +150,7 @@ def run_bridge_corpus(
     else:
         raise ValueError(
             "corpus_kind must be one of "
-            "pure-language|language-math|language-math-heldout-templates|"
+            "pure-language|language-math|language-math-heldout-templates|language-math-heldout-variance|"
             "math-only|expert-ablation|expert-shuffle|target-randomized|wrong-expert"
         )
 
@@ -296,6 +297,7 @@ def build_language_math_heldout_template_rows(
     safety_per_group: int,
     eval_per_group: int,
     seed: int,
+    rotate_formula_split: bool = False,
 ) -> tuple[list[dict[str, Any]], int, list[str], str, dict[str, Any]]:
     source_summary = json.loads(source_bridge_summary_path.read_text())
     source_feature_path = resolve_feature_table_path(source_summary, source_bridge_summary_path)
@@ -313,7 +315,11 @@ def build_language_math_heldout_template_rows(
     for index in range(token_bins):
         vocab.token(f"NUM_{index:02d}")
 
-    seen_tasks, heldout_tasks = split_seen_heldout_formula_tasks(sorted(formula_tokens))
+    formula_split_seed = seed if rotate_formula_split else None
+    seen_tasks, heldout_tasks = split_seen_heldout_formula_tasks(
+        sorted(formula_tokens),
+        rotation_seed=formula_split_seed,
+    )
     selected = select_source_rows(
         [
             row
@@ -370,6 +376,7 @@ def build_language_math_heldout_template_rows(
         "heldout_formula_tasks": list(heldout_tasks),
         "seen_language_templates": [template_id for template_id, _template in TRAIN_LANGUAGE_MATH_TEMPLATES],
         "heldout_language_templates": [template_id for template_id, _template in HELDOUT_LANGUAGE_MATH_TEMPLATES],
+        "formula_split_rotation_seed": formula_split_seed,
         "split_contract": {
             "train": "seen formulas and seen language templates",
             "safety_calibration": "seen formulas and seen language templates",
@@ -403,7 +410,11 @@ def register_language_math_templates(vocab: Vocabulary) -> None:
                 vocab.token(token)
 
 
-def split_seen_heldout_formula_tasks(task_ids: list[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def split_seen_heldout_formula_tasks(
+    task_ids: list[str],
+    *,
+    rotation_seed: int | None = None,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     grouped: dict[str, list[str]] = {}
     for task_id in task_ids:
         grouped.setdefault(formula_depth_prefix(task_id), []).append(task_id)
@@ -414,6 +425,9 @@ def split_seen_heldout_formula_tasks(task_ids: list[str]) -> tuple[tuple[str, ..
         if len(group) == 1:
             seen.extend(group)
             continue
+        if rotation_seed is not None:
+            offset = (rotation_seed + sum(ord(character) for character in _depth)) % len(group)
+            group = group[offset:] + group[:offset]
         midpoint = max(1, len(group) // 2)
         seen.extend(group[:midpoint])
         heldout.extend(group[midpoint:])

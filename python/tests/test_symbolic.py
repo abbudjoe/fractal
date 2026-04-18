@@ -1023,6 +1023,31 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertIn("heldout_template", report.summary)
             self.assertIn("math_answer_index_counts", report.summary["feature_table"])
             self.assertGreater(len(report.summary["feature_table"]["math_answer_index_counts"]), 1)
+            variance_a = run_bridge_corpus(
+                root / "heldout-variance-a",
+                run_label="unit-heldout-variance-a",
+                corpus_kind="language-math-heldout-variance",
+                source_bridge_summary_path=source_summary,
+                seed=1,
+                language_train_per_group=1,
+                language_safety_per_group=1,
+                language_eval_per_group=1,
+            )
+            variance_b = run_bridge_corpus(
+                root / "heldout-variance-b",
+                run_label="unit-heldout-variance-b",
+                corpus_kind="language-math-heldout-variance",
+                source_bridge_summary_path=source_summary,
+                seed=2,
+                language_train_per_group=1,
+                language_safety_per_group=1,
+                language_eval_per_group=1,
+            )
+            self.assertNotEqual(
+                variance_a.summary["heldout_template"]["seen_formula_tasks"],
+                variance_b.summary["heldout_template"]["seen_formula_tasks"],
+            )
+            self.assertEqual(variance_a.summary["heldout_template"]["formula_split_rotation_seed"], 1)
 
     @unittest.skipUnless(importlib.util.find_spec("torch") is not None, "PyTorch is optional for default unit tests")
     def test_symbolic_bridge_lm_transformer_backbone_runs_true_token_control(self) -> None:

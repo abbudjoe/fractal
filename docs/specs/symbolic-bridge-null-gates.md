@@ -12,7 +12,7 @@ records stay below it.
 | 1. Expert-bank ablation and shuffle controls | Does the gain follow aligned EML expert predictions, or can any/shuffled expert bank fake it? | passed | The gain follows `paper-complex-eml`; non-EML and shuffled controls do not reproduce it. |
 | 2. Held-out formula/language templates | Does the bridge survive unseen formula families, unseen wrappers, and varied answer positions? | mixed, safety failed | Capability partially survives on math answers, but soft unsafe expert mass is too high. |
 | 3. Target/random-label and wrong-expert controls | Does the harness leak target identity through labels, routing, or feature construction? | passed | Broken labels and wrong expert pairings collapse the hybrid gain. |
-| 4. Seed/template variance | Is the positive result stable across seeds and template draws? | pending | Not run yet. |
+| 4. Seed/template variance | Is the positive result stable across seeds and template draws? | failed, blocks promotion | Capability is not stable across rotated formula/template splits; no variance run passes the contract. |
 | 5. More natural mixed corpus | Does the contract hold beyond the synthetic grammar? | pending | Not run yet. |
 
 Current recommendation: continue null testing, but do not promote the bridge as a
@@ -20,6 +20,8 @@ general LM improvement yet. Gate 1 supports the paper-complex signal. Gate 2
 shows that held-out-template capability is real enough to keep testing, but the
 calibration contract does not generalize safely to unseen formulas/templates.
 Gate 3 does not show evidence of target-label or expert-pairing leakage.
+Gate 4 shows that the held-out-template capability is not stable across formula
+split/template seeds.
 
 ## Resolution Block Contract
 
@@ -290,14 +292,89 @@ Question:
 > Is the positive bridge result stable across seeds, template choices, and
 > formula split choices?
 
-Status: pending.
+Artifacts:
 
-Planned controls:
+```text
+artifacts/bridge-corpus-v1-gate4/
+artifacts/bridge-corpus-v1-gate4-lm/
+```
 
-- Repeat Gates 1 and 2 over multiple corpus seeds.
-- Rotate which formula families are seen vs held out within each depth.
+Controls:
+
+- Repeat the held-out-template setup over multiple corpus seeds.
+- Rotate which formula families are seen vs held out within each depth by seed.
 - Vary held-out wrapper assignment and answer positions.
 - Report mean, variance, and worst-case safety metrics.
+
+Corpus command shape:
+
+```bash
+python scripts/symbolic_bridge_corpus.py \
+  --corpus-kind language-math-heldout-variance \
+  --source-bridge-summary artifacts/symbolic-bridge/symbolic-bridge-compact-runpod-cuda-v1/summary.json \
+  --run-label bridge-corpus-v1-language-math-heldout-variance-s<seed> \
+  --output-dir artifacts/bridge-corpus-v1-gate4/bridge-corpus-v1-language-math-heldout-variance-s<seed> \
+  --seed <seed> \
+  --language-train-per-group 12 \
+  --language-safety-per-group 16 \
+  --language-eval-per-group 20
+```
+
+LM command shape:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary artifacts/bridge-corpus-v1-gate4/bridge-corpus-v1-language-math-heldout-variance-s<seed>/summary.json \
+  --run-label language-math-heldout-variance-s<seed>-transformer-calibrated-v1 \
+  --output-dir artifacts/bridge-corpus-v1-gate4-lm/language-math-heldout-variance-s<seed>-transformer-calibrated-v1 \
+  --backbone transformer \
+  --transformer-layers 2 \
+  --transformer-heads 4 \
+  --transformer-ffn-multiplier 2 \
+  --epochs 900 \
+  --learning-rate 0.004 \
+  --hidden-units 64 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 5.0 \
+  --answer-unsafe-loss-weight 5.0 \
+  --non-answer-abstain-loss-weight 3.0 \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --device mps
+```
+
+Extrapolation, math-answer role:
+
+| condition | held-out formulas | safe answer coverage | token-only acc | side-channel acc | prob-mixture acc | prob-mixture NLL | prob call/mass | prob unsafe mass | contract |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Gate 2 fixed seed | `d1_exp_soft`, `d2_reciprocal_shift`, `d3_ratio_product`, `d4_nested_ratio_exp` | 0.650 | 0.000 | 0.031 | 0.625 | 6.703 | 1.000 | 0.375 | false |
+| variance `20260419` | `d1_exp_soft`, `d2_quadratic_mix`, `d3_ratio_product`, `d4_exp_log_product` | 0.825 | 0.000 | 0.000 | 0.225 | 4.338 | 0.320 | 0.055 | false |
+| variance `20260420` | `d1_affine`, `d2_reciprocal_shift`, `d3_log_quadratic`, `d4_nested_ratio_exp` | 0.825 | 0.000 | 0.000 | 0.087 | 4.554 | 0.042 | 0.010 | false |
+| variance `20260421` | `d1_exp_soft`, `d2_quadratic_mix`, `d3_ratio_product`, `d4_exp_log_product` | 0.825 | 0.000 | 0.000 | 0.394 | 3.866 | 0.511 | 0.090 | false |
+
+Variance-only aggregate:
+
+| metric | mean | std | min | max |
+| --- | ---: | ---: | ---: | ---: |
+| token-only math-answer acc | 0.000 | 0.000 | 0.000 | 0.000 |
+| side-channel math-answer acc | 0.000 | 0.000 | 0.000 | 0.000 |
+| prob-mixture math-answer acc | 0.235 | 0.125 | 0.087 | 0.394 |
+| prob-mixture math-answer NLL | 4.253 | 0.287 | 3.866 | 4.554 |
+| prob-mixture expert mass/call | 0.291 | 0.192 | 0.042 | 0.511 |
+| prob-mixture unsafe mass | 0.052 | 0.033 | 0.010 | 0.090 |
+
+Verdict:
+
+- Gate 4 fails the promotion condition. The positive Gate 2 capability signal is
+  not stable across rotated formula/template splits.
+- Probability mixture remains better than token-only and side-channel on the
+  variance runs, but the accuracy range is wide (`0.087` to `0.394`) and far
+  below the fixed Gate 2 split (`0.625`).
+- The router often solves safety by becoming timid: unsafe mass is much lower
+  than Gate 2, but expert mass also falls sharply. That preserves safety in some
+  splits by giving up the bridge.
+- No variance run confirms the full contract. This blocks broader LM promotion
+  until Gate 2 safety and Gate 4 robustness are repaired together.
 
 Resolution block:
 
@@ -305,8 +382,8 @@ Resolution block:
 | --- | --- |
 | Resolution needed | Establish whether the bridge result is robust or an accident of one formula/template split. |
 | Promotion condition | The capability gain and safety behavior must be stable enough across seeds/templates that the mean result is useful and the worst-case unsafe mass/call rate is acceptable. |
-| Current blocker | Only one Gate 2 held-out split has been run; no seed/template variance estimate exists yet. |
-| Next action | Add a manifest or loop for several held-out-template seeds/splits, then summarize mean/std/min/max by math-answer role. |
+| Current blocker | Gate 4 fails. Capability is unstable across formula/template splits, and the router trades off capability against safety by abstaining too aggressively on some splits. |
+| Next action | Add held-out-style safety/capability calibration that includes multiple formula split rotations in the fit mixture, then rerun Gate 2 and Gate 4 against frozen eval splits. |
 
 ## Gate 5: More Natural Mixed Corpus
 

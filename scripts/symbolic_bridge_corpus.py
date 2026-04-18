@@ -22,6 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
             "pure-language",
             "language-math",
             "language-math-heldout-templates",
+            "language-math-heldout-variance",
             "math-only",
             "expert-ablation",
             "expert-shuffle",

@@ -1407,7 +1407,7 @@ Current status:
 | 1. Expert-bank ablation and shuffle controls | passed | The effect follows aligned `paper-complex-eml`; non-EML and shuffled controls do not reproduce it. |
 | 2. Held-out formula/language templates | mixed, safety failed | Probability mixture keeps math-answer capability on held-out templates, but unsafe soft mass is too high. |
 | 3. Target/random-label and wrong-expert controls | passed | Broken labels and wrong expert pairings collapse the hybrid gain. |
-| 4. Seed/template variance | pending | Not run yet. |
+| 4. Seed/template variance | failed, blocks promotion | Capability is unstable across rotated formula/template splits; no variance run confirms the contract. |
 | 5. More natural mixed corpus | pending | Not run yet. |
 
 Gate 2 artifact bundle:
@@ -1466,3 +1466,29 @@ Gate 3 verdict:
 - This supports the interpretation that the original bridge win depends on
   correctly aligned expert outputs, not target-label leakage or generic
   expert-token priors.
+
+Gate 4 artifact bundle:
+
+```text
+artifacts/bridge-corpus-v1-gate4/
+artifacts/bridge-corpus-v1-gate4-lm/
+```
+
+Language+math held-out-template variance, extrapolation math-answer role:
+
+| condition | token-only acc | side-channel acc | prob-mixture acc | prob-mixture NLL | prob unsafe mass | contract |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Gate 2 fixed seed | 0.000 | 0.031 | 0.625 | 6.703 | 0.375 | false |
+| variance `20260419` | 0.000 | 0.000 | 0.225 | 4.338 | 0.055 | false |
+| variance `20260420` | 0.000 | 0.000 | 0.087 | 4.554 | 0.010 | false |
+| variance `20260421` | 0.000 | 0.000 | 0.394 | 3.866 | 0.090 | false |
+
+Gate 4 verdict:
+
+- Probability mixture remains above token-only and side-channel on the variance
+  runs, but capability is unstable (`0.087` to `0.394`) and much weaker than the
+  fixed Gate 2 split (`0.625`).
+- Safety is less bad than Gate 2 mostly because the router often becomes timid:
+  expert mass/call averages `0.291`, with a minimum of `0.042`.
+- No variance run confirms the full contract. This blocks broader LM promotion
+  until held-out-style calibration repairs both safety and robustness.
