@@ -25,6 +25,8 @@ def build_parser() -> argparse.ArgumentParser:
             "math-only",
             "expert-ablation",
             "expert-shuffle",
+            "target-randomized",
+            "wrong-expert",
         ],
         required=True,
     )

@@ -1406,7 +1406,7 @@ Current status:
 | --- | --- | --- |
 | 1. Expert-bank ablation and shuffle controls | passed | The effect follows aligned `paper-complex-eml`; non-EML and shuffled controls do not reproduce it. |
 | 2. Held-out formula/language templates | mixed, safety failed | Probability mixture keeps math-answer capability on held-out templates, but unsafe soft mass is too high. |
-| 3. Target/random-label and wrong-expert controls | pending | Not run yet. |
+| 3. Target/random-label and wrong-expert controls | passed | Broken labels and wrong expert pairings collapse the hybrid gain. |
 | 4. Seed/template variance | pending | Not run yet. |
 | 5. More natural mixed corpus | pending | Not run yet. |
 
@@ -1442,3 +1442,27 @@ Gate 2 verdict:
   and the hard-call route stays safe only by abstaining away the gain.
 - This blocks promotion to broader LM runs until the answer-token objective
   learns safe expert mass under held-out-style template/formula diversity.
+
+Gate 3 artifact bundle:
+
+```text
+artifacts/bridge-corpus-v1-gate3/
+artifacts/bridge-corpus-v1-gate3-lm/
+```
+
+Language+math Gate 3 controls, extrapolation math-answer role:
+
+| condition | token-only acc | side-channel acc | prob-mixture acc | prob-mixture NLL | prob unsafe mass |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| baseline all-four | 0.375 | 0.606 | 0.872 | 1.639 | 0.058 |
+| target-randomized | 0.125 | 0.113 | 0.134 | 6.689 | 0.161 |
+| wrong-expert | 0.375 | 0.562 | 0.328 | 3.738 | 0.272 |
+
+Gate 3 verdict:
+
+- Broken labels collapse the probability-mixture gain (`0.872 -> 0.134`).
+- Wrong expert pairing also collapses the gain (`0.872 -> 0.328`) and falls
+  below token-only and side-channel controls.
+- This supports the interpretation that the original bridge win depends on
+  correctly aligned expert outputs, not target-label leakage or generic
+  expert-token priors.

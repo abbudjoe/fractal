@@ -11,7 +11,7 @@ records stay below it.
 | --- | --- | --- | --- |
 | 1. Expert-bank ablation and shuffle controls | Does the gain follow aligned EML expert predictions, or can any/shuffled expert bank fake it? | passed | The gain follows `paper-complex-eml`; non-EML and shuffled controls do not reproduce it. |
 | 2. Held-out formula/language templates | Does the bridge survive unseen formula families, unseen wrappers, and varied answer positions? | mixed, safety failed | Capability partially survives on math answers, but soft unsafe expert mass is too high. |
-| 3. Target/random-label and wrong-expert controls | Does the harness leak target identity through labels, routing, or feature construction? | pending | Not run yet. |
+| 3. Target/random-label and wrong-expert controls | Does the harness leak target identity through labels, routing, or feature construction? | passed | Broken labels and wrong expert pairings collapse the hybrid gain. |
 | 4. Seed/template variance | Is the positive result stable across seeds and template draws? | pending | Not run yet. |
 | 5. More natural mixed corpus | Does the contract hold beyond the synthetic grammar? | pending | Not run yet. |
 
@@ -19,6 +19,7 @@ Current recommendation: continue null testing, but do not promote the bridge as 
 general LM improvement yet. Gate 1 supports the paper-complex signal. Gate 2
 shows that held-out-template capability is real enough to keep testing, but the
 calibration contract does not generalize safely to unseen formulas/templates.
+Gate 3 does not show evidence of target-label or expert-pairing leakage.
 
 ## Resolution Block Contract
 
@@ -214,16 +215,64 @@ Question:
 > Does the harness leak target identity through labels, routing targets, feature
 > construction, or expert-token priors?
 
-Status: pending.
+Artifacts:
 
-Planned controls:
+```text
+artifacts/bridge-corpus-v1-gate3/
+artifacts/bridge-corpus-v1-gate3-lm/
+```
+
+Controls:
 
 - Randomize math-answer target tokens while preserving input/template structure.
-- Pair rows with wrong expert payloads from different tasks or `x` values.
-- Keep expert validity/token distribution similar where possible, then recompute
-  safety metadata.
-- Run the same calibrated transformer recipe and require the hybrid gain to
-  collapse.
+- Pair rows with wrong expert payloads from different tasks.
+- Recompute safety metadata after each transform.
+- Run the same calibrated transformer recipe used by the positive
+  `language + math` result.
+
+Corpus commands:
+
+```bash
+python scripts/symbolic_bridge_corpus.py \
+  --corpus-kind target-randomized \
+  --source-corpus-summary artifacts/bridge-corpus-v1/bridge-corpus-v1-language-math/summary.json \
+  --run-label bridge-corpus-v1-language-math-target-randomized \
+  --output-dir artifacts/bridge-corpus-v1-gate3/bridge-corpus-v1-language-math-target-randomized \
+  --shuffle-seed 20260418
+
+python scripts/symbolic_bridge_corpus.py \
+  --corpus-kind wrong-expert \
+  --source-corpus-summary artifacts/bridge-corpus-v1/bridge-corpus-v1-language-math/summary.json \
+  --run-label bridge-corpus-v1-language-math-wrong-expert \
+  --output-dir artifacts/bridge-corpus-v1-gate3/bridge-corpus-v1-language-math-wrong-expert \
+  --shuffle-seed 20260418
+```
+
+The target-randomized corpus changed `0.819` of math-answer labels. The
+wrong-expert corpus paired answer rows with a different task `1.000` of the
+time.
+
+Extrapolation, math-answer role:
+
+| condition | safe answer coverage | token-only acc | side-channel acc | prob-mixture acc | prob-mixture NLL | prob unsafe mass |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline all-four | 0.825 | 0.375 | 0.606 | 0.872 | 1.639 | 0.058 |
+| target-randomized | 0.263 | 0.125 | 0.113 | 0.134 | 6.689 | 0.161 |
+| wrong-expert | 0.250 | 0.375 | 0.562 | 0.328 | 3.738 | 0.272 |
+
+Verdict:
+
+- The positive hybrid effect does not survive broken labels. Probability-mixture
+  math-answer accuracy falls from `0.872` to `0.134`, essentially the same
+  low-accuracy regime as token-only (`0.125`).
+- The positive hybrid effect does not survive wrong expert pairing.
+  Probability-mixture accuracy falls to `0.328`, below token-only (`0.375`) and
+  well below side-channel (`0.562`).
+- This is evidence against target-label leakage, task-level expert-token priors,
+  or feature-construction leakage as the source of the original gain.
+- The controls still produce residual safe coverage through token collisions,
+  which is expected for quantized token outputs. That residual does not preserve
+  the bridge effect.
 
 Resolution block:
 
@@ -231,8 +280,8 @@ Resolution block:
 | --- | --- |
 | Resolution needed | Prove that the bridge cannot succeed when target labels or expert payload alignment are deliberately broken. |
 | Promotion condition | Token-only and hybrid variants should not show a meaningful math-answer gain on randomized labels or wrong-expert pairings; shuffled/wrong experts should perform at or below baseline. |
-| Current blocker | Not run yet. The existing shuffled-payload Gate 1 is helpful but does not fully rule out target-label leakage or task-level expert-token priors. |
-| Next action | Implement `target-randomized` and `wrong-expert` corpus transforms that preserve artifact contracts, then run the calibrated transformer comparison. |
+| Current blocker | Gate 3 itself is not blocked; it passed. Broken-label and wrong-expert controls collapse the original probability-mixture gain. Gate 2 safety remains the active blocker for promotion. |
+| Next action | Continue to Gate 4 seed/template variance, while separately planning a Gate 2 safety repair pass with explicit safe-expert-mass calibration. |
 
 ## Gate 4: Seed And Template Variance
 

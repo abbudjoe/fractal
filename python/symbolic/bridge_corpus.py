@@ -121,28 +121,36 @@ def run_bridge_corpus(
         if source_bridge_summary_path is None:
             raise ValueError("math-only corpus requires source_bridge_summary_path")
         rows, token_bins, vocabulary, source_path = build_math_only_rows(source_bridge_summary_path)
-    elif corpus_kind in {"expert-ablation", "expert-shuffle"}:
+    elif corpus_kind in {"expert-ablation", "expert-shuffle", "target-randomized", "wrong-expert"}:
         transform_source_path = source_corpus_summary_path or source_bridge_summary_path
         if transform_source_path is None:
             raise ValueError(f"{corpus_kind} corpus requires source_corpus_summary_path")
         effective_shuffle_seed = seed if shuffle_seed is None else shuffle_seed
-        rows, token_bins, vocabulary, source_path, selected_experts = build_expert_transform_rows(
-            transform_source_path,
-            expert_subset=expert_subset,
-            shuffle_experts=corpus_kind == "expert-shuffle",
-            seed=effective_shuffle_seed,
-        )
-        transform_summary = {
-            "source_corpus_summary_path": source_path,
-            "selected_experts": list(selected_experts),
-            "shuffle_experts": corpus_kind == "expert-shuffle",
-            "shuffle_seed": effective_shuffle_seed if corpus_kind == "expert-shuffle" else None,
-        }
+        if corpus_kind in {"expert-ablation", "expert-shuffle"}:
+            rows, token_bins, vocabulary, source_path, selected_experts = build_expert_transform_rows(
+                transform_source_path,
+                expert_subset=expert_subset,
+                shuffle_experts=corpus_kind == "expert-shuffle",
+                seed=effective_shuffle_seed,
+            )
+            transform_summary = {
+                "source_corpus_summary_path": source_path,
+                "selected_experts": list(selected_experts),
+                "shuffle_experts": corpus_kind == "expert-shuffle",
+                "shuffle_seed": effective_shuffle_seed if corpus_kind == "expert-shuffle" else None,
+            }
+        else:
+            rows, token_bins, vocabulary, source_path, control_summary = build_control_transform_rows(
+                transform_source_path,
+                control_kind=corpus_kind,
+                seed=effective_shuffle_seed,
+            )
+            transform_summary = control_summary
     else:
         raise ValueError(
             "corpus_kind must be one of "
             "pure-language|language-math|language-math-heldout-templates|"
-            "math-only|expert-ablation|expert-shuffle"
+            "math-only|expert-ablation|expert-shuffle|target-randomized|wrong-expert"
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -513,6 +521,177 @@ def build_expert_transform_rows(
         repo_relative(source_corpus_summary_path),
         selected_experts,
     )
+
+
+def build_control_transform_rows(
+    source_corpus_summary_path: Path,
+    *,
+    control_kind: str,
+    seed: int,
+) -> tuple[list[dict[str, Any]], int, list[str], str, dict[str, Any]]:
+    source_summary = json.loads(source_corpus_summary_path.read_text())
+    source_feature_path = resolve_feature_table_path(source_summary, source_corpus_summary_path)
+    source_rows = load_feature_rows(source_feature_path)
+    if not source_rows:
+        raise ValueError(f"source corpus feature table has no rows: {source_feature_path}")
+    if control_kind == "target-randomized":
+        rows, control_stats = transform_target_randomized_rows(source_rows, seed=seed)
+    elif control_kind == "wrong-expert":
+        rows, control_stats = transform_wrong_expert_rows(source_rows, seed=seed)
+    else:
+        raise ValueError("control_kind must be one of target-randomized|wrong-expert")
+    token_bins = int(source_summary.get("token_bins") or source_rows[0]["token_bins"])
+    vocabulary = source_summary.get("summary", {}).get("vocabulary")
+    if not isinstance(vocabulary, list) or len(vocabulary) != token_bins:
+        vocabulary = [f"TOKEN_{index:02d}" for index in range(token_bins)]
+    summary = {
+        "source_corpus_summary_path": repo_relative(source_corpus_summary_path),
+        "control_kind": control_kind,
+        "seed": seed,
+        **control_stats,
+    }
+    return (
+        rows,
+        token_bins,
+        [str(token) for token in vocabulary],
+        repo_relative(source_corpus_summary_path),
+        summary,
+    )
+
+
+def transform_target_randomized_rows(
+    rows: list[dict[str, Any]],
+    *,
+    seed: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    transformed = [clone_bridge_row(row) for row in rows]
+    changed = 0
+    answer_count = 0
+    for group_number, indices in enumerate(control_answer_groups(transformed).values()):
+        source_indices = shifted_indices(indices, seed=seed + group_number)
+        for destination_index, source_index in zip(indices, source_indices):
+            destination = transformed[destination_index]
+            source = transformed[source_index]
+            old_token = int(destination["target_token"])
+            destination["target_token"] = int(source["target_token"])
+            destination["target_y"] = float(source["target_y"])
+            destination["control_original_target_token"] = old_token
+            destination["control_source_sequence_id"] = str(source.get("sequence_id", ""))
+            retarget_row_experts(destination)
+            answer_count += 1
+            if int(destination["target_token"]) != old_token:
+                changed += 1
+    return transformed, {
+        "answer_rows": answer_count,
+        "target_changed_rate": changed / answer_count if answer_count else 0.0,
+        "control_roles": ["math_answer", "math_only"],
+    }
+
+
+def transform_wrong_expert_rows(
+    rows: list[dict[str, Any]],
+    *,
+    seed: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    transformed = [clone_bridge_row(row) for row in rows]
+    wrong_task = 0
+    answer_count = 0
+    for group_number, indices in enumerate(control_answer_groups(transformed).values()):
+        source_indices = wrong_expert_source_indices(transformed, indices, seed=seed + group_number)
+        for destination_index, source_index in zip(indices, source_indices):
+            destination = transformed[destination_index]
+            source = transformed[source_index]
+            destination["experts"] = {
+                expert: retarget_expert_payload(
+                    payload,
+                    target_token=int(destination["target_token"]),
+                    target_y=float(destination["target_y"]),
+                )
+                for expert, payload in source["experts"].items()
+            }
+            destination["control_source_sequence_id"] = str(source.get("sequence_id", ""))
+            destination["control_source_task_id"] = str(source.get("task_id", ""))
+            refresh_expert_metadata(destination, tuple(sorted(destination["experts"])))
+            answer_count += 1
+            if str(destination["task_id"]) != str(source.get("task_id", "")):
+                wrong_task += 1
+    return transformed, {
+        "answer_rows": answer_count,
+        "wrong_task_pair_rate": wrong_task / answer_count if answer_count else 0.0,
+        "control_roles": ["math_answer", "math_only"],
+    }
+
+
+def clone_bridge_row(row: dict[str, Any]) -> dict[str, Any]:
+    row_copy = dict(row)
+    row_copy["experts"] = {
+        str(expert): dict(payload)
+        for expert, payload in row.get("experts", {}).items()
+    }
+    row_copy["safe_expert_mask"] = dict(row.get("safe_expert_mask", {}))
+    row_copy["quantizer"] = dict(row.get("quantizer", {}))
+    return row_copy
+
+
+def control_answer_groups(rows: list[dict[str, Any]]) -> dict[tuple[str, str], list[int]]:
+    groups: dict[tuple[str, str], list[int]] = {}
+    for index, row in enumerate(rows):
+        role = str(row.get("eval_role", "symbolic"))
+        if role not in {"math_answer", "math_only"}:
+            continue
+        groups.setdefault((str(row["split"]), role), []).append(index)
+    return groups
+
+
+def shifted_indices(indices: list[int], *, seed: int) -> list[int]:
+    if len(indices) <= 1:
+        return list(indices)
+    offset = random.Random(seed).randrange(1, len(indices))
+    return indices[offset:] + indices[:offset]
+
+
+def wrong_expert_source_indices(
+    rows: list[dict[str, Any]],
+    indices: list[int],
+    *,
+    seed: int,
+) -> list[int]:
+    if len(indices) <= 1:
+        return list(indices)
+    source_indices = shifted_indices(indices, seed=seed)
+    if all(
+        str(rows[destination]["task_id"]) != str(rows[source]["task_id"])
+        for destination, source in zip(indices, source_indices)
+    ):
+        return source_indices
+    grouped_by_task: dict[str, list[int]] = {}
+    for index in indices:
+        grouped_by_task.setdefault(str(rows[index]["task_id"]), []).append(index)
+    task_ids = sorted(grouped_by_task)
+    if len(task_ids) <= 1:
+        return source_indices
+    rng = random.Random(seed)
+    result = []
+    for destination in indices:
+        destination_task = str(rows[destination]["task_id"])
+        other_tasks = [task_id for task_id in task_ids if task_id != destination_task]
+        source_task = other_tasks[rng.randrange(len(other_tasks))]
+        candidates = grouped_by_task[source_task]
+        result.append(candidates[rng.randrange(len(candidates))])
+    return result
+
+
+def retarget_row_experts(row: dict[str, Any]) -> None:
+    experts = {
+        expert: retarget_expert_payload(
+            payload,
+            target_token=int(row["target_token"]),
+            target_y=float(row["target_y"]),
+        )
+        for expert, payload in row["experts"].items()
+    }
+    row["experts"] = experts
+    refresh_expert_metadata(row, tuple(sorted(experts)))
 
 
 def resolve_expert_subset(rows: list[dict[str, Any]], expert_subset: tuple[str, ...] | None) -> tuple[str, ...]:

@@ -875,6 +875,20 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 expert_subset=("paper-complex-eml",),
                 shuffle_seed=9,
             )
+            target_randomized_report = run_bridge_corpus(
+                root / "target-randomized",
+                run_label="unit-target-randomized",
+                corpus_kind="target-randomized",
+                source_corpus_summary_path=root / "language-math" / "summary.json",
+                shuffle_seed=11,
+            )
+            wrong_expert_report = run_bridge_corpus(
+                root / "wrong-expert",
+                run_label="unit-wrong-expert",
+                corpus_kind="wrong-expert",
+                source_corpus_summary_path=root / "language-math" / "summary.json",
+                shuffle_seed=13,
+            )
 
             self.assertIn("math_answer", language_report.summary["feature_table"]["role_counts"])
             self.assertGreater(language_report.summary["feature_table"]["split_safe_expert_coverage"]["train"], 0.0)
@@ -891,6 +905,13 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertTrue(all(tuple(row["safe_expert_mask"]) == ("paper-complex-eml",) for row in shuffled_rows))
             shuffled_answers = [row for row in shuffled_rows if row["eval_role"] == "math_answer"]
             self.assertTrue(any(not row["oracle_has_safe_expert"] for row in shuffled_answers))
+            self.assertEqual(target_randomized_report.summary["expert_transform"]["control_kind"], "target-randomized")
+            self.assertGreater(target_randomized_report.summary["expert_transform"]["target_changed_rate"], 0.0)
+            self.assertEqual(wrong_expert_report.summary["expert_transform"]["control_kind"], "wrong-expert")
+            with Path(wrong_expert_report.feature_table_path).open() as handle:
+                wrong_expert_rows = [json.loads(line) for line in handle if line.strip()]
+            wrong_expert_answers = [row for row in wrong_expert_rows if row["eval_role"] == "math_answer"]
+            self.assertTrue(any(not row["oracle_has_safe_expert"] for row in wrong_expert_answers))
             self.assertTrue((root / "language-math" / "feature_table.jsonl").exists())
             self.assertTrue((root / "language-math" / "summary.json").exists())
 
