@@ -1391,6 +1391,15 @@ The bridge result is now tracked through an explicit gate ledger:
 docs/specs/symbolic-bridge-null-gates.md
 ```
 
+Each gate in that ledger records a fixed resolution block:
+
+```text
+Resolution needed:
+Promotion condition:
+Current blocker:
+Next action:
+```
+
 Current status:
 
 | gate | status | short verdict |

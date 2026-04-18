@@ -20,6 +20,23 @@ general LM improvement yet. Gate 1 supports the paper-complex signal. Gate 2
 shows that held-out-template capability is real enough to keep testing, but the
 calibration contract does not generalize safely to unseen formulas/templates.
 
+## Resolution Block Contract
+
+Each gate records the same operational block:
+
+```text
+Resolution needed:
+Promotion condition:
+Current blocker:
+Next action:
+```
+
+`Resolution needed` is the scientific or engineering uncertainty that must be
+closed before the gate can be considered done. `Promotion condition` is the
+minimum result needed to move the bridge forward. `Current blocker` is the active
+failure mode, if any. `Next action` is the next bounded experiment or code change
+that should address the blocker.
+
 ## Gate 1: Expert-Bank Ablation And Shuffle Controls
 
 Question:
@@ -56,6 +73,15 @@ Verdict:
 - Non-EML controls and shuffled expert payloads do not explain the gain.
 - Remaining risk after this gate: calibration. Paper-complex-only is strong, but
   has higher unsafe answer mass than the all-four calibrated bank.
+
+Resolution block:
+
+| field | value |
+| --- | --- |
+| Resolution needed | Decide whether the bridge gain is genuinely tied to aligned paper-complex expert predictions rather than generic expert capacity, expert-token priors, or shuffled payload artifacts. |
+| Promotion condition | Aligned `paper-complex-eml` or EML-family experts outperform token-only and non-EML controls on math-answer accuracy/NLL, while shuffled experts fail to reproduce the gain. |
+| Current blocker | Gate 1 itself is not blocked; it passed. Residual issue is that paper-complex-only has higher unsafe answer mass (`0.082`) than the all-four calibrated bank (`0.058`). |
+| Next action | Carry the paper-complex signal forward, but require later gates to improve answer-token safe-mass calibration before any broad LM promotion. |
 
 ## Gate 2: Held-Out Formula And Language Templates
 
@@ -171,3 +197,90 @@ Next useful run:
   cases, then rerun Gate 2.
 - Keep the same Gate 2 eval split frozen so improvement is measured against this
   failure, not against an easier corpus.
+
+Resolution block:
+
+| field | value |
+| --- | --- |
+| Resolution needed | Determine whether the bridge generalizes beyond the fixed language wrapper, fixed answer position, and train-seen formula families. |
+| Promotion condition | On the frozen held-out-template eval, the hybrid must materially beat token-only and side-channel controls on math-answer accuracy/NLL while keeping unsafe answer mass/calls below the existing safety gate. |
+| Current blocker | Capability partially survives (`0.625` probability-mixture math-answer accuracy), but unsafe answer mass is too high (`0.375`), so the safety contract fails. |
+| Next action | Add held-out-style safety calibration or an explicit safe-expert-mass objective, then rerun Gate 2 against the same frozen held-out formula/template split. |
+
+## Gate 3: Target/Random-Label And Wrong-Expert Controls
+
+Question:
+
+> Does the harness leak target identity through labels, routing targets, feature
+> construction, or expert-token priors?
+
+Status: pending.
+
+Planned controls:
+
+- Randomize math-answer target tokens while preserving input/template structure.
+- Pair rows with wrong expert payloads from different tasks or `x` values.
+- Keep expert validity/token distribution similar where possible, then recompute
+  safety metadata.
+- Run the same calibrated transformer recipe and require the hybrid gain to
+  collapse.
+
+Resolution block:
+
+| field | value |
+| --- | --- |
+| Resolution needed | Prove that the bridge cannot succeed when target labels or expert payload alignment are deliberately broken. |
+| Promotion condition | Token-only and hybrid variants should not show a meaningful math-answer gain on randomized labels or wrong-expert pairings; shuffled/wrong experts should perform at or below baseline. |
+| Current blocker | Not run yet. The existing shuffled-payload Gate 1 is helpful but does not fully rule out target-label leakage or task-level expert-token priors. |
+| Next action | Implement `target-randomized` and `wrong-expert` corpus transforms that preserve artifact contracts, then run the calibrated transformer comparison. |
+
+## Gate 4: Seed And Template Variance
+
+Question:
+
+> Is the positive bridge result stable across seeds, template choices, and
+> formula split choices?
+
+Status: pending.
+
+Planned controls:
+
+- Repeat Gates 1 and 2 over multiple corpus seeds.
+- Rotate which formula families are seen vs held out within each depth.
+- Vary held-out wrapper assignment and answer positions.
+- Report mean, variance, and worst-case safety metrics.
+
+Resolution block:
+
+| field | value |
+| --- | --- |
+| Resolution needed | Establish whether the bridge result is robust or an accident of one formula/template split. |
+| Promotion condition | The capability gain and safety behavior must be stable enough across seeds/templates that the mean result is useful and the worst-case unsafe mass/call rate is acceptable. |
+| Current blocker | Only one Gate 2 held-out split has been run; no seed/template variance estimate exists yet. |
+| Next action | Add a manifest or loop for several held-out-template seeds/splits, then summarize mean/std/min/max by math-answer role. |
+
+## Gate 5: More Natural Mixed Corpus
+
+Question:
+
+> Does the bridge contract hold beyond this synthetic grammar?
+
+Status: pending.
+
+Planned controls:
+
+- Mix pure-language examples with less templated math prompts.
+- Include multiple prompt phrasings and distractor prose around math answers.
+- Preserve role labels so math-answer and prose/context behavior remain
+  separately measurable.
+- Keep pure transformer, side-channel, hard-call, logit-fusion, and
+  probability-mixture comparisons.
+
+Resolution block:
+
+| field | value |
+| --- | --- |
+| Resolution needed | Determine whether the EML bridge is useful outside the controlled synthetic language/math grammar. |
+| Promotion condition | The hybrid must improve math-answer accuracy/NLL without degrading pure-language/prose behavior and without violating unsafe-call or unsafe-mass gates. |
+| Current blocker | Gate 2 already exposed safety generalization failure under held-out templates, so a more natural corpus is premature until that is addressed. |
+| Next action | After Gate 2 safety is repaired and Gate 3 leakage controls pass, build a small mixed naturalistic math-language corpus with frozen eval prompts. |
