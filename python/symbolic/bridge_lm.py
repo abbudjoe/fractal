@@ -100,6 +100,8 @@ class BridgeLmReport:
     bridge_summary_path: str
     feature_table_path: str
     run_label: str
+    backbone: str
+    backbone_config: dict[str, Any]
     token_bins: int
     seed: int
     epochs: int
@@ -125,6 +127,8 @@ class BridgeLmReport:
             "bridge_summary_path": self.bridge_summary_path,
             "feature_table_path": self.feature_table_path,
             "run_label": self.run_label,
+            "backbone": self.backbone,
+            "backbone_config": self.backbone_config,
             "token_bins": self.token_bins,
             "seed": self.seed,
             "epochs": self.epochs,
@@ -164,9 +168,20 @@ def run_symbolic_bridge_lm(
     unsafe_margin: float = 0.5,
     router_call_threshold: float = 0.0,
     expert_logit_scale: float = 6.0,
+    backbone: str = "gru",
+    transformer_layers: int = 2,
+    transformer_heads: int = 4,
+    transformer_ffn_multiplier: int = 2,
     device: str = "auto",
 ) -> BridgeLmReport:
     torch = import_torch()
+    validate_bridge_lm_backbone(
+        backbone,
+        hidden_units=hidden_units,
+        transformer_layers=transformer_layers,
+        transformer_heads=transformer_heads,
+        transformer_ffn_multiplier=transformer_ffn_multiplier,
+    )
     bridge_summary = json.loads(bridge_summary_path.read_text())
     feature_table_path = resolve_feature_table_path(bridge_summary, bridge_summary_path)
     rows = load_feature_rows(feature_table_path)
@@ -218,6 +233,10 @@ def run_symbolic_bridge_lm(
                 unsafe_margin=unsafe_margin,
                 router_call_threshold=router_call_threshold,
                 expert_logit_scale=expert_logit_scale,
+                backbone=backbone,
+                transformer_layers=transformer_layers,
+                transformer_heads=transformer_heads,
+                transformer_ffn_multiplier=transformer_ffn_multiplier,
                 device=selected_device,
             )
         )
@@ -228,6 +247,14 @@ def run_symbolic_bridge_lm(
         bridge_summary_path=repo_relative(bridge_summary_path),
         feature_table_path=repo_relative(feature_table_path),
         run_label=run_label,
+        backbone=backbone,
+        backbone_config=bridge_lm_backbone_config(
+            backbone,
+            hidden_units=hidden_units,
+            transformer_layers=transformer_layers,
+            transformer_heads=transformer_heads,
+            transformer_ffn_multiplier=transformer_ffn_multiplier,
+        ),
         token_bins=token_bins,
         seed=seed,
         epochs=epochs,
@@ -275,18 +302,28 @@ def train_lm_contract_variant(
     unsafe_margin: float,
     router_call_threshold: float,
     expert_logit_scale: float,
+    backbone: str,
+    transformer_layers: int,
+    transformer_heads: int,
+    transformer_ffn_multiplier: int,
     device: Any,
 ) -> BridgeLmRun:
     torch.manual_seed(seed)
     splits = build_contract_splits(torch, rows, task_ids, expert_ids, token_bins, feature_set, device)
     feature_dim = int(splits["fit"].features.shape[-1])
+    max_sequence_length = max(int(batch.previous_tokens.shape[1]) for batch in splits.values())
     model = build_symbolic_bridge_lm_model(
         torch,
+        backbone=backbone,
         token_vocab_size=token_bins + 1,
         feature_dim=feature_dim,
         hidden_units=hidden_units,
         token_bins=token_bins,
         router_classes=len(expert_ids) + 1,
+        max_sequence_length=max_sequence_length,
+        transformer_layers=transformer_layers,
+        transformer_heads=transformer_heads,
+        transformer_ffn_multiplier=transformer_ffn_multiplier,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1.0e-4)
     fit_batch = splits["fit"]
@@ -515,12 +552,33 @@ def fused_token_outputs(
 def build_symbolic_bridge_lm_model(
     torch: Any,
     *,
+    backbone: str,
     token_vocab_size: int,
     feature_dim: int,
     hidden_units: int,
     token_bins: int,
     router_classes: int,
+    max_sequence_length: int,
+    transformer_layers: int,
+    transformer_heads: int,
+    transformer_ffn_multiplier: int,
 ) -> Any:
+    if backbone == "transformer":
+        return build_symbolic_bridge_transformer_model(
+            torch,
+            token_vocab_size=token_vocab_size,
+            feature_dim=feature_dim,
+            hidden_units=hidden_units,
+            token_bins=token_bins,
+            router_classes=router_classes,
+            max_sequence_length=max_sequence_length,
+            transformer_layers=transformer_layers,
+            transformer_heads=transformer_heads,
+            transformer_ffn_multiplier=transformer_ffn_multiplier,
+        )
+    if backbone != "gru":
+        raise ValueError("backbone must be one of gru|transformer")
+
     class TinySymbolicBridgeLM(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
@@ -537,6 +595,114 @@ def build_symbolic_bridge_lm_model(
             return self.token_head(hidden), self.router_head(hidden)
 
     return TinySymbolicBridgeLM()
+
+
+def build_symbolic_bridge_transformer_model(
+    torch: Any,
+    *,
+    token_vocab_size: int,
+    feature_dim: int,
+    hidden_units: int,
+    token_bins: int,
+    router_classes: int,
+    max_sequence_length: int,
+    transformer_layers: int,
+    transformer_heads: int,
+    transformer_ffn_multiplier: int,
+) -> Any:
+    class TinyCausalTransformerBridgeLM(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.token_embedding = torch.nn.Embedding(token_vocab_size, hidden_units)
+            self.position_embedding = torch.nn.Embedding(max_sequence_length, hidden_units)
+            self.feature_projection = torch.nn.Linear(feature_dim, hidden_units, bias=False)
+            encoder_layer = torch.nn.TransformerEncoderLayer(
+                d_model=hidden_units,
+                nhead=transformer_heads,
+                dim_feedforward=hidden_units * transformer_ffn_multiplier,
+                dropout=0.0,
+                activation="gelu",
+                batch_first=True,
+                norm_first=False,
+            )
+            self.transformer = torch.nn.TransformerEncoder(encoder_layer, num_layers=transformer_layers)
+            self.final_norm = torch.nn.LayerNorm(hidden_units)
+            self.token_head = torch.nn.Linear(hidden_units, token_bins)
+            self.router_head = torch.nn.Linear(hidden_units, router_classes)
+
+        def forward(self, previous_tokens: Any, features: Any) -> tuple[Any, Any]:
+            sequence_length = int(previous_tokens.shape[1])
+            if sequence_length > max_sequence_length:
+                raise ValueError(
+                    f"sequence length {sequence_length} exceeds transformer limit {max_sequence_length}"
+                )
+            positions = torch.arange(sequence_length, device=previous_tokens.device).unsqueeze(0)
+            hidden = (
+                self.token_embedding(previous_tokens)
+                + self.position_embedding(positions)
+                + torch.tanh(self.feature_projection(features))
+            )
+            causal_mask = torch.triu(
+                torch.ones(
+                    sequence_length,
+                    sequence_length,
+                    dtype=torch.bool,
+                    device=previous_tokens.device,
+                ),
+                diagonal=1,
+            )
+            hidden = self.transformer(hidden, mask=causal_mask)
+            hidden = self.final_norm(hidden)
+            return self.token_head(hidden), self.router_head(hidden)
+
+    return TinyCausalTransformerBridgeLM()
+
+
+def validate_bridge_lm_backbone(
+    backbone: str,
+    *,
+    hidden_units: int,
+    transformer_layers: int,
+    transformer_heads: int,
+    transformer_ffn_multiplier: int,
+) -> None:
+    if backbone not in {"gru", "transformer"}:
+        raise ValueError("backbone must be one of gru|transformer")
+    if hidden_units <= 0:
+        raise ValueError("hidden_units must be positive")
+    if transformer_layers <= 0:
+        raise ValueError("transformer_layers must be positive")
+    if transformer_heads <= 0:
+        raise ValueError("transformer_heads must be positive")
+    if transformer_ffn_multiplier <= 0:
+        raise ValueError("transformer_ffn_multiplier must be positive")
+    if backbone == "transformer" and hidden_units % transformer_heads != 0:
+        raise ValueError("hidden_units must be divisible by transformer_heads")
+
+
+def bridge_lm_backbone_config(
+    backbone: str,
+    *,
+    hidden_units: int,
+    transformer_layers: int,
+    transformer_heads: int,
+    transformer_ffn_multiplier: int,
+) -> dict[str, Any]:
+    if backbone == "transformer":
+        return {
+            "type": "decoder-only-causal-transformer",
+            "hidden_units": hidden_units,
+            "layers": transformer_layers,
+            "heads": transformer_heads,
+            "ffn_multiplier": transformer_ffn_multiplier,
+            "dropout": 0.0,
+            "feature_projection_bias": False,
+        }
+    return {
+        "type": "gru",
+        "hidden_units": hidden_units,
+        "feature_projection_bias": True,
+    }
 
 
 def router_loss_class_weights(
@@ -1156,6 +1322,16 @@ def summarize_lm_contract(runs: list[BridgeLmRun], rows: list[dict[str, Any]]) -
             if side is not None and prob_mixture is not None
             else 0.0
         ),
+        "logit_fusion_extrapolation_nll_delta_vs_token_only": (
+            token_only.extrapolation_final_nll - logit_fusion.extrapolation_final_nll
+            if token_only is not None and logit_fusion is not None
+            else 0.0
+        ),
+        "prob_mixture_extrapolation_nll_delta_vs_token_only": (
+            token_only.extrapolation_final_nll - prob_mixture.extrapolation_final_nll
+            if token_only is not None and prob_mixture is not None
+            else 0.0
+        ),
         "logit_fusion_extrapolation_accuracy_delta_vs_side_channel": (
             logit_fusion.extrapolation_final_token_accuracy - side.extrapolation_final_token_accuracy
             if side is not None and logit_fusion is not None
@@ -1164,6 +1340,16 @@ def summarize_lm_contract(runs: list[BridgeLmRun], rows: list[dict[str, Any]]) -
         "prob_mixture_extrapolation_accuracy_delta_vs_side_channel": (
             prob_mixture.extrapolation_final_token_accuracy - side.extrapolation_final_token_accuracy
             if side is not None and prob_mixture is not None
+            else 0.0
+        ),
+        "logit_fusion_extrapolation_accuracy_delta_vs_token_only": (
+            logit_fusion.extrapolation_final_token_accuracy - token_only.extrapolation_final_token_accuracy
+            if token_only is not None and logit_fusion is not None
+            else 0.0
+        ),
+        "prob_mixture_extrapolation_accuracy_delta_vs_token_only": (
+            prob_mixture.extrapolation_final_token_accuracy - token_only.extrapolation_final_token_accuracy
+            if token_only is not None and prob_mixture is not None
             else 0.0
         ),
         "router_contract_extrapolation_gain_vs_token_only": (
@@ -1210,6 +1396,8 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
         "",
         f"Bridge summary: `{report.bridge_summary_path}`",
         f"Feature table: `{report.feature_table_path}`",
+        f"Backbone: `{report.backbone}`",
+        f"Backbone config: `{report.backbone_config}`",
         f"Token bins: `{report.token_bins}`",
         f"Experts: `{list(report.expert_ids)}`",
         f"Abstain index: `{report.abstain_index}`",
@@ -1258,8 +1446,12 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
             f"Best trained extrapolation final NLL: `{report.summary['best_trained_extrapolation_final_nll']}`",
             f"Logit-fusion extrapolation NLL delta vs frozen side-channel: `{report.summary['logit_fusion_extrapolation_nll_delta_vs_side_channel']:.4g}`",
             f"Prob-mixture extrapolation NLL delta vs frozen side-channel: `{report.summary['prob_mixture_extrapolation_nll_delta_vs_side_channel']:.4g}`",
+            f"Logit-fusion extrapolation NLL delta vs token-only: `{report.summary['logit_fusion_extrapolation_nll_delta_vs_token_only']:.4g}`",
+            f"Prob-mixture extrapolation NLL delta vs token-only: `{report.summary['prob_mixture_extrapolation_nll_delta_vs_token_only']:.4g}`",
             f"Logit-fusion extrapolation accuracy delta vs frozen side-channel: `{report.summary['logit_fusion_extrapolation_accuracy_delta_vs_side_channel']:.3f}`",
             f"Prob-mixture extrapolation accuracy delta vs frozen side-channel: `{report.summary['prob_mixture_extrapolation_accuracy_delta_vs_side_channel']:.3f}`",
+            f"Logit-fusion extrapolation accuracy delta vs token-only: `{report.summary['logit_fusion_extrapolation_accuracy_delta_vs_token_only']:.3f}`",
+            f"Prob-mixture extrapolation accuracy delta vs token-only: `{report.summary['prob_mixture_extrapolation_accuracy_delta_vs_token_only']:.3f}`",
             f"Router contract gain vs token-only extrapolation: `{report.summary['router_contract_extrapolation_gain_vs_token_only']:.3f}`",
             f"Router contract gain vs x-task extrapolation: `{report.summary['router_contract_extrapolation_gain_vs_x_task']:.3f}`",
             f"Router contract gain vs frozen side-channel extrapolation: `{report.summary['router_contract_extrapolation_gain_vs_side_channel']:.3f}`",

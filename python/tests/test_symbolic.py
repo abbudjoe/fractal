@@ -729,6 +729,8 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 device="cpu",
             )
 
+            self.assertEqual(report.backbone, "gru")
+            self.assertEqual(report.backbone_config["type"], "gru")
             self.assertEqual(report.abstain_index, 2)
             self.assertEqual(report.abstain_class_weight, 2.0)
             self.assertEqual(report.unsafe_call_loss_weight, 0.5)
@@ -745,6 +747,103 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertIn("best_extrapolation_final_nll", report.summary)
             self.assertIn("logit_fusion_extrapolation_nll_delta_vs_side_channel", report.summary)
             self.assertIn("prob_mixture_extrapolation_nll_delta_vs_side_channel", report.summary)
+            self.assertIn("prob_mixture_extrapolation_nll_delta_vs_token_only", report.summary)
+            self.assertTrue((output_dir / "summary.json").exists())
+            self.assertTrue((output_dir / "runs.jsonl").exists())
+            self.assertTrue((output_dir / "summary.md").exists())
+
+    @unittest.skipUnless(importlib.util.find_spec("torch") is not None, "PyTorch is optional for default unit tests")
+    def test_symbolic_bridge_lm_transformer_backbone_runs_true_token_control(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            feature_table = root / "feature_table.jsonl"
+            bridge_summary = root / "summary.json"
+            output_dir = root / "bridge-lm-transformer"
+            rows = []
+            for split, values in {
+                "train": (-1.0, -0.25, 0.25, 1.0),
+                "safety_calibration": (-1.2, 1.2),
+                "validation": (-0.75, 0.75),
+                "extrapolation": (-1.5, 1.5),
+            }.items():
+                for index, x_value in enumerate(values):
+                    target_token = 0 if x_value < 0.0 else 1
+                    has_safe_expert = abs(x_value) <= 1.2
+                    rows.append(
+                        {
+                            "task_id": "toy_sign",
+                            "seed": 1,
+                            "split": split,
+                            "index": index,
+                            "x": x_value,
+                            "target_y": float(target_token),
+                            "target_token": target_token,
+                            "token_bins": 2,
+                            "quantizer": {"minimum": 0.0, "maximum": 1.0},
+                            "in_training_range": split in {"train", "validation"},
+                            "best_expert_id": "paper-complex-eml" if has_safe_expert else "generic-tree",
+                            "oracle_has_safe_expert": has_safe_expert,
+                            "safe_expert_mask": {
+                                "generic-tree": False,
+                                "paper-complex-eml": has_safe_expert,
+                            },
+                            "experts": {
+                                "generic-tree": {
+                                    "prediction": 1.0 - float(target_token),
+                                    "token": 1 - target_token,
+                                    "residual": 0.0,
+                                    "abs_residual": 1.0,
+                                    "token_match": False,
+                                },
+                                "paper-complex-eml": {
+                                    "prediction": float(target_token),
+                                    "token": target_token,
+                                    "residual": 0.0,
+                                    "abs_residual": 0.0,
+                                    "token_match": has_safe_expert,
+                                },
+                            },
+                        }
+                    )
+            with feature_table.open("w") as handle:
+                for row in rows:
+                    handle.write(json.dumps(row) + "\n")
+            bridge_summary.write_text(
+                json.dumps(
+                    {
+                        "token_bins": 2,
+                        "summary": {
+                            "feature_table": {
+                                "path": str(feature_table),
+                                "row_count": len(rows),
+                                "safe_expert_coverage": 0.8,
+                            }
+                        },
+                    }
+                )
+            )
+
+            report = run_symbolic_bridge_lm(
+                bridge_summary,
+                output_dir,
+                run_label="unit-bridge-lm-transformer",
+                epochs=2,
+                learning_rate=0.003,
+                hidden_units=8,
+                backbone="transformer",
+                transformer_layers=1,
+                transformer_heads=2,
+                transformer_ffn_multiplier=2,
+                device="cpu",
+            )
+
+            self.assertEqual(report.backbone, "transformer")
+            self.assertEqual(report.backbone_config["type"], "decoder-only-causal-transformer")
+            self.assertFalse(report.backbone_config["feature_projection_bias"])
+            run_names = {run.name for run in report.runs}
+            self.assertIn("lm-token-only", run_names)
+            self.assertIn("lm-router-prob-mixture", run_names)
+            self.assertIn("best_trained_extrapolation_final_nll", report.summary)
             self.assertTrue((output_dir / "summary.json").exists())
             self.assertTrue((output_dir / "runs.jsonl").exists())
             self.assertTrue((output_dir / "summary.md").exists())
@@ -835,6 +934,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 device="cpu",
             )
 
+            self.assertEqual(report.backbone, "path1")
             self.assertIn("path1_variant", report.summary)
             self.assertEqual(report.summary["path1_variant"]["d_model"], 16)
             self.assertIn("router_contract_unsafe_call_rate", report.summary)

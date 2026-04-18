@@ -1062,3 +1062,82 @@ Softmax fusion verdict:
 - This supports the user's proposed architecture: an EML expert can contribute
   directly to the final softmax distribution, and loss comparison is meaningful
   when measured on the fused token distribution.
+
+## Decoder-Only Transformer Control
+
+The first softmax-fusion run above used the bridge harness's tiny recurrent LM.
+That was useful for the contract, but it was not a pure decoder-only transformer
+control. The bridge LM harness now accepts `--backbone transformer`, which swaps
+the recurrent backbone for a small causal Transformer encoder used decoder-only:
+previous tokens plus causal mask, learned positional embeddings, zero dropout,
+and a bias-free feature projection. The bias-free projection matters for the
+`lm-token-only` control because its side feature is exactly zero, so no learned
+feature bias can leak into the pure token baseline.
+
+Transformer-control artifact:
+
+```text
+artifacts/symbolic-bridge-lm/symbolic-bridge-lm-compact-transformer-fusion-ab-v1/
+```
+
+Command:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary artifacts/symbolic-bridge/symbolic-bridge-compact-runpod-cuda-v1/summary.json \
+  --run-label symbolic-bridge-lm-compact-transformer-fusion-ab-v1 \
+  --output-dir artifacts/symbolic-bridge-lm/symbolic-bridge-lm-compact-transformer-fusion-ab-v1 \
+  --backbone transformer \
+  --transformer-layers 2 \
+  --transformer-heads 4 \
+  --transformer-ffn-multiplier 2 \
+  --epochs 1800 \
+  --learning-rate 0.004 \
+  --hidden-units 96 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 5.0 \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --device auto \
+  --output table
+```
+
+Run environment:
+
+- `torch==2.11.0`, MPS available and selected by `--device auto`.
+- Same compact bridge feature table as the RunPod CUDA symbolic benchmark:
+  `artifacts/symbolic-bridge/symbolic-bridge-compact-runpod-cuda-v1/summary.json`.
+- Backbone: 2-layer, 4-head causal transformer, `hidden_units=96`,
+  dropout `0.0`.
+
+| run | mode | extrap final accuracy | extrap final NLL | extrap LM accuracy | router extrap accuracy | expert mass/call | unsafe mass/call |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `lm-token-only` | pure transformer control | 0.624 | 3.518 | 0.624 | n/a | 0.000 | 0.000 |
+| `lm-frozen-side-channel` | transformer side-channel | 0.574 | 4.304 | 0.574 | n/a | 0.000 | 0.000 |
+| `lm-router-hard-call` | hard call | 0.866 | 1.087 | 0.589 | 0.930 | 0.732 | 0.009 |
+| `lm-router-logit-fusion` | logit fusion | 0.691 | 2.302 | 0.551 | 0.904 | 0.801 | 0.033 |
+| `lm-router-prob-mixture` | probability mixture | 0.866 | 1.567 | 0.135 | 0.938 | 0.793 | 0.025 |
+
+Transformer-control verdict:
+
+- The EML hybrid beats the pure decoder-only transformer control on the same
+  symbolic-token task. The hard-call router improves extrapolation accuracy from
+  `0.624` to `0.866`, and the probability-mixture softmax path improves it from
+  `0.624` to `0.866`.
+- The loss comparison should use the softmax-native rows, not hard-call's
+  accuracy-derived pseudo-NLL. On that apples-to-apples basis, probability
+  mixture lowers extrapolation NLL from the pure transformer's `3.518` to
+  `1.567`.
+- The hard-call router now satisfies the bridge contract on this run:
+  capability gain is confirmed, unsafe hard calls are below the `0.01` gate
+  (`0.009`), abstain recall is `0.961`, and the artifact reports
+  `contract_confirmed=True`.
+- The frozen side-channel alone does not explain the gain. With the same
+  transformer backbone it underperforms the token-only control (`0.574` versus
+  `0.624` extrapolation accuracy), while explicit expert routing/fusion produces
+  the jump.
+- This is a real positive control for the bridge idea, but still only on the
+  symbolic-token benchmark. It does not yet prove broad language modeling
+  improvement on natural text; it shows that, under the bridge contract, a
+  decoder-only transformer can use the compiled EML expert bank to improve
+  extrapolative symbolic prediction.

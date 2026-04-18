@@ -31,6 +31,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--unsafe-margin", type=float, default=0.5)
     parser.add_argument("--router-call-threshold", type=float, default=0.0)
     parser.add_argument("--expert-logit-scale", type=float, default=6.0)
+    parser.add_argument("--backbone", choices=["gru", "transformer"], default="gru")
+    parser.add_argument("--transformer-layers", type=int, default=2)
+    parser.add_argument("--transformer-heads", type=int, default=4)
+    parser.add_argument("--transformer-ffn-multiplier", type=int, default=2)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto")
     parser.add_argument("--output", choices=["table", "json"], default="table")
     return parser
@@ -55,11 +59,18 @@ def main(argv: list[str] | None = None) -> int:
         unsafe_margin=args.unsafe_margin,
         router_call_threshold=args.router_call_threshold,
         expert_logit_scale=args.expert_logit_scale,
+        backbone=args.backbone,
+        transformer_layers=args.transformer_layers,
+        transformer_heads=args.transformer_heads,
+        transformer_ffn_multiplier=args.transformer_ffn_multiplier,
         device=args.device,
     )
     if args.output == "json":
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
     else:
+        print(
+            f"backbone={report.backbone}\tconfig={report.backbone_config}"
+        )
         print(
             "run\tmode\tfeatures\tval_final_acc\textrap_final_acc\tval_final_nll\textrap_final_nll\textrap_lm_acc\t"
             "router_extrap_acc\texpert_call_rate\tunsafe_call_rate\tabstain_recall"
@@ -88,8 +99,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"best_trained_extrapolation_final_nll={report.summary['best_trained_extrapolation_final_nll']}")
         print(f"logit_fusion_nll_gain_vs_side_channel={report.summary['logit_fusion_extrapolation_nll_delta_vs_side_channel']:.4g}")
         print(f"prob_mixture_nll_gain_vs_side_channel={report.summary['prob_mixture_extrapolation_nll_delta_vs_side_channel']:.4g}")
+        print(f"logit_fusion_nll_gain_vs_token_only={report.summary['logit_fusion_extrapolation_nll_delta_vs_token_only']:.4g}")
+        print(f"prob_mixture_nll_gain_vs_token_only={report.summary['prob_mixture_extrapolation_nll_delta_vs_token_only']:.4g}")
         print(f"logit_fusion_acc_gain_vs_side_channel={report.summary['logit_fusion_extrapolation_accuracy_delta_vs_side_channel']:.3f}")
         print(f"prob_mixture_acc_gain_vs_side_channel={report.summary['prob_mixture_extrapolation_accuracy_delta_vs_side_channel']:.3f}")
+        print(f"logit_fusion_acc_gain_vs_token_only={report.summary['logit_fusion_extrapolation_accuracy_delta_vs_token_only']:.3f}")
+        print(f"prob_mixture_acc_gain_vs_token_only={report.summary['prob_mixture_extrapolation_accuracy_delta_vs_token_only']:.3f}")
         print(f"router_gain_vs_token_only={report.summary['router_contract_extrapolation_gain_vs_token_only']:.3f}")
         print(f"router_gain_vs_x_task={report.summary['router_contract_extrapolation_gain_vs_x_task']:.3f}")
         print(f"router_gain_vs_side_channel={report.summary['router_contract_extrapolation_gain_vs_side_channel']:.3f}")
