@@ -22,9 +22,11 @@ naturalistic distractor prose. However, Gate 5 also shows that this is still a
 role-local improvement: the hybrid improves answer tokens but does not improve
 the surrounding prose distribution. Frozen-teacher KL helps prose NLL, and a
 prose-only KL mask reduces the math-context damage, but neither is a finished
-general-decoder repair. The next step should keep the symbolic bridge isolated
-behind a calibrated answer/action interface, while testing only narrow
-composition repairs before making broad LM claims.
+general-decoder repair. The first composition test, prose-only KL plus
+answer-span-only fusion, preserved safety but degraded answer/context NLL
+relative to prose-only KL alone. The next step should keep the symbolic bridge
+isolated behind a calibrated answer/action interface and treat these repairs as
+competing candidates until the interference is understood.
 
 ## Metric Glossary
 
@@ -749,7 +751,7 @@ Resolution block:
 | Resolution needed | Determine whether the EML bridge is useful outside the controlled synthetic language/math grammar. |
 | Promotion condition | The hybrid must improve math-answer accuracy/NLL without degrading pure-language/prose behavior and without violating unsafe-call or unsafe-mass gates. |
 | Current blocker | Math-answer transfer passes, but prose retention does not. The fusion path is useful as an answer/action bridge, not yet as a general next-token improvement. |
-| Next action | Run the ablation ladder one step at a time. Ablation 1 preserved answer gains but did not solve prose NLL. Ablation 2 retention-only worsened prose and broke answer safety. Ablation 3 showed teacher KL is the right prose-retention direction, and the weight sweep found `0.5` as the current best safe all-non-answer KL point. Ablation 3c showed prose-only KL preserves math-context behavior better but gives up some prose-NLL repair. The next clean test can combine prose-only `0.5` KL with answer-span fusion, but should still be treated as a composition test rather than assumed solved. |
+| Next action | Run the ablation ladder one step at a time. Ablation 1 preserved answer gains but did not solve prose NLL. Ablation 2 retention-only worsened prose and broke answer safety. Ablation 3 showed teacher KL is the right prose-retention direction, and the weight sweep found `0.5` as the current best safe all-non-answer KL point. Ablation 3c showed prose-only KL preserves math-context behavior better but gives up some prose-NLL repair. Ablation 4 showed prose-only KL plus answer-span fusion does not cleanly compose: safety remains good, but answer/context NLL regress. The next clean test should diagnose the training interaction or run seed variance on the two best single repairs, not assume stacking is better. |
 
 ### Gate 5 Ablation 1: Answer-Span-Only Fusion
 
@@ -1114,3 +1116,74 @@ Interpretation:
 - This is a better component for the next composition test than the old
   all-non-answer mask, but the null hypothesis is not yet disproven for broad
   language modeling.
+
+### Gate 5 Ablation 4: Prose-Only KL Plus Answer-Span Fusion
+
+Question:
+
+> Do the two best-looking single repairs compose, or do their training signals
+> interfere?
+
+Artifact:
+
+```text
+artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-prose-kl-answer-span-v1/
+```
+
+Command:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260430/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260431/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260432/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260433/summary.json \
+  --run-label gate5-ablation-prose-kl-answer-span-v1 \
+  --output-dir artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-prose-kl-answer-span-v1 \
+  --backbone transformer \
+  --transformer-layers 2 \
+  --transformer-heads 4 \
+  --transformer-ffn-multiplier 2 \
+  --epochs 600 \
+  --learning-rate 0.004 \
+  --hidden-units 64 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 1.0 \
+  --answer-call-abstain-loss-weight 8.0 \
+  --answer-unsafe-loss-weight 5.0 \
+  --non-answer-abstain-loss-weight 2.0 \
+  --non-answer-teacher-kl-loss-weight 0.5 \
+  --non-answer-teacher-kl-roles prose \
+  --fusion-allowed-roles math_answer,math_only \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --device mps \
+  --output table
+```
+
+Caption: Gate 5 Ablation 4 composes the prose-only frozen-teacher KL objective
+with answer-span-only soft expert fusion. It should be read as a composition
+test, not a new baseline unless it beats the single repairs.
+
+| condition | fusion roles | KL roles | whole acc | whole NLL | math-answer acc | math-answer NLL | prose acc | prose NLL | context acc | context NLL | answer unsafe mass | answer contract |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| repaired Gate 5 | all | none | 0.256 | 5.992 | 0.544 | 2.301 | 0.167 | 7.214 | 0.565 | 1.677 | 0.041 | true |
+| answer-span fusion | math_answer, math_only | none | 0.273 | 6.094 | 0.550 | 2.092 | 0.178 | 7.327 | 0.615 | 1.827 | 0.045 | true |
+| prose-only teacher KL `0.5` | all | prose | 0.265 | 5.250 | 0.550 | 1.877 | 0.179 | 6.241 | 0.558 | 1.877 | 0.037 | true |
+| prose KL + answer-span fusion | math_answer, math_only | prose | 0.245 | 5.375 | 0.556 | 2.847 | 0.155 | 6.207 | 0.550 | 2.440 | 0.042 | true |
+
+Interpretation:
+
+- The two repairs do not cleanly compose. The combined run keeps the answer
+  safety contract (`0.042`) and slightly improves answer accuracy (`0.556`),
+  but answer NLL regresses badly versus prose-only KL (`2.847` vs `1.877`).
+- Prose NLL is marginally better than prose-only KL (`6.207` vs `6.241`), but
+  prose accuracy drops below the repaired baseline (`0.155` vs `0.167`).
+- Math-context behavior also regresses (`context NLL 2.440`), so the
+  answer-span gate is not just removing stray non-answer fusion; it changes the
+  training dynamics in a way that hurts calibration.
+- Current best single candidate depends on the target: answer-span fusion has
+  the best whole/role accuracy, while prose-only KL has the best safe
+  math-answer NLL and cleaner prose/context balance. The combined recipe should
+  not be promoted.

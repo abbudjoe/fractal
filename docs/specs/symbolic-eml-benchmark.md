@@ -1729,19 +1729,22 @@ Teacher-KL weight tuning:
 artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-teacher-kl-w025-v1/
 artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-teacher-kl-w050-v1/
 artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-teacher-kl-prose-w050-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-prose-kl-answer-span-v1/
 ```
 
 The sweep keeps answer-span fusion off and changes only
 `--non-answer-teacher-kl-loss-weight`. The prose-only follow-up keeps the
-weight at `0.5` and adds `--non-answer-teacher-kl-roles prose`.
+weight at `0.5` and adds `--non-answer-teacher-kl-roles prose`. The composition
+follow-up also adds `--fusion-allowed-roles math_answer,math_only`.
 
-| condition | KL roles | whole acc | whole NLL | math-answer acc | math-answer NLL | prose acc | prose NLL | context acc | context NLL | answer unsafe mass | contract |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| weight `0.0` | none | 0.256 | 5.992 | 0.544 | 2.301 | 0.167 | 7.214 | 0.565 | 1.677 | 0.041 | true |
-| weight `0.25` | prose, math_context | 0.227 | 5.364 | 0.569 | 2.526 | 0.162 | 6.238 | 0.408 | 2.340 | 0.035 | true |
-| weight `0.5` | prose, math_context | 0.244 | 5.120 | 0.562 | 2.502 | 0.185 | 5.984 | 0.408 | 2.069 | 0.043 | true |
-| weight `1.0` | prose, math_context | 0.213 | 5.165 | 0.556 | 3.165 | 0.162 | 5.891 | 0.333 | 2.535 | 0.106 | false |
-| weight `0.5` prose-only | prose | 0.265 | 5.250 | 0.550 | 1.877 | 0.179 | 6.241 | 0.558 | 1.877 | 0.037 | true |
+| condition | fusion roles | KL roles | whole acc | whole NLL | math-answer acc | math-answer NLL | prose acc | prose NLL | context acc | context NLL | answer unsafe mass | contract |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| repaired Gate 5 | all | none | 0.256 | 5.992 | 0.544 | 2.301 | 0.167 | 7.214 | 0.565 | 1.677 | 0.041 | true |
+| weight `0.25` | all | prose, math_context | 0.227 | 5.364 | 0.569 | 2.526 | 0.162 | 6.238 | 0.408 | 2.340 | 0.035 | true |
+| weight `0.5` | all | prose, math_context | 0.244 | 5.120 | 0.562 | 2.502 | 0.185 | 5.984 | 0.408 | 2.069 | 0.043 | true |
+| weight `1.0` | all | prose, math_context | 0.213 | 5.165 | 0.556 | 3.165 | 0.162 | 5.891 | 0.333 | 2.535 | 0.106 | false |
+| weight `0.5` prose-only | all | prose | 0.265 | 5.250 | 0.550 | 1.877 | 0.179 | 6.241 | 0.558 | 1.877 | 0.037 | true |
+| prose KL + answer-span fusion | math_answer, math_only | prose | 0.245 | 5.375 | 0.556 | 2.847 | 0.155 | 6.207 | 0.550 | 2.440 | 0.042 | true |
 
 Verdict:
 
@@ -1750,6 +1753,9 @@ Verdict:
 - Prose-only `0.5` is the cleaner bridge component: it preserves math-context
   accuracy, improves math-answer NLL and safety, and still improves prose NLL
   versus repaired Gate 5.
-- Neither setting is a broad LM promotion. The next test should compose
-  prose-only teacher KL with answer-span-only fusion and keep the result judged
-  by role-specific controls, not only whole-corpus loss.
+- Prose-only KL plus answer-span-only fusion does not cleanly compose: safety
+  remains acceptable and answer accuracy rises slightly, but answer/context NLL
+  regress. Do not promote the combined recipe.
+- None of these settings is a broad LM promotion. The next test should diagnose
+  the training interaction or run seed variance on the two best single repairs,
+  not stack them by default.
