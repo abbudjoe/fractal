@@ -13,7 +13,7 @@ records stay below it.
 | 2. Held-out formula/language templates | Does the bridge survive unseen formula families, unseen wrappers, and varied answer positions? | repaired after audit | Multi-split calibration plus answer-token call/abstain loss keeps most capability while reducing unsafe mass below the role-aware gate. |
 | 3. Target/random-label and wrong-expert controls | Does the harness leak target identity through labels, routing, or feature construction? | passed after repaired audit | Broken labels and wrong expert pairings still collapse the repaired hybrid gain. |
 | 4. Seed/template variance | Is the positive result stable across seeds and template draws? | repaired after audit | Multi-split calibration turns the unstable variance result into stable math-answer gains with low unsafe mass. |
-| 5. More natural mixed corpus | Does the contract hold beyond the synthetic grammar? | partial pass | The repaired probability-mixture bridge still wins strongly on held-out natural-wrapper math-answer tokens, but the full mixed-corpus contract is not confirmed because prose accuracy/NLL does not improve over controls. |
+| 5. More natural mixed corpus | Does the contract hold beyond the synthetic grammar? | partial, seed-unstable | The repaired probability-mixture bridge can win strongly on held-out natural-wrapper math-answer tokens, but the role-aware answer-safety contract passed only `1/3` seeds for each current candidate. |
 
 Current recommendation: do not promote to broad LM claims yet. The repaired
 recipe has now survived the bridge-critical math-answer slice through Gate 5,
@@ -26,7 +26,10 @@ general-decoder repair. The first composition test, prose-only KL plus
 answer-span-only fusion, preserved safety but degraded answer/context NLL
 relative to prose-only KL alone. The next step should keep the symbolic bridge
 isolated behind a calibrated answer/action interface and treat these repairs as
-competing candidates until the interference is understood.
+competing candidates until the interference is understood. The seed-variance
+audit then showed that even the role-local answer contract is not stable enough
+to promote: every current candidate passed the `math_answer` safety contract on
+only one of three seeds.
 
 ## Metric Glossary
 
@@ -751,7 +754,7 @@ Resolution block:
 | Resolution needed | Determine whether the EML bridge is useful outside the controlled synthetic language/math grammar. |
 | Promotion condition | The hybrid must improve math-answer accuracy/NLL without degrading pure-language/prose behavior and without violating unsafe-call or unsafe-mass gates. |
 | Current blocker | Math-answer transfer passes, but prose retention does not. The fusion path is useful as an answer/action bridge, not yet as a general next-token improvement. |
-| Next action | Run the ablation ladder one step at a time. Ablation 1 preserved answer gains but did not solve prose NLL. Ablation 2 retention-only worsened prose and broke answer safety. Ablation 3 showed teacher KL is the right prose-retention direction, and the weight sweep found `0.5` as the current best safe all-non-answer KL point. Ablation 3c showed prose-only KL preserves math-context behavior better but gives up some prose-NLL repair. Ablation 4 showed prose-only KL plus answer-span fusion does not cleanly compose: safety remains good, but answer/context NLL regress. The next clean test should diagnose the training interaction or run seed variance on the two best single repairs, not assume stacking is better. |
+| Next action | Stop treating the seed-777 recipes as promotable. Ablation 5 showed the repaired, answer-span-only, and prose-only-KL candidates each pass the role-aware `math_answer` safety contract only `1/3` seeds. The next clean test should fix calibration stability directly: train or select the router/fusion threshold against role-aware answer unsafe mass on safety-calibration rows, then rerun the same seed-variance audit. |
 
 ### Gate 5 Ablation 1: Answer-Span-Only Fusion
 
@@ -1187,3 +1190,113 @@ Interpretation:
   the best whole/role accuracy, while prose-only KL has the best safe
   math-answer NLL and cleaner prose/context balance. The combined recipe should
   not be promoted.
+
+### Gate 5 Ablation 5: Seed-Variance Audit
+
+Question:
+
+> Are the best-looking Gate 5 candidates stable across optimizer seeds, or was
+> seed `777` unusually favorable?
+
+Design:
+
+- Keep the Gate 5 corpus and calibration summaries fixed.
+- Use the existing seed `777` artifacts as the first point.
+- Add seeds `778` and `779` for three candidates:
+  - repaired Gate 5 probability-mixture recipe
+  - answer-span-only fusion
+  - prose-only teacher KL at weight `0.5`
+- Judge the probability-mixture run by role-aware `math_answer` safety, not only
+  whole-corpus metrics.
+
+Artifacts:
+
+```text
+artifacts/bridge-corpus-v1-gate5-lm/gate5-repair-language-math-natural-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-answer-span-fusion-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-teacher-kl-prose-w050-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-seed-variance-repaired-s778-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-seed-variance-repaired-s779-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-seed-variance-answer-span-s778-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-seed-variance-answer-span-s779-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-seed-variance-prose-kl-s778-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-seed-variance-prose-kl-s779-v1/
+```
+
+Command pattern:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260430/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260431/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260432/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260433/summary.json \
+  --backbone transformer \
+  --transformer-layers 2 \
+  --transformer-heads 4 \
+  --transformer-ffn-multiplier 2 \
+  --epochs 600 \
+  --learning-rate 0.004 \
+  --hidden-units 64 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 1.0 \
+  --answer-call-abstain-loss-weight 8.0 \
+  --answer-unsafe-loss-weight 5.0 \
+  --non-answer-abstain-loss-weight 2.0 \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --device mps \
+  --seed 778 \
+  --run-label gate5-seed-variance-repaired-s778-v1 \
+  --output-dir artifacts/bridge-corpus-v1-gate5-lm/gate5-seed-variance-repaired-s778-v1 \
+  --output table
+```
+
+Candidate-specific flags:
+
+```text
+repaired: no extra flags
+answer-span-only: --fusion-allowed-roles math_answer,math_only
+prose-only KL: --non-answer-teacher-kl-loss-weight 0.5 --non-answer-teacher-kl-roles prose
+```
+
+Caption: Gate 5 seed-variance audit for the probability-mixture hybrid. The
+`answer pass` column is the role-aware `math_answer` contract, including the
+answer unsafe-mass gate.
+
+| condition | seed | whole acc | whole NLL | answer acc | answer NLL | answer unsafe | answer pass | prose NLL | context NLL |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: |
+| repaired | 777 | 0.256 | 5.992 | 0.544 | 2.301 | 0.041 | true | 7.214 | 1.677 |
+| repaired | 778 | 0.282 | 6.107 | 0.487 | 3.878 | 0.286 | false | 7.168 | 2.032 |
+| repaired | 779 | 0.240 | 6.608 | 0.444 | 2.321 | 0.066 | false | 7.702 | 3.068 |
+| answer-span | 777 | 0.273 | 6.094 | 0.550 | 2.092 | 0.045 | true | 7.327 | 1.827 |
+| answer-span | 778 | 0.269 | 6.299 | 0.463 | 3.735 | 0.281 | false | 7.412 | 2.098 |
+| answer-span | 779 | 0.270 | 6.265 | 0.544 | 1.759 | 0.140 | false | 7.536 | 1.995 |
+| prose-only KL | 777 | 0.265 | 5.250 | 0.550 | 1.877 | 0.037 | true | 6.241 | 1.877 |
+| prose-only KL | 778 | 0.249 | 5.838 | 0.469 | 3.238 | 0.268 | false | 6.775 | 2.453 |
+| prose-only KL | 779 | 0.245 | 6.036 | 0.469 | 2.106 | 0.095 | false | 7.039 | 2.793 |
+
+Caption: Aggregate seed-variance summary. Means and sample standard deviations
+are over seeds `777`, `778`, and `779`.
+
+| condition | answer pass count | whole acc mean +/- sd | whole NLL mean +/- sd | answer acc mean +/- sd | answer NLL mean +/- sd | answer unsafe mean +/- sd | prose NLL mean +/- sd | context NLL mean +/- sd |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| repaired | 1/3 | 0.259 +/- 0.021 | 6.236 +/- 0.327 | 0.492 +/- 0.050 | 2.833 +/- 0.905 | 0.131 +/- 0.135 | 7.361 +/- 0.296 | 2.259 +/- 0.723 |
+| answer-span | 1/3 | 0.271 +/- 0.002 | 6.219 +/- 0.110 | 0.519 +/- 0.049 | 2.529 +/- 1.058 | 0.155 +/- 0.119 | 7.425 +/- 0.105 | 1.973 +/- 0.137 |
+| prose-only KL | 1/3 | 0.253 +/- 0.011 | 5.708 +/- 0.409 | 0.496 +/- 0.047 | 2.407 +/- 0.728 | 0.133 +/- 0.120 | 6.685 +/- 0.407 | 2.374 +/- 0.463 |
+
+Interpretation:
+
+- Seed `777` was too favorable. Every current candidate passed the role-aware
+  `math_answer` safety contract only once in three seeds.
+- The answer-token capability signal still exists: all three candidates retain
+  large answer-accuracy gains over the pure LM controls in most seeds. The
+  failure is calibration/safety stability, not total loss of the symbolic
+  signal.
+- Answer-span-only fusion is the most stable on whole accuracy, but not on
+  answer safety. Prose-only KL is best on mean whole NLL, answer NLL, and prose
+  NLL, but it also fails role-aware answer safety on seeds `778` and `779`.
+- Do not promote any current Gate 5 recipe. The next repair must make the
+  router/fusion calibration seed-stable under the role-aware answer unsafe
+  metric before broader LM claims are revisited.

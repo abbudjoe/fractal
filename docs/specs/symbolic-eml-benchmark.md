@@ -1759,3 +1759,35 @@ Verdict:
 - None of these settings is a broad LM promotion. The next test should diagnose
   the training interaction or run seed variance on the two best single repairs,
   not stack them by default.
+
+Gate 5 seed-variance audit:
+
+```text
+artifacts/bridge-corpus-v1-gate5-lm/gate5-seed-variance-repaired-s778-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-seed-variance-repaired-s779-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-seed-variance-answer-span-s778-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-seed-variance-answer-span-s779-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-seed-variance-prose-kl-s778-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-seed-variance-prose-kl-s779-v1/
+```
+
+The audit used the existing seed `777` artifacts plus new seeds `778` and
+`779`, keeping the Gate 5 corpus and calibration summaries fixed. It compared
+the repaired recipe, answer-span-only fusion, and prose-only KL.
+
+| condition | answer pass count | whole acc mean +/- sd | whole NLL mean +/- sd | answer acc mean +/- sd | answer NLL mean +/- sd | answer unsafe mean +/- sd | prose NLL mean +/- sd | context NLL mean +/- sd |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| repaired | 1/3 | 0.259 +/- 0.021 | 6.236 +/- 0.327 | 0.492 +/- 0.050 | 2.833 +/- 0.905 | 0.131 +/- 0.135 | 7.361 +/- 0.296 | 2.259 +/- 0.723 |
+| answer-span | 1/3 | 0.271 +/- 0.002 | 6.219 +/- 0.110 | 0.519 +/- 0.049 | 2.529 +/- 1.058 | 0.155 +/- 0.119 | 7.425 +/- 0.105 | 1.973 +/- 0.137 |
+| prose-only KL | 1/3 | 0.253 +/- 0.011 | 5.708 +/- 0.409 | 0.496 +/- 0.047 | 2.407 +/- 0.728 | 0.133 +/- 0.120 | 6.685 +/- 0.407 | 2.374 +/- 0.463 |
+
+Seed-variance verdict:
+
+- The seed `777` recipes are not promotable. All three current candidates pass
+  the role-aware `math_answer` safety contract only `1/3` seeds.
+- The symbolic signal has not disappeared: answer accuracy remains elevated
+  relative to controls. The blocker is unstable router/fusion calibration,
+  especially unsafe answer mass.
+- The next bridge repair should target role-aware calibration stability
+  directly, then rerun this exact audit. A larger LM or broader corpus should
+  wait until the answer unsafe-mass pass count is stable.
