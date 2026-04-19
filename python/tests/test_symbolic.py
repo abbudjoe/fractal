@@ -26,6 +26,7 @@ from python.symbolic.bridge_lm import (
     build_contract_splits,
     fused_token_outputs,
     role_gated_features,
+    role_scaled_features,
     run_symbolic_bridge_lm,
 )
 from python.symbolic.bridge_sequence import run_sequence_bridge
@@ -925,6 +926,9 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 expert_logit_scale=3.0,
                 fusion_allowed_roles=("math_answer",),
                 feature_allowed_roles=("symbolic",),
+                feature_role_scales=(("symbolic", 0.5),),
+                feature_invariance_loss_weight=0.25,
+                feature_invariance_roles=("symbolic",),
                 device="cpu",
                 extra_fit_bridge_summary_paths=(extra_bridge_summary,),
                 extra_fit_splits=("train", "safety_calibration", "extrapolation"),
@@ -954,6 +958,9 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertEqual(report.expert_logit_scale, 3.0)
             self.assertEqual(report.fusion_allowed_roles, ("math_answer",))
             self.assertEqual(report.feature_allowed_roles, ("symbolic",))
+            self.assertEqual(report.feature_role_scales, (("symbolic", 0.5),))
+            self.assertEqual(report.feature_invariance_loss_weight, 0.25)
+            self.assertEqual(report.feature_invariance_roles, ("symbolic",))
             self.assertEqual(report.extra_fit_bridge_summary_paths, (str(extra_bridge_summary.resolve()),))
             self.assertEqual(report.extra_fit_feature_table_paths, (str(extra_feature_table.resolve()),))
             self.assertEqual(report.summary["extra_fit_row_count"], 4)
@@ -1066,6 +1073,9 @@ class SymbolicEvaluationTests(unittest.TestCase):
         self.assertTrue(torch.all(gated[prose_mask] == 0.0).item())
         self.assertTrue(torch.allclose(gated[answer_mask], batch.features[answer_mask]))
         self.assertTrue(torch.allclose(role_gated_features(torch, batch, ()), batch.features))
+        scaled = role_scaled_features(torch, batch, (), (("prose", 0.25),))
+        self.assertTrue(torch.allclose(scaled[prose_mask], batch.features[prose_mask] * 0.25))
+        self.assertTrue(torch.allclose(scaled[answer_mask], batch.features[answer_mask]))
 
     def test_bridge_corpus_v1_generates_language_math_and_math_only_contracts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

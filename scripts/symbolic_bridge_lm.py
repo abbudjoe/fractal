@@ -18,6 +18,22 @@ def parse_comma_separated(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
+def parse_role_scales(value: str) -> tuple[tuple[str, float], ...]:
+    pairs: list[tuple[str, float]] = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" not in item:
+            raise ValueError(f"role scale must use role:scale form; got {item!r}")
+        role, scale = item.split(":", 1)
+        role = role.strip()
+        if not role:
+            raise ValueError(f"role scale must have a non-empty role; got {item!r}")
+        pairs.append((role, float(scale.strip())))
+    return tuple(pairs)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Confirm the symbolic router contract on a tiny LM-style model.")
     parser.add_argument("--bridge-summary", type=Path, required=True)
@@ -96,6 +112,23 @@ def build_parser() -> argparse.ArgumentParser:
             "Empty means all roles."
         ),
     )
+    parser.add_argument(
+        "--feature-role-scales",
+        default="",
+        help=(
+            "Comma-separated role:scale pairs that softly scale bridge side-channel features for matching eval_role "
+            "names. Example: prose:0.25 keeps one quarter of the side-channel on prose tokens."
+        ),
+    )
+    parser.add_argument("--feature-invariance-loss-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--feature-invariance-roles",
+        default="prose",
+        help=(
+            "Comma-separated eval_role names where token logits are KL-regularized against a no-feature reference. "
+            "Used to make protected roles less dependent on the side-channel."
+        ),
+    )
     parser.add_argument("--backbone", choices=["gru", "transformer"], default="gru")
     parser.add_argument("--transformer-layers", type=int, default=2)
     parser.add_argument("--transformer-heads", type=int, default=4)
@@ -110,6 +143,8 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = args.output_dir or (REPO_ROOT / "artifacts" / "symbolic-bridge-lm" / args.run_label)
     fusion_allowed_roles = parse_comma_separated(args.fusion_allowed_roles)
     feature_allowed_roles = parse_comma_separated(args.feature_allowed_roles)
+    feature_role_scales = parse_role_scales(args.feature_role_scales)
+    feature_invariance_roles = parse_comma_separated(args.feature_invariance_roles)
     non_answer_teacher_kl_roles = parse_comma_separated(args.non_answer_teacher_kl_roles)
     calibration_answer_roles = parse_comma_separated(args.calibration_answer_roles)
     calibration_selection_modes = parse_comma_separated(args.calibration_selection_modes)
@@ -143,6 +178,9 @@ def main(argv: list[str] | None = None) -> int:
         expert_logit_scale=args.expert_logit_scale,
         fusion_allowed_roles=fusion_allowed_roles,
         feature_allowed_roles=feature_allowed_roles,
+        feature_role_scales=feature_role_scales,
+        feature_invariance_loss_weight=args.feature_invariance_loss_weight,
+        feature_invariance_roles=feature_invariance_roles,
         backbone=args.backbone,
         transformer_layers=args.transformer_layers,
         transformer_heads=args.transformer_heads,
@@ -159,6 +197,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"fusion_allowed_roles={report.fusion_allowed_roles or 'all'}")
         print(f"feature_allowed_roles={report.feature_allowed_roles or 'all'}")
+        print(f"feature_role_scales={report.feature_role_scales or 'none'}")
+        print(f"feature_invariance_loss_weight={report.feature_invariance_loss_weight}")
+        print(f"feature_invariance_roles={report.feature_invariance_roles or 'none'}")
         print(f"non_answer_teacher_kl_roles={report.non_answer_teacher_kl_roles or 'none'}")
         print(f"role_aware_calibration={report.role_aware_calibration}")
         print(f"calibration_answer_roles={report.calibration_answer_roles or 'none'}")

@@ -172,6 +172,9 @@ class BridgeLmReport:
     expert_logit_scale: float
     fusion_allowed_roles: tuple[str, ...]
     feature_allowed_roles: tuple[str, ...]
+    feature_role_scales: tuple[tuple[str, float], ...]
+    feature_invariance_loss_weight: float
+    feature_invariance_roles: tuple[str, ...]
     device: str
     expert_ids: tuple[str, ...]
     abstain_index: int
@@ -215,6 +218,9 @@ class BridgeLmReport:
             "expert_logit_scale": self.expert_logit_scale,
             "fusion_allowed_roles": list(self.fusion_allowed_roles),
             "feature_allowed_roles": list(self.feature_allowed_roles),
+            "feature_role_scales": [[role, scale] for role, scale in self.feature_role_scales],
+            "feature_invariance_loss_weight": self.feature_invariance_loss_weight,
+            "feature_invariance_roles": list(self.feature_invariance_roles),
             "device": self.device,
             "expert_ids": list(self.expert_ids),
             "abstain_index": self.abstain_index,
@@ -254,6 +260,9 @@ def run_symbolic_bridge_lm(
     expert_logit_scale: float = 6.0,
     fusion_allowed_roles: tuple[str, ...] = (),
     feature_allowed_roles: tuple[str, ...] = (),
+    feature_role_scales: tuple[tuple[str, float], ...] = (),
+    feature_invariance_loss_weight: float = 0.0,
+    feature_invariance_roles: tuple[str, ...] = ("prose",),
     backbone: str = "gru",
     transformer_layers: int = 2,
     transformer_heads: int = 4,
@@ -272,6 +281,8 @@ def run_symbolic_bridge_lm(
     )
     calibration_selection_modes = validate_calibration_selection_modes(calibration_selection_modes)
     extra_fit_splits = validate_extra_fit_splits(extra_fit_splits)
+    feature_role_scales = validate_feature_role_scales(feature_role_scales)
+    feature_invariance_roles = tuple(dict.fromkeys(feature_invariance_roles))
     bridge_summary = json.loads(bridge_summary_path.read_text())
     feature_table_path = resolve_feature_table_path(bridge_summary, bridge_summary_path)
     rows = load_feature_rows(feature_table_path)
@@ -365,6 +376,9 @@ def run_symbolic_bridge_lm(
                 expert_logit_scale=expert_logit_scale,
                 fusion_allowed_roles=fusion_allowed_roles,
                 feature_allowed_roles=feature_allowed_roles,
+                feature_role_scales=feature_role_scales,
+                feature_invariance_loss_weight=feature_invariance_loss_weight,
+                feature_invariance_roles=feature_invariance_roles,
                 teacher_probabilities_by_split=teacher_probabilities_by_split,
                 backbone=backbone,
                 transformer_layers=transformer_layers,
@@ -417,6 +431,9 @@ def run_symbolic_bridge_lm(
         expert_logit_scale=expert_logit_scale,
         fusion_allowed_roles=fusion_allowed_roles,
         feature_allowed_roles=feature_allowed_roles,
+        feature_role_scales=feature_role_scales,
+        feature_invariance_loss_weight=feature_invariance_loss_weight,
+        feature_invariance_roles=feature_invariance_roles,
         device=str(selected_device),
         expert_ids=expert_ids,
         abstain_index=abstain_index,
@@ -465,6 +482,9 @@ def train_lm_contract_variant(
     expert_logit_scale: float,
     fusion_allowed_roles: tuple[str, ...],
     feature_allowed_roles: tuple[str, ...],
+    feature_role_scales: tuple[tuple[str, float], ...],
+    feature_invariance_loss_weight: float,
+    feature_invariance_roles: tuple[str, ...],
     teacher_probabilities_by_split: dict[str, Any] | None,
     backbone: str,
     transformer_layers: int,
@@ -505,7 +525,7 @@ def train_lm_contract_variant(
         optimizer.zero_grad(set_to_none=True)
         token_logits, router_logits = model(
             fit_batch.previous_tokens,
-            role_gated_features(torch, fit_batch, feature_allowed_roles),
+            role_scaled_features(torch, fit_batch, feature_allowed_roles, feature_role_scales),
         )
         final_logits, final_probabilities, _router_stats = fused_token_outputs(
             torch,
@@ -592,6 +612,18 @@ def train_lm_contract_variant(
                 split="fit",
                 roles=non_answer_teacher_kl_roles,
             )
+            if feature_invariance_loss_weight > 0.0:
+                feature_invariance_loss = feature_invariance_kl_loss(
+                    torch,
+                    model,
+                    fit_batch,
+                    token_logits,
+                    feature_allowed_roles=feature_allowed_roles,
+                    feature_role_scales=feature_role_scales,
+                    invariant_roles=feature_invariance_roles,
+                )
+            else:
+                feature_invariance_loss = token_loss * 0.0
             loss = (
                 token_loss
                 + router_loss_weight * router_loss
@@ -602,6 +634,7 @@ def train_lm_contract_variant(
                 + non_answer_abstain_loss_weight * non_answer_abstain_loss
                 + non_answer_lm_retention_loss_weight * non_answer_lm_retention_loss
                 + non_answer_teacher_kl_loss_weight * non_answer_teacher_kl_loss
+                + feature_invariance_loss_weight * feature_invariance_loss
                 + unsafe_margin_loss_weight * unsafe_margin_loss
             )
         else:
@@ -620,7 +653,7 @@ def train_lm_contract_variant(
             calibration_batch = splits[calibration_split]
             calibration_token_logits, calibration_router_logits = model(
                 calibration_batch.previous_tokens,
-                role_gated_features(torch, calibration_batch, feature_allowed_roles),
+                role_scaled_features(torch, calibration_batch, feature_allowed_roles, feature_role_scales),
             )
             capability_batch = splits.get("validation")
             capability_token_logits = None
@@ -628,7 +661,7 @@ def train_lm_contract_variant(
             if capability_batch is not None:
                 capability_token_logits, capability_router_logits = model(
                     capability_batch.previous_tokens,
-                    role_gated_features(torch, capability_batch, feature_allowed_roles),
+                    role_scaled_features(torch, capability_batch, feature_allowed_roles, feature_role_scales),
                 )
             calibration_policy = fit_role_aware_fusion_calibration(
                 torch,
@@ -651,7 +684,7 @@ def train_lm_contract_variant(
         for split, batch in splits.items():
             token_logits, router_logits = model(
                 batch.previous_tokens,
-                role_gated_features(torch, batch, feature_allowed_roles),
+                role_scaled_features(torch, batch, feature_allowed_roles, feature_role_scales),
             )
             final_logits, final_probabilities, router_stats = fused_token_outputs(
                 torch,
@@ -679,6 +712,7 @@ def train_lm_contract_variant(
             non_answer_abstain_loss_value = 0.0
             non_answer_lm_retention_loss_value = 0.0
             non_answer_teacher_kl_loss_value = 0.0
+            feature_invariance_loss_value = 0.0
             unsafe_margin_loss_value = 0.0
             if use_router:
                 router_class_weights = router_loss_class_weights(
@@ -757,6 +791,17 @@ def train_lm_contract_variant(
                     roles=non_answer_teacher_kl_roles,
                 )
                 non_answer_teacher_kl_loss_value = float(non_answer_teacher_kl_loss.detach().cpu().item())
+                if feature_invariance_loss_weight > 0.0:
+                    feature_invariance_loss = feature_invariance_kl_loss(
+                        torch,
+                        model,
+                        batch,
+                        token_logits,
+                        feature_allowed_roles=feature_allowed_roles,
+                        feature_role_scales=feature_role_scales,
+                        invariant_roles=feature_invariance_roles,
+                    )
+                    feature_invariance_loss_value = float(feature_invariance_loss.detach().cpu().item())
             split_metrics[split] = evaluate_contract_outputs(
                 torch,
                 batch,
@@ -780,6 +825,7 @@ def train_lm_contract_variant(
                     + non_answer_abstain_loss_weight * non_answer_abstain_loss_value
                     + non_answer_lm_retention_loss_weight * non_answer_lm_retention_loss_value
                     + non_answer_teacher_kl_loss_weight * non_answer_teacher_kl_loss_value
+                    + feature_invariance_loss_weight * feature_invariance_loss_value
                     + unsafe_margin_loss_weight * unsafe_margin_loss_value
                 ),
             )
@@ -984,10 +1030,25 @@ def fusion_role_gate(torch: Any, batch: SymbolicBridgeBatch, allowed_roles: tupl
 
 
 def role_gated_features(torch: Any, batch: SymbolicBridgeBatch, allowed_roles: tuple[str, ...]) -> Any:
-    if not allowed_roles:
+    return role_scaled_features(torch, batch, allowed_roles, ())
+
+
+def role_scaled_features(
+    torch: Any,
+    batch: SymbolicBridgeBatch,
+    allowed_roles: tuple[str, ...],
+    role_scales: tuple[tuple[str, float], ...],
+) -> Any:
+    if not allowed_roles and not role_scales:
         return batch.features
-    gate = fusion_role_gate(torch, batch, allowed_roles).to(batch.features.dtype).unsqueeze(-1)
-    return batch.features * gate
+    scales = torch.ones_like(batch.symbolic_mask, dtype=batch.features.dtype)
+    if allowed_roles:
+        scales = scales * fusion_role_gate(torch, batch, allowed_roles).to(batch.features.dtype)
+    for role, scale in role_scales:
+        if role in batch.role_names:
+            role_scale = torch.full_like(scales, float(scale))
+            scales = torch.where(batch.role_ids == batch.role_names.index(role), role_scale, scales)
+    return batch.features * scales.unsqueeze(-1)
 
 
 def fit_role_aware_fusion_calibration(
@@ -1317,6 +1378,19 @@ def validate_extra_fit_splits(extra_fit_splits: tuple[str, ...]) -> tuple[str, .
     return splits
 
 
+def validate_feature_role_scales(role_scales: tuple[tuple[str, float], ...]) -> tuple[tuple[str, float], ...]:
+    validated: dict[str, float] = {}
+    for raw_role, raw_scale in role_scales:
+        role = str(raw_role).strip()
+        if not role:
+            raise ValueError("feature role scale roles must be non-empty")
+        scale = float(raw_scale)
+        if scale < 0.0 or scale > 1.0:
+            raise ValueError(f"feature role scale for {role} must be between 0 and 1; got {scale}")
+        validated[role] = scale
+    return tuple(sorted(validated.items()))
+
+
 def bridge_lm_backbone_config(
     backbone: str,
     *,
@@ -1480,6 +1554,45 @@ def teacher_kl_loss_for_split(
         final_probabilities,
         role_mask(torch, batch, roles),
     )
+
+
+def feature_invariance_kl_loss(
+    torch: Any,
+    model: Any,
+    batch: SymbolicBridgeBatch,
+    token_logits: Any,
+    *,
+    feature_allowed_roles: tuple[str, ...],
+    feature_role_scales: tuple[tuple[str, float], ...],
+    invariant_roles: tuple[str, ...],
+) -> Any:
+    mask = role_mask(torch, batch, invariant_roles)
+    if not bool(mask.any().detach().cpu().item()):
+        return token_logits.sum() * 0.0
+    reference_scales = feature_invariance_reference_scales(feature_role_scales, invariant_roles)
+    with torch.no_grad():
+        reference_logits, _reference_router_logits = model(
+            batch.previous_tokens,
+            role_scaled_features(torch, batch, feature_allowed_roles, reference_scales),
+        )
+        teacher_probabilities = torch.nn.functional.softmax(reference_logits.detach(), dim=-1)
+    return masked_teacher_kl(
+        torch,
+        teacher_probabilities,
+        token_logits,
+        None,
+        mask,
+    )
+
+
+def feature_invariance_reference_scales(
+    feature_role_scales: tuple[tuple[str, float], ...],
+    invariant_roles: tuple[str, ...],
+) -> tuple[tuple[str, float], ...]:
+    merged = {role: float(scale) for role, scale in feature_role_scales}
+    for role in invariant_roles:
+        merged[str(role)] = 0.0
+    return tuple(sorted(merged.items()))
 
 
 def masked_mean(torch: Any, values: Any, mask: Any | None) -> Any:
@@ -2343,6 +2456,9 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
         f"Expert logit scale: `{report.expert_logit_scale}`",
         f"Fusion allowed roles: `{list(report.fusion_allowed_roles) or 'all'}`",
         f"Feature allowed roles: `{list(report.feature_allowed_roles) or 'all'}`",
+        f"Feature role scales: `{list(report.feature_role_scales) or 'none'}`",
+        f"Feature invariance loss weight: `{report.feature_invariance_loss_weight}`",
+        f"Feature invariance roles: `{list(report.feature_invariance_roles) or 'none'}`",
         "",
         "| run | mode | features | val final acc | extrap final acc | val final NLL | extrap final NLL | extrap LM acc | router extrap acc | expert call rate | unsafe call rate | abstain recall |",
         "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",

@@ -1755,3 +1755,107 @@ Interpretation:
   role-aware side-channel adapter or auxiliary objective that preserves the
   math-context pathway while making prose-only sequences behave like the pure
   transformer.
+
+### Gate 5 Ablation 10: Soft Side-Channel Adapter and Prose Invariance Loss
+
+Question:
+
+> Can a softer side-channel control preserve math-answer gains while reducing
+> prose/context damage better than the hard feature gate?
+
+Implementation:
+
+- Add `--feature-role-scales`, a per-`eval_role` multiplier for bridge
+  side-channel feature vectors. This is a soft version of
+  `--feature-allowed-roles`; for example `prose:0.25` keeps one quarter of the
+  side-channel on prose tokens instead of hard-zeroing it.
+- Add `--feature-invariance-loss-weight` and `--feature-invariance-roles`.
+  During router training, protected roles receive a KL penalty between the
+  normal token logits and a no-feature reference pass for those roles. The
+  intent is to make prose logits insensitive to the side-channel without
+  blocking math-context/answer features.
+- Defaults preserve prior behavior: no role scales, zero invariance weight.
+
+Artifacts:
+
+```text
+artifacts/bridge-lm-gate5-repair/gate5-feature-soft-prose025-top-expert-gain04-s777-v1/
+artifacts/bridge-lm-gate5-repair/gate5-feature-invariance-prose-w050-top-expert-gain04-s777-v1/
+```
+
+Command pattern:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260430/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260431/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260432/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260433/summary.json \
+  --extra-fit-splits train,safety_calibration,extrapolation \
+  --seed 777 \
+  --backbone transformer \
+  --transformer-layers 2 \
+  --transformer-heads 4 \
+  --transformer-ffn-multiplier 2 \
+  --epochs 600 \
+  --learning-rate 0.004 \
+  --hidden-units 64 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 1.0 \
+  --answer-call-abstain-loss-weight 8.0 \
+  --answer-unsafe-loss-weight 5.0 \
+  --non-answer-abstain-loss-weight 2.0 \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --role-aware-calibration \
+  --calibration-selection-modes top-expert \
+  --calibration-target-answer-unsafe 0.05 \
+  --calibration-min-answer-accuracy-gain 0.4 \
+  --device mps \
+  --output table
+```
+
+The soft-adapter run adds:
+
+```bash
+--feature-role-scales prose:0.25
+```
+
+The invariance run adds:
+
+```bash
+--feature-invariance-loss-weight 0.5 --feature-invariance-roles prose
+```
+
+Caption: Seed-777 diagnostics under the same four-expert top-expert calibration
+recipe. `Side acc/NLL` is the frozen side-channel control within the same run;
+the whole contract is not repaired when prob-mixture remains below that control.
+
+| condition | whole acc | whole NLL | side acc | side NLL | answer acc | answer NLL | answer call | answer unsafe | context acc | context NLL | prose acc | prose NLL |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| champion | 0.250 | 6.178 | 0.273 | 6.506 | 0.487 | 3.086 | 0.225 | 0.000 | 0.588 | 1.787 | 0.158 | 7.371 |
+| hard math-role gate | 0.243 | 5.706 | 0.230 | 6.136 | 0.431 | 4.473 | 0.365 | 0.000 | 0.402 | 2.630 | 0.194 | 6.473 |
+| soft prose scale 0.25 | 0.250 | 5.884 | 0.257 | 6.927 | 0.419 | 4.348 | 0.159 | 0.000 | 0.523 | 2.032 | 0.178 | 6.845 |
+| prose invariance KL 0.5 | 0.244 | 5.819 | 0.276 | 6.583 | 0.556 | 2.519 | 0.237 | 0.000 | 0.554 | 1.846 | 0.153 | 6.935 |
+
+Interpretation:
+
+- Soft prose scaling is safer than the hard answer-only gate, but it is not a
+  promotion. It preserves whole accuracy relative to the champion and improves
+  whole NLL, but answer accuracy/NLL regress and the frozen side-channel control
+  still has higher whole accuracy.
+- The prose-invariance auxiliary objective is the more promising repair. It
+  improves answer accuracy from `0.487` to `0.556`, improves answer NLL from
+  `3.086` to `2.519`, keeps answer unsafe calls at `0.000`, and improves whole
+  NLL from `6.178` to `5.819`.
+- The invariance objective still does not solve the whole bridge contract:
+  whole accuracy falls to `0.244` while the same run's frozen side-channel
+  control reaches `0.276`. Prose accuracy remains weak, though prose NLL is
+  better than the champion.
+- Operational note: running the two MPS jobs in parallel completed, but it was
+  slow for this tiny model. Future sweeps should prefer CPU parallelism or
+  single-run MPS scheduling.
+- Current resolution: do not promote soft scaling. Treat prose-invariance KL as
+  the next candidate for seed variance and role-aware calibration tuning, not as
+  a finished repair.
