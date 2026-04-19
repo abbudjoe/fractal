@@ -123,6 +123,7 @@ class BridgeLmReport:
     answer_unsafe_loss_weight: float
     non_answer_abstain_loss_weight: float
     non_answer_lm_retention_loss_weight: float
+    non_answer_teacher_kl_loss_weight: float
     unsafe_margin_loss_weight: float
     unsafe_margin: float
     router_call_threshold: float
@@ -157,6 +158,7 @@ class BridgeLmReport:
             "answer_unsafe_loss_weight": self.answer_unsafe_loss_weight,
             "non_answer_abstain_loss_weight": self.non_answer_abstain_loss_weight,
             "non_answer_lm_retention_loss_weight": self.non_answer_lm_retention_loss_weight,
+            "non_answer_teacher_kl_loss_weight": self.non_answer_teacher_kl_loss_weight,
             "unsafe_margin_loss_weight": self.unsafe_margin_loss_weight,
             "unsafe_margin": self.unsafe_margin,
             "router_call_threshold": self.router_call_threshold,
@@ -188,6 +190,7 @@ def run_symbolic_bridge_lm(
     answer_unsafe_loss_weight: float = 0.0,
     non_answer_abstain_loss_weight: float = 0.0,
     non_answer_lm_retention_loss_weight: float = 0.0,
+    non_answer_teacher_kl_loss_weight: float = 0.0,
     unsafe_margin_loss_weight: float = 0.0,
     unsafe_margin: float = 0.5,
     router_call_threshold: float = 0.0,
@@ -227,6 +230,27 @@ def run_symbolic_bridge_lm(
     task_ids = tuple(sorted({str(row["task_id"]) for row in fit_rows}))
     expert_ids = tuple(sorted({str(expert) for row in fit_rows for expert in row["experts"]}))
     abstain_index = len(expert_ids)
+    teacher_probabilities_by_split = (
+        train_token_only_teacher_probabilities(
+            torch,
+            rows,
+            task_ids,
+            expert_ids,
+            token_bins,
+            fit_rows=fit_rows,
+            seed=seed + 100_003,
+            epochs=epochs,
+            learning_rate=learning_rate,
+            hidden_units=hidden_units,
+            backbone=backbone,
+            transformer_layers=transformer_layers,
+            transformer_heads=transformer_heads,
+            transformer_ffn_multiplier=transformer_ffn_multiplier,
+            device=selected_device,
+        )
+        if non_answer_teacher_kl_loss_weight > 0.0
+        else None
+    )
 
     runs: list[BridgeLmRun] = [
         evaluate_majority_baseline(rows, token_bins),
@@ -266,11 +290,13 @@ def run_symbolic_bridge_lm(
                 answer_unsafe_loss_weight=answer_unsafe_loss_weight,
                 non_answer_abstain_loss_weight=non_answer_abstain_loss_weight,
                 non_answer_lm_retention_loss_weight=non_answer_lm_retention_loss_weight,
+                non_answer_teacher_kl_loss_weight=non_answer_teacher_kl_loss_weight,
                 unsafe_margin_loss_weight=unsafe_margin_loss_weight,
                 unsafe_margin=unsafe_margin,
                 router_call_threshold=router_call_threshold,
                 expert_logit_scale=expert_logit_scale,
                 fusion_allowed_roles=fusion_allowed_roles,
+                teacher_probabilities_by_split=teacher_probabilities_by_split,
                 backbone=backbone,
                 transformer_layers=transformer_layers,
                 transformer_heads=transformer_heads,
@@ -308,6 +334,7 @@ def run_symbolic_bridge_lm(
         answer_unsafe_loss_weight=answer_unsafe_loss_weight,
         non_answer_abstain_loss_weight=non_answer_abstain_loss_weight,
         non_answer_lm_retention_loss_weight=non_answer_lm_retention_loss_weight,
+        non_answer_teacher_kl_loss_weight=non_answer_teacher_kl_loss_weight,
         unsafe_margin_loss_weight=unsafe_margin_loss_weight,
         unsafe_margin=unsafe_margin,
         router_call_threshold=router_call_threshold,
@@ -348,11 +375,13 @@ def train_lm_contract_variant(
     answer_unsafe_loss_weight: float,
     non_answer_abstain_loss_weight: float,
     non_answer_lm_retention_loss_weight: float,
+    non_answer_teacher_kl_loss_weight: float,
     unsafe_margin_loss_weight: float,
     unsafe_margin: float,
     router_call_threshold: float,
     expert_logit_scale: float,
     fusion_allowed_roles: tuple[str, ...],
+    teacher_probabilities_by_split: dict[str, Any] | None,
     backbone: str,
     transformer_layers: int,
     transformer_heads: int,
@@ -467,6 +496,14 @@ def train_lm_contract_variant(
                 fit_batch.target_ids,
                 role_mask(torch, fit_batch, ("prose", "math_context")),
             )
+            non_answer_teacher_kl_loss = teacher_kl_loss_for_split(
+                torch,
+                fit_batch,
+                final_logits,
+                final_probabilities,
+                teacher_probabilities_by_split,
+                split="fit",
+            )
             loss = (
                 token_loss
                 + router_loss_weight * router_loss
@@ -476,6 +513,7 @@ def train_lm_contract_variant(
                 + answer_unsafe_loss_weight * answer_unsafe_loss
                 + non_answer_abstain_loss_weight * non_answer_abstain_loss
                 + non_answer_lm_retention_loss_weight * non_answer_lm_retention_loss
+                + non_answer_teacher_kl_loss_weight * non_answer_teacher_kl_loss
                 + unsafe_margin_loss_weight * unsafe_margin_loss
             )
         else:
@@ -512,6 +550,7 @@ def train_lm_contract_variant(
             answer_unsafe_loss_value = 0.0
             non_answer_abstain_loss_value = 0.0
             non_answer_lm_retention_loss_value = 0.0
+            non_answer_teacher_kl_loss_value = 0.0
             unsafe_margin_loss_value = 0.0
             if use_router:
                 router_class_weights = router_loss_class_weights(
@@ -580,6 +619,15 @@ def train_lm_contract_variant(
                     role_mask(torch, batch, ("prose", "math_context")),
                 )
                 non_answer_lm_retention_loss_value = float(non_answer_lm_retention_loss.detach().cpu().item())
+                non_answer_teacher_kl_loss = teacher_kl_loss_for_split(
+                    torch,
+                    batch,
+                    final_logits,
+                    final_probabilities,
+                    teacher_probabilities_by_split,
+                    split=split,
+                )
+                non_answer_teacher_kl_loss_value = float(non_answer_teacher_kl_loss.detach().cpu().item())
             split_metrics[split] = evaluate_contract_outputs(
                 torch,
                 batch,
@@ -602,6 +650,7 @@ def train_lm_contract_variant(
                     + answer_unsafe_loss_weight * answer_unsafe_loss_value
                     + non_answer_abstain_loss_weight * non_answer_abstain_loss_value
                     + non_answer_lm_retention_loss_weight * non_answer_lm_retention_loss_value
+                    + non_answer_teacher_kl_loss_weight * non_answer_teacher_kl_loss_value
                     + unsafe_margin_loss_weight * unsafe_margin_loss_value
                 ),
             )
@@ -639,6 +688,75 @@ def train_lm_contract_variant(
             if split in split_metrics
         },
     )
+
+
+def train_token_only_teacher_probabilities(
+    torch: Any,
+    rows: list[dict[str, Any]],
+    task_ids: tuple[str, ...],
+    expert_ids: tuple[str, ...],
+    token_bins: int,
+    *,
+    fit_rows: list[dict[str, Any]],
+    seed: int,
+    epochs: int,
+    learning_rate: float,
+    hidden_units: int,
+    backbone: str,
+    transformer_layers: int,
+    transformer_heads: int,
+    transformer_ffn_multiplier: int,
+    device: Any,
+) -> dict[str, Any]:
+    torch.manual_seed(seed)
+    splits = build_contract_splits(
+        torch,
+        rows,
+        task_ids,
+        expert_ids,
+        token_bins,
+        "token-only",
+        device,
+        fit_rows=fit_rows,
+    )
+    feature_dim = int(splits["fit"].features.shape[-1])
+    max_sequence_length = max(int(batch.previous_tokens.shape[1]) for batch in splits.values())
+    model = build_symbolic_bridge_lm_model(
+        torch,
+        backbone=backbone,
+        token_vocab_size=token_bins + 1,
+        feature_dim=feature_dim,
+        hidden_units=hidden_units,
+        token_bins=token_bins,
+        router_classes=len(expert_ids) + 1,
+        max_sequence_length=max_sequence_length,
+        transformer_layers=transformer_layers,
+        transformer_heads=transformer_heads,
+        transformer_ffn_multiplier=transformer_ffn_multiplier,
+    ).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1.0e-4)
+    fit_batch = splits["fit"]
+    for _epoch in range(epochs):
+        model.train()
+        optimizer.zero_grad(set_to_none=True)
+        token_logits, _router_logits = model(fit_batch.previous_tokens, fit_batch.features)
+        loss = masked_token_nll(
+            torch,
+            token_logits,
+            None,
+            fit_batch.target_ids,
+            fit_batch.symbolic_mask,
+        )
+        loss.backward()
+        optimizer.step()
+
+    model.eval()
+    probabilities: dict[str, Any] = {}
+    with torch.no_grad():
+        for split, batch in splits.items():
+            token_logits, _router_logits = model(batch.previous_tokens, batch.features)
+            probabilities[split] = torch.nn.functional.softmax(token_logits, dim=-1).detach()
+    return probabilities
 
 
 def fused_token_outputs(
@@ -935,6 +1053,51 @@ def masked_token_nll(
     selected = probabilities.gather(-1, targets.unsqueeze(-1)).squeeze(-1).clamp(min=1.0e-8)
     losses = -torch.log(selected)
     return masked_mean(torch, losses, mask)
+
+
+def masked_teacher_kl(
+    torch: Any,
+    teacher_probabilities: Any,
+    logits: Any | None,
+    probabilities: Any | None,
+    mask: Any,
+) -> Any:
+    teacher = teacher_probabilities.detach().clamp(min=1.0e-8)
+    if probabilities is None:
+        if logits is None:
+            raise ValueError("masked_teacher_kl requires logits or probabilities")
+        student_log_probabilities = torch.nn.functional.log_softmax(logits, dim=-1)
+    else:
+        student_log_probabilities = torch.log(probabilities.clamp(min=1.0e-8))
+    losses = (teacher * (torch.log(teacher) - student_log_probabilities)).sum(dim=-1)
+    return masked_mean(torch, losses, mask)
+
+
+def teacher_kl_loss_for_split(
+    torch: Any,
+    batch: SymbolicBridgeBatch,
+    final_logits: Any | None,
+    final_probabilities: Any | None,
+    teacher_probabilities_by_split: dict[str, Any] | None,
+    *,
+    split: str,
+) -> Any:
+    if teacher_probabilities_by_split is None or split not in teacher_probabilities_by_split:
+        source = final_logits if final_logits is not None else final_probabilities
+        return source.sum() * 0.0
+    teacher_probabilities = teacher_probabilities_by_split[split]
+    if tuple(teacher_probabilities.shape[:2]) != tuple(batch.target_ids.shape):
+        raise ValueError(
+            f"teacher probability shape mismatch for {split}: "
+            f"{tuple(teacher_probabilities.shape[:2])} vs {tuple(batch.target_ids.shape)}"
+        )
+    return masked_teacher_kl(
+        torch,
+        teacher_probabilities,
+        final_logits,
+        final_probabilities,
+        role_mask(torch, batch, ("prose", "math_context")),
+    )
 
 
 def masked_mean(torch: Any, values: Any, mask: Any | None) -> Any:
@@ -1758,6 +1921,7 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
         f"Answer unsafe loss weight: `{report.answer_unsafe_loss_weight}`",
         f"Non-answer abstain loss weight: `{report.non_answer_abstain_loss_weight}`",
         f"Non-answer LM retention loss weight: `{report.non_answer_lm_retention_loss_weight}`",
+        f"Non-answer teacher KL loss weight: `{report.non_answer_teacher_kl_loss_weight}`",
         f"Unsafe margin loss weight: `{report.unsafe_margin_loss_weight}`",
         f"Unsafe margin: `{report.unsafe_margin}`",
         f"Router call threshold: `{report.router_call_threshold}`",

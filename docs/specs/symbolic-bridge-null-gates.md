@@ -747,7 +747,7 @@ Resolution block:
 | Resolution needed | Determine whether the EML bridge is useful outside the controlled synthetic language/math grammar. |
 | Promotion condition | The hybrid must improve math-answer accuracy/NLL without degrading pure-language/prose behavior and without violating unsafe-call or unsafe-mass gates. |
 | Current blocker | Math-answer transfer passes, but prose retention does not. The fusion path is useful as an answer/action bridge, not yet as a general next-token improvement. |
-| Next action | Run the ablation ladder one step at a time. Ablation 1 preserved answer gains but did not solve prose NLL. Ablation 2 retention-only worsened prose and broke answer safety. The next clean test should combine span gating with a smaller or differently targeted retention term, or use a frozen token-only teacher rather than extra self-NLL. |
+| Next action | Run the ablation ladder one step at a time. Ablation 1 preserved answer gains but did not solve prose NLL. Ablation 2 retention-only worsened prose and broke answer safety. Ablation 3 teacher KL repaired prose NLL but still broke answer safety. The next clean test should lower teacher-KL weight and/or strengthen answer safety calibration before any composition claim. |
 
 ### Gate 5 Ablation 1: Answer-Span-Only Fusion
 
@@ -899,3 +899,80 @@ Interpretation:
 - Do not stack this exact retention-only setting into the bridge. A better next
   ablation is either a lower retention weight with answer-span fusion, or a
   frozen token-only teacher KL on prose roles.
+
+### Gate 5 Ablation 3: Frozen Token-Only Teacher KL
+
+Question:
+
+> Can a frozen token-only teacher preserve the hybrid's non-answer language
+> distribution better than self-retention, while keeping the answer bridge
+> intact?
+
+Change:
+
+- Add `non_answer_teacher_kl_loss_weight`.
+- Train a frozen token-only teacher inside the same LM runner.
+- Add masked `KL(p_teacher || p_hybrid_final)` on `prose` and `math_context`
+  roles for router/fusion variants.
+- Leave answer-span-only fusion off.
+- Keep model size, training data, calibration rotations, safety losses, and MPS
+  backend otherwise unchanged.
+
+Artifact:
+
+```text
+artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-teacher-kl-v1/
+```
+
+Command:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260430/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260431/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260432/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260433/summary.json \
+  --run-label gate5-ablation-teacher-kl-v1 \
+  --output-dir artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-teacher-kl-v1 \
+  --backbone transformer \
+  --transformer-layers 2 \
+  --transformer-heads 4 \
+  --transformer-ffn-multiplier 2 \
+  --epochs 600 \
+  --learning-rate 0.004 \
+  --hidden-units 64 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 1.0 \
+  --answer-call-abstain-loss-weight 8.0 \
+  --answer-unsafe-loss-weight 5.0 \
+  --non-answer-abstain-loss-weight 2.0 \
+  --non-answer-teacher-kl-loss-weight 1.0 \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --device mps \
+  --output table
+```
+
+Caption: Gate 5 Ablation 3 uses a frozen token-only teacher KL on non-answer
+roles. It is more principled than self-retention because the teacher
+distribution is fixed before hybrid training.
+
+| run | whole acc | whole NLL | math-answer acc | math-answer NLL | prose acc | prose NLL | context acc | context NLL | answer unsafe mass |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| repaired Gate 5 | 0.256 | 5.992 | 0.544 | 2.301 | 0.167 | 7.214 | 0.565 | 1.677 | 0.041 |
+| answer-span fusion | 0.273 | 6.094 | 0.550 | 2.092 | 0.178 | 7.327 | 0.615 | 1.827 | 0.045 |
+| self-retention | 0.256 | 6.537 | 0.575 | 2.525 | 0.136 | 7.928 | 0.694 | 1.557 | 0.153 |
+| teacher KL | 0.213 | 5.165 | 0.556 | 3.165 | 0.162 | 5.891 | 0.333 | 2.535 | 0.106 |
+
+Interpretation:
+
+- Teacher KL confirms that a frozen language teacher is the right kind of
+  pressure for prose NLL: prose NLL improves from `7.214` to `5.891`.
+- It does not solve the full bridge. Whole-corpus NLL improves, but whole
+  accuracy drops, math-context accuracy drops, and answer NLL worsens.
+- Most importantly, the safety contract fails: unsafe answer mass rises from
+  `0.041` to `0.106`.
+- This is a partial/unsafe result, not a repair. The next ablation should lower
+  teacher-KL weight or pair teacher KL with stronger answer-safety calibration
+  before considering it for the bridge recipe.

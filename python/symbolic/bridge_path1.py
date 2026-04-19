@@ -146,6 +146,7 @@ def run_symbolic_bridge_path1(
         answer_unsafe_loss_weight=0.0,
         non_answer_abstain_loss_weight=0.0,
         non_answer_lm_retention_loss_weight=0.0,
+        non_answer_teacher_kl_loss_weight=0.0,
         unsafe_margin_loss_weight=unsafe_margin_loss_weight,
         unsafe_margin=unsafe_margin,
         router_call_threshold=router_call_threshold,

@@ -1695,3 +1695,30 @@ Interpretation:
   prose-retention mechanism.
 - The next repair should use either answer-span fusion plus a smaller retention
   term, or a proper frozen token-only teacher/KL objective on prose roles.
+
+Gate 5 Ablation 3:
+
+```text
+artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-teacher-kl-v1/
+```
+
+This ablation trains a frozen token-only teacher and adds
+`--non-answer-teacher-kl-loss-weight 1.0`, a masked
+`KL(p_teacher || p_hybrid_final)` on `prose` and `math_context` roles. It leaves
+answer-span fusion off.
+
+| condition | whole acc | whole NLL | math-answer acc | math-answer NLL | prose acc | prose NLL | answer unsafe mass |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| repaired Gate 5 | 0.256 | 5.992 | 0.544 | 2.301 | 0.167 | 7.214 | 0.041 |
+| answer-span fusion | 0.273 | 6.094 | 0.550 | 2.092 | 0.178 | 7.327 | 0.045 |
+| self-retention | 0.256 | 6.537 | 0.575 | 2.525 | 0.136 | 7.928 | 0.153 |
+| teacher KL | 0.213 | 5.165 | 0.556 | 3.165 | 0.162 | 5.891 | 0.106 |
+
+Interpretation:
+
+- Frozen-teacher KL is the first ablation that materially repairs prose NLL.
+- It is still unsafe: answer unsafe mass rises to `0.106`, so the math-answer
+  contract fails.
+- It also trades away whole-corpus accuracy and math-context accuracy.
+- The next test should reduce teacher-KL weight and/or increase answer-safety
+  pressure before stacking it with other changes.
