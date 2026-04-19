@@ -1986,3 +1986,102 @@ Gate status after Ablation 11:
   currently retrains the same model. Before broader tuning, save or replay
   trained logits/checkpoints so calibration-only sweeps are cheap and exactly
   comparable.
+
+### Gate 5 Ablation 12: Role-Aware Feature Adapter and Logit Replay
+
+Question:
+
+> Can role-aware feature adaptation before hidden-state fusion repair prose and
+> context damage, and can calibration-only sweeps reuse trained logits instead
+> of retraining?
+
+Implementation:
+
+- Add `--feature-adapter-mode` with:
+  `shared`, `role-gated`, and `role-affine`.
+- `shared` preserves the previous single feature projection. `role-gated`
+  learns a per-role hidden-dimension multiplicative gate initialized to the
+  shared behavior. `role-affine` adds a small per-role bias after that gate.
+- The adapter runs inside the model before the side-channel enters the GRU or
+  transformer hidden state. This is different from `--feature-role-scales`,
+  which scales raw side-channel features outside the model.
+- Add `--save-logit-replay` to write per-run token/router logits for each split
+  under `logit_replay/`.
+- Add `--replay-logit-dir` to rebuild the same benchmark batches, load saved
+  logits, and rerun role-aware calibration/evaluation without retraining.
+
+Artifacts:
+
+```text
+artifacts/bridge-lm-gate5-repair/gate5-role-affine-invariance-w050-top-expert-gain04-s779-v1/
+artifacts/bridge-lm-gate5-repair/gate5-role-affine-invariance-w050-replay-wholenll-dense-top-s779-v1/
+artifacts/bridge-lm-gate5-repair/gate5-role-affine-invariance-w050-replay-answernll-dense-top-s779-v1/
+artifacts/bridge-lm-gate5-repair/gate5-role-affine-invariance-w050-replay-strictunsafe-s779-v1/
+```
+
+Training command addition:
+
+```bash
+--feature-adapter-mode role-affine --save-logit-replay
+```
+
+Replay command addition:
+
+```bash
+--feature-adapter-mode role-affine \
+--replay-logit-dir artifacts/bridge-lm-gate5-repair/gate5-role-affine-invariance-w050-top-expert-gain04-s779-v1/logit_replay
+```
+
+Caption: Seed-779 comparison between the previous prose-invariance candidate
+and the new role-affine feature adapter. The role-affine row used answer-accuracy
+calibration, top-expert selection, and saved logit replay artifacts.
+
+| condition | whole acc | whole NLL | side acc | side NLL | token NLL | answer acc | answer NLL | answer call | answer unsafe | context acc | context NLL | prose acc | prose NLL |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| no adapter, invariance KL 0.5 | 0.255 | 6.197 | 0.212 | 6.859 | 6.145 | 0.475 | 3.162 | 0.188 | 0.000 | 0.525 | 3.018 | 0.180 | 7.120 |
+| role-affine, invariance KL 0.5 | 0.268 | 5.966 | 0.245 | 6.826 | 6.471 | 0.425 | 3.016 | 0.281 | 0.075 | 0.654 | 2.483 | 0.171 | 6.950 |
+
+Caption: Calibration-only replay from the role-affine logits. The replay bundle
+was `487M`, and each replay avoided the 600-epoch training loop.
+
+| replay condition | calibration score | unsafe target | whole acc | whole NLL | answer acc | answer NLL | answer call | answer unsafe | prose acc | prose NLL | selected feasible |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| saved-train policy | answer-accuracy | 0.050 | 0.268 | 5.966 | 0.425 | 3.016 | 0.281 | 0.075 | 0.171 | 6.950 | true |
+| replay whole-nll | whole-nll | 0.050 | 0.268 | 5.966 | 0.425 | 3.016 | 0.281 | 0.075 | 0.171 | 6.950 | true |
+| replay answer-nll | answer-nll | 0.050 | 0.268 | 5.966 | 0.425 | 3.016 | 0.281 | 0.075 | 0.171 | 6.950 | true |
+| replay strict unsafe | answer-accuracy | 0.005 | 0.248 | 6.109 | 0.150 | 10.440 | 0.000 | 0.000 | 0.171 | 6.950 | false |
+
+Interpretation:
+
+- The role-affine feature adapter improves the whole-LM side of the tradeoff:
+  whole accuracy rises from `0.255` to `0.268`, whole NLL improves from `6.197`
+  to `5.966`, context accuracy rises from `0.525` to `0.654`, and prose NLL
+  improves from `7.120` to `6.950`.
+- The improvement is not safe enough. Extrapolated math-answer unsafe calls rise
+  from `0.000` to `0.075`, above the `0.050` contract threshold, and answer
+  accuracy falls from `0.475` to `0.425`.
+- Calibration replay works and is scientifically useful. Changing calibration
+  score modes no longer requires retraining, and replay exactly reproduced the
+  trained run's metrics when the selected policy was unchanged.
+- The current calibration grid cannot rescue the role-affine candidate. Whole-NLL
+  and answer-NLL replay selected the same policy as answer-accuracy. A stricter
+  unsafe target forced zero unsafe calls, but collapsed answer accuracy to
+  `0.150` and made the calibration infeasible.
+- The root problem has shifted. Role-aware feature adaptation can repair prose
+  and context damage, but the router/fusion safety target is calibrated on
+  validation/capability rows and does not reliably bound extrapolated
+  math-answer unsafe calls.
+
+Gate status after Ablation 12:
+
+- Resolved: logit replay should be part of the bridge workflow before any
+  broader calibration search. It avoids retraining for calibration-only sweeps.
+- Resolved: role-aware hidden-state feature adaptation is a real lever for
+  whole-LM behavior.
+- Unresolved: the role-affine adapter is not promotable until extrapolated
+  answer unsafe calls are controlled.
+- Next repair: make calibration selection extrapolation-risk aware, or add a
+  cheap held-out unsafe-proxy split to the calibration objective. The current
+  answer unsafe constraint is too optimistic because it is enforced on
+  calibration/validation rows, not on the out-of-range answer distribution where
+  this candidate fails.

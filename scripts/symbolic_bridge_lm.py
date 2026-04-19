@@ -138,6 +138,25 @@ def build_parser() -> argparse.ArgumentParser:
             "Used to make protected roles less dependent on the side-channel."
         ),
     )
+    parser.add_argument(
+        "--feature-adapter-mode",
+        choices=["shared", "role-gated", "role-affine"],
+        default="shared",
+        help=(
+            "How bridge side-channel features are adapted before entering the decoder hidden state. "
+            "shared preserves the prior single projection; role-gated/role-affine add learned per-role adapters."
+        ),
+    )
+    parser.add_argument(
+        "--save-logit-replay",
+        action="store_true",
+        help="Write per-run, per-split token/router logits for later calibration-only replay.",
+    )
+    parser.add_argument(
+        "--replay-logit-dir",
+        type=Path,
+        help="Reuse a logit_replay directory from a prior run and skip model training.",
+    )
     parser.add_argument("--backbone", choices=["gru", "transformer"], default="gru")
     parser.add_argument("--transformer-layers", type=int, default=2)
     parser.add_argument("--transformer-heads", type=int, default=4)
@@ -191,6 +210,9 @@ def main(argv: list[str] | None = None) -> int:
         feature_role_scales=feature_role_scales,
         feature_invariance_loss_weight=args.feature_invariance_loss_weight,
         feature_invariance_roles=feature_invariance_roles,
+        feature_adapter_mode=args.feature_adapter_mode,
+        save_logit_replay=args.save_logit_replay,
+        replay_logit_dir=args.replay_logit_dir,
         backbone=args.backbone,
         transformer_layers=args.transformer_layers,
         transformer_heads=args.transformer_heads,
@@ -210,6 +232,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"feature_role_scales={report.feature_role_scales or 'none'}")
         print(f"feature_invariance_loss_weight={report.feature_invariance_loss_weight}")
         print(f"feature_invariance_roles={report.feature_invariance_roles or 'none'}")
+        print(f"feature_adapter_mode={report.feature_adapter_mode}")
+        print(f"save_logit_replay={report.save_logit_replay}")
+        print(f"replay_logit_dir={report.replay_logit_dir or 'none'}")
         print(f"non_answer_teacher_kl_roles={report.non_answer_teacher_kl_roles or 'none'}")
         print(f"role_aware_calibration={report.role_aware_calibration}")
         print(f"calibration_score_mode={report.calibration_score_mode}")

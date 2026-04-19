@@ -100,6 +100,7 @@ class BridgeLmRun:
     extrapolation_final_nll: float
     role_metrics: dict[str, Any] | None = None
     calibration: dict[str, Any] | None = None
+    logit_replay_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -135,6 +136,8 @@ class BridgeLmRun:
             payload["role_metrics"] = self.role_metrics
         if self.calibration is not None:
             payload["calibration"] = self.calibration
+        if self.logit_replay_path is not None:
+            payload["logit_replay_path"] = self.logit_replay_path
         return payload
 
 
@@ -178,6 +181,9 @@ class BridgeLmReport:
     feature_role_scales: tuple[tuple[str, float], ...]
     feature_invariance_loss_weight: float
     feature_invariance_roles: tuple[str, ...]
+    feature_adapter_mode: str
+    save_logit_replay: bool
+    replay_logit_dir: str | None
     device: str
     expert_ids: tuple[str, ...]
     abstain_index: int
@@ -225,6 +231,9 @@ class BridgeLmReport:
             "feature_role_scales": [[role, scale] for role, scale in self.feature_role_scales],
             "feature_invariance_loss_weight": self.feature_invariance_loss_weight,
             "feature_invariance_roles": list(self.feature_invariance_roles),
+            "feature_adapter_mode": self.feature_adapter_mode,
+            "save_logit_replay": self.save_logit_replay,
+            "replay_logit_dir": self.replay_logit_dir,
             "device": self.device,
             "expert_ids": list(self.expert_ids),
             "abstain_index": self.abstain_index,
@@ -268,6 +277,9 @@ def run_symbolic_bridge_lm(
     feature_role_scales: tuple[tuple[str, float], ...] = (),
     feature_invariance_loss_weight: float = 0.0,
     feature_invariance_roles: tuple[str, ...] = ("prose",),
+    feature_adapter_mode: str = "shared",
+    save_logit_replay: bool = False,
+    replay_logit_dir: Path | None = None,
     backbone: str = "gru",
     transformer_layers: int = 2,
     transformer_heads: int = 4,
@@ -286,6 +298,7 @@ def run_symbolic_bridge_lm(
     )
     calibration_selection_modes = validate_calibration_selection_modes(calibration_selection_modes)
     calibration_score_mode = validate_calibration_score_mode(calibration_score_mode)
+    feature_adapter_mode = validate_feature_adapter_mode(feature_adapter_mode)
     extra_fit_splits = validate_extra_fit_splits(extra_fit_splits)
     feature_role_scales = validate_feature_role_scales(feature_role_scales)
     feature_invariance_roles = tuple(dict.fromkeys(feature_invariance_roles))
@@ -309,6 +322,8 @@ def run_symbolic_bridge_lm(
     task_ids = tuple(sorted({str(row["task_id"]) for row in fit_rows}))
     expert_ids = tuple(sorted({str(expert) for row in fit_rows for expert in row["experts"]}))
     abstain_index = len(expert_ids)
+    if replay_logit_dir is not None and save_logit_replay:
+        raise ValueError("save_logit_replay cannot be combined with replay_logit_dir")
     teacher_probabilities_by_split = (
         train_token_only_teacher_probabilities(
             torch,
@@ -344,9 +359,14 @@ def run_symbolic_bridge_lm(
         ("lm-router-logit-fusion", "side-channel", True, "logit-fusion"),
         ("lm-router-prob-mixture", "side-channel", True, "prob-mixture"),
     )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    replay_output_dir = output_dir / "logit_replay" if save_logit_replay else None
+    if replay_output_dir is not None:
+        replay_output_dir.mkdir(parents=True, exist_ok=True)
     for offset, (name, feature_set, use_router, fusion_mode) in enumerate(model_specs):
-        runs.append(
-            train_lm_contract_variant(
+        replay_path = replay_output_dir / f"{name}.pt" if replay_output_dir is not None else None
+        if replay_logit_dir is None:
+            run = train_lm_contract_variant(
                 torch,
                 rows,
                 task_ids,
@@ -386,17 +406,55 @@ def run_symbolic_bridge_lm(
                 feature_role_scales=feature_role_scales,
                 feature_invariance_loss_weight=feature_invariance_loss_weight,
                 feature_invariance_roles=feature_invariance_roles,
+                feature_adapter_mode=feature_adapter_mode,
                 teacher_probabilities_by_split=teacher_probabilities_by_split,
                 backbone=backbone,
                 transformer_layers=transformer_layers,
                 transformer_heads=transformer_heads,
                 transformer_ffn_multiplier=transformer_ffn_multiplier,
                 device=selected_device,
+                logit_replay_path=replay_path,
             )
-        )
+        else:
+            run = replay_lm_contract_variant(
+                torch,
+                rows,
+                task_ids,
+                expert_ids,
+                token_bins,
+                fit_rows=fit_rows,
+                feature_set=feature_set,
+                name=name,
+                use_router=use_router,
+                fusion_mode=fusion_mode,
+                seed=seed + 11 + offset,
+                router_loss_weight=router_loss_weight,
+                abstain_class_weight=abstain_class_weight,
+                unsafe_call_loss_weight=unsafe_call_loss_weight,
+                call_abstain_loss_weight=call_abstain_loss_weight,
+                answer_call_abstain_loss_weight=answer_call_abstain_loss_weight,
+                answer_unsafe_loss_weight=answer_unsafe_loss_weight,
+                non_answer_abstain_loss_weight=non_answer_abstain_loss_weight,
+                non_answer_lm_retention_loss_weight=non_answer_lm_retention_loss_weight,
+                non_answer_teacher_kl_loss_weight=non_answer_teacher_kl_loss_weight,
+                non_answer_teacher_kl_roles=non_answer_teacher_kl_roles,
+                role_aware_calibration=role_aware_calibration,
+                calibration_score_mode=calibration_score_mode,
+                calibration_target_answer_unsafe=calibration_target_answer_unsafe,
+                calibration_min_answer_accuracy_gain=calibration_min_answer_accuracy_gain,
+                calibration_answer_roles=calibration_answer_roles,
+                calibration_selection_modes=calibration_selection_modes,
+                unsafe_margin_loss_weight=unsafe_margin_loss_weight,
+                unsafe_margin=unsafe_margin,
+                router_call_threshold=router_call_threshold,
+                expert_logit_scale=expert_logit_scale,
+                fusion_allowed_roles=fusion_allowed_roles,
+                replay_path=replay_logit_dir / f"{name}.pt",
+                device=selected_device,
+            )
+        runs.append(run)
 
     summary = summarize_lm_contract(runs, rows, fit_rows=fit_rows)
-    output_dir.mkdir(parents=True, exist_ok=True)
     report = BridgeLmReport(
         bridge_summary_path=repo_relative(bridge_summary_path),
         feature_table_path=repo_relative(feature_table_path),
@@ -411,6 +469,7 @@ def run_symbolic_bridge_lm(
             transformer_layers=transformer_layers,
             transformer_heads=transformer_heads,
             transformer_ffn_multiplier=transformer_ffn_multiplier,
+            feature_adapter_mode=feature_adapter_mode,
         ),
         token_bins=token_bins,
         seed=seed,
@@ -442,6 +501,9 @@ def run_symbolic_bridge_lm(
         feature_role_scales=feature_role_scales,
         feature_invariance_loss_weight=feature_invariance_loss_weight,
         feature_invariance_roles=feature_invariance_roles,
+        feature_adapter_mode=feature_adapter_mode,
+        save_logit_replay=save_logit_replay,
+        replay_logit_dir=None if replay_logit_dir is None else repo_relative(replay_logit_dir),
         device=str(selected_device),
         expert_ids=expert_ids,
         abstain_index=abstain_index,
@@ -494,12 +556,14 @@ def train_lm_contract_variant(
     feature_role_scales: tuple[tuple[str, float], ...],
     feature_invariance_loss_weight: float,
     feature_invariance_roles: tuple[str, ...],
+    feature_adapter_mode: str,
     teacher_probabilities_by_split: dict[str, Any] | None,
     backbone: str,
     transformer_layers: int,
     transformer_heads: int,
     transformer_ffn_multiplier: int,
     device: Any,
+    logit_replay_path: Path | None = None,
 ) -> BridgeLmRun:
     torch.manual_seed(seed)
     splits = build_contract_splits(
@@ -514,6 +578,7 @@ def train_lm_contract_variant(
     )
     feature_dim = int(splits["fit"].features.shape[-1])
     max_sequence_length = max(int(batch.previous_tokens.shape[1]) for batch in splits.values())
+    fit_batch = splits["fit"]
     model = build_symbolic_bridge_lm_model(
         torch,
         backbone=backbone,
@@ -523,18 +588,20 @@ def train_lm_contract_variant(
         token_bins=token_bins,
         router_classes=len(expert_ids) + 1,
         max_sequence_length=max_sequence_length,
+        role_count=len(fit_batch.role_names),
+        feature_adapter_mode=feature_adapter_mode,
         transformer_layers=transformer_layers,
         transformer_heads=transformer_heads,
         transformer_ffn_multiplier=transformer_ffn_multiplier,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1.0e-4)
-    fit_batch = splits["fit"]
     for _epoch in range(epochs):
         model.train()
         optimizer.zero_grad(set_to_none=True)
         token_logits, router_logits = model(
             fit_batch.previous_tokens,
             role_scaled_features(torch, fit_batch, feature_allowed_roles, feature_role_scales),
+            fit_batch.role_ids,
         )
         final_logits, final_probabilities, _router_stats = fused_token_outputs(
             torch,
@@ -663,6 +730,7 @@ def train_lm_contract_variant(
             calibration_token_logits, calibration_router_logits = model(
                 calibration_batch.previous_tokens,
                 role_scaled_features(torch, calibration_batch, feature_allowed_roles, feature_role_scales),
+                calibration_batch.role_ids,
             )
             capability_batch = splits.get("validation")
             capability_token_logits = None
@@ -671,6 +739,7 @@ def train_lm_contract_variant(
                 capability_token_logits, capability_router_logits = model(
                     capability_batch.previous_tokens,
                     role_scaled_features(torch, capability_batch, feature_allowed_roles, feature_role_scales),
+                    capability_batch.role_ids,
                 )
             calibration_policy = fit_role_aware_fusion_calibration(
                 torch,
@@ -691,11 +760,17 @@ def train_lm_contract_variant(
                 selected_split=calibration_split,
             )
         split_metrics = {}
+        replay_logits: dict[str, dict[str, Any]] = {}
         for split, batch in splits.items():
             token_logits, router_logits = model(
                 batch.previous_tokens,
                 role_scaled_features(torch, batch, feature_allowed_roles, feature_role_scales),
+                batch.role_ids,
             )
+            replay_logits[split] = {
+                "token_logits": token_logits.detach().cpu(),
+                "router_logits": router_logits.detach().cpu(),
+            }
             final_logits, final_probabilities, router_stats = fused_token_outputs(
                 torch,
                 batch,
@@ -839,6 +914,21 @@ def train_lm_contract_variant(
                     + unsafe_margin_loss_weight * unsafe_margin_loss_value
                 ),
             )
+    if logit_replay_path is not None:
+        write_logit_replay(
+            torch,
+            logit_replay_path,
+            run_name=name,
+            feature_set=feature_set,
+            use_router=use_router,
+            fusion_mode=fusion_mode,
+            seed=seed,
+            token_bins=token_bins,
+            task_ids=task_ids,
+            expert_ids=expert_ids,
+            role_names=splits["fit"].role_names,
+            split_logits=replay_logits,
+        )
     return BridgeLmRun(
         name=name,
         mode=fusion_mode if use_router else "lm",
@@ -873,7 +963,333 @@ def train_lm_contract_variant(
             if split in split_metrics
         },
         calibration=None if calibration_policy is None else calibration_policy.to_dict(),
+        logit_replay_path=None if logit_replay_path is None else repo_relative(logit_replay_path),
     )
+
+
+def replay_lm_contract_variant(
+    torch: Any,
+    rows: list[dict[str, Any]],
+    task_ids: tuple[str, ...],
+    expert_ids: tuple[str, ...],
+    token_bins: int,
+    *,
+    fit_rows: list[dict[str, Any]] | None = None,
+    feature_set: str,
+    name: str,
+    use_router: bool,
+    fusion_mode: str,
+    seed: int,
+    router_loss_weight: float,
+    abstain_class_weight: float,
+    unsafe_call_loss_weight: float,
+    call_abstain_loss_weight: float,
+    answer_call_abstain_loss_weight: float,
+    answer_unsafe_loss_weight: float,
+    non_answer_abstain_loss_weight: float,
+    non_answer_lm_retention_loss_weight: float,
+    non_answer_teacher_kl_loss_weight: float,
+    non_answer_teacher_kl_roles: tuple[str, ...],
+    role_aware_calibration: bool,
+    calibration_score_mode: str,
+    calibration_target_answer_unsafe: float,
+    calibration_min_answer_accuracy_gain: float,
+    calibration_answer_roles: tuple[str, ...],
+    calibration_selection_modes: tuple[str, ...],
+    unsafe_margin_loss_weight: float,
+    unsafe_margin: float,
+    router_call_threshold: float,
+    expert_logit_scale: float,
+    fusion_allowed_roles: tuple[str, ...],
+    replay_path: Path,
+    device: Any,
+) -> BridgeLmRun:
+    del seed
+    payload = load_logit_replay(torch, replay_path)
+    validate_logit_replay_payload(
+        payload,
+        run_name=name,
+        feature_set=feature_set,
+        use_router=use_router,
+        fusion_mode=fusion_mode,
+        token_bins=token_bins,
+        task_ids=task_ids,
+        expert_ids=expert_ids,
+    )
+    splits = build_contract_splits(
+        torch,
+        rows,
+        task_ids,
+        expert_ids,
+        token_bins,
+        feature_set,
+        device,
+        fit_rows=fit_rows,
+    )
+    calibration_policy = None
+    if role_aware_calibration and use_router and fusion_mode == "prob-mixture":
+        if "fit_safety_calibration" in splits:
+            calibration_split = "fit_safety_calibration"
+        else:
+            calibration_split = "safety_calibration" if "safety_calibration" in splits else "validation"
+        calibration_batch = splits[calibration_split]
+        calibration_token_logits, calibration_router_logits = replay_logits_for_split(
+            payload,
+            calibration_split,
+            device,
+        )
+        capability_batch = splits.get("validation")
+        capability_token_logits = None
+        capability_router_logits = None
+        if capability_batch is not None:
+            capability_token_logits, capability_router_logits = replay_logits_for_split(
+                payload,
+                "validation",
+                device,
+            )
+        calibration_policy = fit_role_aware_fusion_calibration(
+            torch,
+            calibration_batch,
+            calibration_token_logits,
+            calibration_router_logits,
+            token_bins,
+            capability_batch=capability_batch,
+            capability_token_logits=capability_token_logits,
+            capability_router_logits=capability_router_logits,
+            expert_logit_scale=expert_logit_scale,
+            fusion_allowed_roles=fusion_allowed_roles,
+            answer_roles=calibration_answer_roles,
+            selection_modes=calibration_selection_modes,
+            score_mode=calibration_score_mode,
+            target_answer_unsafe=calibration_target_answer_unsafe,
+            min_answer_accuracy_gain=calibration_min_answer_accuracy_gain,
+            selected_split=calibration_split,
+        )
+    split_metrics = {}
+    for split, batch in splits.items():
+        token_logits, router_logits = replay_logits_for_split(payload, split, device)
+        final_logits, final_probabilities, router_stats = fused_token_outputs(
+            torch,
+            batch,
+            token_logits,
+            router_logits,
+            token_bins,
+            fusion_mode=fusion_mode,
+            expert_logit_scale=expert_logit_scale,
+            fusion_allowed_roles=fusion_allowed_roles,
+            calibration_policy=calibration_policy,
+        )
+        token_loss = masked_token_nll(
+            torch,
+            final_logits,
+            final_probabilities,
+            batch.target_ids,
+            batch.symbolic_mask,
+        )
+        replay_loss = float(token_loss.detach().cpu().item())
+        if use_router:
+            router_class_weights = router_loss_class_weights(
+                torch,
+                classes=len(expert_ids) + 1,
+                abstain_class_weight=abstain_class_weight,
+                device=device,
+            )
+            router_loss = masked_cross_entropy(
+                torch,
+                router_logits,
+                batch.router_targets,
+                batch.symbolic_mask,
+                weight=router_class_weights,
+            )
+            unsafe_loss = router_unsafe_probability_loss(
+                torch,
+                router_logits,
+                batch.expert_safe_mask,
+                mask=batch.symbolic_mask,
+            )
+            call_abstain_loss = router_call_abstain_loss(
+                torch,
+                router_logits,
+                batch.expert_safe_mask,
+                abstain_weight=abstain_class_weight,
+                mask=batch.symbolic_mask,
+            )
+            answer_call_abstain_loss = router_call_abstain_loss(
+                torch,
+                router_logits,
+                batch.expert_safe_mask,
+                abstain_weight=abstain_class_weight,
+                mask=role_mask(torch, batch, ("math_answer", "math_only")),
+            )
+            answer_unsafe_loss = router_unsafe_probability_loss(
+                torch,
+                router_logits,
+                batch.expert_safe_mask,
+                mask=role_mask(torch, batch, ("math_answer", "math_only")),
+            )
+            non_answer_abstain_loss = router_abstain_probability_loss(
+                torch,
+                router_logits,
+                mask=role_mask(torch, batch, ("prose", "math_context")),
+            )
+            non_answer_lm_retention_loss = masked_token_nll(
+                torch,
+                token_logits,
+                None,
+                batch.target_ids,
+                role_mask(torch, batch, ("prose", "math_context")),
+            )
+            unsafe_margin_loss = router_unsafe_margin_loss(
+                torch,
+                router_logits,
+                batch.expert_safe_mask,
+                margin=unsafe_margin,
+                mask=batch.symbolic_mask,
+            )
+            replay_loss += (
+                router_loss_weight * float(router_loss.detach().cpu().item())
+                + unsafe_call_loss_weight * float(unsafe_loss.detach().cpu().item())
+                + call_abstain_loss_weight * float(call_abstain_loss.detach().cpu().item())
+                + answer_call_abstain_loss_weight * float(answer_call_abstain_loss.detach().cpu().item())
+                + answer_unsafe_loss_weight * float(answer_unsafe_loss.detach().cpu().item())
+                + non_answer_abstain_loss_weight * float(non_answer_abstain_loss.detach().cpu().item())
+                + non_answer_lm_retention_loss_weight * float(non_answer_lm_retention_loss.detach().cpu().item())
+                + unsafe_margin_loss_weight * float(unsafe_margin_loss.detach().cpu().item())
+            )
+            if non_answer_teacher_kl_loss_weight or non_answer_teacher_kl_roles:
+                # Replay artifacts intentionally store logits, not teacher models. Keep
+                # the replay loss focused on terms that can be recomputed exactly.
+                pass
+        split_metrics[split] = evaluate_contract_outputs(
+            torch,
+            batch,
+            token_logits,
+            router_logits,
+            expert_ids,
+            token_bins,
+            use_router=use_router,
+            fusion_mode=fusion_mode,
+            final_logits=final_logits,
+            final_probabilities=final_probabilities,
+            router_stats=router_stats,
+            router_call_threshold=router_call_threshold,
+            loss=replay_loss,
+        )
+    return BridgeLmRun(
+        name=name,
+        mode=fusion_mode if use_router else "lm",
+        feature_set=feature_set,
+        train_final_token_accuracy=split_metrics["train"]["final_token_accuracy"],
+        validation_final_token_accuracy=split_metrics["validation"]["final_token_accuracy"],
+        extrapolation_final_token_accuracy=split_metrics["extrapolation"]["final_token_accuracy"],
+        train_lm_token_accuracy=split_metrics["train"]["lm_token_accuracy"],
+        validation_lm_token_accuracy=split_metrics["validation"]["lm_token_accuracy"],
+        extrapolation_lm_token_accuracy=split_metrics["extrapolation"]["lm_token_accuracy"],
+        train_router_accuracy=split_metrics["train"]["router_accuracy"],
+        validation_router_accuracy=split_metrics["validation"]["router_accuracy"],
+        extrapolation_router_accuracy=split_metrics["extrapolation"]["router_accuracy"],
+        train_expert_call_rate=split_metrics["train"]["expert_call_rate"],
+        validation_expert_call_rate=split_metrics["validation"]["expert_call_rate"],
+        extrapolation_expert_call_rate=split_metrics["extrapolation"]["expert_call_rate"],
+        train_unsafe_call_rate=split_metrics["train"]["unsafe_call_rate"],
+        validation_unsafe_call_rate=split_metrics["validation"]["unsafe_call_rate"],
+        extrapolation_unsafe_call_rate=split_metrics["extrapolation"]["unsafe_call_rate"],
+        train_abstain_recall=split_metrics["train"]["abstain_recall"],
+        validation_abstain_recall=split_metrics["validation"]["abstain_recall"],
+        extrapolation_abstain_recall=split_metrics["extrapolation"]["abstain_recall"],
+        train_loss=split_metrics["train"]["loss"],
+        validation_loss=split_metrics["validation"]["loss"],
+        extrapolation_loss=split_metrics["extrapolation"]["loss"],
+        train_final_nll=split_metrics["train"]["final_nll"],
+        validation_final_nll=split_metrics["validation"]["final_nll"],
+        extrapolation_final_nll=split_metrics["extrapolation"]["final_nll"],
+        role_metrics={
+            split: split_metrics[split].get("role_metrics", {})
+            for split in ("train", "safety_calibration", "validation", "extrapolation")
+            if split in split_metrics
+        },
+        calibration=None if calibration_policy is None else calibration_policy.to_dict(),
+        logit_replay_path=repo_relative(replay_path),
+    )
+
+
+def write_logit_replay(
+    torch: Any,
+    path: Path,
+    *,
+    run_name: str,
+    feature_set: str,
+    use_router: bool,
+    fusion_mode: str,
+    seed: int,
+    token_bins: int,
+    task_ids: tuple[str, ...],
+    expert_ids: tuple[str, ...],
+    role_names: tuple[str, ...],
+    split_logits: dict[str, dict[str, Any]],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "schema": "symbolic-bridge-lm-logit-replay-v1",
+            "run_name": run_name,
+            "feature_set": feature_set,
+            "use_router": use_router,
+            "fusion_mode": fusion_mode,
+            "seed": seed,
+            "token_bins": token_bins,
+            "task_ids": list(task_ids),
+            "expert_ids": list(expert_ids),
+            "role_names": list(role_names),
+            "split_logits": split_logits,
+        },
+        path,
+    )
+
+
+def load_logit_replay(torch: Any, path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise ValueError(f"logit replay file does not exist: {path}")
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        payload = torch.load(path, map_location="cpu")
+    if not isinstance(payload, dict) or payload.get("schema") != "symbolic-bridge-lm-logit-replay-v1":
+        raise ValueError(f"invalid bridge LM logit replay file: {path}")
+    return payload
+
+
+def validate_logit_replay_payload(
+    payload: dict[str, Any],
+    *,
+    run_name: str,
+    feature_set: str,
+    use_router: bool,
+    fusion_mode: str,
+    token_bins: int,
+    task_ids: tuple[str, ...],
+    expert_ids: tuple[str, ...],
+) -> None:
+    expected = {
+        "run_name": run_name,
+        "feature_set": feature_set,
+        "use_router": use_router,
+        "fusion_mode": fusion_mode,
+        "token_bins": token_bins,
+        "task_ids": list(task_ids),
+        "expert_ids": list(expert_ids),
+    }
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            raise ValueError(f"logit replay {key} mismatch: expected {value!r}, got {payload.get(key)!r}")
+
+
+def replay_logits_for_split(payload: dict[str, Any], split: str, device: Any) -> tuple[Any, Any]:
+    split_logits = payload.get("split_logits", {})
+    if split not in split_logits:
+        raise ValueError(f"logit replay is missing split {split!r}")
+    tensors = split_logits[split]
+    return tensors["token_logits"].to(device), tensors["router_logits"].to(device)
 
 
 def train_token_only_teacher_probabilities(
@@ -916,6 +1332,8 @@ def train_token_only_teacher_probabilities(
         token_bins=token_bins,
         router_classes=len(expert_ids) + 1,
         max_sequence_length=max_sequence_length,
+        role_count=len(splits["fit"].role_names),
+        feature_adapter_mode="shared",
         transformer_layers=transformer_layers,
         transformer_heads=transformer_heads,
         transformer_ffn_multiplier=transformer_ffn_multiplier,
@@ -925,7 +1343,7 @@ def train_token_only_teacher_probabilities(
     for _epoch in range(epochs):
         model.train()
         optimizer.zero_grad(set_to_none=True)
-        token_logits, _router_logits = model(fit_batch.previous_tokens, fit_batch.features)
+        token_logits, _router_logits = model(fit_batch.previous_tokens, fit_batch.features, fit_batch.role_ids)
         loss = masked_token_nll(
             torch,
             token_logits,
@@ -940,7 +1358,7 @@ def train_token_only_teacher_probabilities(
     probabilities: dict[str, Any] = {}
     with torch.no_grad():
         for split, batch in splits.items():
-            token_logits, _router_logits = model(batch.previous_tokens, batch.features)
+            token_logits, _router_logits = model(batch.previous_tokens, batch.features, batch.role_ids)
             probabilities[split] = torch.nn.functional.softmax(token_logits, dim=-1).detach()
     return probabilities
 
@@ -1273,6 +1691,44 @@ def calibration_policy_score(
     raise ValueError(f"unsupported calibration score mode: {score_mode}")
 
 
+def build_feature_adapter(
+    torch: Any,
+    *,
+    feature_dim: int,
+    hidden_units: int,
+    role_count: int,
+    mode: str,
+    bias: bool,
+) -> Any:
+    class FeatureAdapter(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.mode = mode
+            self.feature_projection = torch.nn.Linear(feature_dim, hidden_units, bias=bias)
+            if mode != "shared":
+                self.role_gate = torch.nn.Embedding(role_count, hidden_units)
+                torch.nn.init.zeros_(self.role_gate.weight)
+            else:
+                self.role_gate = None
+            if mode == "role-affine":
+                self.role_bias = torch.nn.Embedding(role_count, hidden_units)
+                torch.nn.init.zeros_(self.role_bias.weight)
+            else:
+                self.role_bias = None
+
+        def forward(self, features: Any, role_ids: Any | None = None) -> Any:
+            side_features = torch.tanh(self.feature_projection(features))
+            if self.mode == "shared" or role_ids is None:
+                return side_features
+            gate = 1.0 + torch.tanh(self.role_gate(role_ids))
+            side_features = side_features * gate
+            if self.role_bias is not None:
+                side_features = side_features + 0.1 * torch.tanh(self.role_bias(role_ids))
+            return side_features
+
+    return FeatureAdapter()
+
+
 def build_symbolic_bridge_lm_model(
     torch: Any,
     *,
@@ -1283,6 +1739,8 @@ def build_symbolic_bridge_lm_model(
     token_bins: int,
     router_classes: int,
     max_sequence_length: int,
+    role_count: int,
+    feature_adapter_mode: str,
     transformer_layers: int,
     transformer_heads: int,
     transformer_ffn_multiplier: int,
@@ -1296,6 +1754,8 @@ def build_symbolic_bridge_lm_model(
             token_bins=token_bins,
             router_classes=router_classes,
             max_sequence_length=max_sequence_length,
+            role_count=role_count,
+            feature_adapter_mode=feature_adapter_mode,
             transformer_layers=transformer_layers,
             transformer_heads=transformer_heads,
             transformer_ffn_multiplier=transformer_ffn_multiplier,
@@ -1307,14 +1767,21 @@ def build_symbolic_bridge_lm_model(
         def __init__(self) -> None:
             super().__init__()
             self.token_embedding = torch.nn.Embedding(token_vocab_size, hidden_units)
-            self.feature_projection = torch.nn.Linear(feature_dim, hidden_units)
+            self.feature_adapter = build_feature_adapter(
+                torch,
+                feature_dim=feature_dim,
+                hidden_units=hidden_units,
+                role_count=role_count,
+                mode=feature_adapter_mode,
+                bias=True,
+            )
             self.gru = torch.nn.GRU(input_size=hidden_units * 2, hidden_size=hidden_units, batch_first=True)
             self.token_head = torch.nn.Linear(hidden_units, token_bins)
             self.router_head = torch.nn.Linear(hidden_units, router_classes)
 
-        def forward(self, previous_tokens: Any, features: Any) -> tuple[Any, Any]:
+        def forward(self, previous_tokens: Any, features: Any, role_ids: Any | None = None) -> tuple[Any, Any]:
             token_features = self.token_embedding(previous_tokens)
-            side_features = self.feature_projection(features).tanh()
+            side_features = self.feature_adapter(features, role_ids)
             hidden, _state = self.gru(torch.cat((token_features, side_features), dim=-1))
             return self.token_head(hidden), self.router_head(hidden)
 
@@ -1330,6 +1797,8 @@ def build_symbolic_bridge_transformer_model(
     token_bins: int,
     router_classes: int,
     max_sequence_length: int,
+    role_count: int,
+    feature_adapter_mode: str,
     transformer_layers: int,
     transformer_heads: int,
     transformer_ffn_multiplier: int,
@@ -1339,7 +1808,14 @@ def build_symbolic_bridge_transformer_model(
             super().__init__()
             self.token_embedding = torch.nn.Embedding(token_vocab_size, hidden_units)
             self.position_embedding = torch.nn.Embedding(max_sequence_length, hidden_units)
-            self.feature_projection = torch.nn.Linear(feature_dim, hidden_units, bias=False)
+            self.feature_adapter = build_feature_adapter(
+                torch,
+                feature_dim=feature_dim,
+                hidden_units=hidden_units,
+                role_count=role_count,
+                mode=feature_adapter_mode,
+                bias=False,
+            )
             encoder_layer = torch.nn.TransformerEncoderLayer(
                 d_model=hidden_units,
                 nhead=transformer_heads,
@@ -1354,7 +1830,7 @@ def build_symbolic_bridge_transformer_model(
             self.token_head = torch.nn.Linear(hidden_units, token_bins)
             self.router_head = torch.nn.Linear(hidden_units, router_classes)
 
-        def forward(self, previous_tokens: Any, features: Any) -> tuple[Any, Any]:
+        def forward(self, previous_tokens: Any, features: Any, role_ids: Any | None = None) -> tuple[Any, Any]:
             sequence_length = int(previous_tokens.shape[1])
             if sequence_length > max_sequence_length:
                 raise ValueError(
@@ -1364,7 +1840,7 @@ def build_symbolic_bridge_transformer_model(
             hidden = (
                 self.token_embedding(previous_tokens)
                 + self.position_embedding(positions)
-                + torch.tanh(self.feature_projection(features))
+                + self.feature_adapter(features, role_ids)
             )
             causal_mask = torch.triu(
                 torch.ones(
@@ -1453,6 +1929,14 @@ def validate_feature_role_scales(role_scales: tuple[tuple[str, float], ...]) -> 
     return tuple(sorted(validated.items()))
 
 
+def validate_feature_adapter_mode(mode: str) -> str:
+    selected = str(mode).strip()
+    allowed = {"shared", "role-gated", "role-affine"}
+    if selected not in allowed:
+        raise ValueError("feature adapter mode must be one of shared|role-gated|role-affine")
+    return selected
+
+
 def bridge_lm_backbone_config(
     backbone: str,
     *,
@@ -1460,6 +1944,7 @@ def bridge_lm_backbone_config(
     transformer_layers: int,
     transformer_heads: int,
     transformer_ffn_multiplier: int,
+    feature_adapter_mode: str,
 ) -> dict[str, Any]:
     if backbone == "transformer":
         return {
@@ -1470,11 +1955,13 @@ def bridge_lm_backbone_config(
             "ffn_multiplier": transformer_ffn_multiplier,
             "dropout": 0.0,
             "feature_projection_bias": False,
+            "feature_adapter_mode": feature_adapter_mode,
         }
     return {
         "type": "gru",
         "hidden_units": hidden_units,
         "feature_projection_bias": True,
+        "feature_adapter_mode": feature_adapter_mode,
     }
 
 
@@ -1636,6 +2123,7 @@ def feature_invariance_kl_loss(
         reference_logits, _reference_router_logits = model(
             batch.previous_tokens,
             role_scaled_features(torch, batch, feature_allowed_roles, reference_scales),
+            batch.role_ids,
         )
         teacher_probabilities = torch.nn.functional.softmax(reference_logits.detach(), dim=-1)
     return masked_teacher_kl(
@@ -2522,6 +3010,9 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
         f"Feature role scales: `{list(report.feature_role_scales) or 'none'}`",
         f"Feature invariance loss weight: `{report.feature_invariance_loss_weight}`",
         f"Feature invariance roles: `{list(report.feature_invariance_roles) or 'none'}`",
+        f"Feature adapter mode: `{report.feature_adapter_mode}`",
+        f"Save logit replay: `{report.save_logit_replay}`",
+        f"Replay logit dir: `{report.replay_logit_dir or 'none'}`",
         "",
         "| run | mode | features | val final acc | extrap final acc | val final NLL | extrap final NLL | extrap LM acc | router extrap acc | expert call rate | unsafe call rate | abstain recall |",
         "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",

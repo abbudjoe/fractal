@@ -931,6 +931,8 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 feature_role_scales=(("symbolic", 0.5),),
                 feature_invariance_loss_weight=0.25,
                 feature_invariance_roles=("symbolic",),
+                feature_adapter_mode="role-affine",
+                save_logit_replay=True,
                 device="cpu",
                 extra_fit_bridge_summary_paths=(extra_bridge_summary,),
                 extra_fit_splits=("train", "safety_calibration", "extrapolation"),
@@ -964,6 +966,9 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertEqual(report.feature_role_scales, (("symbolic", 0.5),))
             self.assertEqual(report.feature_invariance_loss_weight, 0.25)
             self.assertEqual(report.feature_invariance_roles, ("symbolic",))
+            self.assertEqual(report.feature_adapter_mode, "role-affine")
+            self.assertTrue(report.save_logit_replay)
+            self.assertIsNone(report.replay_logit_dir)
             self.assertEqual(report.extra_fit_bridge_summary_paths, (str(extra_bridge_summary.resolve()),))
             self.assertEqual(report.extra_fit_feature_table_paths, (str(extra_feature_table.resolve()),))
             self.assertEqual(report.summary["extra_fit_row_count"], 4)
@@ -989,6 +994,49 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 prob_mixture.role_metrics["extrapolation"]["symbolic"]["expert_call_rate"],
                 0.0,
             )
+            replay_dir = output_dir / "logit_replay"
+            self.assertTrue((replay_dir / "lm-router-prob-mixture.pt").exists())
+            self.assertIsNotNone(prob_mixture.logit_replay_path)
+
+            replay_report = run_symbolic_bridge_lm(
+                bridge_summary,
+                root / "bridge-lm-replay",
+                run_label="unit-bridge-lm-replay",
+                epochs=4,
+                learning_rate=0.003,
+                hidden_units=4,
+                abstain_class_weight=2.0,
+                unsafe_call_loss_weight=0.5,
+                call_abstain_loss_weight=0.75,
+                answer_call_abstain_loss_weight=0.8,
+                answer_unsafe_loss_weight=0.6,
+                non_answer_abstain_loss_weight=0.7,
+                non_answer_lm_retention_loss_weight=0.9,
+                role_aware_calibration=True,
+                calibration_score_mode="whole-nll",
+                calibration_target_answer_unsafe=0.2,
+                calibration_min_answer_accuracy_gain=0.0,
+                calibration_answer_roles=("symbolic",),
+                calibration_selection_modes=("top-expert",),
+                unsafe_margin_loss_weight=1.25,
+                unsafe_margin=0.4,
+                router_call_threshold=0.25,
+                expert_logit_scale=3.0,
+                fusion_allowed_roles=("math_answer",),
+                feature_allowed_roles=("symbolic",),
+                feature_role_scales=(("symbolic", 0.5),),
+                feature_adapter_mode="role-affine",
+                device="cpu",
+                extra_fit_bridge_summary_paths=(extra_bridge_summary,),
+                extra_fit_splits=("train", "safety_calibration", "extrapolation"),
+                replay_logit_dir=replay_dir,
+            )
+            self.assertEqual(replay_report.replay_logit_dir, str(replay_dir.resolve()))
+            replay_prob_mixture = next(run for run in replay_report.runs if run.name == "lm-router-prob-mixture")
+            self.assertIsNotNone(replay_prob_mixture.calibration)
+            assert replay_prob_mixture.calibration is not None
+            self.assertEqual(replay_prob_mixture.calibration["score_mode"], "whole-nll")
+            self.assertEqual(replay_prob_mixture.logit_replay_path, str((replay_dir / "lm-router-prob-mixture.pt").resolve()))
             self.assertIn("router_contract_unsafe_call_rate", report.summary)
             self.assertIn("router_contract_abstain_recall", report.summary)
             self.assertIn("best_extrapolation_final_nll", report.summary)
