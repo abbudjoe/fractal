@@ -9,19 +9,19 @@ records stay below it.
 
 | gate | question | status | current answer |
 | --- | --- | --- | --- |
-| 1. Expert-bank ablation and shuffle controls | Does the gain follow aligned EML expert predictions, or can any/shuffled expert bank fake it? | passed | The gain follows `paper-complex-eml`; non-EML and shuffled controls do not reproduce it. |
-| 2. Held-out formula/language templates | Does the bridge survive unseen formula families, unseen wrappers, and varied answer positions? | repaired for math-answer probability mixture | Multi-split calibration plus answer-token call/abstain loss keeps most capability while reducing unsafe mass below the role-aware gate. |
-| 3. Target/random-label and wrong-expert controls | Does the harness leak target identity through labels, routing, or feature construction? | passed | Broken labels and wrong expert pairings collapse the hybrid gain. |
-| 4. Seed/template variance | Is the positive result stable across seeds and template draws? | repaired for math-answer probability mixture | Multi-split calibration turns the unstable variance result into stable math-answer gains with low unsafe mass. |
+| 1. Expert-bank ablation and shuffle controls | Does the gain follow aligned EML expert predictions, or can any/shuffled expert bank fake it? | passed after repaired audit | The repaired gain follows `paper-complex-eml` / symbolic-tree experts; non-EML and shuffled controls do not reproduce it. |
+| 2. Held-out formula/language templates | Does the bridge survive unseen formula families, unseen wrappers, and varied answer positions? | repaired after audit | Multi-split calibration plus answer-token call/abstain loss keeps most capability while reducing unsafe mass below the role-aware gate. |
+| 3. Target/random-label and wrong-expert controls | Does the harness leak target identity through labels, routing, or feature construction? | passed after repaired audit | Broken labels and wrong expert pairings still collapse the repaired hybrid gain. |
+| 4. Seed/template variance | Is the positive result stable across seeds and template draws? | repaired after audit | Multi-split calibration turns the unstable variance result into stable math-answer gains with low unsafe mass. |
 | 5. More natural mixed corpus | Does the contract hold beyond the synthetic grammar? | pending | Not run yet. |
 
-Current recommendation: proceed to Gate 5, but keep the claim narrow. Gate 1
-supports the paper-complex signal. Gate 3 does not show evidence of target-label
-or expert-pairing leakage. The first Gate 2/4 pass failed because calibration
-was brittle; the repair pass shows that broader multi-split calibration and an
-answer-token call/abstain objective make the probability-mixture bridge much
-more stable on math-answer tokens. This does not yet establish a general LM
-improvement.
+Current recommendation: proceed to Gate 5, but keep the claim narrow. The
+repaired recipe has now been audited against Gates 1-4. The first Gate 2/4 pass
+failed because calibration was brittle; the repair pass shows that broader
+multi-split calibration and an answer-token call/abstain objective make the
+probability-mixture bridge much more stable on math-answer tokens. The repaired
+Gate 1 and Gate 3 reruns do not show generic-expert or leakage explanations.
+This does not yet establish a general LM improvement.
 
 ## Metric Glossary
 
@@ -531,6 +531,74 @@ Verdict:
 - Caveat: the top-level hard-call contract is still weaker and sometimes passes
   by abstaining. The bridge claim should therefore stay attached to the
   probability-mixture path plus role-aware safety metrics.
+
+## Repaired Gates 1-4 Audit
+
+Question:
+
+> After repairing the calibration objective, do the original null gates still
+> hold, or did the repair open a new loophole?
+
+Artifacts:
+
+```text
+artifacts/bridge-corpus-v1-repair-audit/
+artifacts/bridge-corpus-v1-repair-audit-lm/
+```
+
+Note: the original Gate 1/3 language+math corpora used a smaller `109`-token
+vocabulary. The repaired calibration rotations use the held-out-template
+`123`-token vocabulary, and those vocabularies are not prefix-compatible. The
+repair audit therefore regenerates Gate 1/3 controls from the frozen
+held-out-template surface and applies the same transform to all four calibration
+rotations. This keeps the control-plane contract explicit: each expert-bank or
+leakage condition is matched between eval rows and fit-only calibration rows.
+
+Caption: Repaired Gate 1 audit on extrapolation `math_answer` tokens. `all-four`
+uses the repaired Gate 2 all-expert run. Other rows use matched transformed eval
+and calibration corpora.
+
+| condition | token-only acc | side-channel acc | prob-mixture acc | prob-mixture NLL | prob expert mass | prob unsafe mass | role-aware contract |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| all-four | 0.000 | 0.000 | 0.562 | 2.859 | 0.468 | 0.049 | true |
+| paper-complex only | 0.000 | 0.000 | 0.194 | 4.295 | 0.100 | 0.001 | true |
+| stable-real only | 0.000 | 0.000 | 0.019 | 9.267 | 0.000 | 0.000 | false |
+| generic-tree only | 0.000 | 0.013 | 0.013 | 10.707 | 0.000 | 0.000 | false |
+| small-MLP only | 0.000 | 0.025 | 0.025 | 7.289 | 0.001 | 0.001 | false |
+| symbolic trees | 0.000 | 0.000 | 0.256 | 3.895 | 0.283 | 0.030 | true |
+| non-EML control | 0.000 | 0.013 | 0.006 | 9.658 | 0.001 | 0.001 | false |
+| shuffled all | 0.000 | 0.037 | 0.019 | 10.077 | 0.017 | 0.016 | false |
+
+Caption: Repaired Gate 3 audit on extrapolation `math_answer` tokens. Both
+controls are regenerated on the repaired-compatible held-out-template surface
+and matched across calibration rows.
+
+| condition | token-only acc | side-channel acc | prob-mixture acc | prob-mixture NLL | prob expert mass | prob unsafe mass | role-aware contract |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| target-randomized | 0.000 | 0.000 | 0.000 | 8.001 | 0.005 | 0.005 | false |
+| wrong-expert | 0.000 | 0.062 | 0.006 | 9.279 | 0.007 | 0.006 | false |
+
+Caption: Repaired Gate 2/4 audit summary on extrapolation `math_answer` tokens.
+
+| gate | condition | prob-mixture acc | prob-mixture NLL | prob expert mass | prob unsafe mass | role-aware contract |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| 2 | frozen held-out-template | 0.562 | 2.859 | 0.468 | 0.049 | true |
+| 4 | variance `20260419` | 0.719 | 1.607 | 0.643 | 0.011 | true |
+| 4 | variance `20260420` | 0.606 | 1.875 | 0.493 | 0.021 | true |
+| 4 | variance `20260421` | 0.731 | 1.471 | 0.691 | 0.013 | true |
+
+Audit verdict:
+
+- The repair survives the full Gates 1-4 audit on the role-aware
+  probability-mixture metric.
+- Gate 1 remains meaningful after repair: paper-complex-only and symbolic-tree
+  conditions pass, while stable-real-only, generic-tree-only, small-MLP-only,
+  non-EML, and shuffled controls do not.
+- Gate 3 remains meaningful after repair: randomized labels and wrong expert
+  pairings do not reproduce the bridge gain.
+- Gates 2 and 4 remain repaired on their frozen eval splits.
+- The claim is still bounded. This audit supports moving to Gate 5, not claiming
+  a broad LM improvement.
 
 ## Gate 5: More Natural Mixed Corpus
 
