@@ -811,6 +811,46 @@ Interpretation:
 
 The TPU VM was deleted after copying the log; no TPU was left running.
 
+## Matched MaxText Attention Baseline
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-attn-mt-0419`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, unpatched
+- path: unchanged MaxText `decoder_block=default`
+- dataset/tokenizer/shape/budget: matched to the RGRP quality-only run above
+- raw log:
+  `experiments/jax_tpu/maxtext_quality/attention_maxtext_baseline_20260419T0444Z.log`
+- summary:
+  `experiments/jax_tpu/maxtext_quality/20260419T0444Z_attention_baseline.md`
+- scorecard:
+  `experiments/jax_tpu/maxtext_quality/20260419T0418Z_0444Z_maxtext_scorecard.md`
+
+Result:
+
+| Lane | Params | Memory After Init | Eval Loss @99 | Final Eval Loss @199 | Final Eval PPL | Final Train Loss | Median Tok/s/Device |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Attention baseline | `0.030B` | `0.35 GB` | `4.030` | `3.758` | `42.874` | `3.817` | `375,987` |
+| RGRP FFN seam | `0.028B` | `0.33 GB` | `4.400` | `4.066` | `58.317` | `4.102` | `105,763` |
+
+Interpretation:
+
+- The unchanged MaxText transformer baseline wins this matched short-run rung
+  on both quality and speed.
+- RGRP is slightly smaller and slightly lower-memory, but the advantage is not
+  close to enough to offset `+0.308` worse final eval loss and a `3.55x`
+  baseline throughput advantage.
+- The RGRP MaxText integration remains valuable because it is now real,
+  documented, and benchmarked against the necessary control. But the current
+  plain `lax.scan` FFN replacement should not be promoted as competitive.
+- The next TPU experiment should change the hypothesis, not just repeat the
+  run: try a hybrid FFN+RGRP seam, residual/ramp controls, or a larger/longer
+  rung where recurrent state has a plausible role.
+
+The TPU VM was deleted after copying the log; no TPU was left running.
+
 ## Non-Goals
 
 - Do not use this lane to make CUDA speed claims.
