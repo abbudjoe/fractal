@@ -44,6 +44,7 @@ class JaxLmSmokeConfig:
     rgrp_scan_unroll: int = 1
     rgrp_projection_mode: str = "sequence"
     rgrp_trig_mode: str = "precompute"
+    rgrp_execution_mode: str = "scan"
     dtype: str = "bfloat16"
 
     @property
@@ -71,6 +72,7 @@ class JaxLmSmokeConfig:
             scan_unroll=self.rgrp_scan_unroll,
             projection_mode=self.rgrp_projection_mode,
             trig_mode=self.rgrp_trig_mode,
+            execution_mode=self.rgrp_execution_mode,
             dtype=self.dtype,
         ).validate()
 
@@ -148,6 +150,7 @@ def init_params(key: Array, config: JaxLmSmokeConfig) -> Params:
                     scan_unroll=config.rgrp_scan_unroll,
                     projection_mode=config.rgrp_projection_mode,
                     trig_mode=config.rgrp_trig_mode,
+                    execution_mode=config.rgrp_execution_mode,
                     dtype=config.dtype,
                 ),
             )
@@ -212,6 +215,7 @@ def rgrp_ffn(hidden: Array, block: Params, config: JaxLmSmokeConfig) -> Array:
         scan_unroll=config.rgrp_scan_unroll,
         projection_mode=config.rgrp_projection_mode,
         trig_mode=config.rgrp_trig_mode,
+        execution_mode=config.rgrp_execution_mode,
         dtype=config.dtype,
     )
     outputs, _final_state = rgrp.scan(block["rgrp"], hidden, rgrp_config)
@@ -255,6 +259,8 @@ def benchmark_lm(
     input_ids, target_ids = init_batch(batch_key, config)
     param_count = count_params(params)
     token_count = config.batch_size * config.seq_len
+    if config.variant == "rgrp" and config.rgrp_execution_mode == "pallas-forward" and not forward_only:
+        raise RuntimeError("rgrp_execution_mode='pallas-forward' is forward-only; rerun with --forward-only")
 
     if forward_only:
         compiled = jax.jit(lambda current_params: loss_fn(current_params, input_ids, target_ids, config))
@@ -300,6 +306,7 @@ def benchmark_lm(
         "rgrp_scan_unroll": config.rgrp_scan_unroll if config.variant == "rgrp" else None,
         "rgrp_projection_mode": config.rgrp_projection_mode if config.variant == "rgrp" else None,
         "rgrp_trig_mode": config.rgrp_trig_mode if config.variant == "rgrp" else None,
+        "rgrp_execution_mode": config.rgrp_execution_mode if config.variant == "rgrp" else None,
         "dtype": config.dtype,
         "forward_only": forward_only,
         "parameter_count": param_count,

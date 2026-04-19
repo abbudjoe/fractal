@@ -557,6 +557,72 @@ Current TPU policy:
 The TPU VM was deleted after the follow-up; `gcloud compute tpus tpu-vm list`
 was empty afterward.
 
+## RGRP Pallas Forward-Kernel Smoke
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-rgrp-pallas-20260419024425`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- shape: `vocab=8192,batch=4,d_model=512,layers=2,heads=8`
+- path: tiny repo-owned LM-shaped forward-only smoke
+- timing: `warmup=3`, `iterations=30`
+- artifacts:
+  `experiments/jax_tpu/rgrp_lowering_ladder/20260419T0244Z/rgrp_pallas_forward_ladder.jsonl`
+  and
+  `experiments/jax_tpu/rgrp_lowering_ladder/20260419T0244Z/rgrp_pallas_forward_ladder.md`
+
+Implementation notes:
+
+- The Pallas kernel is forward-only and intentionally does not claim training
+  readiness. A training path would need a backward rule/custom VJP unless a
+  future Pallas lowering gives us acceptable automatic differentiation.
+- The first rank-1 `state @ W` lowering failed in Mosaic, so the kernel uses a
+  rank-2 matmul form with fp32 accumulation.
+- Mosaic also rejected pair reshape / strided gather patterns, so the kernel is
+  pair-native: even/odd rotary lanes and the state-transform matrix quadrants
+  are split before entering Pallas, then re-interleaved outside the kernel.
+- The kernel keeps the TPU-favorable controls from prior ladders: sequence-wide
+  packed projection and trig precompute.
+
+| Case | Seam | Seq | Mode | Params | Compile seconds | Forward tok/s | Synthetic loss |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `seq256-mlp` | MLP | `256` | XLA | `14.82M` | `1.75` | `3,140,937` | `9.1238` |
+| `seq256-rgrp-scan-unroll3` | RGRP | `256` | `lax.scan` | `12.99M` | `1.51` | `751,699` | `9.1115` |
+| `seq256-rgrp-pallas-forward` | RGRP | `256` | Pallas | `12.99M` | `13.48` | `160,315` | `9.1116` |
+| `seq512-mlp` | MLP | `512` | XLA | `14.95M` | `1.45` | `3,745,490` | `9.1168` |
+| `seq512-rgrp-scan-unroll3` | RGRP | `512` | `lax.scan` | `13.12M` | `3.20` | `772,462` | `9.1120` |
+| `seq512-rgrp-pallas-forward` | RGRP | `512` | Pallas | `13.12M` | `30.10` | `290,698` | `9.1120` |
+| `seq1024-mlp` | MLP | `1024` | XLA | `15.22M` | `1.74` | `2,320,681` | `9.1092` |
+| `seq1024-rgrp-scan-unroll3` | RGRP | `1024` | `lax.scan` | `13.38M` | `3.02` | `688,023` | `9.1109` |
+| `seq1024-rgrp-pallas-forward` | RGRP | `1024` | Pallas | `13.38M` | `87.55` | `448,688` | `9.1110` |
+
+Interpretation:
+
+- The pair-native Pallas forward kernel compiles and runs, but it is not a win.
+- Pallas forward was slower than `lax.scan` at every tested sequence length.
+- The gap narrowed with longer sequences, but not enough to justify a backward
+  implementation yet: Pallas reached about `21%` of scan throughput at
+  `seq=256`, `38%` at `seq=512`, and `65%` at `seq=1024`.
+- Compile time is also much worse for Pallas, especially at `seq=1024`.
+- The likely root cause is kernel shape: one Pallas program per batch element
+  hides a long recurrent loop and repeated vector-matrix work inside a single
+  program. That does not expose enough tiled matrix work to TPU/Mosaic.
+
+Current decision:
+
+- Do not promote this Pallas forward kernel.
+- Keep the code as an explicit experimental lane because it documents the
+  Mosaic constraints and gives us a runnable baseline for future Pallas designs.
+- If we continue custom TPU work, the next design should be chunked/tiled:
+  expose state transform matmul tiles and sequence chunks to Pallas rather than
+  placing the entire recurrent loop inside one program.
+- Otherwise, for near-term TPU quality runs, use the `lax.scan` reference with
+  `scan_unroll=3`.
+
+The TPU VM was deleted after the Pallas smoke; `gcloud compute tpus tpu-vm list`
+was empty afterward.
+
 ## Non-Goals
 
 - Do not use this lane to make CUDA speed claims.

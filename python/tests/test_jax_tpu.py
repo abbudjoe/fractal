@@ -172,6 +172,27 @@ class JaxTpuContractTests(unittest.TestCase):
                 projection_mode="scan",
                 trig_mode="precompute",
             ).validate()
+        with self.assertRaisesRegex(ValueError, "execution_mode"):
+            rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(d_model=16, execution_mode="warp-drive").validate()
+        with self.assertRaisesRegex(ValueError, "requires projection_mode='sequence'"):
+            rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(
+                d_model=16,
+                projection_mode="scan",
+                trig_mode="scan",
+                execution_mode="pallas-forward",
+            ).validate()
+        with self.assertRaisesRegex(ValueError, "requires trig_mode='precompute'"):
+            rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(
+                d_model=16,
+                trig_mode="scan",
+                execution_mode="pallas-forward",
+            ).validate()
+        with self.assertRaisesRegex(ValueError, "dense-shaped"):
+            rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(
+                d_model=16,
+                state_transform="block-diagonal-4",
+                execution_mode="pallas-forward",
+            ).validate()
 
     def test_jax_lm_smoke_config_validates_without_jax(self) -> None:
         baseline = lm_smoke.JaxLmSmokeConfig(
@@ -197,6 +218,7 @@ class JaxTpuContractTests(unittest.TestCase):
             rgrp_scan_unroll=2,
             rgrp_projection_mode="sequence",
             rgrp_trig_mode="scan",
+            rgrp_execution_mode="scan",
         )
         recurrent.validate()
         self.assertEqual(recurrent.d_ff, 128)
