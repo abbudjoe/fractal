@@ -48,6 +48,10 @@ Primary references:
 - `python/jax_tpu/cli.py` exposes a small command emitter for scout runs.
 - `python/jax_tpu/adapters/` is the future home for Fractal-specific JAX
   adapter modules.
+- `python/jax_tpu/lm_smoke.py` owns a tiny repo-local LM-shaped
+  forward/backward gate for transformer MLP vs RGRP FFN seams.
+- `scripts/jax_tpu_lm_smoke.py` runs that LM gate on local JAX installs or TPU
+  VMs.
 - `python/tests/test_jax_tpu.py` holds contract tests.
 
 ## Candidate Rules
@@ -251,6 +255,163 @@ quality result and should not be compared against the synthetic scout.
    data, and steps.
 6. Report compile-inclusive throughput separately from steady-state throughput.
 7. Only after correctness and signal are visible, test a Pallas/custom lowering.
+
+## First RGRP Adapter TPU Smoke
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-rgrp-smoke-20260419002026`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- JAX install: `jax[tpu]` from the official libtpu wheel index
+- JAX version: `0.6.2`
+- libtpu: `0.0.17`
+
+This smoke did not use MaxText and did not train a full language model. It
+tested the new JAX reference adapter directly:
+
+```sh
+python3 scripts/jax_tpu_rgrp_smoke.py \
+  --batch-size 64 \
+  --seq-len 256 \
+  --d-model 512 \
+  --state-transform block-diagonal-4 \
+  --iterations 5 \
+  --warmup 2
+```
+
+The adapter executed on `backend=tpu` with one `TPU_0` device.
+
+| Surface | State transform | Compile seconds | Steady-state tok/s | Notes |
+|---|---:|---:|---:|---|
+| forward only | block-diagonal-4 | `1.275` | `4,308,400` | isolated scan, no LM shell |
+| forward + grad | block-diagonal-4 | `4.072` | `2,888,680` | dummy loss over emitted outputs |
+| forward + grad | dense | `4.113` | `2,962,100` | dense was slightly faster in this isolated TPU smoke |
+
+Interpretation:
+
+- The rotary gated recurrent state update primitive now has a real JAX
+  `lax.scan` implementation that compiles and runs on TPU.
+- The TPU path should not automatically inherit the CUDA/Triton fast-lane
+  assumption that block-diagonal state transforms are best; dense state
+  transform was slightly faster in this isolated smoke.
+- This is a kernel/adapter smoke only. The next gate is a repo-owned LM-shaped
+  integration smoke before patching the MaxText FFN-side seam.
+
+The TPU VM was deleted after the smoke; `gcloud compute tpus tpu-vm list` was
+empty afterward.
+
+## RGRP TPU State-Transform Definition Ablation
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-rgrp-ablate-20260419003810`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- JAX version: `0.6.2`
+- libtpu: `0.0.17`
+- shared shape: `batch_size=64`, `seq_len=256`, `d_model=512`, `bf16`
+- path: forward + gradient over the isolated adapter dummy loss
+- iterations: `8`
+- warmup iterations: `3`
+
+Command pattern:
+
+```sh
+python3 scripts/jax_tpu_rgrp_smoke.py \
+  --batch-size 64 \
+  --seq-len 256 \
+  --d-model 512 \
+  --state-transform <mode> \
+  --iterations 8 \
+  --warmup 3
+```
+
+| State transform definition | Compile seconds | Steady-state tok/s |
+|---|---:|---:|
+| `dense` | `4.415` | `2,963,451` |
+| `block-diagonal-4` | `4.404` | `2,953,874` |
+| `block-diagonal-4-masked-dense` | `4.545` | `2,968,600` |
+
+Interpretation:
+
+- The three definitions are effectively tied at this isolated adapter scale.
+- The initial dense-over-block result should not be interpreted as an
+  architectural finding.
+- `block-diagonal-4-masked-dense` slightly led grouped `block-diagonal-4`,
+  suggesting some of the difference is layout/lowering rather than the recurrent
+  rule itself.
+- TPU experiments should treat the state-transform implementation as a backend
+  policy knob. CUDA/Triton may prefer explicit block-diagonal kernels, while
+  TPU/XLA may prefer dense-shaped lowering even when the represented math is
+  structured.
+
+The TPU VM was deleted after the ablation; `gcloud compute tpus tpu-vm list` was
+empty afterward.
+
+## First RGRP LM-Shaped TPU Smoke
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-lm-smoke-20260419010655`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- JAX version: `0.6.2`
+- libtpu: `0.0.17`
+- dtype: `bf16`
+- path: tiny repo-owned transformer shell with causal attention, LM head, and
+  forward + gradient over synthetic random next-token loss
+- compared seams: standard MLP FFN vs rotary gated recurrent state update
+  primitive FFN seam
+
+This smoke is intentionally not MaxText and is not a language-model quality
+result. It exists to test whether the RGRP adapter can participate in an
+LM-shaped residual block before we spend effort patching MaxText.
+
+Command pattern:
+
+```sh
+python3 scripts/jax_tpu_lm_smoke.py \
+  --variant <mlp|rgrp> \
+  --rgrp-state-transform block-diagonal-4-masked-dense \
+  --vocab-size <vocab> \
+  --batch-size <batch> \
+  --seq-len <seq> \
+  --d-model <width> \
+  --layers 2 \
+  --heads <heads> \
+  --iterations <iters> \
+  --warmup 1
+```
+
+Results:
+
+| Shape | Seam | Params | Compile seconds | Steady-state tok/s | Synthetic loss |
+|---|---:|---:|---:|---:|---:|
+| `vocab=4096,batch=8,seq=128,d=256,layers=2,heads=4` | MLP | `3.71M` | `3.501` | `155,619` | `8.3702` |
+| `vocab=4096,batch=8,seq=128,d=256,layers=2,heads=4` | RGRP | `3.25M` | `4.006` | `132,108` | `8.3664` |
+| `vocab=8192,batch=8,seq=256,d=256,layers=2,heads=4` | MLP | `5.84M` | `3.634` | `318,887` | `9.0579` |
+| `vocab=8192,batch=8,seq=256,d=256,layers=2,heads=4` | RGRP | `5.38M` | `4.303` | `286,580` | `9.0701` |
+| `vocab=8192,batch=4,seq=256,d=512,layers=2,heads=8` | MLP | `14.82M` | `3.980` | `156,651` | `9.1238` |
+| `vocab=8192,batch=4,seq=256,d=512,layers=2,heads=8` | RGRP | `12.99M` | `4.554` | `117,765` | `9.1116` |
+
+Interpretation:
+
+- The RGRP seam is now integration-correct on TPU inside a complete toy
+  LM-shaped forward/backward path.
+- RGRP is consistently parameter-lighter than the matched MLP seam in this
+  shell.
+- RGRP is not yet throughput-competitive with the MLP seam in this simple XLA
+  lowering. The gap was roughly `15%` at the smallest shape, `10%` at
+  `seq=256,d=256`, and `25%` at `d=512`.
+- The synthetic random-token losses are not quality evidence; they only prove
+  numerical execution.
+- Before a serious TPU quality run, the next engineering question is whether the
+  MaxText integration can express this seam without adding extra layout or scan
+  overhead beyond what this toy path shows.
+
+The TPU VM was deleted after the smoke; `gcloud compute tpus tpu-vm list` was
+empty afterward.
 
 ## Non-Goals
 

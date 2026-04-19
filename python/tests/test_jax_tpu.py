@@ -14,6 +14,8 @@ from python.jax_tpu import (
     get_candidate,
     render_shell_command,
 )
+from python.jax_tpu import lm_smoke
+from python.jax_tpu.adapters import rotary_gated_recurrent_state_update as rgrp_adapter
 from python.specs.common import ValidationError
 
 
@@ -123,6 +125,140 @@ class JaxTpuContractTests(unittest.TestCase):
             JaxTpuModelShape(d_model=510, num_heads=8).validate()
         with self.assertRaises(ValidationError):
             JaxTpuParallelismSpec(ici_fsdp_parallelism=0).validate()
+
+    def test_rgrp_adapter_imports_without_jax(self) -> None:
+        self.assertEqual(rgrp_adapter.ADAPTER_NAME, "rotary-gated-recurrent-state-update")
+        config = rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(
+            d_model=16,
+            state_transform="block-diagonal-4",
+            dtype="float32",
+        )
+        config.validate()
+        self.assertEqual(config.packed_width, 56)
+        if not rgrp_adapter.jax_available():
+            with self.assertRaisesRegex(RuntimeError, "JAX is required"):
+                rgrp_adapter.require_jax()
+
+    def test_rgrp_masked_dense_transform_contract_validates(self) -> None:
+        config = rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(
+            d_model=16,
+            state_transform="block-diagonal-4-masked-dense",
+            dtype="bfloat16",
+        )
+        config.validate()
+        self.assertEqual(config.block_count, 4)
+        self.assertTrue(config.stores_block_transform_as_dense)
+
+    def test_jax_lm_smoke_config_validates_without_jax(self) -> None:
+        baseline = lm_smoke.JaxLmSmokeConfig(
+            variant="mlp",
+            vocab_size=128,
+            seq_len=16,
+            batch_size=2,
+            d_model=32,
+            layers=1,
+            heads=4,
+        )
+        baseline.validate()
+
+        recurrent = lm_smoke.JaxLmSmokeConfig(
+            variant="rgrp",
+            vocab_size=128,
+            seq_len=16,
+            batch_size=2,
+            d_model=32,
+            layers=1,
+            heads=4,
+            rgrp_state_transform="block-diagonal-4-masked-dense",
+        )
+        recurrent.validate()
+        self.assertEqual(recurrent.d_ff, 128)
+        self.assertEqual(recurrent.head_dim, 8)
+        if not lm_smoke.jax_available():
+            with self.assertRaisesRegex(RuntimeError, "JAX is required"):
+                lm_smoke.require_jax()
+
+    @unittest.skipUnless(rgrp_adapter.jax_available(), "JAX is not installed in this environment")
+    def test_rgrp_jax_adapter_matches_torch_p20_block_diagonal_scan(self) -> None:
+        import numpy as np
+        import torch
+
+        from python.models.primitives import P20RotaryStateOutputRuntimeSequenceMixer
+        from python.specs.runtime import PrimitiveStateTransformMode
+
+        torch.manual_seed(7)
+        inputs = torch.randn(2, 5, 16)
+        torch_primitive = P20RotaryStateOutputRuntimeSequenceMixer(
+            16,
+            state_transform_mode=PrimitiveStateTransformMode.BLOCK_DIAGONAL_4,
+        )
+        torch_result = torch_primitive.scan(inputs)
+
+        config = rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(
+            d_model=16,
+            state_transform="block-diagonal-4",
+            dtype="float32",
+        )
+        params = rgrp_adapter.params_from_torch_state_dict(torch_primitive.state_dict(), config)
+        jax_inputs = rgrp_adapter.jnp.asarray(inputs.detach().numpy(), dtype=rgrp_adapter.jnp.float32)
+        jax_outputs, jax_final_state = rgrp_adapter.scan(params, jax_inputs, config)
+
+        np.testing.assert_allclose(
+            np.asarray(jax_outputs),
+            torch_result.emitted_outputs.detach().numpy(),
+            atol=1.0e-5,
+            rtol=1.0e-5,
+        )
+        np.testing.assert_allclose(
+            np.asarray(jax_final_state),
+            torch_result.final_state.detach().numpy(),
+            atol=1.0e-5,
+            rtol=1.0e-5,
+        )
+
+    @unittest.skipUnless(rgrp_adapter.jax_available(), "JAX is not installed in this environment")
+    def test_rgrp_masked_dense_matches_grouped_block_diagonal(self) -> None:
+        import numpy as np
+        import torch
+
+        from python.models.primitives import P20RotaryStateOutputRuntimeSequenceMixer
+        from python.specs.runtime import PrimitiveStateTransformMode
+
+        torch.manual_seed(11)
+        inputs = torch.randn(2, 5, 16)
+        torch_primitive = P20RotaryStateOutputRuntimeSequenceMixer(
+            16,
+            state_transform_mode=PrimitiveStateTransformMode.BLOCK_DIAGONAL_4,
+        )
+        grouped_config = rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(
+            d_model=16,
+            state_transform="block-diagonal-4",
+            dtype="float32",
+        )
+        masked_config = rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(
+            d_model=16,
+            state_transform="block-diagonal-4-masked-dense",
+            dtype="float32",
+        )
+        grouped_params = rgrp_adapter.params_from_torch_state_dict(torch_primitive.state_dict(), grouped_config)
+        masked_params = rgrp_adapter.params_from_torch_state_dict(torch_primitive.state_dict(), masked_config)
+        jax_inputs = rgrp_adapter.jnp.asarray(inputs.detach().numpy(), dtype=rgrp_adapter.jnp.float32)
+
+        grouped_outputs, grouped_state = rgrp_adapter.scan(grouped_params, jax_inputs, grouped_config)
+        masked_outputs, masked_state = rgrp_adapter.scan(masked_params, jax_inputs, masked_config)
+
+        np.testing.assert_allclose(
+            np.asarray(masked_outputs),
+            np.asarray(grouped_outputs),
+            atol=1.0e-5,
+            rtol=1.0e-5,
+        )
+        np.testing.assert_allclose(
+            np.asarray(masked_state),
+            np.asarray(grouped_state),
+            atol=1.0e-5,
+            rtol=1.0e-5,
+        )
 
 
 if __name__ == "__main__":
