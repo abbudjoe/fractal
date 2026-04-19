@@ -36,6 +36,36 @@ class SymbolicBridgeBatch:
 
 
 @dataclass(frozen=True)
+class FusionCalibrationPolicy:
+    answer_roles: tuple[str, ...]
+    temperature: float
+    abstain_bias: float
+    answer_call_threshold: float
+    answer_fusion_cap: float
+    non_answer_fusion_cap: float
+    target_answer_unsafe: float
+    min_answer_accuracy_gain: float
+    selected_split: str
+    selected_feasible: bool
+    selected_metrics: dict[str, float]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "answer_roles": list(self.answer_roles),
+            "temperature": self.temperature,
+            "abstain_bias": self.abstain_bias,
+            "answer_call_threshold": self.answer_call_threshold,
+            "answer_fusion_cap": self.answer_fusion_cap,
+            "non_answer_fusion_cap": self.non_answer_fusion_cap,
+            "target_answer_unsafe": self.target_answer_unsafe,
+            "min_answer_accuracy_gain": self.min_answer_accuracy_gain,
+            "selected_split": self.selected_split,
+            "selected_feasible": self.selected_feasible,
+            "selected_metrics": self.selected_metrics,
+        }
+
+
+@dataclass(frozen=True)
 class BridgeLmRun:
     name: str
     mode: str
@@ -65,6 +95,7 @@ class BridgeLmRun:
     validation_final_nll: float
     extrapolation_final_nll: float
     role_metrics: dict[str, Any] | None = None
+    calibration: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -98,6 +129,8 @@ class BridgeLmRun:
         }
         if self.role_metrics is not None:
             payload["role_metrics"] = self.role_metrics
+        if self.calibration is not None:
+            payload["calibration"] = self.calibration
         return payload
 
 
@@ -125,6 +158,10 @@ class BridgeLmReport:
     non_answer_lm_retention_loss_weight: float
     non_answer_teacher_kl_loss_weight: float
     non_answer_teacher_kl_roles: tuple[str, ...]
+    role_aware_calibration: bool
+    calibration_target_answer_unsafe: float
+    calibration_min_answer_accuracy_gain: float
+    calibration_answer_roles: tuple[str, ...]
     unsafe_margin_loss_weight: float
     unsafe_margin: float
     router_call_threshold: float
@@ -161,6 +198,10 @@ class BridgeLmReport:
             "non_answer_lm_retention_loss_weight": self.non_answer_lm_retention_loss_weight,
             "non_answer_teacher_kl_loss_weight": self.non_answer_teacher_kl_loss_weight,
             "non_answer_teacher_kl_roles": list(self.non_answer_teacher_kl_roles),
+            "role_aware_calibration": self.role_aware_calibration,
+            "calibration_target_answer_unsafe": self.calibration_target_answer_unsafe,
+            "calibration_min_answer_accuracy_gain": self.calibration_min_answer_accuracy_gain,
+            "calibration_answer_roles": list(self.calibration_answer_roles),
             "unsafe_margin_loss_weight": self.unsafe_margin_loss_weight,
             "unsafe_margin": self.unsafe_margin,
             "router_call_threshold": self.router_call_threshold,
@@ -194,6 +235,10 @@ def run_symbolic_bridge_lm(
     non_answer_lm_retention_loss_weight: float = 0.0,
     non_answer_teacher_kl_loss_weight: float = 0.0,
     non_answer_teacher_kl_roles: tuple[str, ...] = ("prose", "math_context"),
+    role_aware_calibration: bool = False,
+    calibration_target_answer_unsafe: float = 0.05,
+    calibration_min_answer_accuracy_gain: float = 0.01,
+    calibration_answer_roles: tuple[str, ...] = ("math_answer", "math_only"),
     unsafe_margin_loss_weight: float = 0.0,
     unsafe_margin: float = 0.5,
     router_call_threshold: float = 0.0,
@@ -295,6 +340,10 @@ def run_symbolic_bridge_lm(
                 non_answer_lm_retention_loss_weight=non_answer_lm_retention_loss_weight,
                 non_answer_teacher_kl_loss_weight=non_answer_teacher_kl_loss_weight,
                 non_answer_teacher_kl_roles=non_answer_teacher_kl_roles,
+                role_aware_calibration=role_aware_calibration,
+                calibration_target_answer_unsafe=calibration_target_answer_unsafe,
+                calibration_min_answer_accuracy_gain=calibration_min_answer_accuracy_gain,
+                calibration_answer_roles=calibration_answer_roles,
                 unsafe_margin_loss_weight=unsafe_margin_loss_weight,
                 unsafe_margin=unsafe_margin,
                 router_call_threshold=router_call_threshold,
@@ -340,6 +389,10 @@ def run_symbolic_bridge_lm(
         non_answer_lm_retention_loss_weight=non_answer_lm_retention_loss_weight,
         non_answer_teacher_kl_loss_weight=non_answer_teacher_kl_loss_weight,
         non_answer_teacher_kl_roles=non_answer_teacher_kl_roles,
+        role_aware_calibration=role_aware_calibration,
+        calibration_target_answer_unsafe=calibration_target_answer_unsafe,
+        calibration_min_answer_accuracy_gain=calibration_min_answer_accuracy_gain,
+        calibration_answer_roles=calibration_answer_roles,
         unsafe_margin_loss_weight=unsafe_margin_loss_weight,
         unsafe_margin=unsafe_margin,
         router_call_threshold=router_call_threshold,
@@ -382,6 +435,10 @@ def train_lm_contract_variant(
     non_answer_lm_retention_loss_weight: float,
     non_answer_teacher_kl_loss_weight: float,
     non_answer_teacher_kl_roles: tuple[str, ...],
+    role_aware_calibration: bool,
+    calibration_target_answer_unsafe: float,
+    calibration_min_answer_accuracy_gain: float,
+    calibration_answer_roles: tuple[str, ...],
     unsafe_margin_loss_weight: float,
     unsafe_margin: float,
     router_call_threshold: float,
@@ -528,9 +585,44 @@ def train_lm_contract_variant(
         loss.backward()
         optimizer.step()
 
-    split_metrics = {}
+    calibration_policy = None
     model.eval()
     with torch.no_grad():
+        if role_aware_calibration and use_router and fusion_mode == "prob-mixture":
+            if "fit_safety_calibration" in splits:
+                calibration_split = "fit_safety_calibration"
+            else:
+                calibration_split = "safety_calibration" if "safety_calibration" in splits else "validation"
+            calibration_batch = splits[calibration_split]
+            calibration_token_logits, calibration_router_logits = model(
+                calibration_batch.previous_tokens,
+                calibration_batch.features,
+            )
+            capability_batch = splits.get("validation")
+            capability_token_logits = None
+            capability_router_logits = None
+            if capability_batch is not None:
+                capability_token_logits, capability_router_logits = model(
+                    capability_batch.previous_tokens,
+                    capability_batch.features,
+                )
+            calibration_policy = fit_role_aware_fusion_calibration(
+                torch,
+                calibration_batch,
+                calibration_token_logits,
+                calibration_router_logits,
+                token_bins,
+                capability_batch=capability_batch,
+                capability_token_logits=capability_token_logits,
+                capability_router_logits=capability_router_logits,
+                expert_logit_scale=expert_logit_scale,
+                fusion_allowed_roles=fusion_allowed_roles,
+                answer_roles=calibration_answer_roles,
+                target_answer_unsafe=calibration_target_answer_unsafe,
+                min_answer_accuracy_gain=calibration_min_answer_accuracy_gain,
+                selected_split=calibration_split,
+            )
+        split_metrics = {}
         for split, batch in splits.items():
             token_logits, router_logits = model(batch.previous_tokens, batch.features)
             final_logits, final_probabilities, router_stats = fused_token_outputs(
@@ -542,6 +634,7 @@ def train_lm_contract_variant(
                 fusion_mode=fusion_mode,
                 expert_logit_scale=expert_logit_scale,
                 fusion_allowed_roles=fusion_allowed_roles,
+                calibration_policy=calibration_policy,
             )
             token_loss = masked_token_nll(
                 torch,
@@ -695,6 +788,7 @@ def train_lm_contract_variant(
             for split in ("train", "safety_calibration", "validation", "extrapolation")
             if split in split_metrics
         },
+        calibration=None if calibration_policy is None else calibration_policy.to_dict(),
     )
 
 
@@ -777,17 +871,47 @@ def fused_token_outputs(
     fusion_mode: str,
     expert_logit_scale: float,
     fusion_allowed_roles: tuple[str, ...] = (),
+    calibration_policy: FusionCalibrationPolicy | None = None,
 ) -> tuple[Any | None, Any | None, dict[str, Any]]:
     if fusion_mode in {"none", "hard-call"}:
         return token_logits, None, {}
     if fusion_mode not in {"logit-fusion", "prob-mixture"}:
         raise ValueError("fusion_mode must be one of none|hard-call|logit-fusion|prob-mixture")
     role_gate = fusion_role_gate(torch, batch, fusion_allowed_roles)
-    router_probabilities = torch.nn.functional.softmax(router_logits, dim=-1)
+    if calibration_policy is None:
+        router_probabilities = torch.nn.functional.softmax(router_logits, dim=-1)
+    else:
+        calibrated_logits = router_logits / float(calibration_policy.temperature)
+        if calibration_policy.abstain_bias:
+            abstain_adjustment = torch.zeros_like(calibrated_logits)
+            abstain_adjustment[..., -1] = float(calibration_policy.abstain_bias)
+            calibrated_logits = calibrated_logits + abstain_adjustment
+        router_probabilities = torch.nn.functional.softmax(calibrated_logits, dim=-1)
     expert_count = int(batch.expert_tokens.shape[-1])
     expert_probabilities = router_probabilities[..., :expert_count]
     valid_mask = batch.expert_valid_mask & (batch.expert_tokens >= 0)
     valid_probabilities = expert_probabilities * valid_mask.float() * role_gate.unsqueeze(-1).float()
+    unsafe_probabilities = expert_probabilities * (~batch.expert_safe_mask).float() * role_gate.unsqueeze(-1).float()
+    if calibration_policy is not None:
+        answer_gate = fusion_role_gate(torch, batch, calibration_policy.answer_roles)
+        raw_expert_mass = valid_probabilities.sum(dim=-1)
+        answer_allowed = answer_gate & (raw_expert_mass >= float(calibration_policy.answer_call_threshold))
+        non_answer_allowed = (~answer_gate) & (float(calibration_policy.non_answer_fusion_cap) > 0.0)
+        allowed = (answer_allowed | non_answer_allowed) & batch.symbolic_mask
+        cap = torch.where(
+            answer_gate,
+            torch.full_like(raw_expert_mass, float(calibration_policy.answer_fusion_cap)),
+            torch.full_like(raw_expert_mass, float(calibration_policy.non_answer_fusion_cap)),
+        )
+        capped_mass = torch.minimum(raw_expert_mass, cap).clamp(min=0.0, max=1.0)
+        scale = torch.where(
+            raw_expert_mass > 0.0,
+            capped_mass / raw_expert_mass.clamp(min=1.0e-8),
+            torch.zeros_like(raw_expert_mass),
+        )
+        scale = scale * allowed.float()
+        valid_probabilities = valid_probabilities * scale.unsqueeze(-1)
+        unsafe_probabilities = unsafe_probabilities * scale.unsqueeze(-1)
     token_indices = batch.expert_tokens.clamp(min=0, max=max(0, token_bins - 1))
     expert_token_mass = torch.zeros(
         (*batch.target_ids.shape, token_bins),
@@ -796,9 +920,7 @@ def fused_token_outputs(
     )
     expert_token_mass.scatter_add_(-1, token_indices, valid_probabilities.to(token_logits.dtype))
     expert_mass = expert_token_mass.sum(dim=-1, keepdim=True).clamp(min=0.0, max=1.0)
-    unsafe_mass = (
-        expert_probabilities * (~batch.expert_safe_mask).float() * role_gate.unsqueeze(-1).float()
-    ).sum(dim=-1)
+    unsafe_mass = unsafe_probabilities.sum(dim=-1)
     stats = {
         "expert_mass": expert_mass.squeeze(-1),
         "unsafe_mass": unsafe_mass,
@@ -819,6 +941,172 @@ def fusion_role_gate(torch: Any, batch: SymbolicBridgeBatch, allowed_roles: tupl
         if role in batch.role_names:
             selected = selected | (batch.role_ids == batch.role_names.index(role))
     return selected & batch.symbolic_mask
+
+
+def fit_role_aware_fusion_calibration(
+    torch: Any,
+    batch: SymbolicBridgeBatch,
+    token_logits: Any,
+    router_logits: Any,
+    token_bins: int,
+    *,
+    capability_batch: SymbolicBridgeBatch | None = None,
+    capability_token_logits: Any | None = None,
+    capability_router_logits: Any | None = None,
+    expert_logit_scale: float,
+    fusion_allowed_roles: tuple[str, ...],
+    answer_roles: tuple[str, ...],
+    target_answer_unsafe: float,
+    min_answer_accuracy_gain: float,
+    selected_split: str,
+) -> FusionCalibrationPolicy:
+    candidates: list[tuple[bool, tuple[float, ...], FusionCalibrationPolicy]] = []
+    temperatures = (0.75, 1.0, 1.25, 1.5, 2.0)
+    abstain_biases = (0.0, 0.5, 1.0, 2.0, 3.0, 4.0)
+    thresholds = (0.0, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 0.9, 0.95, 0.98, 0.99, 0.995, 0.999, 0.9999)
+    caps = (0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0)
+    for temperature in temperatures:
+        for abstain_bias in abstain_biases:
+            for answer_call_threshold in thresholds:
+                for answer_fusion_cap in caps:
+                    policy = FusionCalibrationPolicy(
+                        answer_roles=answer_roles,
+                        temperature=temperature,
+                        abstain_bias=abstain_bias,
+                        answer_call_threshold=answer_call_threshold,
+                        answer_fusion_cap=answer_fusion_cap,
+                        non_answer_fusion_cap=0.0,
+                        target_answer_unsafe=target_answer_unsafe,
+                        min_answer_accuracy_gain=min_answer_accuracy_gain,
+                        selected_split=selected_split,
+                        selected_feasible=False,
+                        selected_metrics={},
+                    )
+                    final_logits, final_probabilities, router_stats = fused_token_outputs(
+                        torch,
+                        batch,
+                        token_logits,
+                        router_logits,
+                        token_bins,
+                        fusion_mode="prob-mixture",
+                        expert_logit_scale=expert_logit_scale,
+                        fusion_allowed_roles=fusion_allowed_roles,
+                        calibration_policy=policy,
+                    )
+                    metrics = evaluate_contract_outputs(
+                        torch,
+                        batch,
+                        token_logits,
+                        router_logits,
+                        (),
+                        token_bins,
+                        use_router=True,
+                        fusion_mode="prob-mixture",
+                        final_logits=final_logits,
+                        final_probabilities=final_probabilities,
+                        router_stats=router_stats,
+                        router_call_threshold=0.0,
+                        loss=0.0,
+                    )
+                    answer_metrics = first_role_metrics(
+                        metrics.get("role_metrics", {}),
+                        answer_roles,
+                    )
+                    answer_accuracy = float(answer_metrics.get("final_token_accuracy", 0.0))
+                    answer_nll = float(answer_metrics.get("final_nll", float("inf")))
+                    answer_unsafe = float(answer_metrics.get("unsafe_call_rate", 1.0))
+                    answer_lm_accuracy = float(answer_metrics.get("lm_token_accuracy", 0.0))
+                    answer_gain = answer_accuracy - answer_lm_accuracy
+                    capability_accuracy = answer_accuracy
+                    capability_nll = answer_nll
+                    capability_lm_accuracy = answer_lm_accuracy
+                    capability_gain = answer_gain
+                    if (
+                        capability_batch is not None
+                        and capability_token_logits is not None
+                        and capability_router_logits is not None
+                    ):
+                        capability_final_logits, capability_final_probabilities, capability_router_stats = fused_token_outputs(
+                            torch,
+                            capability_batch,
+                            capability_token_logits,
+                            capability_router_logits,
+                            token_bins,
+                            fusion_mode="prob-mixture",
+                            expert_logit_scale=expert_logit_scale,
+                            fusion_allowed_roles=fusion_allowed_roles,
+                            calibration_policy=policy,
+                        )
+                        capability_metrics = evaluate_contract_outputs(
+                            torch,
+                            capability_batch,
+                            capability_token_logits,
+                            capability_router_logits,
+                            (),
+                            token_bins,
+                            use_router=True,
+                            fusion_mode="prob-mixture",
+                            final_logits=capability_final_logits,
+                            final_probabilities=capability_final_probabilities,
+                            router_stats=capability_router_stats,
+                            router_call_threshold=0.0,
+                            loss=0.0,
+                        )
+                        capability_answer_metrics = first_role_metrics(
+                            capability_metrics.get("role_metrics", {}),
+                            answer_roles,
+                        )
+                        capability_accuracy = float(capability_answer_metrics.get("final_token_accuracy", 0.0))
+                        capability_nll = float(capability_answer_metrics.get("final_nll", float("inf")))
+                        capability_lm_accuracy = float(capability_answer_metrics.get("lm_token_accuracy", 0.0))
+                        capability_gain = capability_accuracy - capability_lm_accuracy
+                    feasible = (
+                        answer_unsafe <= target_answer_unsafe
+                        and capability_gain >= min_answer_accuracy_gain
+                    )
+                    selected_metrics = {
+                        "answer_accuracy": capability_accuracy,
+                        "answer_lm_accuracy": capability_lm_accuracy,
+                        "answer_accuracy_gain_vs_lm": capability_gain,
+                        "answer_nll": capability_nll,
+                        "answer_unsafe": answer_unsafe,
+                        "calibration_answer_accuracy": answer_accuracy,
+                        "calibration_answer_lm_accuracy": answer_lm_accuracy,
+                        "calibration_answer_accuracy_gain_vs_lm": answer_gain,
+                        "calibration_answer_nll": answer_nll,
+                        "calibration_answer_unsafe": answer_unsafe,
+                        "whole_accuracy": float(metrics["final_token_accuracy"]),
+                        "whole_nll": float(metrics["final_nll"]),
+                    }
+                    final_policy = FusionCalibrationPolicy(
+                        answer_roles=answer_roles,
+                        temperature=temperature,
+                        abstain_bias=abstain_bias,
+                        answer_call_threshold=answer_call_threshold,
+                        answer_fusion_cap=answer_fusion_cap,
+                        non_answer_fusion_cap=0.0,
+                        target_answer_unsafe=target_answer_unsafe,
+                        min_answer_accuracy_gain=min_answer_accuracy_gain,
+                        selected_split=selected_split,
+                        selected_feasible=feasible,
+                        selected_metrics=selected_metrics,
+                    )
+                    if feasible:
+                        score = (answer_unsafe, -capability_accuracy, capability_nll, -capability_gain)
+                    else:
+                        score = (answer_unsafe, -capability_accuracy, capability_nll, -capability_gain)
+                    candidates.append((feasible, score, final_policy))
+    feasible_candidates = [candidate for candidate in candidates if candidate[0]]
+    candidate_pool = feasible_candidates or candidates
+    return min(candidate_pool, key=lambda candidate: candidate[1])[2]
+
+
+def first_role_metrics(role_metrics: dict[str, Any], roles: tuple[str, ...]) -> dict[str, float]:
+    for role in roles:
+        metrics = role_metrics.get(role)
+        if metrics is not None:
+            return metrics
+    return {}
 
 
 def build_symbolic_bridge_lm_model(
@@ -1232,6 +1520,23 @@ def build_contract_splits(
                 role_names,
                 device,
             )
+    fit_safety_sequences = [
+        sequence
+        for key, sequence in sorted(fit_grouped.items())
+        if key[2] == "safety_calibration"
+    ]
+    if fit_safety_sequences:
+        splits["fit_safety_calibration"] = batch_from_sequences(
+            torch,
+            fit_safety_sequences,
+            task_ids,
+            expert_ids,
+            token_bins,
+            feature_set,
+            stats,
+            role_names,
+            device,
+        )
     fit_sequences = [
         sequence
         for key, sequence in sorted(fit_grouped.items())
@@ -1932,6 +2237,10 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
         f"Non-answer LM retention loss weight: `{report.non_answer_lm_retention_loss_weight}`",
         f"Non-answer teacher KL loss weight: `{report.non_answer_teacher_kl_loss_weight}`",
         f"Non-answer teacher KL roles: `{list(report.non_answer_teacher_kl_roles) or 'none'}`",
+        f"Role-aware calibration: `{report.role_aware_calibration}`",
+        f"Calibration answer roles: `{list(report.calibration_answer_roles) or 'none'}`",
+        f"Calibration target answer unsafe: `{report.calibration_target_answer_unsafe}`",
+        f"Calibration min answer accuracy gain: `{report.calibration_min_answer_accuracy_gain}`",
         f"Unsafe margin loss weight: `{report.unsafe_margin_loss_weight}`",
         f"Unsafe margin: `{report.unsafe_margin}`",
         f"Router call threshold: `{report.router_call_threshold}`",
@@ -1957,6 +2266,33 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
             f"{run.extrapolation_unsafe_call_rate:.3f} | "
             f"{format_optional(run.extrapolation_abstain_recall)} |"
         )
+    calibration_rows = [run for run in report.runs if run.calibration is not None]
+    if calibration_rows:
+        lines.extend(
+            [
+                "",
+                "## Calibration Policies",
+                "",
+                "| run | split | feasible | temperature | abstain bias | answer threshold | answer cap | answer unsafe | answer acc | answer NLL |",
+                "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for run in calibration_rows:
+            calibration = run.calibration or {}
+            selected = calibration.get("selected_metrics", {})
+            lines.append(
+                "| "
+                f"`{run.name}` | "
+                f"{calibration.get('selected_split')} | "
+                f"{calibration.get('selected_feasible')} | "
+                f"{float(calibration.get('temperature', 0.0)):.3f} | "
+                f"{float(calibration.get('abstain_bias', 0.0)):.3f} | "
+                f"{float(calibration.get('answer_call_threshold', 0.0)):.3f} | "
+                f"{float(calibration.get('answer_fusion_cap', 0.0)):.3f} | "
+                f"{float(selected.get('answer_unsafe', 0.0)):.3f} | "
+                f"{float(selected.get('answer_accuracy', 0.0)):.3f} | "
+                f"{float(selected.get('answer_nll', 0.0)):.4g} |"
+            )
     role_rows = []
     for run in report.runs:
         role_metrics = run.role_metrics or {}

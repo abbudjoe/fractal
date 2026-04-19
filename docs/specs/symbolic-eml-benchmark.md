@@ -1791,3 +1791,34 @@ Seed-variance verdict:
 - The next bridge repair should target role-aware calibration stability
   directly, then rerun this exact audit. A larger LM or broader corpus should
   wait until the answer unsafe-mass pass count is stable.
+
+Role-aware calibrated fusion:
+
+```text
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-repaired-s777-v4/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-repaired-s778-v4/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-repaired-s779-v4/
+```
+
+The calibrated runner adds a post-training policy search for `prob-mixture`.
+It selects router temperature, abstain bias, answer threshold, and answer
+fusion cap on `fit_safety_calibration`, while requiring validation answer
+capability. The important implementation fix is that `fit_safety_calibration`
+uses the same primary+extra safety rows used for fitting; the primary safety
+split alone had no unsafe `math_answer` rows.
+
+| condition | answer pass count | answer safety count | whole acc mean +/- sd | whole NLL mean +/- sd | answer acc mean +/- sd | answer gain mean +/- sd | answer NLL mean +/- sd | answer unsafe mean +/- sd |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| uncalibrated repaired | 1/3 | 1/3 | 0.259 +/- 0.021 | 6.236 +/- 0.327 | 0.492 +/- 0.050 | 0.390 +/- 0.058 | 2.833 +/- 0.905 | 0.131 +/- 0.135 |
+| calibrated repaired | 2/3 | 3/3 | 0.241 +/- 0.018 | 6.405 +/- 0.294 | 0.156 +/- 0.062 | 0.048 +/- 0.042 | 5.239 +/- 0.820 | 0.000 +/- 0.000 |
+
+Calibration verdict:
+
+- Role-aware calibration fixes the safety instability: answer unsafe mass is
+  below the gate on `3/3` seeds.
+- It is too conservative to call solved. The full answer capability+safety
+  contract is only `2/3`, and answer NLL/accuracy are much worse than the
+  uncalibrated high-signal runs.
+- This supports the bridge as a controlled answer/action expert, but the next
+  repair must recover more answer capability under the calibrated safety
+  policy.

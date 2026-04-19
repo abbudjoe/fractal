@@ -793,6 +793,10 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 non_answer_lm_retention_loss_weight=0.9,
                 non_answer_teacher_kl_loss_weight=0.4,
                 non_answer_teacher_kl_roles=("symbolic",),
+                role_aware_calibration=True,
+                calibration_target_answer_unsafe=0.2,
+                calibration_min_answer_accuracy_gain=0.0,
+                calibration_answer_roles=("symbolic",),
                 unsafe_margin_loss_weight=1.25,
                 unsafe_margin=0.4,
                 router_call_threshold=0.25,
@@ -814,6 +818,10 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertEqual(report.non_answer_lm_retention_loss_weight, 0.9)
             self.assertEqual(report.non_answer_teacher_kl_loss_weight, 0.4)
             self.assertEqual(report.non_answer_teacher_kl_roles, ("symbolic",))
+            self.assertTrue(report.role_aware_calibration)
+            self.assertEqual(report.calibration_target_answer_unsafe, 0.2)
+            self.assertEqual(report.calibration_min_answer_accuracy_gain, 0.0)
+            self.assertEqual(report.calibration_answer_roles, ("symbolic",))
             self.assertEqual(report.unsafe_margin_loss_weight, 1.25)
             self.assertEqual(report.unsafe_margin, 0.4)
             self.assertEqual(report.router_call_threshold, 0.25)
@@ -827,6 +835,10 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertIn("lm-router-logit-fusion", run_names)
             self.assertIn("lm-router-prob-mixture", run_names)
             prob_mixture = next(run for run in report.runs if run.name == "lm-router-prob-mixture")
+            self.assertIsNotNone(prob_mixture.calibration)
+            assert prob_mixture.calibration is not None
+            self.assertEqual(prob_mixture.calibration["answer_roles"], ["symbolic"])
+            self.assertIn("selected_metrics", prob_mixture.calibration)
             self.assertEqual(prob_mixture.extrapolation_expert_call_rate, 0.0)
             self.assertEqual(prob_mixture.extrapolation_unsafe_call_rate, 0.0)
             self.assertIsNotNone(prob_mixture.role_metrics)

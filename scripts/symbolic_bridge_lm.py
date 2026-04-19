@@ -51,6 +51,18 @@ def build_parser() -> argparse.ArgumentParser:
             "Empty disables the KL mask."
         ),
     )
+    parser.add_argument(
+        "--role-aware-calibration",
+        action="store_true",
+        help="Fit a post-training role-aware prob-mixture calibration policy on safety_calibration rows.",
+    )
+    parser.add_argument("--calibration-target-answer-unsafe", type=float, default=0.05)
+    parser.add_argument("--calibration-min-answer-accuracy-gain", type=float, default=0.01)
+    parser.add_argument(
+        "--calibration-answer-roles",
+        default="math_answer,math_only",
+        help="Comma-separated eval_role names treated as answer roles during calibration.",
+    )
     parser.add_argument("--unsafe-margin-loss-weight", type=float, default=0.0)
     parser.add_argument("--unsafe-margin", type=float, default=0.5)
     parser.add_argument("--router-call-threshold", type=float, default=0.0)
@@ -77,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = args.output_dir or (REPO_ROOT / "artifacts" / "symbolic-bridge-lm" / args.run_label)
     fusion_allowed_roles = parse_comma_separated(args.fusion_allowed_roles)
     non_answer_teacher_kl_roles = parse_comma_separated(args.non_answer_teacher_kl_roles)
+    calibration_answer_roles = parse_comma_separated(args.calibration_answer_roles)
     report = run_symbolic_bridge_lm(
         args.bridge_summary,
         output_dir,
@@ -95,6 +108,10 @@ def main(argv: list[str] | None = None) -> int:
         non_answer_lm_retention_loss_weight=args.non_answer_lm_retention_loss_weight,
         non_answer_teacher_kl_loss_weight=args.non_answer_teacher_kl_loss_weight,
         non_answer_teacher_kl_roles=non_answer_teacher_kl_roles,
+        role_aware_calibration=args.role_aware_calibration,
+        calibration_target_answer_unsafe=args.calibration_target_answer_unsafe,
+        calibration_min_answer_accuracy_gain=args.calibration_min_answer_accuracy_gain,
+        calibration_answer_roles=calibration_answer_roles,
         unsafe_margin_loss_weight=args.unsafe_margin_loss_weight,
         unsafe_margin=args.unsafe_margin,
         router_call_threshold=args.router_call_threshold,
@@ -115,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"fusion_allowed_roles={report.fusion_allowed_roles or 'all'}")
         print(f"non_answer_teacher_kl_roles={report.non_answer_teacher_kl_roles or 'none'}")
+        print(f"role_aware_calibration={report.role_aware_calibration}")
+        print(f"calibration_answer_roles={report.calibration_answer_roles or 'none'}")
         print(
             "run\tmode\tfeatures\tval_final_acc\textrap_final_acc\tval_final_nll\textrap_final_nll\textrap_lm_acc\t"
             "router_extrap_acc\texpert_call_rate\tunsafe_call_rate\tabstain_recall"
@@ -134,6 +153,21 @@ def main(argv: list[str] | None = None) -> int:
                 f"{run.extrapolation_unsafe_call_rate:.3f}\t"
                 f"{format_optional(run.extrapolation_abstain_recall)}"
             )
+            if run.calibration is not None:
+                selected = run.calibration.get("selected_metrics", {})
+                print(
+                    "calibration\t"
+                    f"{run.name}\t"
+                    f"split={run.calibration.get('selected_split')}\t"
+                    f"feasible={run.calibration.get('selected_feasible')}\t"
+                    f"temperature={float(run.calibration.get('temperature', 0.0)):.3f}\t"
+                    f"abstain_bias={float(run.calibration.get('abstain_bias', 0.0)):.3f}\t"
+                    f"answer_threshold={float(run.calibration.get('answer_call_threshold', 0.0)):.3f}\t"
+                    f"answer_cap={float(run.calibration.get('answer_fusion_cap', 0.0)):.3f}\t"
+                    f"answer_unsafe={float(selected.get('answer_unsafe', 0.0)):.3f}\t"
+                    f"answer_acc={float(selected.get('answer_accuracy', 0.0)):.3f}\t"
+                    f"answer_nll={float(selected.get('answer_nll', 0.0)):.4g}"
+                )
         safe = report.summary["safe_expert_coverage"]
         print(f"extra_fit_bridge_summaries={report.extra_fit_bridge_summary_paths}")
         print(f"extra_fit_feature_tables={report.extra_fit_feature_table_paths}")

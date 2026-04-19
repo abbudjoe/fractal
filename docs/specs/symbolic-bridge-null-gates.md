@@ -13,7 +13,7 @@ records stay below it.
 | 2. Held-out formula/language templates | Does the bridge survive unseen formula families, unseen wrappers, and varied answer positions? | repaired after audit | Multi-split calibration plus answer-token call/abstain loss keeps most capability while reducing unsafe mass below the role-aware gate. |
 | 3. Target/random-label and wrong-expert controls | Does the harness leak target identity through labels, routing, or feature construction? | passed after repaired audit | Broken labels and wrong expert pairings still collapse the repaired hybrid gain. |
 | 4. Seed/template variance | Is the positive result stable across seeds and template draws? | repaired after audit | Multi-split calibration turns the unstable variance result into stable math-answer gains with low unsafe mass. |
-| 5. More natural mixed corpus | Does the contract hold beyond the synthetic grammar? | partial, seed-unstable | The repaired probability-mixture bridge can win strongly on held-out natural-wrapper math-answer tokens, but the role-aware answer-safety contract passed only `1/3` seeds for each current candidate. |
+| 5. More natural mixed corpus | Does the contract hold beyond the synthetic grammar? | partial, calibration-improved | The repaired probability-mixture bridge can win on held-out natural-wrapper math-answer tokens. Role-aware calibration now makes answer safety stable across `3/3` seeds, but the full answer capability+safety contract is still only `2/3`. |
 
 Current recommendation: do not promote to broad LM claims yet. The repaired
 recipe has now survived the bridge-critical math-answer slice through Gate 5,
@@ -29,7 +29,9 @@ isolated behind a calibrated answer/action interface and treat these repairs as
 competing candidates until the interference is understood. The seed-variance
 audit then showed that even the role-local answer contract is not stable enough
 to promote: every current candidate passed the `math_answer` safety contract on
-only one of three seeds.
+only one of three seeds. A first role-aware calibration repair fixes the safety
+part (`3/3` seeds under the answer unsafe-mass gate), but it is conservative and
+retains the full answer capability+safety contract on only `2/3` seeds.
 
 ## Metric Glossary
 
@@ -754,7 +756,7 @@ Resolution block:
 | Resolution needed | Determine whether the EML bridge is useful outside the controlled synthetic language/math grammar. |
 | Promotion condition | The hybrid must improve math-answer accuracy/NLL without degrading pure-language/prose behavior and without violating unsafe-call or unsafe-mass gates. |
 | Current blocker | Math-answer transfer passes, but prose retention does not. The fusion path is useful as an answer/action bridge, not yet as a general next-token improvement. |
-| Next action | Stop treating the seed-777 recipes as promotable. Ablation 5 showed the repaired, answer-span-only, and prose-only-KL candidates each pass the role-aware `math_answer` safety contract only `1/3` seeds. The next clean test should fix calibration stability directly: train or select the router/fusion threshold against role-aware answer unsafe mass on safety-calibration rows, then rerun the same seed-variance audit. |
+| Next action | Stop treating the seed-777 recipes as promotable. Ablation 5 showed the repaired, answer-span-only, and prose-only-KL candidates each pass the role-aware `math_answer` contract only `1/3` seeds. Ablation 6 fixed a hidden calibration-control-plane bug and made answer safety stable (`3/3` seeds) with post-training role-aware calibration, but capability is now marginal (`2/3` full contract). The next clean test should improve calibrated capability retention, probably by a less binary fusion policy or by calibrating a separately supervised answer router. |
 
 ### Gate 5 Ablation 1: Answer-Span-Only Fusion
 
@@ -1300,3 +1302,113 @@ Interpretation:
 - Do not promote any current Gate 5 recipe. The next repair must make the
   router/fusion calibration seed-stable under the role-aware answer unsafe
   metric before broader LM claims are revisited.
+
+### Gate 5 Ablation 6: Role-Aware Calibrated Fusion
+
+Question:
+
+> Can a post-training role-aware calibration policy turn the unstable symbolic
+> answer signal into a seed-stable safe expert call?
+
+Implementation:
+
+- Add `--role-aware-calibration` to the bridge-LM runner.
+- During training, keep the model and losses unchanged.
+- After training, grid-search a deterministic `prob-mixture` calibration policy:
+  router temperature, abstain bias, answer call threshold, and answer fusion
+  cap.
+- Apply the selected policy only during evaluation/exported artifacts.
+- Select policies using:
+  - safety on `fit_safety_calibration`, which includes the extra calibration
+    summaries used for fitting
+  - answer capability on the held-out validation split
+- Keep non-answer fusion capped at zero in this first calibrated policy.
+
+Important fix:
+
+The first calibration attempt accidentally selected on the primary
+`safety_calibration` split only. That split had no unsafe `math_answer` rows:
+
+```text
+primary safety_calibration math_answer: 128 safe, 0 unsafe
+extra fit safety_calibration math_answer: 2416 safe, 656 unsafe
+```
+
+That was a hidden control-plane bug: training saw the extra calibration rows,
+but policy selection did not. The runner now builds a `fit_safety_calibration`
+batch from the same primary+extra safety rows used for fitting.
+
+Artifacts:
+
+```text
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-repaired-s777-v4/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-repaired-s778-v4/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-repaired-s779-v4/
+```
+
+Command pattern:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260430/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260431/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260432/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260433/summary.json \
+  --run-label gate5-calibrated-repaired-s778-v4 \
+  --output-dir artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-repaired-s778-v4 \
+  --seed 778 \
+  --backbone transformer \
+  --transformer-layers 2 \
+  --transformer-heads 4 \
+  --transformer-ffn-multiplier 2 \
+  --epochs 600 \
+  --learning-rate 0.004 \
+  --hidden-units 64 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 1.0 \
+  --answer-call-abstain-loss-weight 8.0 \
+  --answer-unsafe-loss-weight 5.0 \
+  --non-answer-abstain-loss-weight 2.0 \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --role-aware-calibration \
+  --calibration-target-answer-unsafe 0.05 \
+  --calibration-min-answer-accuracy-gain 0.05 \
+  --calibration-answer-roles math_answer,math_only \
+  --device mps \
+  --output table
+```
+
+Caption: Calibrated repaired recipe, compared with the uncalibrated repaired
+seed audit. The `answer gain` column is versus the stronger of token-only and
+frozen-side-channel controls on the `math_answer` role.
+
+| condition | seed | whole acc | whole NLL | answer acc | answer gain | answer NLL | answer unsafe | answer pass | calibration split | threshold | cap | abstain bias |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: | ---: | ---: |
+| uncalibrated repaired | 777 | 0.256 | 5.992 | 0.544 | 0.437 | 2.301 | 0.041 | true | - | 0.000 | 0.000 | 0.000 |
+| uncalibrated repaired | 778 | 0.282 | 6.107 | 0.487 | 0.406 | 3.878 | 0.286 | false | - | 0.000 | 0.000 | 0.000 |
+| uncalibrated repaired | 779 | 0.240 | 6.608 | 0.444 | 0.325 | 2.321 | 0.066 | false | - | 0.000 | 0.000 | 0.000 |
+| calibrated repaired | 777 | 0.231 | 6.259 | 0.219 | 0.069 | 4.610 | 0.000 | true | fit_safety_calibration | 1.000 | 0.500 | 4.000 |
+| calibrated repaired | 778 | 0.261 | 6.213 | 0.156 | 0.075 | 4.941 | 0.000 | true | fit_safety_calibration | 1.000 | 0.300 | 4.000 |
+| calibrated repaired | 779 | 0.231 | 6.743 | 0.094 | 0.000 | 6.167 | 0.000 | false | fit_safety_calibration | 1.000 | 0.500 | 4.000 |
+
+Caption: Aggregate calibrated audit over seeds `777`, `778`, and `779`.
+
+| condition | answer pass count | answer safety count | whole acc mean +/- sd | whole NLL mean +/- sd | answer acc mean +/- sd | answer gain mean +/- sd | answer NLL mean +/- sd | answer unsafe mean +/- sd |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| uncalibrated repaired | 1/3 | 1/3 | 0.259 +/- 0.021 | 6.236 +/- 0.327 | 0.492 +/- 0.050 | 0.390 +/- 0.058 | 2.833 +/- 0.905 | 0.131 +/- 0.135 |
+| calibrated repaired | 2/3 | 3/3 | 0.241 +/- 0.018 | 6.405 +/- 0.294 | 0.156 +/- 0.062 | 0.048 +/- 0.042 | 5.239 +/- 0.820 | 0.000 +/- 0.000 |
+
+Interpretation:
+
+- The calibration-control-plane fix worked for safety. Role-aware answer unsafe
+  mass is now stable across all three seeds (`3/3` safety pass).
+- The full answer contract is improved but not solved: `2/3` seeds pass both
+  answer capability and answer safety.
+- The calibrated policy is very conservative. It often chooses high abstain
+  bias and near-total answer thresholds, so answer unsafe mass goes to zero but
+  answer accuracy and NLL degrade.
+- This is evidence for the calibrated answer/action interface, not evidence for
+  broad LM improvement. The next repair should preserve more answer capability
+  while maintaining the now-stable safety behavior.
