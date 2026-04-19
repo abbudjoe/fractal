@@ -614,14 +614,96 @@ Current decision:
 - Do not promote this Pallas forward kernel.
 - Keep the code as an explicit experimental lane because it documents the
   Mosaic constraints and gives us a runnable baseline for future Pallas designs.
-- If we continue custom TPU work, the next design should be chunked/tiled:
-  expose state transform matmul tiles and sequence chunks to Pallas rather than
-  placing the entire recurrent loop inside one program.
+- A chunked/tiled follow-up was run below. It improved the Pallas lane but did
+  not overtake `lax.scan`.
 - Otherwise, for near-term TPU quality runs, use the `lax.scan` reference with
   `scan_unroll=3`.
 
 The TPU VM was deleted after the Pallas smoke; `gcloud compute tpus tpu-vm list`
 was empty afterward.
+
+## RGRP Chunked Block-Tiled Pallas Smoke
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-rgrp-tiled-20260419031707`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- shape: `vocab=8192,batch=4,d_model=512,layers=2,heads=8`
+- path: tiny repo-owned LM-shaped forward-only smoke
+- timing: `warmup=3`, `iterations=30`
+- artifacts:
+  `experiments/jax_tpu/rgrp_lowering_ladder/20260419T0317Z/rgrp_pallas_block_tiled_ladder.jsonl`
+  and
+  `experiments/jax_tpu/rgrp_lowering_ladder/20260419T0317Z/rgrp_pallas_block_tiled_ladder.md`
+
+Implementation notes:
+
+- This adds `execution_mode=pallas-block-tiled-forward`.
+- The mode is forward-only and does not claim training readiness.
+- It only targets masked block-diagonal state transforms. Dense recurrent
+  transforms cannot be split this way without cross-tile reductions.
+- The kernel uses sequence-wide packed projection and trig precompute, then
+  scans fixed-size sequence chunks through Pallas.
+- TPU Pallas rejected one-logical-block tiles because the innermost block
+  dimension was too small. The working implementation groups logical recurrent
+  blocks into `128`-wide rotary-pair tiles, or uses the full width when the
+  pair dimension is smaller than `128`.
+- TPU Pallas also rejected a batch-row block shape of `1` for `batch=4`; the
+  working implementation gives each program the local batch and one recurrent
+  state tile.
+- A vectorized `batch x 128 @ 128 x 128` carry matmul crashed Mosaic. The
+  working implementation keeps the full-batch block spec but computes each
+  batch row with rank-2 vector-matrix matmuls inside the Pallas program.
+- The recurrent carry between chunks is fp32. Emitted sequence outputs remain
+  in the configured input dtype.
+
+| Case | Seam | Seq | Mode | Chunk | Params | Compile seconds | Forward tok/s | Synthetic loss |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `seq256-mlp` | MLP | `256` | XLA | - | `14.82M` | `1.78` | `3,233,229` | `9.1238` |
+| `seq256-rgrp-scan-unroll3` | RGRP | `256` | `lax.scan` | `256` | `12.99M` | `1.53` | `758,862` | `9.1115` |
+| `seq256-rgrp-pallas-forward` | RGRP | `256` | Pallas full | `256` | `12.99M` | `13.68` | `160,729` | `9.1116` |
+| `seq256-rgrp-pallas-block-tiled-c128` | RGRP | `256` | Pallas tiled | `128` | `12.99M` | `21.14` | `164,191` | `9.1116` |
+| `seq512-mlp` | MLP | `512` | XLA | - | `14.95M` | `1.53` | `3,801,110` | `9.1168` |
+| `seq512-rgrp-scan-unroll3` | RGRP | `512` | `lax.scan` | `256` | `13.12M` | `3.21` | `770,767` | `9.1120` |
+| `seq512-rgrp-pallas-forward` | RGRP | `512` | Pallas full | `256` | `13.12M` | `30.54` | `290,730` | `9.1120` |
+| `seq512-rgrp-pallas-block-tiled-c128` | RGRP | `512` | Pallas tiled | `128` | `13.12M` | `21.30` | `306,078` | `9.1120` |
+| `seq1024-mlp` | MLP | `1024` | XLA | - | `15.22M` | `1.78` | `2,317,386` | `9.1092` |
+| `seq1024-rgrp-scan-unroll3` | RGRP | `1024` | `lax.scan` | `256` | `13.38M` | `3.03` | `686,487` | `9.1109` |
+| `seq1024-rgrp-pallas-forward` | RGRP | `1024` | Pallas full | `256` | `13.38M` | `87.50` | `448,113` | `9.1110` |
+| `seq1024-rgrp-pallas-block-tiled-c128` | RGRP | `1024` | Pallas tiled | `128` | `13.38M` | `21.28` | `483,600` | `9.1110` |
+
+Chunk-size probe:
+
+| Case | Chunk | Compile seconds | Forward tok/s | Interpretation |
+|---|---:|---:|---:|---|
+| `seq512-rgrp-pallas-block-tiled-c256` | `256` | `43.41` | `302,351` | slower than `c128` and much slower compile |
+| `seq1024-rgrp-pallas-block-tiled-c256` | `256` | `43.44` | `478,042` | slower than `c128` and much slower compile |
+
+Interpretation:
+
+- Chunked block-tiled Pallas is a real improvement over the first Pallas lane:
+  `seq1024` improves from `448k` to `484k tok/s`, and compile drops from
+  `87.5s` to `21.3s`.
+- It still does not beat `lax.scan`: at `seq1024`, tiled Pallas reaches about
+  `70%` of scan throughput.
+- The best chunk tested was `128`. Larger `256` chunks reduced inter-chunk work
+  but lost throughput and doubled compile time.
+- The lowering is fragile. Two plausible kernel shapes hit Mosaic failures
+  before the row-wise matmul fallback compiled.
+
+Current decision:
+
+- Keep `pallas-block-tiled-forward` as an experimental forward-only lane.
+- Do not promote it to the MaxText quality run or invest in a backward path yet.
+- For the next quality-only TPU run, use the `lax.scan` reference with
+  `scan_unroll=3`.
+- Revisit custom TPU lowering only if we are willing to design a lower-level
+  kernel contract around TPU layout constraints from the start, rather than
+  adapting this Pallas prototype incrementally.
+
+The TPU VM was deleted after the chunked/tiled smoke; `gcloud compute tpus
+tpu-vm list` was empty afterward.
 
 ## Non-Goals
 

@@ -25,6 +25,7 @@ class LadderCase:
     projection_mode: str = "sequence"
     trig_mode: str = "precompute"
     execution_mode: str = "scan"
+    pallas_chunk_size: int = 256
     vocab_size: int | None = None
     batch_size: int | None = None
     seq_len: int | None = None
@@ -121,6 +122,58 @@ def pallas_forward_cases() -> list[LadderCase]:
     ]
 
 
+def pallas_block_tiled_cases() -> list[LadderCase]:
+    """Forward-only chunked block-tiled Pallas smoke against scan controls."""
+
+    return [
+        LadderCase(name="seq256-mlp", variant="mlp", seq_len=256),
+        LadderCase(name="seq256-rgrp-scan-unroll3", variant="rgrp", scan_unroll=3, seq_len=256),
+        LadderCase(
+            name="seq256-rgrp-pallas-forward",
+            variant="rgrp",
+            seq_len=256,
+            execution_mode="pallas-forward",
+        ),
+        LadderCase(
+            name="seq256-rgrp-pallas-block-tiled-c128",
+            variant="rgrp",
+            seq_len=256,
+            execution_mode="pallas-block-tiled-forward",
+            pallas_chunk_size=128,
+        ),
+        LadderCase(name="seq512-mlp", variant="mlp", seq_len=512),
+        LadderCase(name="seq512-rgrp-scan-unroll3", variant="rgrp", scan_unroll=3, seq_len=512),
+        LadderCase(
+            name="seq512-rgrp-pallas-forward",
+            variant="rgrp",
+            seq_len=512,
+            execution_mode="pallas-forward",
+        ),
+        LadderCase(
+            name="seq512-rgrp-pallas-block-tiled-c128",
+            variant="rgrp",
+            seq_len=512,
+            execution_mode="pallas-block-tiled-forward",
+            pallas_chunk_size=128,
+        ),
+        LadderCase(name="seq1024-mlp", variant="mlp", seq_len=1024),
+        LadderCase(name="seq1024-rgrp-scan-unroll3", variant="rgrp", scan_unroll=3, seq_len=1024),
+        LadderCase(
+            name="seq1024-rgrp-pallas-forward",
+            variant="rgrp",
+            seq_len=1024,
+            execution_mode="pallas-forward",
+        ),
+        LadderCase(
+            name="seq1024-rgrp-pallas-block-tiled-c128",
+            variant="rgrp",
+            seq_len=1024,
+            execution_mode="pallas-block-tiled-forward",
+            pallas_chunk_size=128,
+        ),
+    ]
+
+
 def next_cases() -> list[LadderCase]:
     """Second rung: unroll refinement plus longer-sequence survival checks."""
 
@@ -144,6 +197,8 @@ def cases_for_ladder(name: str) -> list[LadderCase]:
         return sequence_unroll_cases()
     if name == "pallas-forward":
         return pallas_forward_cases()
+    if name == "pallas-block-tiled":
+        return pallas_block_tiled_cases()
     if name == "next":
         return next_cases()
     raise ValueError(f"unsupported ladder: {name}")
@@ -167,7 +222,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--forward-only", action="store_true")
     parser.add_argument(
         "--ladder",
-        choices=["first-pass", "unroll-window", "sequence-scaling", "sequence-unroll", "pallas-forward", "next"],
+        choices=[
+            "first-pass",
+            "unroll-window",
+            "sequence-scaling",
+            "sequence-unroll",
+            "pallas-forward",
+            "pallas-block-tiled",
+            "next",
+        ],
         default="first-pass",
     )
     parser.add_argument("--output-jsonl", type=Path)
@@ -225,6 +288,8 @@ def command_for_case(args: argparse.Namespace, case: LadderCase) -> list[str]:
                 case.trig_mode,
                 "--rgrp-execution-mode",
                 case.execution_mode,
+                "--rgrp-pallas-chunk-size",
+                str(case.pallas_chunk_size),
             ]
         )
     return command
@@ -248,6 +313,7 @@ def run_case(args: argparse.Namespace, case: LadderCase) -> dict[str, Any]:
         "rgrp_projection_mode": case.projection_mode if case.variant == "rgrp" else None,
         "rgrp_trig_mode": case.trig_mode if case.variant == "rgrp" else None,
         "rgrp_execution_mode": case.execution_mode if case.variant == "rgrp" else None,
+        "rgrp_pallas_chunk_size": case.pallas_chunk_size if case.variant == "rgrp" else None,
         "requested_vocab_size": case_value(args, case, "vocab_size"),
         "requested_batch_size": case_value(args, case, "batch_size"),
         "requested_seq_len": case_value(args, case, "seq_len"),
@@ -284,8 +350,8 @@ def format_number(value: Any, digits: int = 2) -> str:
 
 def markdown_table(rows: list[dict[str, Any]]) -> str:
     lines = [
-        "| Case | Variant | Mode | Batch | Seq | D | State | Projection | Trig | Unroll | Params | Compile s | Tok/s | Loss | Status |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Case | Variant | Mode | Chunk | Batch | Seq | D | State | Projection | Trig | Unroll | Params | Compile s | Tok/s | Loss | Status |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
@@ -295,6 +361,7 @@ def markdown_table(rows: list[dict[str, Any]]) -> str:
                     row.get("case", ""),
                     row.get("variant", ""),
                     row.get("rgrp_execution_mode") or "",
+                    format_number(row.get("rgrp_pallas_chunk_size"), 0),
                     format_number(row.get("batch_size") or row.get("requested_batch_size"), 0),
                     format_number(row.get("seq_len") or row.get("requested_seq_len"), 0),
                     format_number(row.get("d_model") or row.get("requested_d_model"), 0),

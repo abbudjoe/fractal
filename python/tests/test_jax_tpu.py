@@ -174,6 +174,8 @@ class JaxTpuContractTests(unittest.TestCase):
             ).validate()
         with self.assertRaisesRegex(ValueError, "execution_mode"):
             rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(d_model=16, execution_mode="warp-drive").validate()
+        with self.assertRaisesRegex(ValueError, "pallas_chunk_size"):
+            rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(d_model=16, pallas_chunk_size=0).validate()
         with self.assertRaisesRegex(ValueError, "requires projection_mode='sequence'"):
             rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(
                 d_model=16,
@@ -192,6 +194,12 @@ class JaxTpuContractTests(unittest.TestCase):
                 d_model=16,
                 state_transform="block-diagonal-4",
                 execution_mode="pallas-forward",
+            ).validate()
+        with self.assertRaisesRegex(ValueError, "masked block-diagonal"):
+            rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(
+                d_model=16,
+                state_transform="dense",
+                execution_mode="pallas-block-tiled-forward",
             ).validate()
 
     def test_jax_lm_smoke_config_validates_without_jax(self) -> None:
@@ -219,6 +227,7 @@ class JaxTpuContractTests(unittest.TestCase):
             rgrp_projection_mode="sequence",
             rgrp_trig_mode="scan",
             rgrp_execution_mode="scan",
+            rgrp_pallas_chunk_size=128,
         )
         recurrent.validate()
         self.assertEqual(recurrent.d_ff, 128)

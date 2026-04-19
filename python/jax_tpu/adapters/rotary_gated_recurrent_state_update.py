@@ -32,7 +32,7 @@ SUPPORTED_STATE_TRANSFORMS = (
 )
 SUPPORTED_PROJECTION_MODES = ("sequence", "scan")
 SUPPORTED_TRIG_MODES = ("precompute", "scan")
-SUPPORTED_EXECUTION_MODES = ("scan", "pallas-forward")
+SUPPORTED_EXECUTION_MODES = ("scan", "pallas-forward", "pallas-block-tiled-forward")
 
 try:  # Keep normal repo imports/tests working when JAX is not installed locally.
     import jax
@@ -60,6 +60,7 @@ class RotaryGatedRecurrentStateUpdateConfig:
     projection_mode: str = "sequence"
     trig_mode: str = "precompute"
     execution_mode: str = "scan"
+    pallas_chunk_size: int = 256
 
     @property
     def angle_width(self) -> int:
@@ -104,16 +105,23 @@ class RotaryGatedRecurrentStateUpdateConfig:
             raise ValueError(
                 f"execution_mode must be one of {SUPPORTED_EXECUTION_MODES}, got {self.execution_mode!r}"
             )
+        if self.pallas_chunk_size <= 0:
+            raise ValueError(f"pallas_chunk_size must be positive, got {self.pallas_chunk_size}")
         if self.projection_mode == "scan" and self.trig_mode != "scan":
             raise ValueError("projection_mode='scan' requires trig_mode='scan'")
-        if self.execution_mode == "pallas-forward":
+        if self.execution_mode.startswith("pallas"):
             if self.projection_mode != "sequence":
-                raise ValueError("execution_mode='pallas-forward' requires projection_mode='sequence'")
+                raise ValueError(f"execution_mode={self.execution_mode!r} requires projection_mode='sequence'")
             if self.trig_mode != "precompute":
-                raise ValueError("execution_mode='pallas-forward' requires trig_mode='precompute'")
+                raise ValueError(f"execution_mode={self.execution_mode!r} requires trig_mode='precompute'")
             if self.is_block_transform and not self.stores_block_transform_as_dense:
                 raise ValueError(
-                    "execution_mode='pallas-forward' requires dense-shaped state transform storage"
+                    f"execution_mode={self.execution_mode!r} requires dense-shaped state transform storage"
+                )
+        if self.execution_mode == "pallas-block-tiled-forward":
+            if self.state_transform == "dense":
+                raise ValueError(
+                    "execution_mode='pallas-block-tiled-forward' requires a masked block-diagonal state transform"
                 )
 
     @property
@@ -528,6 +536,242 @@ def pallas_forward_scan(
     return outputs, final_state
 
 
+def pallas_block_tiled_forward_scan(
+    params: Params,
+    inputs: Array,
+    config: RotaryGatedRecurrentStateUpdateConfig,
+    *,
+    initial_state: Array | None = None,
+) -> tuple[Array, Array]:
+    """Run a chunked block-tiled Pallas forward pass.
+
+    This mode only targets the structured masked block-diagonal contract. Each
+    Pallas program owns the local batch and one TPU-legal recurrent state tile,
+    while ``jax.lax.scan`` carries state across fixed-size sequence chunks. The
+    tile can contain more than one logical recurrent block because this TPU
+    Pallas lowering requires the innermost block dimension to be 128-wide, or
+    the full array dimension.
+    """
+
+    require_pallas()
+    config.validate()
+    if inputs.ndim != 3:
+        raise ValueError(f"inputs must have shape [batch, seq, d_model], got {inputs.shape}")
+    batch_size, seq_len, d_model = inputs.shape
+    if d_model != config.d_model:
+        raise ValueError(f"inputs last dim must be {config.d_model}, got {d_model}")
+    chunk_size = config.pallas_chunk_size
+    if seq_len % chunk_size != 0:
+        raise ValueError(
+            f"pallas-block-tiled-forward requires seq_len divisible by pallas_chunk_size; "
+            f"got seq_len={seq_len}, pallas_chunk_size={chunk_size}"
+        )
+    if d_model % 128 != 0:
+        raise ValueError(
+            f"pallas-block-tiled-forward requires d_model divisible by 128 on TPU, got {d_model}"
+        )
+
+    pair_count = config.angle_width
+    tile_pair_count = 128 if pair_count >= 128 else pair_count
+    if pair_count % tile_pair_count != 0:
+        raise ValueError(f"angle_width {pair_count} must be divisible by TPU tile width {tile_pair_count}")
+    tile_count = pair_count // tile_pair_count
+
+    plan = prepare_runtime_plan(params, inputs, config)
+    transform = params["state_transform"]
+    transform_kernel = transform["kernel"]
+    kernel_first_to_first = transform_kernel[0::2, 0::2]
+    kernel_second_to_first = transform_kernel[1::2, 0::2]
+    kernel_first_to_second = transform_kernel[0::2, 1::2]
+    kernel_second_to_second = transform_kernel[1::2, 1::2]
+    transform_bias_first = transform["bias"][0::2][None, :]
+    transform_bias_second = transform["bias"][1::2][None, :]
+
+    def time_chunks(stream: Array) -> Array:
+        return jnp.swapaxes(stream.reshape(batch_size, seq_len // chunk_size, chunk_size, pair_count), 0, 1)
+
+    chunk_streams = (
+        time_chunks(plan["update_gates"][:, :, 0::2]),
+        time_chunks(plan["update_gates"][:, :, 1::2]),
+        time_chunks(plan["retain_gates"][:, :, 0::2]),
+        time_chunks(plan["retain_gates"][:, :, 1::2]),
+        time_chunks(plan["angle_cos"]),
+        time_chunks(plan["angle_sin"]),
+        time_chunks(plan["candidates"][:, :, 0::2]),
+        time_chunks(plan["candidates"][:, :, 1::2]),
+        time_chunks(plan["output_gates"][:, :, 0::2]),
+        time_chunks(plan["output_gates"][:, :, 1::2]),
+    )
+
+    if initial_state is None:
+        state_first = jnp.zeros((batch_size, pair_count), dtype=jnp.float32)
+        state_second = jnp.zeros((batch_size, pair_count), dtype=jnp.float32)
+    else:
+        if initial_state.shape != (batch_size, d_model):
+            raise ValueError(f"initial_state must have shape {(batch_size, d_model)}, got {initial_state.shape}")
+        state_first = initial_state[:, 0::2].astype(jnp.float32)
+        state_second = initial_state[:, 1::2].astype(jnp.float32)
+
+    def kernel(
+        initial_state_first_ref: Any,
+        initial_state_second_ref: Any,
+        update_first_ref: Any,
+        update_second_ref: Any,
+        retain_first_ref: Any,
+        retain_second_ref: Any,
+        angle_cos_ref: Any,
+        angle_sin_ref: Any,
+        candidate_first_ref: Any,
+        candidate_second_ref: Any,
+        output_gate_first_ref: Any,
+        output_gate_second_ref: Any,
+        kernel_first_to_first_ref: Any,
+        kernel_second_to_first_ref: Any,
+        kernel_first_to_second_ref: Any,
+        kernel_second_to_second_ref: Any,
+        state_bias_first_ref: Any,
+        state_bias_second_ref: Any,
+        outputs_first_ref: Any,
+        outputs_second_ref: Any,
+        final_state_first_ref: Any,
+        final_state_second_ref: Any,
+    ) -> None:
+        state_first = initial_state_first_ref[:, :].astype(jnp.float32)
+        state_second = initial_state_second_ref[:, :].astype(jnp.float32)
+        kernel_first_to_first = kernel_first_to_first_ref[...].astype(jnp.float32)
+        kernel_second_to_first = kernel_second_to_first_ref[...].astype(jnp.float32)
+        kernel_first_to_second = kernel_first_to_second_ref[...].astype(jnp.float32)
+        kernel_second_to_second = kernel_second_to_second_ref[...].astype(jnp.float32)
+        state_bias_first = state_bias_first_ref[0, :].astype(jnp.float32)
+        state_bias_second = state_bias_second_ref[0, :].astype(jnp.float32)
+        for timestep in range(chunk_size):
+            next_first_rows = []
+            next_second_rows = []
+            for batch_index in range(batch_size):
+                row_state_first = state_first[batch_index, :]
+                row_state_second = state_second[batch_index, :]
+                first = (
+                    (row_state_first[None, :] @ kernel_first_to_first)[0, :]
+                    + (row_state_second[None, :] @ kernel_second_to_first)[0, :]
+                    + state_bias_first
+                )
+                second = (
+                    (row_state_first[None, :] @ kernel_first_to_second)[0, :]
+                    + (row_state_second[None, :] @ kernel_second_to_second)[0, :]
+                    + state_bias_second
+                )
+                cos = angle_cos_ref[batch_index, timestep, :].astype(jnp.float32)
+                sin = angle_sin_ref[batch_index, timestep, :].astype(jnp.float32)
+                transformed_first = first * cos - second * sin
+                transformed_second = first * sin + second * cos
+                next_first = (
+                    update_first_ref[batch_index, timestep, :].astype(jnp.float32) * transformed_first
+                    + retain_first_ref[batch_index, timestep, :].astype(jnp.float32)
+                    * candidate_first_ref[batch_index, timestep, :].astype(jnp.float32)
+                )
+                next_second = (
+                    update_second_ref[batch_index, timestep, :].astype(jnp.float32) * transformed_second
+                    + retain_second_ref[batch_index, timestep, :].astype(jnp.float32)
+                    * candidate_second_ref[batch_index, timestep, :].astype(jnp.float32)
+                )
+                emitted_first = output_gate_first_ref[batch_index, timestep, :].astype(jnp.float32) * next_first
+                emitted_second = output_gate_second_ref[batch_index, timestep, :].astype(jnp.float32) * next_second
+                outputs_first_ref[batch_index, timestep, :] = emitted_first.astype(outputs_first_ref.dtype)
+                outputs_second_ref[batch_index, timestep, :] = emitted_second.astype(outputs_second_ref.dtype)
+                next_first_rows.append(next_first)
+                next_second_rows.append(next_second)
+            state_first = jnp.stack(next_first_rows, axis=0)
+            state_second = jnp.stack(next_second_rows, axis=0)
+        final_state_first_ref[:, :] = state_first
+        final_state_second_ref[:, :] = state_second
+
+    batch_block = (batch_size, tile_pair_count)
+    chunk_block = (batch_size, chunk_size, tile_pair_count)
+
+    def run_chunk(carry: tuple[Array, Array], streams: tuple[Array, ...]) -> tuple[tuple[Array, Array], tuple[Array, Array]]:
+        carry_first, carry_second = carry
+        (
+            update_first,
+            update_second,
+            retain_first,
+            retain_second,
+            angle_cos,
+            angle_sin,
+            candidate_first,
+            candidate_second,
+            output_gate_first,
+            output_gate_second,
+        ) = streams
+        outputs_first, outputs_second, next_first, next_second = pl.pallas_call(
+            kernel,
+            out_shape=(
+                jax.ShapeDtypeStruct((batch_size, chunk_size, pair_count), inputs.dtype),
+                jax.ShapeDtypeStruct((batch_size, chunk_size, pair_count), inputs.dtype),
+                jax.ShapeDtypeStruct((batch_size, pair_count), jnp.float32),
+                jax.ShapeDtypeStruct((batch_size, pair_count), jnp.float32),
+            ),
+            grid=(tile_count,),
+            in_specs=[
+                pl.BlockSpec(batch_block, lambda tile: (0, tile)),
+                pl.BlockSpec(batch_block, lambda tile: (0, tile)),
+                pl.BlockSpec(chunk_block, lambda tile: (0, 0, tile)),
+                pl.BlockSpec(chunk_block, lambda tile: (0, 0, tile)),
+                pl.BlockSpec(chunk_block, lambda tile: (0, 0, tile)),
+                pl.BlockSpec(chunk_block, lambda tile: (0, 0, tile)),
+                pl.BlockSpec(chunk_block, lambda tile: (0, 0, tile)),
+                pl.BlockSpec(chunk_block, lambda tile: (0, 0, tile)),
+                pl.BlockSpec(chunk_block, lambda tile: (0, 0, tile)),
+                pl.BlockSpec(chunk_block, lambda tile: (0, 0, tile)),
+                pl.BlockSpec(chunk_block, lambda tile: (0, 0, tile)),
+                pl.BlockSpec(chunk_block, lambda tile: (0, 0, tile)),
+                pl.BlockSpec((tile_pair_count, tile_pair_count), lambda tile: (tile, tile)),
+                pl.BlockSpec((tile_pair_count, tile_pair_count), lambda tile: (tile, tile)),
+                pl.BlockSpec((tile_pair_count, tile_pair_count), lambda tile: (tile, tile)),
+                pl.BlockSpec((tile_pair_count, tile_pair_count), lambda tile: (tile, tile)),
+                pl.BlockSpec((1, tile_pair_count), lambda tile: (0, tile)),
+                pl.BlockSpec((1, tile_pair_count), lambda tile: (0, tile)),
+            ],
+            out_specs=[
+                pl.BlockSpec(chunk_block, lambda tile: (0, 0, tile)),
+                pl.BlockSpec(chunk_block, lambda tile: (0, 0, tile)),
+                pl.BlockSpec(batch_block, lambda tile: (0, tile)),
+                pl.BlockSpec(batch_block, lambda tile: (0, tile)),
+            ],
+            name="rgrp_block_tiled_forward_chunk",
+        )(
+            carry_first,
+            carry_second,
+            update_first,
+            update_second,
+            retain_first,
+            retain_second,
+            angle_cos,
+            angle_sin,
+            candidate_first,
+            candidate_second,
+            output_gate_first,
+            output_gate_second,
+            kernel_first_to_first,
+            kernel_second_to_first,
+            kernel_first_to_second,
+            kernel_second_to_second,
+            transform_bias_first,
+            transform_bias_second,
+        )
+        return (next_first, next_second), (outputs_first, outputs_second)
+
+    (final_first, final_second), (outputs_first_chunks, outputs_second_chunks) = jax.lax.scan(
+        run_chunk,
+        (state_first, state_second),
+        chunk_streams,
+    )
+    outputs_first = jnp.swapaxes(outputs_first_chunks, 0, 1).reshape(batch_size, seq_len, pair_count)
+    outputs_second = jnp.swapaxes(outputs_second_chunks, 0, 1).reshape(batch_size, seq_len, pair_count)
+    outputs = jnp.stack((outputs_first, outputs_second), axis=-1).reshape((batch_size, seq_len, d_model))
+    final_state = jnp.stack((final_first, final_second), axis=-1).reshape((batch_size, d_model))
+    return outputs, final_state
+
+
 def scan(
     params: Params,
     inputs: Array,
@@ -545,6 +789,8 @@ def scan(
         raise ValueError(f"inputs last dim must be {config.d_model}, got {inputs.shape[-1]}")
     if config.execution_mode == "pallas-forward":
         return pallas_forward_scan(params, inputs, config, initial_state=initial_state)
+    if config.execution_mode == "pallas-block-tiled-forward":
+        return pallas_block_tiled_forward_scan(params, inputs, config, initial_state=initial_state)
 
     state = (
         jnp.zeros((inputs.shape[0], config.d_model), dtype=inputs.dtype)
@@ -612,6 +858,7 @@ def benchmark_scan(
     projection_mode: str = "sequence",
     trig_mode: str = "precompute",
     execution_mode: str = "scan",
+    pallas_chunk_size: int = 256,
     seed: int = 42,
     warmup: int = 1,
     iterations: int = 5,
@@ -628,10 +875,11 @@ def benchmark_scan(
         projection_mode=projection_mode,
         trig_mode=trig_mode,
         execution_mode=execution_mode,
+        pallas_chunk_size=pallas_chunk_size,
     )
     config.validate()
-    if include_grad and execution_mode == "pallas-forward":
-        raise RuntimeError("execution_mode='pallas-forward' is forward-only; rerun with include_grad=false")
+    if include_grad and execution_mode.startswith("pallas"):
+        raise RuntimeError(f"execution_mode={execution_mode!r} is forward-only; rerun with include_grad=false")
     key = jax.random.PRNGKey(seed)
     param_key, input_key = jax.random.split(key)
     run_dtype = dtype_from_config(config)
@@ -682,6 +930,7 @@ def benchmark_scan(
         "projection_mode": projection_mode,
         "trig_mode": trig_mode,
         "execution_mode": execution_mode,
+        "pallas_chunk_size": pallas_chunk_size,
         "include_grad": include_grad,
         "warmup": warmup,
         "iterations": iterations,

@@ -39,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rgrp-projection-mode", choices=SUPPORTED_PROJECTION_MODES, default="sequence")
     parser.add_argument("--rgrp-trig-mode", choices=SUPPORTED_TRIG_MODES, default="precompute")
     parser.add_argument("--rgrp-execution-mode", choices=SUPPORTED_EXECUTION_MODES, default="scan")
+    parser.add_argument("--rgrp-pallas-chunk-size", type=int, default=256)
     parser.add_argument("--dtype", choices=["bfloat16", "float32"], default="bfloat16")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--warmup", type=int, default=1)
@@ -64,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         rgrp_projection_mode=args.rgrp_projection_mode,
         rgrp_trig_mode=args.rgrp_trig_mode,
         rgrp_execution_mode=args.rgrp_execution_mode,
+        rgrp_pallas_chunk_size=args.rgrp_pallas_chunk_size,
         dtype=args.dtype,
     )
     try:

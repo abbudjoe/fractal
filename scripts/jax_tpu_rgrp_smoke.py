@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--projection-mode", choices=SUPPORTED_PROJECTION_MODES, default="sequence")
     parser.add_argument("--trig-mode", choices=SUPPORTED_TRIG_MODES, default="precompute")
     parser.add_argument("--execution-mode", choices=SUPPORTED_EXECUTION_MODES, default="scan")
+    parser.add_argument("--pallas-chunk-size", type=int, default=256)
     parser.add_argument("--dtype", choices=["bfloat16", "float32"], default="bfloat16")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--warmup", type=int, default=1)
@@ -55,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
             projection_mode=args.projection_mode,
             trig_mode=args.trig_mode,
             execution_mode=args.execution_mode,
+            pallas_chunk_size=args.pallas_chunk_size,
             dtype=args.dtype,
             seed=args.seed,
             warmup=args.warmup,
