@@ -20,6 +20,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-label", default=f"symbolic-bridge-{int(time.time())}")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--token-bins", type=int, default=32)
+    parser.add_argument(
+        "--expert-bank-mode",
+        choices=["family", "family-seed"],
+        default="family",
+        help=(
+            "family preserves the original one-expert-per-model-family contract; "
+            "family-seed exposes each compiled model seed as a separate expert."
+        ),
+    )
     parser.add_argument("--output", choices=["table", "json"], default="table")
     return parser
 
@@ -32,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
         output_dir,
         run_label=args.run_label,
         token_bins=args.token_bins,
+        expert_bank_mode=args.expert_bank_mode,
     )
     if args.output == "json":
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
@@ -53,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
             "feature_table="
             f"path={feature_table['path']}"
             f"\trows={feature_table['row_count']}"
+            f"\texpert_bank_mode={feature_table['expert_bank_mode']}"
+            f"\texperts={feature_table['expert_count']}"
             f"\tsafe_expert_coverage={feature_table['safe_expert_coverage']:.3f}"
         )
         print(f"feature_split_counts={feature_table['split_counts']}")

@@ -83,6 +83,7 @@ class BridgeReport:
     source_summary_path: str
     run_label: str
     token_bins: int
+    expert_bank_mode: str
     results: tuple[BridgeRunResult, ...]
     summary: dict[str, Any]
     output_dir: str
@@ -92,6 +93,7 @@ class BridgeReport:
             "source_summary_path": self.source_summary_path,
             "run_label": self.run_label,
             "token_bins": self.token_bins,
+            "expert_bank_mode": self.expert_bank_mode,
             "results": [result.to_dict() for result in self.results],
             "summary": self.summary,
             "output_dir": self.output_dir,
@@ -104,7 +106,10 @@ def run_symbolic_bridge(
     *,
     run_label: str,
     token_bins: int = 32,
+    expert_bank_mode: str = "family",
 ) -> BridgeReport:
+    if expert_bank_mode not in {"family", "family-seed"}:
+        raise ValueError("expert_bank_mode must be one of family|family-seed")
     source = json.loads(source_summary_path.read_text())
     datasets = datasets_from_symbolic_summary(source)
     results: list[BridgeRunResult] = []
@@ -119,10 +124,19 @@ def run_symbolic_bridge(
     source_rows = tuple(row for row in source.get("results", []) if row.get("model_family") != "token-majority")
     summary["frozen_side_channel_probe"] = summarize_side_channel_probe(source_rows, datasets, token_bins)
     summary["router_target_probe"] = summarize_router_target_probe(source_rows, datasets, token_bins)
-    feature_rows = build_bridge_feature_table(source_rows, datasets, token_bins)
+    feature_rows = build_bridge_feature_table(
+        source_rows,
+        datasets,
+        token_bins,
+        expert_bank_mode=expert_bank_mode,
+    )
+    expert_ids = tuple(sorted({str(expert) for row in feature_rows for expert in row.get("experts", {})}))
     summary["feature_table"] = {
         "path": repo_relative(output_dir / "feature_table.jsonl"),
         "row_count": len(feature_rows),
+        "expert_bank_mode": expert_bank_mode,
+        "expert_count": len(expert_ids),
+        "expert_ids": list(expert_ids),
         "split_counts": split_counts(feature_rows),
         "split_safe_expert_coverage": split_safe_expert_coverage(feature_rows),
         "safe_expert_coverage": mean(1.0 if row["oracle_has_safe_expert"] else 0.0 for row in feature_rows),
@@ -132,6 +146,7 @@ def run_symbolic_bridge(
         source_summary_path=repo_relative(source_summary_path),
         run_label=run_label,
         token_bins=token_bins,
+        expert_bank_mode=expert_bank_mode,
         results=tuple(results),
         summary=summary,
         output_dir=repo_relative(output_dir),
@@ -363,20 +378,29 @@ def build_bridge_feature_table(
     rows: tuple[dict[str, Any], ...],
     datasets: dict[str, FormulaDataset],
     token_bins: int,
+    *,
+    expert_bank_mode: str = "family",
 ) -> list[dict[str, Any]]:
+    if expert_bank_mode not in {"family", "family-seed"}:
+        raise ValueError("expert_bank_mode must be one of family|family-seed")
     grouped: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    bank_by_task: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        grouped.setdefault((row["task_id"], int(row["seed"])), []).append(row)
+        task_id = str(row["task_id"])
+        grouped.setdefault((task_id, int(row["seed"])), []).append(row)
+        bank_by_task.setdefault(task_id, []).append(row)
     feature_rows: list[dict[str, Any]] = []
     for (task_id, seed), group in sorted(grouped.items()):
         dataset = datasets.get(task_id)
         if dataset is None:
             continue
+        bank_rows = bank_by_task[task_id] if expert_bank_mode == "family-seed" else group
         compiled = tuple(
-            (row["model_family"], compiled_row_function(row))
-            for row in group
+            (expert_id_for_row(row, expert_bank_mode), compiled_row_function(row))
+            for row in bank_rows
         )
         compiled = tuple((model, func) for model, func in compiled if func is not None)
+        validate_unique_expert_ids(compiled)
         if not compiled:
             continue
         quantizer = quantizer_for_dataset(dataset, token_bins)
@@ -426,6 +450,26 @@ def build_bridge_feature_table(
                 )
             )
     return feature_rows
+
+
+def expert_id_for_row(row: dict[str, Any], expert_bank_mode: str) -> str:
+    model_family = str(row["model_family"])
+    if expert_bank_mode == "family":
+        return model_family
+    if expert_bank_mode == "family-seed":
+        return f"{model_family}-s{int(row['seed'])}"
+    raise ValueError("expert_bank_mode must be one of family|family-seed")
+
+
+def validate_unique_expert_ids(compiled: tuple[tuple[str, Any], ...]) -> None:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for expert_id, _func in compiled:
+        if expert_id in seen:
+            duplicates.add(expert_id)
+        seen.add(expert_id)
+    if duplicates:
+        raise ValueError(f"expert_bank_mode produced duplicate expert ids: {sorted(duplicates)}")
 
 
 def feature_rows_for_split(
@@ -868,6 +912,7 @@ def render_bridge_markdown(report: BridgeReport) -> str:
         "",
         f"Source summary: `{report.source_summary_path}`",
         f"Token bins: `{report.token_bins}`",
+        f"Expert bank mode: `{report.expert_bank_mode}`",
         "",
         "| model | val token acc | extrap token acc | val RMSE | extrap RMSE | source exact |",
         "| --- | ---: | ---: | ---: | ---: | ---: |",
@@ -889,6 +934,7 @@ def render_bridge_markdown(report: BridgeReport) -> str:
             f"Best extrapolation token accuracy: `{report.summary['best_extrapolation_token_accuracy']}`",
             f"Feature table: `{report.summary['feature_table']['path']}`",
             f"Feature rows: `{report.summary['feature_table']['row_count']}`",
+            f"Feature experts: `{report.summary['feature_table']['expert_count']}`",
             f"Feature split counts: `{report.summary['feature_table']['split_counts']}`",
             f"Feature split safe-expert coverage: `{report.summary['feature_table']['split_safe_expert_coverage']}`",
             f"Safe-expert coverage: `{report.summary['feature_table']['safe_expert_coverage']:.3f}`",

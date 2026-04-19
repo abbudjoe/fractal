@@ -417,6 +417,7 @@ def build_language_math_rows(
     source_summary = json.loads(source_bridge_summary_path.read_text())
     source_feature_path = resolve_feature_table_path(source_summary, source_bridge_summary_path)
     source_rows = load_feature_rows(source_feature_path)
+    expert_ids = expert_ids_from_rows(source_rows)
     token_bins = int(source_summary.get("token_bins") or source_rows[0]["token_bins"])
     vocab = base_language_vocabulary()
     formula_tokens = {
@@ -477,6 +478,7 @@ def build_language_math_rows(
                 x_values=[float(source_row["x"])] * len(tokens),
                 answer_source_row=source_row,
                 number_offset=number_offset,
+                expert_ids=expert_ids,
             )
         )
     return rows, len(vocab), vocab.labels(), repo_relative(source_bridge_summary_path)
@@ -494,6 +496,7 @@ def build_language_math_heldout_template_rows(
     source_summary = json.loads(source_bridge_summary_path.read_text())
     source_feature_path = resolve_feature_table_path(source_summary, source_bridge_summary_path)
     source_rows = load_feature_rows(source_feature_path)
+    expert_ids = expert_ids_from_rows(source_rows)
     token_bins = int(source_summary.get("token_bins") or source_rows[0]["token_bins"])
     vocab = base_language_vocabulary()
     register_language_math_templates(vocab)
@@ -550,6 +553,7 @@ def build_language_math_heldout_template_rows(
             template=template,
             task_id=task_id,
             sequence_id=f"{split}-{source_row['seed']}-{source_row['index']}-{template_id}",
+            expert_ids=expert_ids,
         )
         formula_split = "seen_formula" if task_id in seen_tasks else "heldout_formula"
         language_split = (
@@ -590,6 +594,7 @@ def build_language_math_natural_rows(
     source_summary = json.loads(source_bridge_summary_path.read_text())
     source_feature_path = resolve_feature_table_path(source_summary, source_bridge_summary_path)
     source_rows = load_feature_rows(source_feature_path)
+    expert_ids = expert_ids_from_rows(source_rows)
     token_bins = int(source_summary.get("token_bins") or source_rows[0]["token_bins"])
     vocab = base_language_vocabulary()
     register_language_math_templates(vocab)
@@ -649,6 +654,7 @@ def build_language_math_natural_rows(
             template=template,
             task_id=task_id,
             sequence_id=f"{split}-{source_row['seed']}-{source_row['index']}-{template_id}",
+            expert_ids=expert_ids,
         )
         formula_split = "seen_formula" if task_id in seen_tasks else "heldout_formula"
         language_split = (
@@ -678,6 +684,7 @@ def build_language_math_natural_rows(
                 x_values=[0.0] * len(tokens),
                 answer_source_row=None,
                 number_offset=None,
+                expert_ids=expert_ids,
             )
             for row in sequence_rows:
                 row["template_id"] = "natural-prose-only"
@@ -804,6 +811,7 @@ def language_math_template_sequence_rows(
     template: tuple[str, ...],
     task_id: str,
     sequence_id: str,
+    expert_ids: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     tokens: list[int] = []
     roles: list[str] = []
@@ -832,6 +840,7 @@ def language_math_template_sequence_rows(
         x_values=[float(source_row["x"])] * len(tokens),
         answer_source_row=source_row,
         number_offset=number_offset,
+        expert_ids=expert_ids,
     )
 
 
@@ -1262,14 +1271,16 @@ def text_sequence_rows(
     x_values: list[float],
     answer_source_row: dict[str, Any] | None,
     number_offset: int | None,
+    expert_ids: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     rows = []
+    active_expert_ids = EXPERT_IDS if expert_ids is None else expert_ids
     for index, token in enumerate(tokens):
         is_answer = eval_roles[index] == "math_answer" and answer_source_row is not None and number_offset is not None
         experts = (
-            answer_experts(answer_source_row, number_offset)
+            answer_experts(answer_source_row, number_offset, active_expert_ids)
             if is_answer
-            else invalid_experts()
+            else invalid_experts(active_expert_ids)
         )
         safe_mask = {expert: bool(payload["token_match"]) for expert, payload in experts.items()}
         rows.append(
@@ -1298,26 +1309,32 @@ def text_sequence_rows(
     return rows
 
 
-def invalid_experts() -> dict[str, dict[str, Any]]:
+def expert_ids_from_rows(rows: list[dict[str, Any]]) -> tuple[str, ...]:
+    expert_ids = tuple(sorted({str(expert) for row in rows for expert in row.get("experts", {})}))
+    if not expert_ids:
+        raise ValueError("source feature rows do not contain any experts")
+    return expert_ids
+
+
+def invalid_experts(expert_ids: tuple[str, ...] = EXPERT_IDS) -> dict[str, dict[str, Any]]:
     return {
-        expert: {
-            "prediction": None,
-            "token": -1,
-            "residual": None,
-            "abs_residual": 1.0e300,
-            "token_match": False,
-        }
-        for expert in EXPERT_IDS
+        expert: invalid_expert_payload()
+        for expert in expert_ids
     }
 
 
-def answer_experts(source_row: dict[str, Any], number_offset: int) -> dict[str, dict[str, Any]]:
+def answer_experts(
+    source_row: dict[str, Any],
+    number_offset: int,
+    expert_ids: tuple[str, ...] = EXPERT_IDS,
+) -> dict[str, dict[str, Any]]:
     experts = {}
-    for expert in EXPERT_IDS:
+    invalid_payloads = invalid_experts(expert_ids)
+    for expert in expert_ids:
         source_payload = source_row["experts"].get(expert, {})
         source_token = int(source_payload.get("token", -1))
         if source_token < 0:
-            experts[expert] = invalid_experts()[expert]
+            experts[expert] = invalid_payloads[expert]
             continue
         token = number_offset + source_token
         token_match = bool(source_payload.get("token_match", False))
@@ -1408,8 +1425,11 @@ def summarize_corpus_rows(
     for split in sorted(split_counts):
         split_rows = [row for row in rows if row["split"] == split]
         safe_by_split[split] = mean(1.0 if row["oracle_has_safe_expert"] else 0.0 for row in split_rows)
+    expert_ids = tuple(sorted({str(expert) for row in rows for expert in row.get("experts", {})}))
     feature_table = {
         "row_count": len(rows),
+        "expert_count": len(expert_ids),
+        "expert_ids": list(expert_ids),
         "split_counts": split_counts,
         "role_counts": role_counts,
         "split_role_counts": split_role_counts,

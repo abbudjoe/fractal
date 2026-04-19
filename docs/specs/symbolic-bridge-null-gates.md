@@ -13,7 +13,7 @@ records stay below it.
 | 2. Held-out formula/language templates | Does the bridge survive unseen formula families, unseen wrappers, and varied answer positions? | repaired after audit | Multi-split calibration plus answer-token call/abstain loss keeps most capability while reducing unsafe mass below the role-aware gate. |
 | 3. Target/random-label and wrong-expert controls | Does the harness leak target identity through labels, routing, or feature construction? | passed after repaired audit | Broken labels and wrong expert pairings still collapse the repaired hybrid gain. |
 | 4. Seed/template variance | Is the positive result stable across seeds and template draws? | repaired after audit | Multi-split calibration turns the unstable variance result into stable math-answer gains with low unsafe mass. |
-| 5. More natural mixed corpus | Does the contract hold beyond the synthetic grammar? | role-local pass, not broad LM pass | The repaired probability-mixture bridge can win on held-out natural-wrapper math-answer tokens. Top-expert calibrated fusion plus extra extrapolation calibration passes the `math_answer` capability+safety contract on `3/3` seeds, but the gain remains role-local and does not prove broad prose/LM improvement. |
+| 5. More natural mixed corpus | Does the contract hold beyond the synthetic grammar? | role-local pass, not broad LM pass | The repaired probability-mixture bridge can win on held-out natural-wrapper math-answer tokens. Top-expert calibrated fusion plus extra extrapolation calibration passes the `math_answer` capability+safety contract on `3/3` seeds, but an expanded seed-level expert bank did not improve the mean answer result. The gain remains role-local and does not prove broad prose/LM improvement. |
 
 Current recommendation: do not promote to broad LM claims yet. The repaired
 recipe has now survived the bridge-critical math-answer slice through Gate 5,
@@ -35,7 +35,11 @@ conservative and retained the full answer capability+safety contract on only
 `2/3` seeds. The next repair, top-expert calibrated fusion selected with extra
 extrapolation calibration rows, now passes the role-local answer
 capability+safety contract on `3/3` seeds while retaining a large answer gain.
-That is a real bridge result, but still not a broad LM result.
+That is a real bridge result, but still not a broad LM result. A follow-up
+family-seed expert-bank test doubled the available experts from four to eight.
+It preserved zero unsafe answer calls, but lowered mean answer accuracy and
+increased variance, so the next bridge should focus on role-aware calibration
+and expert quality rather than simply adding more experts.
 
 ## Metric Glossary
 
@@ -1528,3 +1532,136 @@ Interpretation:
   prose behavior remain mixed. The supported claim is narrower and cleaner:
   a decoder can use a calibrated symbolic expert as an answer/action head when
   the contract isolates where expert fusion is allowed.
+
+### Gate 5 Ablation 8: Seed-Level Expanded Expert Bank
+
+Question:
+
+> Can additional EML experts improve math-answer accuracy without hurting
+> prose-only safety?
+
+Implementation:
+
+- Add an explicit source-bridge `expert_bank_mode`.
+- The default `family` mode preserves the original four expert IDs:
+  `generic-tree`, `paper-complex-eml`, `small-mlp`, and `stable-real-eml`.
+- The new `family-seed` mode exposes each trained model seed as a separate
+  expert ID. On the RunPod compact symbolic source this produces eight experts:
+  one seed-42 and one seed-43 expert for each family.
+- Fix the bridge-corpus contract so language/math corpora propagate dynamic
+  expert IDs from the source feature table instead of silently forcing the old
+  four fixed experts.
+- Rerun the promoted Gate 5 `top-expert-only gain04` recipe unchanged, using
+  rebuilt primary and extra calibration corpora from the expanded source bank.
+
+Artifacts:
+
+```text
+artifacts/symbolic-bridge/symbolic-bridge-compact-runpod-cuda-family-seed-v1/
+artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5-family-seed-v1/
+artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-family-seed-s20260430-v1/
+artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-family-seed-s20260431-v1/
+artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-family-seed-s20260432-v1/
+artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-family-seed-s20260433-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-family-seed-top-expert-only-extraextrap-gain04-s777-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-family-seed-top-expert-only-extraextrap-gain04-s778-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-family-seed-top-expert-only-extraextrap-gain04-s779-v1/
+```
+
+Source bridge command:
+
+```bash
+uv run --python 3.12 --with numpy python scripts/symbolic_bridge.py \
+  --symbolic-summary artifacts/symbolic-benchmark/runpod-cuda-compact-v1/summary.json \
+  --run-label symbolic-bridge-compact-runpod-cuda-family-seed-v1 \
+  --output-dir artifacts/symbolic-bridge/symbolic-bridge-compact-runpod-cuda-family-seed-v1 \
+  --token-bins 32 \
+  --expert-bank-mode family-seed \
+  --output table
+```
+
+Primary corpus command:
+
+```bash
+uv run --python 3.12 --with numpy python scripts/symbolic_bridge_corpus.py \
+  --corpus-kind language-math-natural \
+  --source-bridge-summary artifacts/symbolic-bridge/symbolic-bridge-compact-runpod-cuda-family-seed-v1/summary.json \
+  --run-label bridge-corpus-v1-language-math-natural-gate5-family-seed-v1 \
+  --output-dir artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5-family-seed-v1 \
+  --seed 123 \
+  --language-train-per-group 12 \
+  --language-safety-per-group 16 \
+  --language-eval-per-group 20 \
+  --output table
+```
+
+LM command pattern:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5-family-seed-v1/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-family-seed-s20260430-v1/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-family-seed-s20260431-v1/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-family-seed-s20260432-v1/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-family-seed-s20260433-v1/summary.json \
+  --extra-fit-splits train,safety_calibration,extrapolation \
+  --run-label gate5-family-seed-top-expert-only-extraextrap-gain04-s777-v1 \
+  --output-dir artifacts/bridge-corpus-v1-gate5-lm/gate5-family-seed-top-expert-only-extraextrap-gain04-s777-v1 \
+  --seed 777 \
+  --backbone transformer \
+  --transformer-layers 2 \
+  --transformer-heads 4 \
+  --transformer-ffn-multiplier 2 \
+  --epochs 600 \
+  --learning-rate 0.004 \
+  --hidden-units 64 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 1.0 \
+  --answer-call-abstain-loss-weight 8.0 \
+  --answer-unsafe-loss-weight 5.0 \
+  --non-answer-abstain-loss-weight 2.0 \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --role-aware-calibration \
+  --calibration-selection-modes top-expert \
+  --calibration-target-answer-unsafe 0.05 \
+  --calibration-min-answer-accuracy-gain 0.4 \
+  --calibration-answer-roles math_answer,math_only \
+  --device mps \
+  --output table
+```
+
+Caption: Expanded `family-seed` expert bank compared against the promoted
+four-expert top-expert bridge. `answer gain` is measured against the same run's
+pre-fusion LM prediction on extrapolation `math_answer` tokens.
+
+| condition | seed | whole acc | whole NLL | answer acc | answer gain | answer NLL | answer unsafe | answer pass | whole contract |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| four-expert top-expert-only gain04 | 777 | 0.250 | 6.178 | 0.487 | 0.406 | 3.086 | 0.000 | true | false |
+| four-expert top-expert-only gain04 | 778 | 0.267 | 6.247 | 0.419 | 0.319 | 3.920 | 0.000 | true | false |
+| four-expert top-expert-only gain04 | 779 | 0.251 | 6.589 | 0.506 | 0.394 | 2.975 | 0.006 | true | false |
+| family-seed expanded bank | 777 | 0.268 | 5.873 | 0.519 | 0.344 | 3.691 | 0.000 | true | false |
+| family-seed expanded bank | 778 | 0.217 | 6.368 | 0.281 | 0.200 | 5.993 | 0.000 | true | false |
+| family-seed expanded bank | 779 | 0.246 | 5.796 | 0.394 | 0.256 | 4.849 | 0.000 | true | true |
+
+Caption: Three-seed aggregate for the expanded-bank ablation.
+
+| condition | answer pass count | whole contract count | whole acc mean +/- sd | whole NLL mean +/- sd | answer acc mean +/- sd | answer gain mean +/- sd | answer NLL mean +/- sd | answer unsafe mean +/- sd |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| four-expert top-expert-only gain04 | 3/3 | 0/3 | 0.256 +/- 0.009 | 6.338 +/- 0.220 | 0.471 +/- 0.046 | 0.373 +/- 0.039 | 3.327 +/- 0.517 | 0.002 +/- 0.004 |
+| family-seed expanded bank | 3/3 | 1/3 | 0.244 +/- 0.021 | 6.012 +/- 0.254 | 0.398 +/- 0.097 | 0.267 +/- 0.059 | 4.845 +/- 0.940 | 0.000 +/- 0.000 |
+
+Interpretation:
+
+- Additional experts are possible under the bridge contract, but this specific
+  family-seed expansion is not a clean improvement. It improves whole-corpus
+  NLL and keeps answer unsafe calls at zero across all three seeds, but lowers mean
+  answer accuracy from `0.471` to `0.398` and roughly doubles answer variance.
+- The result argues against the simple hypothesis that more EML experts alone
+  will raise answer accuracy without side effects. The router/calibration layer
+  needs stronger role-aware selection, or the expert bank needs higher-quality
+  diverse specialists rather than duplicate seed variants.
+- This ablation does not overturn the promoted four-expert role-local bridge.
+  The best-supported candidate remains the four-expert `top-expert-only gain04`
+  recipe. Expanded banks should continue only as a controlled router-calibration
+  experiment, not as the next broad-LM bridge default.

@@ -510,6 +510,68 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertIn("safety_calibration", {row["split"] for row in feature_rows})
             self.assertIn("split_safe_expert_coverage", report.summary["feature_table"])
 
+    def test_symbolic_bridge_can_expose_seeded_expert_bank(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_path = root / "summary.json"
+            output_dir = root / "bridge"
+            source_path.write_text(
+                json.dumps(
+                    {
+                        "manifest": {
+                            "preset": "tier0-exact",
+                            "seeds": [42, 43],
+                            "dataset": {
+                                "train_samples": 4,
+                                "validation_samples": 4,
+                                "extrapolation_samples": 4,
+                                "tasks_per_depth": 1,
+                            },
+                        },
+                        "results": [
+                            {
+                                "task_id": "t0_exp_x",
+                                "model_family": "paper-complex-eml",
+                                "seed": seed,
+                                "expression": "exp(x)",
+                                "expression_source": "lambda x: float(math.exp(x))",
+                                "complexity": 2,
+                                "active_ops": ["exp"],
+                                "export_success": True,
+                                "exact_recovery": True,
+                            }
+                            for seed in (42, 43)
+                        ],
+                    }
+                )
+            )
+
+            report = run_symbolic_bridge(
+                source_path,
+                output_dir,
+                run_label="unit-seeded-bank",
+                token_bins=8,
+                expert_bank_mode="family-seed",
+            )
+
+            self.assertEqual(report.expert_bank_mode, "family-seed")
+            self.assertEqual(report.summary["feature_table"]["expert_count"], 2)
+            self.assertEqual(
+                report.summary["feature_table"]["expert_ids"],
+                ["paper-complex-eml-s42", "paper-complex-eml-s43"],
+            )
+            feature_rows = [
+                json.loads(line)
+                for line in (output_dir / "feature_table.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertTrue(
+                all(
+                    tuple(sorted(row["experts"])) == ("paper-complex-eml-s42", "paper-complex-eml-s43")
+                    for row in feature_rows
+                )
+            )
+
     def test_safety_calibration_prefers_out_of_range_safe_rows_near_abstain(self) -> None:
         rows = [
             {"index": 0, "x": -5.0, "in_training_range": False, "oracle_has_safe_expert": True},
@@ -985,6 +1047,16 @@ class SymbolicEvaluationTests(unittest.TestCase):
                             },
                         }
                     )
+            for row in source_rows:
+                token_match = int(row["target_token"]) == 2
+                row["experts"]["paper-complex-eml-s2"] = {
+                    "prediction": float(row["target_token"]) if token_match else 0.0,
+                    "token": int(row["target_token"]) if token_match else 0,
+                    "residual": 0.0 if token_match else 1.0,
+                    "abs_residual": 0.0 if token_match else 1.0,
+                    "token_match": token_match,
+                }
+                row["safe_expert_mask"]["paper-complex-eml-s2"] = token_match
             with source_feature_table.open("w") as handle:
                 for row in source_rows:
                     handle.write(json.dumps(row) + "\n")
@@ -1054,6 +1126,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
             )
 
             self.assertIn("math_answer", language_report.summary["feature_table"]["role_counts"])
+            self.assertIn("paper-complex-eml-s2", language_report.summary["feature_table"]["expert_ids"])
             self.assertGreater(language_report.summary["feature_table"]["split_safe_expert_coverage"]["train"], 0.0)
             self.assertEqual(math_report.summary["feature_table"]["role_counts"], {"math_only": 8})
             self.assertEqual(pure_report.summary["feature_table"]["role_counts"]["prose"], 72)

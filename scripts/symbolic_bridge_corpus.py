@@ -74,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"token_bins={report.token_bins}")
         print(f"feature_table={report.feature_table_path}")
         print(f"row_count={feature_table['row_count']}")
+        print(f"expert_count={feature_table['expert_count']}")
         print(f"split_counts={feature_table['split_counts']}")
         print(f"role_counts={feature_table['role_counts']}")
         print(f"split_safe_expert_coverage={feature_table['split_safe_expert_coverage']}")
