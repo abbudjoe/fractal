@@ -1408,7 +1408,7 @@ Current status:
 | 2. Held-out formula/language templates | repaired after audit | Multi-split calibration plus an answer-token call/abstain loss reduces unsafe mass while keeping useful held-out answer accuracy. |
 | 3. Target/random-label and wrong-expert controls | passed after repaired audit | Broken labels and wrong expert pairings still collapse the repaired hybrid gain. |
 | 4. Seed/template variance | repaired after audit | Probability-mixture math-answer gains become stable across the three frozen variance splits. |
-| 5. More natural mixed corpus | pending | Not run yet. |
+| 5. More natural mixed corpus | partial pass | Math-answer transfer survives naturalistic wrappers, but whole-sequence/prose behavior does not yet improve over controls. |
 
 Metric note for the bridge tables below:
 
@@ -1571,8 +1571,9 @@ Repair verdict:
 - The hard-call path remains a control, not the main bridge claim. It can be
   safe by abstaining too much. The current positive claim belongs to the
   probability-mixture path with role-aware safety metrics.
-- Gate 5 is now worth running, but the claim should remain narrow until a more
-  natural mixed corpus confirms that this survives beyond synthetic templates.
+- Gate 5 shows the answer-token bridge survives naturalistic wrappers, but the
+  claim remains role-local because prose retention is not yet good enough for a
+  broad LM-improvement claim.
 
 Repaired Gates 1-4 audit artifact bundle:
 
@@ -1613,5 +1614,37 @@ Repaired Gates 1-4 audit verdict:
 - Gate 1 still points to aligned `paper-complex-eml` / symbolic-tree signal, not
   generic expert capacity.
 - Gate 3 still rules against target-label leakage and wrong-expert leakage.
-- This makes Gate 5 empirically justified, but the claim remains scoped to the
-  synthetic math-answer bridge until a natural mixed corpus passes.
+- Gate 5 was run next. It supports the math-answer bridge beyond the original
+  synthetic grammar, but it also keeps the claim scoped: the hybrid still needs
+  a prose-retention or action-only interface before broader LM promotion.
+
+Gate 5 artifact bundle:
+
+```text
+artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-repair-language-math-natural-v1/
+```
+
+Gate 5 uses a `123`-token vocabulary compatible with the repaired
+held-out-template calibration runs. It adds naturalistic wrappers, varied answer
+positions, and prose-only sequences, while preserving role labels for
+`math_answer`, `math_context`, and `prose`.
+
+Gate 5 repaired probability-mixture result:
+
+| slice | token-only acc | side-channel acc | prob-mixture acc | prob-mixture NLL | unsafe mass | verdict |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| whole extrapolation | 0.166 | 0.284 | 0.256 | 5.992 | 0.004 | mixed |
+| math-answer extrapolation | 0.062 | 0.106 | 0.544 | 2.301 | 0.041 | pass |
+| prose extrapolation | 0.172 | 0.232 | 0.167 | 7.214 | 0.002 | fail |
+
+Gate 5 verdict:
+
+- The bridge-critical answer slice survives: probability mixture beats
+  token-only by `+0.481` accuracy and side-channel by `+0.438` on held-out
+  natural-wrapper answer tokens.
+- It is not yet a general decoder improvement. Prose accuracy/NLL is worse than
+  token-only, and whole-corpus accuracy is below the frozen side-channel
+  control.
+- The next bridge experiment should either restrict expert fusion to explicit
+  answer/action spans or add a stronger non-answer/prose retention objective.

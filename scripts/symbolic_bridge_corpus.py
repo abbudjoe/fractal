@@ -23,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
             "language-math",
             "language-math-heldout-templates",
             "language-math-heldout-variance",
+            "language-math-natural",
             "math-only",
             "expert-ablation",
             "expert-shuffle",
@@ -78,6 +79,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"split_safe_expert_coverage={feature_table['split_safe_expert_coverage']}")
         if "heldout_template" in report.summary:
             print(f"heldout_template={report.summary['heldout_template']}")
+            print(f"template_counts={feature_table.get('template_counts', {})}")
+            print(f"math_answer_index_counts={feature_table.get('math_answer_index_counts', {})}")
+        if "natural_mixed" in report.summary:
+            print(f"natural_mixed={report.summary['natural_mixed']}")
             print(f"template_counts={feature_table.get('template_counts', {})}")
             print(f"math_answer_index_counts={feature_table.get('math_answer_index_counts', {})}")
         if "expert_transform" in report.summary:

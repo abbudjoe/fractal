@@ -1096,6 +1096,57 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertIn("heldout_template", report.summary)
             self.assertIn("math_answer_index_counts", report.summary["feature_table"])
             self.assertGreater(len(report.summary["feature_table"]["math_answer_index_counts"]), 1)
+            natural_report = run_bridge_corpus(
+                root / "natural",
+                run_label="unit-natural",
+                corpus_kind="language-math-natural",
+                source_bridge_summary_path=source_summary,
+                seed=5,
+                language_train_per_group=2,
+                language_safety_per_group=2,
+                language_eval_per_group=2,
+            )
+            with Path(natural_report.feature_table_path).open() as handle:
+                natural_rows = [json.loads(line) for line in handle if line.strip()]
+            natural_math_rows = [
+                row for row in natural_rows if row["task_id"] != "pure_language"
+            ]
+            natural_train_tasks = {
+                row["task_id"]
+                for row in natural_math_rows
+                if row["split"] in {"train", "safety_calibration"}
+            }
+            natural_eval_tasks = {
+                row["task_id"]
+                for row in natural_math_rows
+                if row["split"] in {"validation", "extrapolation"}
+            }
+            self.assertTrue(natural_train_tasks)
+            self.assertTrue(natural_eval_tasks)
+            self.assertTrue(natural_train_tasks.isdisjoint(natural_eval_tasks))
+            self.assertEqual(natural_report.summary["vocabulary"], report.summary["vocabulary"])
+            self.assertIn("natural_mixed", natural_report.summary)
+            self.assertIn("natural-prose-only", natural_report.summary["feature_table"]["template_counts"])
+            self.assertIn("pure_language", {row["task_id"] for row in natural_rows})
+            self.assertEqual(
+                {row["formula_template_split"] for row in natural_math_rows if row["split"] == "train"},
+                {"seen_formula"},
+            )
+            self.assertEqual(
+                {
+                    row["language_template_split"]
+                    for row in natural_math_rows
+                    if row["split"] == "extrapolation"
+                },
+                {"heldout_natural_wrapper"},
+            )
+            self.assertGreater(
+                len(natural_report.summary["feature_table"]["math_answer_index_counts"]),
+                1,
+            )
+            self.assertIn("prose", natural_report.summary["feature_table"]["role_counts"])
+            self.assertIn("math_context", natural_report.summary["feature_table"]["role_counts"])
+            self.assertIn("math_answer", natural_report.summary["feature_table"]["role_counts"])
             variance_a = run_bridge_corpus(
                 root / "heldout-variance-a",
                 run_label="unit-heldout-variance-a",

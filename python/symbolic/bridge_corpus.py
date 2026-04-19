@@ -32,6 +32,183 @@ HELDOUT_LANGUAGE_MATH_TEMPLATES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     ("heldout-output", ("using", "input", "x", "XBIN", "and", "formula", "FORMULA", "output", "NUM", ".")),
 )
+TRAIN_NATURAL_LANGUAGE_MATH_TEMPLATES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "natural-seen-story-first",
+        (
+            "the",
+            "careful",
+            "coder",
+            "checks",
+            "the",
+            "signal",
+            ".",
+            "for",
+            "formula",
+            "FORMULA",
+            "with",
+            "x",
+            "XBIN",
+            "answer",
+            "NUM",
+            ".",
+        ),
+    ),
+    (
+        "natural-seen-after-note",
+        (
+            "a",
+            "quiet",
+            "robot",
+            "notes",
+            "the",
+            "pattern",
+            "today",
+            ".",
+            "using",
+            "input",
+            "x",
+            "XBIN",
+            "and",
+            "formula",
+            "FORMULA",
+            "the",
+            "value",
+            "is",
+            "NUM",
+            ".",
+        ),
+    ),
+    (
+        "natural-seen-answer-first",
+        (
+            "answer",
+            "NUM",
+            ".",
+            "the",
+            "small",
+            "artist",
+            "sees",
+            "formula",
+            "FORMULA",
+            "where",
+            "x",
+            "equals",
+            "XBIN",
+            ".",
+        ),
+    ),
+    (
+        "natural-seen-delayed-output",
+        (
+            "the",
+            "green",
+            "garden",
+            "moves",
+            "slowly",
+            ".",
+            "please",
+            "solve",
+            "formula",
+            "FORMULA",
+            "at",
+            "x",
+            "XBIN",
+            ".",
+            "output",
+            "NUM",
+            ".",
+        ),
+    ),
+)
+HELDOUT_NATURAL_LANGUAGE_MATH_TEMPLATES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "natural-heldout-distractor-first",
+        (
+            "the",
+            "bright",
+            "bird",
+            "moves",
+            "quickly",
+            "today",
+            ".",
+            "please",
+            "solve",
+            "formula",
+            "FORMULA",
+            "where",
+            "x",
+            "is",
+            "XBIN",
+            ".",
+            "result",
+            "NUM",
+            ".",
+        ),
+    ),
+    (
+        "natural-heldout-answer-first",
+        (
+            "answer",
+            "NUM",
+            "when",
+            "the",
+            "silver",
+            "robot",
+            "checks",
+            "formula",
+            "FORMULA",
+            "with",
+            "x",
+            "XBIN",
+            ".",
+        ),
+    ),
+    (
+        "natural-heldout-middle-output",
+        (
+            "a",
+            "red",
+            "coder",
+            "writes",
+            "notes",
+            ".",
+            "with",
+            "formula",
+            "FORMULA",
+            "and",
+            "input",
+            "x",
+            "XBIN",
+            "output",
+            "NUM",
+            ".",
+        ),
+    ),
+    (
+        "natural-heldout-value-late",
+        (
+            "the",
+            "blue",
+            "artist",
+            "keeps",
+            "the",
+            "story",
+            ".",
+            "for",
+            "formula",
+            "FORMULA",
+            "at",
+            "x",
+            "XBIN",
+            "the",
+            "value",
+            "is",
+            "NUM",
+            ".",
+        ),
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -68,6 +245,9 @@ class Vocabulary:
         for label, index in self._ids.items():
             labels[index] = label
         return labels
+
+    def contains(self, label: str) -> bool:
+        return label in self._ids
 
     def __len__(self) -> int:
         return len(self._ids)
@@ -118,6 +298,17 @@ def run_bridge_corpus(
             rotate_formula_split=corpus_kind == "language-math-heldout-variance",
         )
         corpus_extra_summary["heldout_template"] = heldout_summary
+    elif corpus_kind == "language-math-natural":
+        if source_bridge_summary_path is None:
+            raise ValueError("language-math-natural corpus requires source_bridge_summary_path")
+        rows, token_bins, vocabulary, source_path, natural_summary = build_language_math_natural_rows(
+            source_bridge_summary_path,
+            train_per_group=language_train_per_group,
+            safety_per_group=language_safety_per_group,
+            eval_per_group=language_eval_per_group,
+            seed=seed,
+        )
+        corpus_extra_summary["natural_mixed"] = natural_summary
     elif corpus_kind == "math-only":
         if source_bridge_summary_path is None:
             raise ValueError("math-only corpus requires source_bridge_summary_path")
@@ -151,6 +342,7 @@ def run_bridge_corpus(
         raise ValueError(
             "corpus_kind must be one of "
             "pure-language|language-math|language-math-heldout-templates|language-math-heldout-variance|"
+            "language-math-natural|"
             "math-only|expert-ablation|expert-shuffle|target-randomized|wrong-expert"
         )
 
@@ -387,6 +579,140 @@ def build_language_math_heldout_template_rows(
     return rows, len(vocab), vocab.labels(), repo_relative(source_bridge_summary_path), heldout_summary
 
 
+def build_language_math_natural_rows(
+    source_bridge_summary_path: Path,
+    *,
+    train_per_group: int,
+    safety_per_group: int,
+    eval_per_group: int,
+    seed: int,
+) -> tuple[list[dict[str, Any]], int, list[str], str, dict[str, Any]]:
+    source_summary = json.loads(source_bridge_summary_path.read_text())
+    source_feature_path = resolve_feature_table_path(source_summary, source_bridge_summary_path)
+    source_rows = load_feature_rows(source_feature_path)
+    token_bins = int(source_summary.get("token_bins") or source_rows[0]["token_bins"])
+    vocab = base_language_vocabulary()
+    register_language_math_templates(vocab)
+    ensure_templates_use_registered_tokens(
+        vocab,
+        TRAIN_NATURAL_LANGUAGE_MATH_TEMPLATES + HELDOUT_NATURAL_LANGUAGE_MATH_TEMPLATES,
+    )
+    formula_tokens = {
+        task_id: vocab.token(f"FORMULA_{task_id}")
+        for task_id in sorted({str(row["task_id"]) for row in source_rows})
+    }
+    for index in range(token_bins):
+        vocab.token(f"XBIN_{index:02d}")
+    number_offset = len(vocab)
+    for index in range(token_bins):
+        vocab.token(f"NUM_{index:02d}")
+
+    seen_tasks, heldout_tasks = split_seen_heldout_formula_tasks(
+        sorted(formula_tokens),
+        rotation_seed=None,
+    )
+    selected = select_source_rows(
+        [
+            row
+            for row in source_rows
+            if (
+                (
+                    str(row["split"]) in {"train", "safety_calibration"}
+                    and str(row["task_id"]) in seen_tasks
+                )
+                or (
+                    str(row["split"]) in {"validation", "extrapolation"}
+                    and str(row["task_id"]) in heldout_tasks
+                )
+            )
+        ],
+        train_per_group=train_per_group,
+        safety_per_group=safety_per_group,
+        eval_per_group=eval_per_group,
+    )
+    rows: list[dict[str, Any]] = []
+    for source_row in selected:
+        split = str(source_row["split"])
+        task_id = str(source_row["task_id"])
+        template_pool = (
+            TRAIN_NATURAL_LANGUAGE_MATH_TEMPLATES
+            if split in {"train", "safety_calibration"}
+            else HELDOUT_NATURAL_LANGUAGE_MATH_TEMPLATES
+        )
+        template_id, template = select_language_math_template(template_pool, source_row, seed=seed)
+        sequence_rows = language_math_template_sequence_rows(
+            source_row,
+            vocab=vocab,
+            formula_token=formula_tokens[task_id],
+            x_token=x_bin_token(vocab, source_row, token_bins),
+            number_offset=number_offset,
+            template=template,
+            task_id=task_id,
+            sequence_id=f"{split}-{source_row['seed']}-{source_row['index']}-{template_id}",
+        )
+        formula_split = "seen_formula" if task_id in seen_tasks else "heldout_formula"
+        language_split = (
+            "seen_natural_wrapper"
+            if split in {"train", "safety_calibration"}
+            else "heldout_natural_wrapper"
+        )
+        for row in sequence_rows:
+            row["template_id"] = template_id
+            row["formula_template_split"] = formula_split
+            row["language_template_split"] = language_split
+        rows.extend(sequence_rows)
+
+    rng = random.Random(seed)
+    prose_sequences_per_split = max(8, min(40, eval_per_group))
+    for split in ("train", "safety_calibration", "validation", "extrapolation"):
+        for sequence_index in range(prose_sequences_per_split):
+            tokens = pure_language_sentence(vocab, rng, split, sequence_index)
+            sequence_rows = text_sequence_rows(
+                tokens,
+                vocab=vocab,
+                task_id="pure_language",
+                sequence_id=f"{split}-pure-{sequence_index:04d}",
+                seed=seed,
+                split=split,
+                eval_roles=["prose"] * len(tokens),
+                x_values=[0.0] * len(tokens),
+                answer_source_row=None,
+                number_offset=None,
+            )
+            for row in sequence_rows:
+                row["template_id"] = "natural-prose-only"
+                row["formula_template_split"] = "none"
+                row["language_template_split"] = "pure_language"
+            rows.extend(sequence_rows)
+
+    natural_summary = {
+        "seen_formula_tasks": list(seen_tasks),
+        "heldout_formula_tasks": list(heldout_tasks),
+        "seen_language_templates": [
+            template_id for template_id, _template in TRAIN_NATURAL_LANGUAGE_MATH_TEMPLATES
+        ],
+        "heldout_language_templates": [
+            template_id for template_id, _template in HELDOUT_NATURAL_LANGUAGE_MATH_TEMPLATES
+        ],
+        "prose_sequences_per_split": prose_sequences_per_split,
+        "vocabulary_contract": (
+            "uses the same base/register_language_math_templates/formula/XBIN/NUM "
+            "ordering as language-math-heldout-templates"
+        ),
+        "split_contract": {
+            "train": "seen formulas, seen natural wrappers, plus prose-only sequences",
+            "safety_calibration": "seen formulas, seen natural wrappers, plus prose-only sequences",
+            "validation": "held-out formulas, held-out natural wrappers, plus prose-only sequences",
+            "extrapolation": "held-out formulas, held-out natural wrappers, plus prose-only sequences",
+        },
+        "naturalism_limit": (
+            "synthetic naturalistic wrappers using the frozen bridge vocabulary; "
+            "not an open-web language sample"
+        ),
+    }
+    return rows, len(vocab), vocab.labels(), repo_relative(source_bridge_summary_path), natural_summary
+
+
 def select_language_math_template(
     template_pool: tuple[tuple[str, tuple[str, ...]], ...],
     source_row: dict[str, Any],
@@ -408,6 +734,25 @@ def register_language_math_templates(vocab: Vocabulary) -> None:
         for token in template:
             if token not in {"FORMULA", "XBIN", "NUM"}:
                 vocab.token(token)
+
+
+def ensure_templates_use_registered_tokens(
+    vocab: Vocabulary,
+    templates: tuple[tuple[str, tuple[str, ...]], ...],
+) -> None:
+    missing = sorted(
+        {
+            token
+            for _template_id, template in templates
+            for token in template
+            if token not in {"FORMULA", "XBIN", "NUM"} and not vocab.contains(token)
+        }
+    )
+    if missing:
+        raise ValueError(
+            "natural language-math templates must not change the frozen bridge vocabulary; "
+            f"unregistered tokens: {missing}"
+        )
 
 
 def split_seen_heldout_formula_tasks(
@@ -1121,6 +1466,15 @@ def render_corpus_markdown(report: BridgeCorpusReport) -> str:
         lines.extend(
             [
                 f"Held-out template contract: `{report.summary['heldout_template']}`",
+                f"Template counts: `{feature_table.get('template_counts', {})}`",
+                f"Math answer index counts: `{feature_table.get('math_answer_index_counts', {})}`",
+                "",
+            ]
+        )
+    if "natural_mixed" in report.summary:
+        lines.extend(
+            [
+                f"Natural mixed contract: `{report.summary['natural_mixed']}`",
                 f"Template counts: `{feature_table.get('template_counts', {})}`",
                 f"Math answer index counts: `{feature_table.get('math_answer_index_counts', {})}`",
                 "",

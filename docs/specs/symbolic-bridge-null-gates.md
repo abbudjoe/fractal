@@ -13,15 +13,16 @@ records stay below it.
 | 2. Held-out formula/language templates | Does the bridge survive unseen formula families, unseen wrappers, and varied answer positions? | repaired after audit | Multi-split calibration plus answer-token call/abstain loss keeps most capability while reducing unsafe mass below the role-aware gate. |
 | 3. Target/random-label and wrong-expert controls | Does the harness leak target identity through labels, routing, or feature construction? | passed after repaired audit | Broken labels and wrong expert pairings still collapse the repaired hybrid gain. |
 | 4. Seed/template variance | Is the positive result stable across seeds and template draws? | repaired after audit | Multi-split calibration turns the unstable variance result into stable math-answer gains with low unsafe mass. |
-| 5. More natural mixed corpus | Does the contract hold beyond the synthetic grammar? | pending | Not run yet. |
+| 5. More natural mixed corpus | Does the contract hold beyond the synthetic grammar? | partial pass | The repaired probability-mixture bridge still wins strongly on held-out natural-wrapper math-answer tokens, but the full mixed-corpus contract is not confirmed because prose accuracy/NLL does not improve over controls. |
 
-Current recommendation: proceed to Gate 5, but keep the claim narrow. The
-repaired recipe has now been audited against Gates 1-4. The first Gate 2/4 pass
-failed because calibration was brittle; the repair pass shows that broader
-multi-split calibration and an answer-token call/abstain objective make the
-probability-mixture bridge much more stable on math-answer tokens. The repaired
-Gate 1 and Gate 3 reruns do not show generic-expert or leakage explanations.
-This does not yet establish a general LM improvement.
+Current recommendation: do not promote to broad LM claims yet. The repaired
+recipe has now survived the bridge-critical math-answer slice through Gate 5,
+including held-out formulas, held-out wrappers, varied answer positions, and
+naturalistic distractor prose. However, Gate 5 also shows that this is still a
+role-local improvement: the hybrid improves answer tokens but does not improve
+the surrounding prose distribution. The next step should keep the symbolic
+bridge isolated behind a calibrated answer/action interface, or add a prose
+retention objective before claiming general decoder improvement.
 
 ## Metric Glossary
 
@@ -606,9 +607,9 @@ Question:
 
 > Does the bridge contract hold beyond this synthetic grammar?
 
-Status: pending.
+Status: partial pass.
 
-Planned controls:
+Controls:
 
 - Mix pure-language examples with less templated math prompts.
 - Include multiple prompt phrasings and distractor prose around math answers.
@@ -616,6 +617,128 @@ Planned controls:
   separately measurable.
 - Keep pure transformer, side-channel, hard-call, logit-fusion, and
   probability-mixture comparisons.
+- Preserve the repaired `123`-token held-out-template vocabulary so the same
+  multi-split calibration runs can be reused.
+
+Artifacts:
+
+```text
+artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-repair-language-math-natural-v1/
+```
+
+Corpus command:
+
+```bash
+python scripts/symbolic_bridge_corpus.py \
+  --corpus-kind language-math-natural \
+  --source-bridge-summary artifacts/symbolic-bridge/symbolic-bridge-compact-runpod-cuda-v1/summary.json \
+  --run-label bridge-corpus-v1-language-math-natural-gate5 \
+  --output-dir artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5 \
+  --seed 20260418 \
+  --language-train-per-group 12 \
+  --language-safety-per-group 16 \
+  --language-eval-per-group 20 \
+  --output table
+```
+
+LM command:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260430/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260431/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260432/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260433/summary.json \
+  --run-label gate5-repair-language-math-natural-v1 \
+  --output-dir artifacts/bridge-corpus-v1-gate5-lm/gate5-repair-language-math-natural-v1 \
+  --backbone transformer \
+  --transformer-layers 2 \
+  --transformer-heads 4 \
+  --transformer-ffn-multiplier 2 \
+  --epochs 600 \
+  --learning-rate 0.004 \
+  --hidden-units 64 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 1.0 \
+  --answer-call-abstain-loss-weight 8.0 \
+  --answer-unsafe-loss-weight 5.0 \
+  --non-answer-abstain-loss-weight 2.0 \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --device mps \
+  --output table
+```
+
+Corpus facts:
+
+| field | value |
+| --- | ---: |
+| token bins | 123 |
+| total token rows | 9,752 |
+| math-answer rows | 544 |
+| math-context rows | 1,632 |
+| prose rows | 7,576 |
+| extrapolation math-answer rows | 160 |
+| prose-only sequences per split | 20 |
+
+Held-out formulas were the same frozen formula families used by Gate 2:
+`d1_exp_soft`, `d2_reciprocal_shift`, `d3_ratio_product`, and
+`d4_nested_ratio_exp`. Held-out natural wrappers placed answer tokens at
+indices `1`, `14`, `15`, `16`, `17`, and `18`.
+
+Caption: Gate 5 whole-corpus extrapolation results. This table includes prose,
+math context, and math answer tokens together, so it tests whether the bridge
+improves the full mixed sequence distribution rather than only answer slots.
+
+| run | extrap acc | extrap NLL | expert mass/call | unsafe mass/call |
+| --- | ---: | ---: | ---: | ---: |
+| `lm-token-only` | 0.166 | 6.378 | 0.000 | 0.000 |
+| `lm-frozen-side-channel` | 0.284 | 6.471 | 0.000 | 0.000 |
+| `lm-router-hard-call` | 0.219 | 7.349 | 0.000 | 0.000 |
+| `lm-router-logit-fusion` | 0.190 | 6.631 | 0.029 | 0.008 |
+| `lm-router-prob-mixture` | 0.256 | 5.992 | 0.031 | 0.004 |
+
+Caption: Gate 5 extrapolation `math_answer` role only. This is the
+bridge-critical slice: the answer token has a symbolic expert prediction
+available, while surrounding prose and context tokens should mostly abstain.
+
+| run | math-answer acc | math-answer NLL | expert mass/call | unsafe mass/call |
+| --- | ---: | ---: | ---: | ---: |
+| `lm-token-only` | 0.062 | 6.395 | 0.000 | 0.000 |
+| `lm-frozen-side-channel` | 0.106 | 7.009 | 0.000 | 0.000 |
+| `lm-router-hard-call` | 0.113 | 8.352 | 0.000 | 0.000 |
+| `lm-router-logit-fusion` | 0.400 | 4.777 | 0.517 | 0.134 |
+| `lm-router-prob-mixture` | 0.544 | 2.301 | 0.540 | 0.041 |
+
+Caption: Gate 5 extrapolation non-answer behavior. This table separates the
+surrounding language and formula-context tokens so the answer-token gain cannot
+hide prose degradation.
+
+| run | prose acc | prose NLL | math-context acc | math-context NLL |
+| --- | ---: | ---: | ---: | ---: |
+| `lm-token-only` | 0.172 | 6.529 | 0.173 | 5.687 |
+| `lm-frozen-side-channel` | 0.232 | 7.136 | 0.577 | 3.271 |
+| `lm-router-hard-call` | 0.156 | 7.943 | 0.542 | 4.318 |
+| `lm-router-logit-fusion` | 0.157 | 7.233 | 0.269 | 4.512 |
+| `lm-router-prob-mixture` | 0.167 | 7.214 | 0.565 | 1.677 |
+
+Gate 5 verdict:
+
+- The math-answer bridge survives the more natural mixed corpus. Probability
+  mixture beats token-only by `+0.481` accuracy and frozen side-channel by
+  `+0.438` on extrapolation answer tokens, with unsafe answer mass `0.041`.
+- Relative to the repaired Gate 2 answer slice, capability is essentially
+  preserved: accuracy is `0.544` versus `0.562`, NLL improves from `2.859` to
+  `2.301`, and unsafe mass improves from `0.049` to `0.041`.
+- The full mixed-corpus contract is not confirmed. Frozen side-channel has
+  better whole-corpus extrapolation accuracy (`0.284` vs `0.256`), and
+  probability-mixture prose accuracy/NLL is slightly worse than token-only
+  (`0.167`/`7.214` vs `0.172`/`6.529`).
+- The positive claim should stay role-local: calibrated symbolic experts can
+  materially help answer tokens when a safe expert is available, but this run
+  does not show a general language-model improvement.
 
 Resolution block:
 
@@ -623,5 +746,5 @@ Resolution block:
 | --- | --- |
 | Resolution needed | Determine whether the EML bridge is useful outside the controlled synthetic language/math grammar. |
 | Promotion condition | The hybrid must improve math-answer accuracy/NLL without degrading pure-language/prose behavior and without violating unsafe-call or unsafe-mass gates. |
-| Current blocker | Gate 2/4 role-aware probability-mixture repair is complete enough to make Gate 5 informative. Remaining risk is that the repair may depend on the synthetic grammar. |
-| Next action | Build a small mixed naturalistic math-language corpus with frozen eval prompts and run the repaired probability-mixture recipe against token-only, side-channel, hard-call, and logit-fusion controls. |
+| Current blocker | Math-answer transfer passes, but prose retention does not. The fusion path is useful as an answer/action bridge, not yet as a general next-token improvement. |
+| Next action | Add a Gate 6-style prose-retention or action-only interface test: either keep expert fusion restricted to explicit answer spans, or train with a stronger non-answer/prose retention objective and rerun Gate 5. |
