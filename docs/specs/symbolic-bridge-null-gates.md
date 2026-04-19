@@ -13,7 +13,7 @@ records stay below it.
 | 2. Held-out formula/language templates | Does the bridge survive unseen formula families, unseen wrappers, and varied answer positions? | repaired after audit | Multi-split calibration plus answer-token call/abstain loss keeps most capability while reducing unsafe mass below the role-aware gate. |
 | 3. Target/random-label and wrong-expert controls | Does the harness leak target identity through labels, routing, or feature construction? | passed after repaired audit | Broken labels and wrong expert pairings still collapse the repaired hybrid gain. |
 | 4. Seed/template variance | Is the positive result stable across seeds and template draws? | repaired after audit | Multi-split calibration turns the unstable variance result into stable math-answer gains with low unsafe mass. |
-| 5. More natural mixed corpus | Does the contract hold beyond the synthetic grammar? | partial, calibration-improved | The repaired probability-mixture bridge can win on held-out natural-wrapper math-answer tokens. Role-aware calibration now makes answer safety stable across `3/3` seeds, but the full answer capability+safety contract is still only `2/3`. |
+| 5. More natural mixed corpus | Does the contract hold beyond the synthetic grammar? | role-local pass, not broad LM pass | The repaired probability-mixture bridge can win on held-out natural-wrapper math-answer tokens. Top-expert calibrated fusion plus extra extrapolation calibration passes the `math_answer` capability+safety contract on `3/3` seeds, but the gain remains role-local and does not prove broad prose/LM improvement. |
 
 Current recommendation: do not promote to broad LM claims yet. The repaired
 recipe has now survived the bridge-critical math-answer slice through Gate 5,
@@ -27,11 +27,15 @@ answer-span-only fusion, preserved safety but degraded answer/context NLL
 relative to prose-only KL alone. The next step should keep the symbolic bridge
 isolated behind a calibrated answer/action interface and treat these repairs as
 competing candidates until the interference is understood. The seed-variance
-audit then showed that even the role-local answer contract is not stable enough
-to promote: every current candidate passed the `math_answer` safety contract on
-only one of three seeds. A first role-aware calibration repair fixes the safety
-part (`3/3` seeds under the answer unsafe-mass gate), but it is conservative and
-retains the full answer capability+safety contract on only `2/3` seeds.
+audit then showed that even the role-local answer contract was not stable enough
+to promote: every pre-calibration candidate passed the `math_answer` safety
+contract on only one of three seeds. A first role-aware calibration repair fixed
+the safety part (`3/3` seeds under the answer unsafe-mass gate), but it was
+conservative and retained the full answer capability+safety contract on only
+`2/3` seeds. The next repair, top-expert calibrated fusion selected with extra
+extrapolation calibration rows, now passes the role-local answer
+capability+safety contract on `3/3` seeds while retaining a large answer gain.
+That is a real bridge result, but still not a broad LM result.
 
 ## Metric Glossary
 
@@ -755,8 +759,8 @@ Resolution block:
 | --- | --- |
 | Resolution needed | Determine whether the EML bridge is useful outside the controlled synthetic language/math grammar. |
 | Promotion condition | The hybrid must improve math-answer accuracy/NLL without degrading pure-language/prose behavior and without violating unsafe-call or unsafe-mass gates. |
-| Current blocker | Math-answer transfer passes, but prose retention does not. The fusion path is useful as an answer/action bridge, not yet as a general next-token improvement. |
-| Next action | Stop treating the seed-777 recipes as promotable. Ablation 5 showed the repaired, answer-span-only, and prose-only-KL candidates each pass the role-aware `math_answer` contract only `1/3` seeds. Ablation 6 fixed a hidden calibration-control-plane bug and made answer safety stable (`3/3` seeds) with post-training role-aware calibration, but capability is now marginal (`2/3` full contract). The next clean test should improve calibrated capability retention, probably by a less binary fusion policy or by calibrating a separately supervised answer router. |
+| Current blocker | Math-answer transfer now passes as a calibrated answer/action bridge, but prose retention and whole-corpus LM quality do not. |
+| Next action | Treat Ablation 7 as the current bridge candidate. The next test should bridge it back into LM-facing training with the expert contribution isolated to answer/action positions, while keeping a pure transformer and frozen side-channel as controls. |
 
 ### Gate 5 Ablation 1: Answer-Span-Only Fusion
 
@@ -1412,3 +1416,115 @@ Interpretation:
 - This is evidence for the calibrated answer/action interface, not evidence for
   broad LM improvement. The next repair should preserve more answer capability
   while maintaining the now-stable safety behavior.
+
+### Gate 5 Ablation 7: Top-Expert Calibrated Fusion
+
+Question:
+
+> Can calibrated fusion keep the safety contract without shutting off the
+> symbolic expert so aggressively that answer capability disappears?
+
+Implementation:
+
+- Add a calibrated `top-expert` selection mode for `prob-mixture`.
+- In `top-expert` mode, the calibrated policy keeps only the highest-probability
+  valid expert from the router before applying the answer threshold and fusion
+  cap. This is deployable because it uses router probabilities and expert
+  validity, not the target label or oracle safe mask.
+- Preserve dense calibration as a searchable mode for ablation, but the
+  promoted bridge restricts calibration to `top-expert`. A dense-allowed run
+  overcalled on seed `778` despite passing the calibration split.
+- Add `--extra-fit-splits`. The promoted run loads `train`,
+  `safety_calibration`, and `extrapolation` rows from the extra calibration
+  summaries. Training still uses only train/safety rows; extra extrapolation
+  rows are calibration-selection rows, not LM training rows.
+
+Artifacts:
+
+```text
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-top-expert-extraextrap-s777-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-top-expert-extraextrap-s778-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-top-expert-extraextrap-s779-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-top-expert-only-extraextrap-gain04-s777-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-top-expert-only-extraextrap-gain04-s778-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-top-expert-only-extraextrap-gain04-s779-v1/
+```
+
+Command pattern:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260430/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260431/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260432/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260433/summary.json \
+  --extra-fit-splits train,safety_calibration,extrapolation \
+  --run-label gate5-calibrated-top-expert-only-extraextrap-gain04-s778-v1 \
+  --output-dir artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-top-expert-only-extraextrap-gain04-s778-v1 \
+  --seed 778 \
+  --backbone transformer \
+  --transformer-layers 2 \
+  --transformer-heads 4 \
+  --transformer-ffn-multiplier 2 \
+  --epochs 600 \
+  --learning-rate 0.004 \
+  --hidden-units 64 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 1.0 \
+  --answer-call-abstain-loss-weight 8.0 \
+  --answer-unsafe-loss-weight 5.0 \
+  --non-answer-abstain-loss-weight 2.0 \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --role-aware-calibration \
+  --calibration-selection-modes top-expert \
+  --calibration-target-answer-unsafe 0.05 \
+  --calibration-min-answer-accuracy-gain 0.4 \
+  --calibration-answer-roles math_answer,math_only \
+  --device mps \
+  --output table
+```
+
+Caption: Top-expert calibration compared with dense role-aware calibration.
+The cap-1 scan showed the promise of top-expert + extra extrapolation
+calibration. After fixing the cap search, dense-allowed selection and a low
+gain floor were rejected because they either overcalled or selected safe but
+weak policies. The promoted candidate is top-expert-only with a `0.4`
+validation answer-gain floor.
+
+| condition | seed | whole acc | whole NLL | answer acc | answer gain | answer NLL | answer unsafe | answer pass | mode | threshold | cap | abstain bias | min gain |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: |
+| calibrated dense v4 | 777 | 0.231 | 6.259 | 0.219 | 0.081 | 4.610 | 0.000 | true | dense | 0.9999 | 0.500 | 4.000 | 0.050 |
+| calibrated dense v4 | 778 | 0.261 | 6.213 | 0.156 | 0.056 | 4.941 | 0.000 | true | dense | 0.9999 | 0.300 | 4.000 | 0.050 |
+| calibrated dense v4 | 779 | 0.231 | 6.743 | 0.094 | 0.019 | 6.167 | 0.000 | false | dense | 0.9999 | 0.500 | 4.000 | 0.050 |
+| top-expert cap-1 scan | 777 | 0.266 | 6.025 | 0.531 | 0.450 | 2.419 | 0.000 | true | top-expert | 0.8000 | 1.000 | 2.000 | 0.050 |
+| top-expert cap-1 scan | 778 | 0.280 | 5.972 | 0.463 | 0.338 | 3.595 | 0.040 | true | top-expert | 0.9000 | 1.000 | 0.500 | 0.050 |
+| top-expert cap-1 scan | 779 | 0.247 | 6.693 | 0.444 | 0.375 | 3.407 | 0.000 | true | top-expert | 0.8000 | 1.000 | 3.000 | 0.050 |
+| top-expert-only gain04 | 777 | 0.250 | 6.178 | 0.487 | 0.406 | 3.086 | 0.000 | true | top-expert | 0.9000 | 0.500 | 0.500 | 0.400 |
+| top-expert-only gain04 | 778 | 0.267 | 6.247 | 0.419 | 0.319 | 3.920 | 0.000 | true | top-expert | 0.9950 | 1.000 | 0.000 | 0.400 |
+| top-expert-only gain04 | 779 | 0.251 | 6.589 | 0.506 | 0.394 | 2.975 | 0.006 | true | top-expert | 0.8000 | 0.500 | 0.000 | 0.400 |
+
+Caption: Aggregate top-expert bridge audit over seeds `777`, `778`, and `779`.
+
+| condition | answer pass count | answer safety count | whole acc mean +/- sd | whole NLL mean +/- sd | answer acc mean +/- sd | answer gain mean +/- sd | answer NLL mean +/- sd | answer unsafe mean +/- sd |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| calibrated dense v4 | 2/3 | 3/3 | 0.241 +/- 0.018 | 6.405 +/- 0.294 | 0.156 +/- 0.062 | 0.052 +/- 0.031 | 5.239 +/- 0.820 | 0.000 +/- 0.000 |
+| top-expert cap-1 scan | 3/3 | 3/3 | 0.264 +/- 0.017 | 6.230 +/- 0.402 | 0.479 +/- 0.046 | 0.388 +/- 0.057 | 3.140 +/- 0.632 | 0.013 +/- 0.023 |
+| top-expert-only gain04 | 3/3 | 3/3 | 0.256 +/- 0.009 | 6.338 +/- 0.220 | 0.471 +/- 0.046 | 0.373 +/- 0.047 | 3.327 +/- 0.517 | 0.002 +/- 0.004 |
+
+Interpretation:
+
+- This is the strongest bridge result so far. The calibrated answer/action
+  contract now passes on all three seeds while preserving most of the
+  uncalibrated answer gain.
+- The repair mattered in two distinct ways: `top-expert` selection removed
+  residual unsafe tail mass from non-selected experts, and extra extrapolation
+  calibration stopped the seed-778 overconfident threshold from passing.
+- The final promoted recipe is stricter than the exploratory cap-1 scan:
+  `top-expert` only, extra extrapolation calibration rows, safety-first policy
+  selection, and a `0.4` minimum validation answer-gain floor.
+- This still does not promote to a broad LM claim. Whole-corpus accuracy and
+  prose behavior remain mixed. The supported claim is narrower and cleaner:
+  a decoder can use a calibrated symbolic expert as an answer/action head when
+  the contract isolates where expert fusion is allowed.

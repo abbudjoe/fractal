@@ -28,6 +28,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Additional bridge corpus summary whose train/safety_calibration rows are used only for fitting.",
     )
+    parser.add_argument(
+        "--extra-fit-splits",
+        default="train,safety_calibration",
+        help=(
+            "Comma-separated splits loaded from extra bridge summaries. "
+            "Train/safety rows can fit the model; validation/extrapolation rows are calibration-only."
+        ),
+    )
     parser.add_argument("--run-label", default=f"symbolic-bridge-lm-{int(time.time())}")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--seed", type=int, default=777)
@@ -63,6 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="math_answer,math_only",
         help="Comma-separated eval_role names treated as answer roles during calibration.",
     )
+    parser.add_argument(
+        "--calibration-selection-modes",
+        default="dense",
+        help="Comma-separated calibrated expert selection modes to search: dense,top-expert.",
+    )
     parser.add_argument("--unsafe-margin-loss-weight", type=float, default=0.0)
     parser.add_argument("--unsafe-margin", type=float, default=0.5)
     parser.add_argument("--router-call-threshold", type=float, default=0.0)
@@ -90,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
     fusion_allowed_roles = parse_comma_separated(args.fusion_allowed_roles)
     non_answer_teacher_kl_roles = parse_comma_separated(args.non_answer_teacher_kl_roles)
     calibration_answer_roles = parse_comma_separated(args.calibration_answer_roles)
+    calibration_selection_modes = parse_comma_separated(args.calibration_selection_modes)
+    extra_fit_splits = parse_comma_separated(args.extra_fit_splits)
     report = run_symbolic_bridge_lm(
         args.bridge_summary,
         output_dir,
@@ -112,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         calibration_target_answer_unsafe=args.calibration_target_answer_unsafe,
         calibration_min_answer_accuracy_gain=args.calibration_min_answer_accuracy_gain,
         calibration_answer_roles=calibration_answer_roles,
+        calibration_selection_modes=calibration_selection_modes,
         unsafe_margin_loss_weight=args.unsafe_margin_loss_weight,
         unsafe_margin=args.unsafe_margin,
         router_call_threshold=args.router_call_threshold,
@@ -123,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         transformer_ffn_multiplier=args.transformer_ffn_multiplier,
         device=args.device,
         extra_fit_bridge_summary_paths=tuple(args.extra_fit_bridge_summary),
+        extra_fit_splits=extra_fit_splits,
     )
     if args.output == "json":
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
@@ -134,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"non_answer_teacher_kl_roles={report.non_answer_teacher_kl_roles or 'none'}")
         print(f"role_aware_calibration={report.role_aware_calibration}")
         print(f"calibration_answer_roles={report.calibration_answer_roles or 'none'}")
+        print(f"calibration_selection_modes={report.calibration_selection_modes or 'none'}")
+        print(f"extra_fit_splits={report.extra_fit_splits or 'none'}")
         print(
             "run\tmode\tfeatures\tval_final_acc\textrap_final_acc\tval_final_nll\textrap_final_nll\textrap_lm_acc\t"
             "router_extrap_acc\texpert_call_rate\tunsafe_call_rate\tabstain_recall"
@@ -160,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"{run.name}\t"
                     f"split={run.calibration.get('selected_split')}\t"
                     f"feasible={run.calibration.get('selected_feasible')}\t"
+                    f"selection={run.calibration.get('selection_mode')}\t"
                     f"temperature={float(run.calibration.get('temperature', 0.0)):.3f}\t"
                     f"abstain_bias={float(run.calibration.get('abstain_bias', 0.0)):.3f}\t"
                     f"answer_threshold={float(run.calibration.get('answer_call_threshold', 0.0)):.3f}\t"

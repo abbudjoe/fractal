@@ -20,7 +20,12 @@ from python.symbolic.autodiff import autodiff_loss_and_gradient
 from python.symbolic.bridge import TokenQuantizer, run_symbolic_bridge, select_safety_calibration_rows
 from python.symbolic.bridge_canary import resolve_device, run_bridge_canary
 from python.symbolic.bridge_corpus import run_bridge_corpus
-from python.symbolic.bridge_lm import run_symbolic_bridge_lm
+from python.symbolic.bridge_lm import (
+    FusionCalibrationPolicy,
+    SymbolicBridgeBatch,
+    fused_token_outputs,
+    run_symbolic_bridge_lm,
+)
 from python.symbolic.bridge_sequence import run_sequence_bridge
 from python.symbolic.formulas import default_symbolic_tasks, sample_symbolic_dataset, tier0_exact_recovery_tasks
 from python.symbolic.models import build_symbolic_model
@@ -324,6 +329,57 @@ class SymbolicModelTests(unittest.TestCase):
 
 
 class SymbolicEvaluationTests(unittest.TestCase):
+    def test_calibrated_top_expert_fusion_drops_non_top_expert_tail(self) -> None:
+        if importlib.util.find_spec("torch") is None:
+            self.skipTest("torch not installed")
+        import torch
+
+        batch = SymbolicBridgeBatch(
+            previous_tokens=torch.tensor([[0]], dtype=torch.long),
+            target_ids=torch.tensor([[1]], dtype=torch.long),
+            x_values=torch.tensor([[0.0]], dtype=torch.float32),
+            expert_tokens=torch.tensor([[[1, 0]]], dtype=torch.long),
+            expert_values=torch.tensor([[[1.0, 0.0]]], dtype=torch.float32),
+            expert_valid_mask=torch.tensor([[[True, True]]], dtype=torch.bool),
+            expert_safe_mask=torch.tensor([[[True, False]]], dtype=torch.bool),
+            router_targets=torch.tensor([[0]], dtype=torch.long),
+            symbolic_mask=torch.tensor([[True]], dtype=torch.bool),
+            features=torch.zeros((1, 1, 1), dtype=torch.float32),
+            role_ids=torch.tensor([[0]], dtype=torch.long),
+            role_names=("math_answer",),
+        )
+        token_logits = torch.tensor([[[0.0, 0.0]]], dtype=torch.float32)
+        router_logits = torch.tensor([[[2.0, 1.0, 0.0]]], dtype=torch.float32)
+        policy = FusionCalibrationPolicy(
+            answer_roles=("math_answer",),
+            selection_mode="top-expert",
+            temperature=1.0,
+            abstain_bias=0.0,
+            answer_call_threshold=0.0,
+            answer_fusion_cap=1.0,
+            non_answer_fusion_cap=0.0,
+            target_answer_unsafe=0.05,
+            min_answer_accuracy_gain=0.0,
+            selected_split="unit",
+            selected_feasible=True,
+            selected_metrics={},
+        )
+
+        _final_logits, final_probabilities, stats = fused_token_outputs(
+            torch,
+            batch,
+            token_logits,
+            router_logits,
+            token_bins=2,
+            fusion_mode="prob-mixture",
+            expert_logit_scale=1.0,
+            calibration_policy=policy,
+        )
+
+        self.assertGreater(float(final_probabilities[0, 0, 1]), 0.8)
+        self.assertAlmostEqual(float(stats["unsafe_mass"][0, 0]), 0.0, places=6)
+        self.assertGreater(float(stats["expert_mass"][0, 0]), 0.6)
+
     def test_error_metrics_track_finite_fraction(self) -> None:
         metrics = evaluate_predictions((1.0, math.nan, 3.0), (1.5, 2.0, 2.0))
 
@@ -718,6 +774,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
             for split, values in {
                 "train": (-0.9, 0.9),
                 "safety_calibration": (-1.1, 1.1),
+                "extrapolation": (-1.4, 1.4),
             }.items():
                 for index, x_value in enumerate(values):
                     target_token = 0 if x_value < 0.0 else 1
@@ -797,6 +854,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 calibration_target_answer_unsafe=0.2,
                 calibration_min_answer_accuracy_gain=0.0,
                 calibration_answer_roles=("symbolic",),
+                calibration_selection_modes=("top-expert",),
                 unsafe_margin_loss_weight=1.25,
                 unsafe_margin=0.4,
                 router_call_threshold=0.25,
@@ -804,6 +862,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 fusion_allowed_roles=("math_answer",),
                 device="cpu",
                 extra_fit_bridge_summary_paths=(extra_bridge_summary,),
+                extra_fit_splits=("train", "safety_calibration", "extrapolation"),
             )
 
             self.assertEqual(report.backbone, "gru")
@@ -822,6 +881,8 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertEqual(report.calibration_target_answer_unsafe, 0.2)
             self.assertEqual(report.calibration_min_answer_accuracy_gain, 0.0)
             self.assertEqual(report.calibration_answer_roles, ("symbolic",))
+            self.assertEqual(report.calibration_selection_modes, ("top-expert",))
+            self.assertEqual(report.extra_fit_splits, ("train", "safety_calibration", "extrapolation"))
             self.assertEqual(report.unsafe_margin_loss_weight, 1.25)
             self.assertEqual(report.unsafe_margin, 0.4)
             self.assertEqual(report.router_call_threshold, 0.25)
@@ -829,8 +890,10 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertEqual(report.fusion_allowed_roles, ("math_answer",))
             self.assertEqual(report.extra_fit_bridge_summary_paths, (str(extra_bridge_summary.resolve()),))
             self.assertEqual(report.extra_fit_feature_table_paths, (str(extra_feature_table.resolve()),))
-            self.assertEqual(report.summary["extra_fit_row_count"], len(extra_rows))
-            self.assertEqual(report.summary["fit_row_count"], 4 + len(extra_rows))
+            self.assertEqual(report.summary["extra_fit_row_count"], 4)
+            self.assertEqual(report.summary["extra_loaded_row_count"], len(extra_rows))
+            self.assertEqual(report.summary["extra_calibration_row_count"], 4)
+            self.assertEqual(report.summary["fit_row_count"], 8)
             run_names = {run.name for run in report.runs}
             self.assertIn("lm-router-logit-fusion", run_names)
             self.assertIn("lm-router-prob-mixture", run_names)
@@ -838,6 +901,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertIsNotNone(prob_mixture.calibration)
             assert prob_mixture.calibration is not None
             self.assertEqual(prob_mixture.calibration["answer_roles"], ["symbolic"])
+            self.assertEqual(prob_mixture.calibration["selection_mode"], "top-expert")
             self.assertIn("selected_metrics", prob_mixture.calibration)
             self.assertEqual(prob_mixture.extrapolation_expert_call_rate, 0.0)
             self.assertEqual(prob_mixture.extrapolation_unsafe_call_rate, 0.0)

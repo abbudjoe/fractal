@@ -152,6 +152,8 @@ def run_symbolic_bridge_path1(
         calibration_target_answer_unsafe=0.05,
         calibration_min_answer_accuracy_gain=0.01,
         calibration_answer_roles=(),
+        calibration_selection_modes=("dense",),
+        extra_fit_splits=("train", "safety_calibration"),
         unsafe_margin_loss_weight=unsafe_margin_loss_weight,
         unsafe_margin=unsafe_margin,
         router_call_threshold=router_call_threshold,

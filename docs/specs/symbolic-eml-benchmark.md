@@ -1822,3 +1822,36 @@ Calibration verdict:
 - This supports the bridge as a controlled answer/action expert, but the next
   repair must recover more answer capability under the calibrated safety
   policy.
+
+Top-expert calibrated bridge:
+
+```text
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-top-expert-extraextrap-s777-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-top-expert-extraextrap-s778-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-top-expert-extraextrap-s779-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-top-expert-only-extraextrap-gain04-s777-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-top-expert-only-extraextrap-gain04-s778-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-calibrated-top-expert-only-extraextrap-gain04-s779-v1/
+```
+
+The next bridge repair adds a calibrated `top-expert` selection mode and lets
+extra calibration summaries contribute extrapolation rows to policy selection
+without adding those rows to LM training. This directly targets the failure in
+which dense calibration was safe but too conservative, while naive top-expert
+calibration recovered capability but overfit seed `778`. The promoted recipe is
+top-expert-only with extra extrapolation calibration and a `0.4` minimum
+validation answer-gain floor.
+
+| condition | answer pass count | answer safety count | whole acc mean +/- sd | whole NLL mean +/- sd | answer acc mean +/- sd | answer gain mean +/- sd | answer NLL mean +/- sd | answer unsafe mean +/- sd |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| calibrated dense v4 | 2/3 | 3/3 | 0.241 +/- 0.018 | 6.405 +/- 0.294 | 0.156 +/- 0.062 | 0.052 +/- 0.031 | 5.239 +/- 0.820 | 0.000 +/- 0.000 |
+| top-expert cap-1 scan | 3/3 | 3/3 | 0.264 +/- 0.017 | 6.230 +/- 0.402 | 0.479 +/- 0.046 | 0.388 +/- 0.057 | 3.140 +/- 0.632 | 0.013 +/- 0.023 |
+| top-expert-only gain04 | 3/3 | 3/3 | 0.256 +/- 0.009 | 6.338 +/- 0.220 | 0.471 +/- 0.046 | 0.373 +/- 0.047 | 3.327 +/- 0.517 | 0.002 +/- 0.004 |
+
+Bridge verdict:
+
+- This is now a credible role-local answer/action bridge: all three seeds pass
+  the `math_answer` capability+safety contract.
+- The result is not a broad LM win. The hybrid should be carried forward as an
+  isolated expert contribution on answer/action positions, with pure transformer
+  and frozen side-channel controls kept in every next run.
