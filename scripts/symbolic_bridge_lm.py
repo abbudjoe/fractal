@@ -37,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--answer-call-abstain-loss-weight", type=float, default=0.0)
     parser.add_argument("--answer-unsafe-loss-weight", type=float, default=0.0)
     parser.add_argument("--non-answer-abstain-loss-weight", type=float, default=0.0)
+    parser.add_argument("--non-answer-lm-retention-loss-weight", type=float, default=0.0)
     parser.add_argument("--unsafe-margin-loss-weight", type=float, default=0.0)
     parser.add_argument("--unsafe-margin", type=float, default=0.5)
     parser.add_argument("--router-call-threshold", type=float, default=0.0)
@@ -79,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         answer_call_abstain_loss_weight=args.answer_call_abstain_loss_weight,
         answer_unsafe_loss_weight=args.answer_unsafe_loss_weight,
         non_answer_abstain_loss_weight=args.non_answer_abstain_loss_weight,
+        non_answer_lm_retention_loss_weight=args.non_answer_lm_retention_loss_weight,
         unsafe_margin_loss_weight=args.unsafe_margin_loss_weight,
         unsafe_margin=args.unsafe_margin,
         router_call_threshold=args.router_call_threshold,

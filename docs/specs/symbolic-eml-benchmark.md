@@ -1669,3 +1669,29 @@ Interpretation:
 - Non-answer expert mass is eliminated by construction.
 - Prose NLL still does not recover, so the next ablation should target shared
   training/prose retention rather than only the final fusion mask.
+
+Gate 5 Ablation 2:
+
+```text
+artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-non-answer-retention-v1/
+```
+
+This ablation leaves answer-span fusion off and adds
+`--non-answer-lm-retention-loss-weight 2.0`, an extra pre-fusion LM-head NLL on
+`prose` and `math_context` roles for router/fusion variants.
+
+| condition | whole acc | whole NLL | math-answer acc | math-answer NLL | prose acc | prose NLL | answer unsafe mass |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| repaired Gate 5 | 0.256 | 5.992 | 0.544 | 2.301 | 0.167 | 7.214 | 0.041 |
+| answer-span fusion | 0.273 | 6.094 | 0.550 | 2.092 | 0.178 | 7.327 | 0.045 |
+| retention-only | 0.256 | 6.537 | 0.575 | 2.525 | 0.136 | 7.928 | 0.153 |
+
+Interpretation:
+
+- Retention-only is a negative ablation at this weight.
+- It keeps or improves answer accuracy, but breaks the safety contract by
+  raising unsafe answer mass to `0.153`.
+- It worsens prose accuracy/NLL, so simple extra self-NLL is not the right
+  prose-retention mechanism.
+- The next repair should use either answer-span fusion plus a smaller retention
+  term, or a proper frozen token-only teacher/KL objective on prose roles.

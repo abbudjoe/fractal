@@ -122,6 +122,7 @@ class BridgeLmReport:
     answer_call_abstain_loss_weight: float
     answer_unsafe_loss_weight: float
     non_answer_abstain_loss_weight: float
+    non_answer_lm_retention_loss_weight: float
     unsafe_margin_loss_weight: float
     unsafe_margin: float
     router_call_threshold: float
@@ -155,6 +156,7 @@ class BridgeLmReport:
             "answer_call_abstain_loss_weight": self.answer_call_abstain_loss_weight,
             "answer_unsafe_loss_weight": self.answer_unsafe_loss_weight,
             "non_answer_abstain_loss_weight": self.non_answer_abstain_loss_weight,
+            "non_answer_lm_retention_loss_weight": self.non_answer_lm_retention_loss_weight,
             "unsafe_margin_loss_weight": self.unsafe_margin_loss_weight,
             "unsafe_margin": self.unsafe_margin,
             "router_call_threshold": self.router_call_threshold,
@@ -185,6 +187,7 @@ def run_symbolic_bridge_lm(
     answer_call_abstain_loss_weight: float = 0.0,
     answer_unsafe_loss_weight: float = 0.0,
     non_answer_abstain_loss_weight: float = 0.0,
+    non_answer_lm_retention_loss_weight: float = 0.0,
     unsafe_margin_loss_weight: float = 0.0,
     unsafe_margin: float = 0.5,
     router_call_threshold: float = 0.0,
@@ -262,6 +265,7 @@ def run_symbolic_bridge_lm(
                 answer_call_abstain_loss_weight=answer_call_abstain_loss_weight,
                 answer_unsafe_loss_weight=answer_unsafe_loss_weight,
                 non_answer_abstain_loss_weight=non_answer_abstain_loss_weight,
+                non_answer_lm_retention_loss_weight=non_answer_lm_retention_loss_weight,
                 unsafe_margin_loss_weight=unsafe_margin_loss_weight,
                 unsafe_margin=unsafe_margin,
                 router_call_threshold=router_call_threshold,
@@ -303,6 +307,7 @@ def run_symbolic_bridge_lm(
         answer_call_abstain_loss_weight=answer_call_abstain_loss_weight,
         answer_unsafe_loss_weight=answer_unsafe_loss_weight,
         non_answer_abstain_loss_weight=non_answer_abstain_loss_weight,
+        non_answer_lm_retention_loss_weight=non_answer_lm_retention_loss_weight,
         unsafe_margin_loss_weight=unsafe_margin_loss_weight,
         unsafe_margin=unsafe_margin,
         router_call_threshold=router_call_threshold,
@@ -342,6 +347,7 @@ def train_lm_contract_variant(
     answer_call_abstain_loss_weight: float,
     answer_unsafe_loss_weight: float,
     non_answer_abstain_loss_weight: float,
+    non_answer_lm_retention_loss_weight: float,
     unsafe_margin_loss_weight: float,
     unsafe_margin: float,
     router_call_threshold: float,
@@ -454,6 +460,13 @@ def train_lm_contract_variant(
                 router_logits,
                 mask=role_mask(torch, fit_batch, ("prose", "math_context")),
             )
+            non_answer_lm_retention_loss = masked_token_nll(
+                torch,
+                token_logits,
+                None,
+                fit_batch.target_ids,
+                role_mask(torch, fit_batch, ("prose", "math_context")),
+            )
             loss = (
                 token_loss
                 + router_loss_weight * router_loss
@@ -462,6 +475,7 @@ def train_lm_contract_variant(
                 + answer_call_abstain_loss_weight * answer_call_abstain_loss
                 + answer_unsafe_loss_weight * answer_unsafe_loss
                 + non_answer_abstain_loss_weight * non_answer_abstain_loss
+                + non_answer_lm_retention_loss_weight * non_answer_lm_retention_loss
                 + unsafe_margin_loss_weight * unsafe_margin_loss
             )
         else:
@@ -497,6 +511,7 @@ def train_lm_contract_variant(
             answer_call_abstain_loss_value = 0.0
             answer_unsafe_loss_value = 0.0
             non_answer_abstain_loss_value = 0.0
+            non_answer_lm_retention_loss_value = 0.0
             unsafe_margin_loss_value = 0.0
             if use_router:
                 router_class_weights = router_loss_class_weights(
@@ -557,6 +572,14 @@ def train_lm_contract_variant(
                     mask=role_mask(torch, batch, ("prose", "math_context")),
                 )
                 non_answer_abstain_loss_value = float(non_answer_abstain_loss.detach().cpu().item())
+                non_answer_lm_retention_loss = masked_token_nll(
+                    torch,
+                    token_logits,
+                    None,
+                    batch.target_ids,
+                    role_mask(torch, batch, ("prose", "math_context")),
+                )
+                non_answer_lm_retention_loss_value = float(non_answer_lm_retention_loss.detach().cpu().item())
             split_metrics[split] = evaluate_contract_outputs(
                 torch,
                 batch,
@@ -578,6 +601,7 @@ def train_lm_contract_variant(
                     + answer_call_abstain_loss_weight * answer_call_abstain_loss_value
                     + answer_unsafe_loss_weight * answer_unsafe_loss_value
                     + non_answer_abstain_loss_weight * non_answer_abstain_loss_value
+                    + non_answer_lm_retention_loss_weight * non_answer_lm_retention_loss_value
                     + unsafe_margin_loss_weight * unsafe_margin_loss_value
                 ),
             )
@@ -1733,6 +1757,7 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
         f"Answer call/abstain loss weight: `{report.answer_call_abstain_loss_weight}`",
         f"Answer unsafe loss weight: `{report.answer_unsafe_loss_weight}`",
         f"Non-answer abstain loss weight: `{report.non_answer_abstain_loss_weight}`",
+        f"Non-answer LM retention loss weight: `{report.non_answer_lm_retention_loss_weight}`",
         f"Unsafe margin loss weight: `{report.unsafe_margin_loss_weight}`",
         f"Unsafe margin: `{report.unsafe_margin}`",
         f"Router call threshold: `{report.router_call_threshold}`",

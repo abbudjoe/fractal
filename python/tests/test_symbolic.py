@@ -790,6 +790,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 answer_call_abstain_loss_weight=0.8,
                 answer_unsafe_loss_weight=0.6,
                 non_answer_abstain_loss_weight=0.7,
+                non_answer_lm_retention_loss_weight=0.9,
                 unsafe_margin_loss_weight=1.25,
                 unsafe_margin=0.4,
                 router_call_threshold=0.25,
@@ -808,6 +809,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertEqual(report.answer_call_abstain_loss_weight, 0.8)
             self.assertEqual(report.answer_unsafe_loss_weight, 0.6)
             self.assertEqual(report.non_answer_abstain_loss_weight, 0.7)
+            self.assertEqual(report.non_answer_lm_retention_loss_weight, 0.9)
             self.assertEqual(report.unsafe_margin_loss_weight, 1.25)
             self.assertEqual(report.unsafe_margin, 0.4)
             self.assertEqual(report.router_call_threshold, 0.25)

@@ -747,7 +747,7 @@ Resolution block:
 | Resolution needed | Determine whether the EML bridge is useful outside the controlled synthetic language/math grammar. |
 | Promotion condition | The hybrid must improve math-answer accuracy/NLL without degrading pure-language/prose behavior and without violating unsafe-call or unsafe-mass gates. |
 | Current blocker | Math-answer transfer passes, but prose retention does not. The fusion path is useful as an answer/action bridge, not yet as a general next-token improvement. |
-| Next action | Run the ablation ladder one step at a time. First result: answer-span-only fusion preserves answer gains but does not solve prose NLL, so the next ablation should target the shared training objective/prose-retention loss. |
+| Next action | Run the ablation ladder one step at a time. Ablation 1 preserved answer gains but did not solve prose NLL. Ablation 2 retention-only worsened prose and broke answer safety. The next clean test should combine span gating with a smaller or differently targeted retention term, or use a frozen token-only teacher rather than extra self-NLL. |
 
 ### Gate 5 Ablation 1: Answer-Span-Only Fusion
 
@@ -823,3 +823,79 @@ Interpretation:
 - Therefore the main failure is probably not stray softmax mass on prose. The
   next ablation should target the shared training objective, such as explicit
   prose-retention/KL against the token-only LM on non-answer roles.
+
+### Gate 5 Ablation 2: Non-Answer LM Retention
+
+Question:
+
+> Is prose degradation caused by router/fusion training pulling the shared LM
+> head away from non-answer language modeling?
+
+Change:
+
+- Add `non_answer_lm_retention_loss_weight`.
+- Leave answer-span-only fusion off.
+- Add extra pre-fusion LM-head NLL on `prose` and `math_context` roles for
+  router/fusion variants.
+- Keep model size, training data, calibration rotations, safety losses, and MPS
+  backend otherwise unchanged.
+
+Artifact:
+
+```text
+artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-non-answer-retention-v1/
+```
+
+Command:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260430/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260431/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260432/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260433/summary.json \
+  --run-label gate5-ablation-non-answer-retention-v1 \
+  --output-dir artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-non-answer-retention-v1 \
+  --backbone transformer \
+  --transformer-layers 2 \
+  --transformer-heads 4 \
+  --transformer-ffn-multiplier 2 \
+  --epochs 600 \
+  --learning-rate 0.004 \
+  --hidden-units 64 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 1.0 \
+  --answer-call-abstain-loss-weight 8.0 \
+  --answer-unsafe-loss-weight 5.0 \
+  --non-answer-abstain-loss-weight 2.0 \
+  --non-answer-lm-retention-loss-weight 2.0 \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --device mps \
+  --output table
+```
+
+Caption: Gate 5 Ablation 2 adds only a non-answer LM-retention objective and
+does not use answer-span fusion. This tests the shared-training hypothesis
+without stacking the previous inference-time span gate.
+
+| run | whole acc | whole NLL | math-answer acc | math-answer NLL | prose acc | prose NLL | context acc | context NLL | answer unsafe mass |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| repaired Gate 5 | 0.256 | 5.992 | 0.544 | 2.301 | 0.167 | 7.214 | 0.565 | 1.677 | 0.041 |
+| answer-span fusion | 0.273 | 6.094 | 0.550 | 2.092 | 0.178 | 7.327 | 0.615 | 1.827 | 0.045 |
+| retention-only | 0.256 | 6.537 | 0.575 | 2.525 | 0.136 | 7.928 | 0.694 | 1.557 | 0.153 |
+
+Interpretation:
+
+- Retention-only is not a valid repair at weight `2.0`. It improves
+  math-answer accuracy (`0.575`) and math-context accuracy (`0.694`), but
+  worsens whole-corpus NLL and prose behavior.
+- It breaks the safety part of the answer contract: unsafe answer mass rises
+  from `0.041` to `0.153`, above the `<= 0.05` gate.
+- The extra self-NLL objective appears to redirect capacity toward context
+  tokens while weakening answer safety calibration. It is not equivalent to a
+  true frozen-token-only teacher or KL-retention objective.
+- Do not stack this exact retention-only setting into the bridge. A better next
+  ablation is either a lower retention weight with answer-span fusion, or a
+  frozen token-only teacher KL on prose roles.
