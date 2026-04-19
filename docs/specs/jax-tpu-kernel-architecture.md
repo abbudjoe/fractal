@@ -467,6 +467,96 @@ Next ladder:
 The TPU VM was deleted after the ladder; `gcloud compute tpus tpu-vm list` was
 empty afterward.
 
+## RGRP Scan-Unroll and Sequence Scaling Ladder
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-rgrp-next-20260419020412`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- shape base: `vocab=8192,batch=4,seq=256,d_model=512,layers=2,heads=8`
+- path: tiny repo-owned LM-shaped forward + gradient smoke
+- stable timing: `warmup=3`, `iterations=30`
+- artifacts:
+  `experiments/jax_tpu/rgrp_lowering_ladder/20260419T0204Z/rgrp_next_ladder_stable.jsonl`
+  and
+  `experiments/jax_tpu/rgrp_lowering_ladder/20260419T0204Z/rgrp_next_ladder_stable.md`
+
+| Case | Seam | Seq | Unroll | Params | Compile seconds | Steady-state tok/s | Synthetic loss |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `mlp-control` | MLP | `256` |  | `14.82M` | `3.74` | `143,927` | `9.1238` |
+| `unroll-1` | RGRP | `256` | `1` | `12.99M` | `4.34` | `109,946` | `9.1116` |
+| `unroll-3` | RGRP | `256` | `3` | `12.99M` | `5.60` | `136,460` | `9.1116` |
+| `unroll-4` | RGRP | `256` | `4` | `12.99M` | `5.50` | `129,154` | `9.1116` |
+| `unroll-5` | RGRP | `256` | `5` | `12.99M` | `6.35` | `126,510` | `9.1116` |
+| `unroll-6` | RGRP | `256` | `6` | `12.99M` | `8.70` | `135,402` | `9.1116` |
+| `seq512-mlp` | MLP | `512` |  | `14.95M` | `5.61` | `297,222` | `9.1168` |
+| `seq512-rgrp-unroll4` | RGRP | `512` | `4` | `13.12M` | `6.96` | `163,925` | `9.1121` |
+| `seq1024-mlp` | MLP | `1024` |  | `15.22M` | `5.88` | `427,136` | `9.1092` |
+| `seq1024-rgrp-unroll4` | RGRP | `1024` | `4` | `13.38M` | `8.27` | `183,856` | `9.1110` |
+
+Interpretation:
+
+- At `seq=256`, `scan_unroll=3` is the best stable RGRP setting in this ladder.
+- `scan_unroll=3` improved throughput by about `24%` over `scan_unroll=1`.
+- At `seq=256`, RGRP with `unroll=3` trailed the matched MLP control by only
+  about `5%`, while using about `1.84M` fewer parameters in this toy shell.
+- The initial sequence scaling rows used `unroll=4` from the previous ladder,
+  so a focused long-sequence `unroll=3` vs `unroll=4` follow-up was required
+  before making a MaxText recommendation.
+
+The TPU VM was deleted after the ladder; `gcloud compute tpus tpu-vm list` was
+empty afterward.
+
+## RGRP Long-Sequence Unroll Follow-Up
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-rgrp-sequnroll-20260419021521`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- shape: `vocab=8192,batch=4,d_model=512,layers=2,heads=8`
+- path: tiny repo-owned LM-shaped forward + gradient smoke
+- timing: `warmup=3`, `iterations=30`
+- artifacts:
+  `experiments/jax_tpu/rgrp_lowering_ladder/20260419T0215Z/rgrp_sequence_unroll_ladder.jsonl`
+  and
+  `experiments/jax_tpu/rgrp_lowering_ladder/20260419T0215Z/rgrp_sequence_unroll_ladder.md`
+
+| Case | Seam | Seq | Unroll | Params | Compile seconds | Steady-state tok/s | Synthetic loss |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `seq512-mlp` | MLP | `512` |  | `14.95M` | `5.62` | `338,918` | `9.1168` |
+| `seq512-rgrp-unroll3` | RGRP | `512` | `3` | `13.12M` | `8.62` | `187,648` | `9.1121` |
+| `seq512-rgrp-unroll4` | RGRP | `512` | `4` | `13.12M` | `6.95` | `167,513` | `9.1121` |
+| `seq1024-mlp` | MLP | `1024` |  | `15.22M` | `5.98` | `426,400` | `9.1092` |
+| `seq1024-rgrp-unroll3` | RGRP | `1024` | `3` | `13.38M` | `8.24` | `201,841` | `9.1110` |
+| `seq1024-rgrp-unroll4` | RGRP | `1024` | `4` | `13.38M` | `8.17` | `188,018` | `9.1110` |
+
+Interpretation:
+
+- `scan_unroll=3` remains the best current RGRP TPU setting at longer sequence
+  lengths.
+- `unroll=3` beat `unroll=4` by about `12%` at `seq=512` and about `7%` at
+  `seq=1024`.
+- The current reference `lax.scan` RGRP lowering still scales worse than the MLP
+  control as sequence length increases. At `seq=512`, RGRP reached about `55%`
+  of MLP throughput; at `seq=1024`, it reached about `47%`.
+- This does not resolve architecture quality. It says that, for TPU speed,
+  plain `lax.scan` is not enough. A serious TPU path needs either a MaxText
+  quality-only run that accepts the speed tax, or a Pallas/custom recurrent
+  lowering before making efficiency claims.
+
+Current TPU policy:
+
+- Use `block-diagonal-4-masked-dense`, sequence projection, trig precompute, and
+  `scan_unroll=3` for any near-term JAX/TPU RGRP reference run.
+- Keep `scan_unroll` explicit in configs. It is a backend policy knob, not a
+  mathematical part of the primitive.
+- Do not claim TPU throughput competitiveness from this reference lowering.
+
+The TPU VM was deleted after the follow-up; `gcloud compute tpus tpu-vm list`
+was empty afterward.
+
 ## Non-Goals
 
 - Do not use this lane to make CUDA speed claims.
