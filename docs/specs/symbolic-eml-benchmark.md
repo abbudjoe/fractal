@@ -1648,3 +1648,24 @@ Gate 5 verdict:
   control.
 - The next bridge experiment should either restrict expert fusion to explicit
   answer/action spans or add a stronger non-answer/prose retention objective.
+
+Gate 5 Ablation 1:
+
+```text
+artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-answer-span-fusion-v1/
+```
+
+This ablation adds `fusion_allowed_roles` and reruns the same repaired recipe
+with soft expert fusion allowed only on `math_answer` / `math_only` roles.
+
+| condition | whole acc | whole NLL | math-answer acc | math-answer NLL | prose acc | prose NLL | answer unsafe mass |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| repaired Gate 5 | 0.256 | 5.992 | 0.544 | 2.301 | 0.167 | 7.214 | 0.041 |
+| answer-span fusion | 0.273 | 6.094 | 0.550 | 2.092 | 0.178 | 7.327 | 0.045 |
+
+Interpretation:
+
+- The answer-token edge survives answer-span-only fusion.
+- Non-answer expert mass is eliminated by construction.
+- Prose NLL still does not recover, so the next ablation should target shared
+  training/prose retention rather than only the final fusion mask.

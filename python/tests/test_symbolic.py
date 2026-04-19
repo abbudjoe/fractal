@@ -794,6 +794,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 unsafe_margin=0.4,
                 router_call_threshold=0.25,
                 expert_logit_scale=3.0,
+                fusion_allowed_roles=("math_answer",),
                 device="cpu",
                 extra_fit_bridge_summary_paths=(extra_bridge_summary,),
             )
@@ -811,6 +812,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertEqual(report.unsafe_margin, 0.4)
             self.assertEqual(report.router_call_threshold, 0.25)
             self.assertEqual(report.expert_logit_scale, 3.0)
+            self.assertEqual(report.fusion_allowed_roles, ("math_answer",))
             self.assertEqual(report.extra_fit_bridge_summary_paths, (str(extra_bridge_summary.resolve()),))
             self.assertEqual(report.extra_fit_feature_table_paths, (str(extra_feature_table.resolve()),))
             self.assertEqual(report.summary["extra_fit_row_count"], len(extra_rows))
@@ -819,9 +821,15 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertIn("lm-router-logit-fusion", run_names)
             self.assertIn("lm-router-prob-mixture", run_names)
             prob_mixture = next(run for run in report.runs if run.name == "lm-router-prob-mixture")
+            self.assertEqual(prob_mixture.extrapolation_expert_call_rate, 0.0)
+            self.assertEqual(prob_mixture.extrapolation_unsafe_call_rate, 0.0)
             self.assertIsNotNone(prob_mixture.role_metrics)
             assert prob_mixture.role_metrics is not None
             self.assertIn("symbolic", prob_mixture.role_metrics["extrapolation"])
+            self.assertEqual(
+                prob_mixture.role_metrics["extrapolation"]["symbolic"]["expert_call_rate"],
+                0.0,
+            )
             self.assertIn("router_contract_unsafe_call_rate", report.summary)
             self.assertIn("router_contract_abstain_recall", report.summary)
             self.assertIn("best_extrapolation_final_nll", report.summary)

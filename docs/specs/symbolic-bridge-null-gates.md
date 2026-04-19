@@ -747,4 +747,79 @@ Resolution block:
 | Resolution needed | Determine whether the EML bridge is useful outside the controlled synthetic language/math grammar. |
 | Promotion condition | The hybrid must improve math-answer accuracy/NLL without degrading pure-language/prose behavior and without violating unsafe-call or unsafe-mass gates. |
 | Current blocker | Math-answer transfer passes, but prose retention does not. The fusion path is useful as an answer/action bridge, not yet as a general next-token improvement. |
-| Next action | Add a Gate 6-style prose-retention or action-only interface test: either keep expert fusion restricted to explicit answer spans, or train with a stronger non-answer/prose retention objective and rerun Gate 5. |
+| Next action | Run the ablation ladder one step at a time. First result: answer-span-only fusion preserves answer gains but does not solve prose NLL, so the next ablation should target the shared training objective/prose-retention loss. |
+
+### Gate 5 Ablation 1: Answer-Span-Only Fusion
+
+Question:
+
+> Is the prose degradation caused by stray soft expert fusion on non-answer
+> tokens?
+
+Change:
+
+- Add `fusion_allowed_roles`.
+- Rerun the Gate 5 recipe with soft expert fusion allowed only on
+  `math_answer` and `math_only` roles.
+- Keep model size, training data, calibration rotations, loss weights, and MPS
+  backend otherwise unchanged.
+
+Artifact:
+
+```text
+artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-answer-span-fusion-v1/
+```
+
+Command:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260430/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260431/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260432/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260433/summary.json \
+  --run-label gate5-ablation-answer-span-fusion-v1 \
+  --output-dir artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-answer-span-fusion-v1 \
+  --backbone transformer \
+  --transformer-layers 2 \
+  --transformer-heads 4 \
+  --transformer-ffn-multiplier 2 \
+  --epochs 600 \
+  --learning-rate 0.004 \
+  --hidden-units 64 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 1.0 \
+  --answer-call-abstain-loss-weight 8.0 \
+  --answer-unsafe-loss-weight 5.0 \
+  --non-answer-abstain-loss-weight 2.0 \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --fusion-allowed-roles math_answer,math_only \
+  --device mps \
+  --output table
+```
+
+Caption: Gate 5 Ablation 1 compares the original repaired probability-mixture
+run with answer-span-only fusion. The intervention is narrow: expert mass is
+forced to zero on prose and math-context tokens, while answer tokens can still
+receive the symbolic expert mixture.
+
+| run | whole acc | whole NLL | math-answer acc | math-answer NLL | prose acc | prose NLL | context acc | context NLL | answer unsafe mass |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| repaired Gate 5 | 0.256 | 5.992 | 0.544 | 2.301 | 0.167 | 7.214 | 0.565 | 1.677 | 0.041 |
+| answer-span fusion | 0.273 | 6.094 | 0.550 | 2.092 | 0.178 | 7.327 | 0.615 | 1.827 | 0.045 |
+
+Interpretation:
+
+- Answer-span fusion does not remove the symbolic answer benefit. The
+  math-answer result is essentially preserved and slightly improves on this
+  run (`0.544 -> 0.550`, NLL `2.301 -> 2.092`).
+- The gate successfully removes non-answer expert mass: prose and math-context
+  expert mass/unsafe mass go to `0.000`.
+- Prose is not repaired. Prose accuracy moves up a little (`0.167 -> 0.178`),
+  but prose NLL gets slightly worse (`7.214 -> 7.327`) and remains worse than
+  the pure token-only prose baseline from the original Gate 5 run.
+- Therefore the main failure is probably not stray softmax mass on prose. The
+  next ablation should target the shared training objective, such as explicit
+  prose-retention/KL against the token-only LM on non-answer roles.

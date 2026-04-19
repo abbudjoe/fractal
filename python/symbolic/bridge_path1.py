@@ -149,6 +149,7 @@ def run_symbolic_bridge_path1(
         unsafe_margin=unsafe_margin,
         router_call_threshold=router_call_threshold,
         expert_logit_scale=0.0,
+        fusion_allowed_roles=(),
         device=str(selected_device),
         expert_ids=expert_ids,
         abstain_index=abstain_index,

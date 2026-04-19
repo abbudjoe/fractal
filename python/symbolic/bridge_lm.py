@@ -126,6 +126,7 @@ class BridgeLmReport:
     unsafe_margin: float
     router_call_threshold: float
     expert_logit_scale: float
+    fusion_allowed_roles: tuple[str, ...]
     device: str
     expert_ids: tuple[str, ...]
     abstain_index: int
@@ -158,6 +159,7 @@ class BridgeLmReport:
             "unsafe_margin": self.unsafe_margin,
             "router_call_threshold": self.router_call_threshold,
             "expert_logit_scale": self.expert_logit_scale,
+            "fusion_allowed_roles": list(self.fusion_allowed_roles),
             "device": self.device,
             "expert_ids": list(self.expert_ids),
             "abstain_index": self.abstain_index,
@@ -187,6 +189,7 @@ def run_symbolic_bridge_lm(
     unsafe_margin: float = 0.5,
     router_call_threshold: float = 0.0,
     expert_logit_scale: float = 6.0,
+    fusion_allowed_roles: tuple[str, ...] = (),
     backbone: str = "gru",
     transformer_layers: int = 2,
     transformer_heads: int = 4,
@@ -263,6 +266,7 @@ def run_symbolic_bridge_lm(
                 unsafe_margin=unsafe_margin,
                 router_call_threshold=router_call_threshold,
                 expert_logit_scale=expert_logit_scale,
+                fusion_allowed_roles=fusion_allowed_roles,
                 backbone=backbone,
                 transformer_layers=transformer_layers,
                 transformer_heads=transformer_heads,
@@ -303,6 +307,7 @@ def run_symbolic_bridge_lm(
         unsafe_margin=unsafe_margin,
         router_call_threshold=router_call_threshold,
         expert_logit_scale=expert_logit_scale,
+        fusion_allowed_roles=fusion_allowed_roles,
         device=str(selected_device),
         expert_ids=expert_ids,
         abstain_index=abstain_index,
@@ -341,6 +346,7 @@ def train_lm_contract_variant(
     unsafe_margin: float,
     router_call_threshold: float,
     expert_logit_scale: float,
+    fusion_allowed_roles: tuple[str, ...],
     backbone: str,
     transformer_layers: int,
     transformer_heads: int,
@@ -387,6 +393,7 @@ def train_lm_contract_variant(
             token_bins,
             fusion_mode=fusion_mode,
             expert_logit_scale=expert_logit_scale,
+            fusion_allowed_roles=fusion_allowed_roles,
         )
         token_loss = masked_token_nll(
             torch,
@@ -467,7 +474,7 @@ def train_lm_contract_variant(
     with torch.no_grad():
         for split, batch in splits.items():
             token_logits, router_logits = model(batch.previous_tokens, batch.features)
-            final_logits, final_probabilities, _router_stats = fused_token_outputs(
+            final_logits, final_probabilities, router_stats = fused_token_outputs(
                 torch,
                 batch,
                 token_logits,
@@ -475,6 +482,7 @@ def train_lm_contract_variant(
                 token_bins,
                 fusion_mode=fusion_mode,
                 expert_logit_scale=expert_logit_scale,
+                fusion_allowed_roles=fusion_allowed_roles,
             )
             token_loss = masked_token_nll(
                 torch,
@@ -560,6 +568,7 @@ def train_lm_contract_variant(
                 fusion_mode=fusion_mode,
                 final_logits=final_logits,
                 final_probabilities=final_probabilities,
+                router_stats=router_stats,
                 router_call_threshold=router_call_threshold,
                 loss=(
                     float(token_loss.detach().cpu().item())
@@ -617,16 +626,18 @@ def fused_token_outputs(
     *,
     fusion_mode: str,
     expert_logit_scale: float,
+    fusion_allowed_roles: tuple[str, ...] = (),
 ) -> tuple[Any | None, Any | None, dict[str, Any]]:
     if fusion_mode in {"none", "hard-call"}:
         return token_logits, None, {}
     if fusion_mode not in {"logit-fusion", "prob-mixture"}:
         raise ValueError("fusion_mode must be one of none|hard-call|logit-fusion|prob-mixture")
+    role_gate = fusion_role_gate(torch, batch, fusion_allowed_roles)
     router_probabilities = torch.nn.functional.softmax(router_logits, dim=-1)
     expert_count = int(batch.expert_tokens.shape[-1])
     expert_probabilities = router_probabilities[..., :expert_count]
     valid_mask = batch.expert_valid_mask & (batch.expert_tokens >= 0)
-    valid_probabilities = expert_probabilities * valid_mask.float()
+    valid_probabilities = expert_probabilities * valid_mask.float() * role_gate.unsqueeze(-1).float()
     token_indices = batch.expert_tokens.clamp(min=0, max=max(0, token_bins - 1))
     expert_token_mass = torch.zeros(
         (*batch.target_ids.shape, token_bins),
@@ -636,7 +647,7 @@ def fused_token_outputs(
     expert_token_mass.scatter_add_(-1, token_indices, valid_probabilities.to(token_logits.dtype))
     expert_mass = expert_token_mass.sum(dim=-1, keepdim=True).clamp(min=0.0, max=1.0)
     unsafe_mass = (
-        expert_probabilities * (~batch.expert_safe_mask).float()
+        expert_probabilities * (~batch.expert_safe_mask).float() * role_gate.unsqueeze(-1).float()
     ).sum(dim=-1)
     stats = {
         "expert_mass": expert_mass.squeeze(-1),
@@ -648,6 +659,16 @@ def fused_token_outputs(
     final_probabilities = (1.0 - expert_mass) * lm_probabilities + expert_token_mass
     final_probabilities = final_probabilities / final_probabilities.sum(dim=-1, keepdim=True).clamp(min=1.0e-8)
     return None, final_probabilities, stats
+
+
+def fusion_role_gate(torch: Any, batch: SymbolicBridgeBatch, allowed_roles: tuple[str, ...]) -> Any:
+    if not allowed_roles:
+        return torch.ones_like(batch.symbolic_mask, dtype=torch.bool)
+    selected = torch.zeros_like(batch.symbolic_mask, dtype=torch.bool)
+    for role in allowed_roles:
+        if role in batch.role_names:
+            selected = selected | (batch.role_ids == batch.role_names.index(role))
+    return selected & batch.symbolic_mask
 
 
 def build_symbolic_bridge_lm_model(
@@ -1126,6 +1147,7 @@ def evaluate_contract_outputs(
     fusion_mode: str = "hard-call",
     final_logits: Any | None = None,
     final_probabilities: Any | None = None,
+    router_stats: dict[str, Any] | None = None,
     router_call_threshold: float,
     loss: float,
 ) -> dict[str, float | None]:
@@ -1172,10 +1194,14 @@ def evaluate_contract_outputs(
             router_predictions,
             torch.full_like(router_predictions, expert_count),
         )
-        expert_probabilities = router_probabilities[..., :expert_count]
-        valid_mask = batch.expert_valid_mask & (batch.expert_tokens >= 0)
-        expert_call_metric = (expert_probabilities * valid_mask.float()).sum(dim=-1).clamp(min=0.0, max=1.0)
-        unsafe_call_metric = (expert_probabilities * (~batch.expert_safe_mask).float()).sum(dim=-1).clamp(min=0.0, max=1.0)
+        if router_stats and "expert_mass" in router_stats and "unsafe_mass" in router_stats:
+            expert_call_metric = router_stats["expert_mass"].clamp(min=0.0, max=1.0)
+            unsafe_call_metric = router_stats["unsafe_mass"].clamp(min=0.0, max=1.0)
+        else:
+            expert_probabilities = router_probabilities[..., :expert_count]
+            valid_mask = batch.expert_valid_mask & (batch.expert_tokens >= 0)
+            expert_call_metric = (expert_probabilities * valid_mask.float()).sum(dim=-1).clamp(min=0.0, max=1.0)
+            unsafe_call_metric = (expert_probabilities * (~batch.expert_safe_mask).float()).sum(dim=-1).clamp(min=0.0, max=1.0)
     else:
         effective_router_predictions = router_predictions
         expert_call_metric = torch.zeros_like(batch.target_ids, dtype=torch.float32)
@@ -1711,6 +1737,7 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
         f"Unsafe margin: `{report.unsafe_margin}`",
         f"Router call threshold: `{report.router_call_threshold}`",
         f"Expert logit scale: `{report.expert_logit_scale}`",
+        f"Fusion allowed roles: `{list(report.fusion_allowed_roles) or 'all'}`",
         "",
         "| run | mode | features | val final acc | extrap final acc | val final NLL | extrap final NLL | extrap LM acc | router extrap acc | expert call rate | unsafe call rate | abstain recall |",
         "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
