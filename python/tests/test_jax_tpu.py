@@ -149,6 +149,30 @@ class JaxTpuContractTests(unittest.TestCase):
         self.assertEqual(config.block_count, 4)
         self.assertTrue(config.stores_block_transform_as_dense)
 
+    def test_rgrp_lowering_knobs_validate(self) -> None:
+        config = rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(
+            d_model=16,
+            state_transform="block-diagonal-4-masked-dense",
+            dtype="bfloat16",
+            scan_unroll=4,
+            projection_mode="sequence",
+            trig_mode="scan",
+        )
+        config.validate()
+
+        with self.assertRaisesRegex(ValueError, "scan_unroll"):
+            rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(d_model=16, scan_unroll=0).validate()
+        with self.assertRaisesRegex(ValueError, "projection_mode"):
+            rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(d_model=16, projection_mode="packed").validate()
+        with self.assertRaisesRegex(ValueError, "trig_mode"):
+            rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(d_model=16, trig_mode="lookup").validate()
+        with self.assertRaisesRegex(ValueError, "requires trig_mode='scan'"):
+            rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(
+                d_model=16,
+                projection_mode="scan",
+                trig_mode="precompute",
+            ).validate()
+
     def test_jax_lm_smoke_config_validates_without_jax(self) -> None:
         baseline = lm_smoke.JaxLmSmokeConfig(
             variant="mlp",
@@ -170,6 +194,9 @@ class JaxTpuContractTests(unittest.TestCase):
             layers=1,
             heads=4,
             rgrp_state_transform="block-diagonal-4-masked-dense",
+            rgrp_scan_unroll=2,
+            rgrp_projection_mode="sequence",
+            rgrp_trig_mode="scan",
         )
         recurrent.validate()
         self.assertEqual(recurrent.d_ff, 128)
@@ -259,6 +286,50 @@ class JaxTpuContractTests(unittest.TestCase):
             atol=1.0e-5,
             rtol=1.0e-5,
         )
+
+    @unittest.skipUnless(rgrp_adapter.jax_available(), "JAX is not installed in this environment")
+    def test_rgrp_lowering_modes_match_reference(self) -> None:
+        import numpy as np
+
+        key = rgrp_adapter.jax.random.PRNGKey(19)
+        param_key, input_key = rgrp_adapter.jax.random.split(key)
+        reference_config = rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(
+            d_model=16,
+            state_transform="block-diagonal-4-masked-dense",
+            dtype="float32",
+            projection_mode="sequence",
+            trig_mode="precompute",
+        )
+        trig_scan_config = rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(
+            d_model=16,
+            state_transform="block-diagonal-4-masked-dense",
+            dtype="float32",
+            projection_mode="sequence",
+            trig_mode="scan",
+        )
+        projection_scan_config = rgrp_adapter.RotaryGatedRecurrentStateUpdateConfig(
+            d_model=16,
+            state_transform="block-diagonal-4-masked-dense",
+            dtype="float32",
+            projection_mode="scan",
+            trig_mode="scan",
+        )
+        params = rgrp_adapter.init_params(param_key, reference_config)
+        inputs = rgrp_adapter.jax.random.normal(input_key, (2, 5, 16), dtype=rgrp_adapter.jnp.float32)
+
+        reference_outputs, reference_state = rgrp_adapter.scan(params, inputs, reference_config)
+        trig_outputs, trig_state = rgrp_adapter.scan(params, inputs, trig_scan_config)
+        projection_outputs, projection_state = rgrp_adapter.scan(params, inputs, projection_scan_config)
+
+        np.testing.assert_allclose(np.asarray(trig_outputs), np.asarray(reference_outputs), atol=1.0e-5, rtol=1.0e-5)
+        np.testing.assert_allclose(np.asarray(trig_state), np.asarray(reference_state), atol=1.0e-5, rtol=1.0e-5)
+        np.testing.assert_allclose(
+            np.asarray(projection_outputs),
+            np.asarray(reference_outputs),
+            atol=1.0e-5,
+            rtol=1.0e-5,
+        )
+        np.testing.assert_allclose(np.asarray(projection_state), np.asarray(reference_state), atol=1.0e-5, rtol=1.0e-5)
 
 
 if __name__ == "__main__":

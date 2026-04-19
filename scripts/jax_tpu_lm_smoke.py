@@ -13,7 +13,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from python.jax_tpu.adapters.rotary_gated_recurrent_state_update import SUPPORTED_STATE_TRANSFORMS
+from python.jax_tpu.adapters.rotary_gated_recurrent_state_update import (
+    SUPPORTED_PROJECTION_MODES,
+    SUPPORTED_STATE_TRANSFORMS,
+    SUPPORTED_TRIG_MODES,
+)
 from python.jax_tpu.lm_smoke import SUPPORTED_VARIANTS, JaxLmSmokeConfig, benchmark_lm
 
 
@@ -30,6 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument("--ffn-multiplier", type=int, default=4)
     parser.add_argument("--rgrp-state-transform", choices=SUPPORTED_STATE_TRANSFORMS, default="block-diagonal-4-masked-dense")
+    parser.add_argument("--rgrp-scan-unroll", type=int, default=1)
+    parser.add_argument("--rgrp-projection-mode", choices=SUPPORTED_PROJECTION_MODES, default="sequence")
+    parser.add_argument("--rgrp-trig-mode", choices=SUPPORTED_TRIG_MODES, default="precompute")
     parser.add_argument("--dtype", choices=["bfloat16", "float32"], default="bfloat16")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--warmup", type=int, default=1)
@@ -51,6 +58,9 @@ def main(argv: list[str] | None = None) -> int:
         heads=args.heads,
         ffn_multiplier=args.ffn_multiplier,
         rgrp_state_transform=args.rgrp_state_transform,
+        rgrp_scan_unroll=args.rgrp_scan_unroll,
+        rgrp_projection_mode=args.rgrp_projection_mode,
+        rgrp_trig_mode=args.rgrp_trig_mode,
         dtype=args.dtype,
     )
     try:

@@ -41,6 +41,9 @@ class JaxLmSmokeConfig:
     heads: int = 4
     ffn_multiplier: int = 4
     rgrp_state_transform: str = "block-diagonal-4-masked-dense"
+    rgrp_scan_unroll: int = 1
+    rgrp_projection_mode: str = "sequence"
+    rgrp_trig_mode: str = "precompute"
     dtype: str = "bfloat16"
 
     @property
@@ -65,6 +68,9 @@ class JaxLmSmokeConfig:
         rgrp.RotaryGatedRecurrentStateUpdateConfig(
             d_model=self.d_model,
             state_transform=self.rgrp_state_transform,
+            scan_unroll=self.rgrp_scan_unroll,
+            projection_mode=self.rgrp_projection_mode,
+            trig_mode=self.rgrp_trig_mode,
             dtype=self.dtype,
         ).validate()
 
@@ -139,6 +145,9 @@ def init_params(key: Array, config: JaxLmSmokeConfig) -> Params:
                 rgrp.RotaryGatedRecurrentStateUpdateConfig(
                     d_model=config.d_model,
                     state_transform=config.rgrp_state_transform,
+                    scan_unroll=config.rgrp_scan_unroll,
+                    projection_mode=config.rgrp_projection_mode,
+                    trig_mode=config.rgrp_trig_mode,
                     dtype=config.dtype,
                 ),
             )
@@ -200,6 +209,9 @@ def rgrp_ffn(hidden: Array, block: Params, config: JaxLmSmokeConfig) -> Array:
     rgrp_config = rgrp.RotaryGatedRecurrentStateUpdateConfig(
         d_model=config.d_model,
         state_transform=config.rgrp_state_transform,
+        scan_unroll=config.rgrp_scan_unroll,
+        projection_mode=config.rgrp_projection_mode,
+        trig_mode=config.rgrp_trig_mode,
         dtype=config.dtype,
     )
     outputs, _final_state = rgrp.scan(block["rgrp"], hidden, rgrp_config)
@@ -285,6 +297,9 @@ def benchmark_lm(
         "heads": config.heads,
         "ffn_multiplier": config.ffn_multiplier,
         "rgrp_state_transform": config.rgrp_state_transform if config.variant == "rgrp" else None,
+        "rgrp_scan_unroll": config.rgrp_scan_unroll if config.variant == "rgrp" else None,
+        "rgrp_projection_mode": config.rgrp_projection_mode if config.variant == "rgrp" else None,
+        "rgrp_trig_mode": config.rgrp_trig_mode if config.variant == "rgrp" else None,
         "dtype": config.dtype,
         "forward_only": forward_only,
         "parameter_count": param_count,

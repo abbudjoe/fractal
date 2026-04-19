@@ -14,7 +14,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from python.jax_tpu.adapters.rotary_gated_recurrent_state_update import (
+    SUPPORTED_PROJECTION_MODES,
     SUPPORTED_STATE_TRANSFORMS,
+    SUPPORTED_TRIG_MODES,
     benchmark_scan,
 )
 
@@ -27,6 +29,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seq-len", type=int, default=256)
     parser.add_argument("--d-model", type=int, default=512)
     parser.add_argument("--state-transform", choices=SUPPORTED_STATE_TRANSFORMS, default="block-diagonal-4")
+    parser.add_argument("--scan-unroll", type=int, default=1)
+    parser.add_argument("--projection-mode", choices=SUPPORTED_PROJECTION_MODES, default="sequence")
+    parser.add_argument("--trig-mode", choices=SUPPORTED_TRIG_MODES, default="precompute")
     parser.add_argument("--dtype", choices=["bfloat16", "float32"], default="bfloat16")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--warmup", type=int, default=1)
@@ -44,6 +49,9 @@ def main(argv: list[str] | None = None) -> int:
             seq_len=args.seq_len,
             d_model=args.d_model,
             state_transform=args.state_transform,
+            scan_unroll=args.scan_unroll,
+            projection_mode=args.projection_mode,
+            trig_mode=args.trig_mode,
             dtype=args.dtype,
             seed=args.seed,
             warmup=args.warmup,

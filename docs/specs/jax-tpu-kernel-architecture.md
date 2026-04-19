@@ -413,6 +413,60 @@ Interpretation:
 The TPU VM was deleted after the smoke; `gcloud compute tpus tpu-vm list` was
 empty afterward.
 
+## First RGRP JAX/XLA Lowering Ladder
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-rgrp-ladder-20260419014935`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- shape: `vocab=8192,batch=4,seq=256,d_model=512,layers=2,heads=8`
+- path: tiny repo-owned LM-shaped forward + gradient smoke
+- artifacts:
+  `experiments/jax_tpu/rgrp_lowering_ladder/20260419T0150Z/rgrp_lowering_ladder.jsonl`
+  and
+  `experiments/jax_tpu/rgrp_lowering_ladder/20260419T0150Z/rgrp_lowering_ladder.md`
+
+This ladder tested one compiler-sensitive axis at a time: state-transform
+storage, trig placement, input projection placement, and `jax.lax.scan` unroll.
+
+| Case | Seam | State | Projection | Trig | Unroll | Params | Compile seconds | Steady-state tok/s | Synthetic loss |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `mlp-control` | MLP |  |  |  |  | `14.82M` | `3.78` | `168,831` | `9.1238` |
+| `rgrp-default` | RGRP | `block-diagonal-4-masked-dense` | `sequence` | `precompute` | `1` | `12.99M` | `4.31` | `128,327` | `9.1116` |
+| `state-dense` | RGRP | `dense` | `sequence` | `precompute` | `1` | `12.99M` | `4.43` | `124,389` | `9.1245` |
+| `state-block4-grouped` | RGRP | `block-diagonal-4` | `sequence` | `precompute` | `1` | `12.59M` | `4.45` | `86,666` | `9.1171` |
+| `trig-inside-scan` | RGRP | `block-diagonal-4-masked-dense` | `sequence` | `scan` | `1` | `12.99M` | `4.26` | `109,420` | `9.1117` |
+| `projection-inside-scan` | RGRP | `block-diagonal-4-masked-dense` | `scan` | `scan` | `1` | `12.99M` | `4.24` | `108,438` | `9.1116` |
+| `unroll-2` | RGRP | `block-diagonal-4-masked-dense` | `sequence` | `precompute` | `2` | `12.99M` | `4.77` | `121,109` | `9.1116` |
+| `unroll-4` | RGRP | `block-diagonal-4-masked-dense` | `sequence` | `precompute` | `4` | `12.99M` | `5.37` | `142,740` | `9.1116` |
+| `unroll-8` | RGRP | `block-diagonal-4-masked-dense` | `sequence` | `precompute` | `8` | `12.99M` | `7.14` | `129,227` | `9.1117` |
+
+Interpretation:
+
+- The best first-pass RGRP lowering was `block-diagonal-4-masked-dense` with
+  sequence-wide projection, sequence-wide trig precompute, and `scan_unroll=4`.
+- `scan_unroll=4` improved RGRP throughput by about `11%` over the default
+  `scan_unroll=1`, at the cost of a longer compile.
+- The best RGRP variant still trailed the MLP control by about `15%` steady-state
+  throughput at this toy LM shape.
+- Explicit grouped block-diagonal storage lowered poorly on TPU, despite having
+  fewer parameters. Treat this as a backend lowering result, not as evidence
+  against structured state transforms in CUDA/Triton.
+- Moving trig or the packed projection inside the scan body hurt throughput.
+  TPU/XLA preferred the sequence-wide packed projection/control precompute.
+
+Next ladder:
+
+- Keep `block-diagonal-4-masked-dense`, sequence projection, trig precompute.
+- Re-test `scan_unroll in {3,4,5,6}` and add sequence length scaling
+  `seq in {256,512,1024}` before MaxText patching.
+- Do not use grouped block-diagonal storage for TPU unless a Pallas kernel owns
+  that layout explicitly.
+
+The TPU VM was deleted after the ladder; `gcloud compute tpus tpu-vm list` was
+empty afterward.
+
 ## Non-Goals
 
 - Do not use this lane to make CUDA speed claims.

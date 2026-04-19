@@ -30,6 +30,8 @@ SUPPORTED_STATE_TRANSFORMS = (
     "block-diagonal-2-masked-dense",
     "block-diagonal-4-masked-dense",
 )
+SUPPORTED_PROJECTION_MODES = ("sequence", "scan")
+SUPPORTED_TRIG_MODES = ("precompute", "scan")
 
 try:  # Keep normal repo imports/tests working when JAX is not installed locally.
     import jax
@@ -48,6 +50,9 @@ class RotaryGatedRecurrentStateUpdateConfig:
     d_model: int
     state_transform: str = "block-diagonal-4"
     dtype: str = "bfloat16"
+    scan_unroll: int = 1
+    projection_mode: str = "sequence"
+    trig_mode: str = "precompute"
 
     @property
     def angle_width(self) -> int:
@@ -80,6 +85,16 @@ class RotaryGatedRecurrentStateUpdateConfig:
             )
         if self.dtype not in {"bfloat16", "float32"}:
             raise ValueError(f"dtype must be bfloat16 or float32, got {self.dtype!r}")
+        if self.scan_unroll <= 0:
+            raise ValueError(f"scan_unroll must be positive, got {self.scan_unroll}")
+        if self.projection_mode not in SUPPORTED_PROJECTION_MODES:
+            raise ValueError(
+                f"projection_mode must be one of {SUPPORTED_PROJECTION_MODES}, got {self.projection_mode!r}"
+            )
+        if self.trig_mode not in SUPPORTED_TRIG_MODES:
+            raise ValueError(f"trig_mode must be one of {SUPPORTED_TRIG_MODES}, got {self.trig_mode!r}")
+        if self.projection_mode == "scan" and self.trig_mode != "scan":
+            raise ValueError("projection_mode='scan' requires trig_mode='scan'")
 
     @property
     def is_block_transform(self) -> bool:
@@ -232,16 +247,43 @@ def prepare_runtime_plan(
     config.validate()
     projection = params["in_projection"]
     packed = jnp.einsum("btd,dk->btk", inputs, projection["kernel"]) + projection["bias"]
+    return controls_from_packed(config, packed)
+
+
+def controls_from_packed(
+    config: RotaryGatedRecurrentStateUpdateConfig,
+    packed: Array,
+) -> dict[str, Array]:
+    """Decode packed projection streams into recurrent update controls."""
+
+    require_jax()
     update_inputs, angle_inputs, candidate_inputs, output_inputs = split_packed_projection(config, packed)
     update_gates = jax.nn.sigmoid(update_inputs)
-    return {
+    controls = {
         "update_gates": update_gates,
         "retain_gates": 1.0 - update_gates,
-        "angle_cos": jnp.cos(angle_inputs),
-        "angle_sin": jnp.sin(angle_inputs),
         "candidates": jnp.tanh(candidate_inputs),
         "output_gates": jax.nn.sigmoid(output_inputs),
     }
+    if config.trig_mode == "precompute":
+        controls["angle_cos"] = jnp.cos(angle_inputs)
+        controls["angle_sin"] = jnp.sin(angle_inputs)
+    else:
+        controls["angle_inputs"] = angle_inputs
+    return controls
+
+
+def project_step_controls(
+    params: Params,
+    token_inputs: Array,
+    config: RotaryGatedRecurrentStateUpdateConfig,
+) -> dict[str, Array]:
+    """Project one timestep inside the scan body for lowering ablations."""
+
+    require_jax()
+    projection = params["in_projection"]
+    packed = jnp.matmul(token_inputs, projection["kernel"]) + projection["bias"]
+    return controls_from_packed(config, packed)
 
 
 def apply_state_transform(
@@ -275,6 +317,11 @@ def rotate_state_pairs_with_trig(state: Array, cos: Array, sin: Array) -> Array:
     return jnp.stack((rotated_first, rotated_second), axis=-1).reshape(batch_size, width)
 
 
+def rotate_state_pairs_with_angles(state: Array, angle_inputs: Array) -> Array:
+    require_jax()
+    return rotate_state_pairs_with_trig(state, jnp.cos(angle_inputs), jnp.sin(angle_inputs))
+
+
 def scan(
     params: Params,
     inputs: Array,
@@ -296,27 +343,44 @@ def scan(
         if initial_state is None
         else initial_state
     )
-    plan = prepare_runtime_plan(params, inputs, config)
-    time_major_plan = {
-        key: jnp.swapaxes(value, 0, 1)
-        for key, value in plan.items()
-    }
+    if config.projection_mode == "sequence":
+        plan = prepare_runtime_plan(params, inputs, config)
+        time_major_plan: dict[str, Array] | Array = {
+            key: jnp.swapaxes(value, 0, 1)
+            for key, value in plan.items()
+        }
+    else:
+        time_major_plan = jnp.swapaxes(inputs, 0, 1)
 
-    def step(carry: Array, slices: dict[str, Array]) -> tuple[Array, Array]:
+    def step(carry: Array, slices: dict[str, Array] | Array) -> tuple[Array, Array]:
+        controls = (
+            project_step_controls(params, slices, config)
+            if config.projection_mode == "scan"
+            else slices
+        )
         projected_state = apply_state_transform(params, carry, config)
-        transformed_state = rotate_state_pairs_with_trig(
-            projected_state,
-            slices["angle_cos"],
-            slices["angle_sin"],
+        transformed_state = (
+            rotate_state_pairs_with_trig(
+                projected_state,
+                controls["angle_cos"],
+                controls["angle_sin"],
+            )
+            if config.trig_mode == "precompute"
+            else rotate_state_pairs_with_angles(projected_state, controls["angle_inputs"])
         )
         next_state = (
-            slices["update_gates"] * transformed_state
-            + slices["retain_gates"] * slices["candidates"]
+            controls["update_gates"] * transformed_state
+            + controls["retain_gates"] * controls["candidates"]
         )
-        emitted = slices["output_gates"] * next_state
+        emitted = controls["output_gates"] * next_state
         return next_state, emitted
 
-    final_state, outputs_time_major = jax.lax.scan(step, state, time_major_plan)
+    final_state, outputs_time_major = jax.lax.scan(
+        step,
+        state,
+        time_major_plan,
+        unroll=config.scan_unroll,
+    )
     return jnp.swapaxes(outputs_time_major, 0, 1), final_state
 
 
@@ -336,6 +400,9 @@ def benchmark_scan(
     d_model: int = 512,
     state_transform: str = "block-diagonal-4",
     dtype: str = "bfloat16",
+    scan_unroll: int = 1,
+    projection_mode: str = "sequence",
+    trig_mode: str = "precompute",
     seed: int = 42,
     warmup: int = 1,
     iterations: int = 5,
@@ -348,6 +415,9 @@ def benchmark_scan(
         d_model=d_model,
         state_transform=state_transform,
         dtype=dtype,
+        scan_unroll=scan_unroll,
+        projection_mode=projection_mode,
+        trig_mode=trig_mode,
     )
     config.validate()
     key = jax.random.PRNGKey(seed)
@@ -396,6 +466,9 @@ def benchmark_scan(
         "d_model": d_model,
         "state_transform": state_transform,
         "dtype": dtype,
+        "scan_unroll": scan_unroll,
+        "projection_mode": projection_mode,
+        "trig_mode": trig_mode,
         "include_grad": include_grad,
         "warmup": warmup,
         "iterations": iterations,
