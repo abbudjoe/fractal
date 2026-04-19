@@ -94,7 +94,7 @@ python -m python.jax_tpu.cli \
   --heads 8
 ```
 
-Emit the future patched-P20 command once the MaxText adapter exists:
+Emit the patched RGRP command once the MaxText adapter exists:
 
 ```sh
 python -m python.jax_tpu.cli \
@@ -251,7 +251,7 @@ quality result and should not be compared against the synthetic scout.
    dataset before using them as the recurring proof-ladder data source.
 4. Add the `rotary-gated-recurrent-state-update` JAX adapter under
    `python/jax_tpu/adapters/` and a matching MaxText patch.
-5. Run baseline and P20 with equal shape, sequence length, batch, optimizer,
+5. Run baseline and RGRP with equal shape, sequence length, batch, optimizer,
    data, and steps.
 6. Report compile-inclusive throughput separately from steady-state throughput.
 7. Only after correctness and signal are visible, test a Pallas/custom lowering.
@@ -704,6 +704,112 @@ Current decision:
 
 The TPU VM was deleted after the chunked/tiled smoke; `gcloud compute tpus
 tpu-vm list` was empty afterward.
+
+## First MaxText RGRP Quality-Only Run
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-rgrp-mt-0419`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, locally patched with
+  `scripts/patch_maxtext_rgrp.py`
+- path: MaxText language-model training on real HF text data
+- dataset: `roneneldan/TinyStories`
+- tokenizer: GPT-2 Hugging Face tokenizer
+- model shape: `base_emb_dim=256`, `base_mlp_dim=1024`,
+  `base_num_decoder_layers=4`, `base_num_query_heads=4`,
+  `base_num_kv_heads=4`, `head_dim=64`
+- sequence/batch: `max_target_length=512`, `per_device_batch_size=4`
+- training budget: `steps=200`, `eval_interval=100`, `eval_steps=5`
+- recurrent lowering: `jax.lax.scan`, `scan_unroll=3`,
+  `block-diagonal-4-masked-dense`, sequence-wide packed projection, trig
+  precompute
+- raw log:
+  `experiments/jax_tpu/maxtext_quality/rgrp_maxtext_quality_laxscan_20260419T0418Z.log`
+- summary:
+  `experiments/jax_tpu/maxtext_quality/20260419T0418Z_rgrp_laxscan_quality.md`
+
+The MaxText patch installs a Fractal-native FFN-side seam. It adds explicit
+config fields for `fractal_candidate`, `fractal_rgrp_state_transform`,
+`fractal_rgrp_scan_unroll`, `fractal_rgrp_projection_mode`,
+`fractal_rgrp_trig_mode`, and `fractal_rgrp_residual_scale`, then routes the
+default decoder layer's FFN branch through the rotary gated recurrent state
+update primitive only when `fractal_candidate` is set.
+
+Command:
+
+```sh
+python3 -m maxtext.trainers.pre_train.train \
+  base_output_directory=gs://fractal-maxtext-runs-81f2add4 \
+  run_name=rgrp-maxtext-quality-laxscan-20260419T0418Z \
+  dataset_type=hf \
+  hf_path=roneneldan/TinyStories \
+  hf_eval_split=validation \
+  tokenizer_type=huggingface \
+  tokenizer_path=gpt2 \
+  train_split=train \
+  steps=200 \
+  log_period=10 \
+  eval_interval=100 \
+  eval_steps=5 \
+  enable_checkpointing=false \
+  save_checkpoint_on_completion=false \
+  log_config=false \
+  decoder_block=default \
+  fractal_candidate=rotary-gated-recurrent-state-update \
+  fractal_adapter_module=python.jax_tpu.adapters.rotary_gated_recurrent_state_update \
+  fractal_rgrp_state_transform=block-diagonal-4-masked-dense \
+  fractal_rgrp_scan_unroll=3 \
+  fractal_rgrp_projection_mode=sequence \
+  fractal_rgrp_trig_mode=precompute \
+  fractal_rgrp_residual_scale=1.0 \
+  max_target_length=512 \
+  vocab_size=50257 \
+  base_emb_dim=256 \
+  base_mlp_dim=1024 \
+  base_num_decoder_layers=4 \
+  base_num_query_heads=4 \
+  base_num_kv_heads=4 \
+  head_dim=64 \
+  per_device_batch_size=4 \
+  learning_rate=0.001 \
+  dtype=bfloat16
+```
+
+Result:
+
+| Metric | Value |
+|---|---:|
+| Reported parameters | `0.028B` |
+| TPU memory after params init | `0.33 / 15.75 GB` |
+| Per-step total TFLOPs | `0.22` |
+| Step 0 train loss | `11.355` |
+| Eval after step 99 | loss `4.400`, perplexity `81.436` |
+| Final eval after step 199 | loss `4.066`, perplexity `58.317` |
+| Final train step 199 | loss `4.102`, perplexity `60.444` |
+| Regular post-compile train throughput | median `105,763 tok/s/device` |
+
+Interpretation:
+
+- This is the first real MaxText quality run for the rotary gated recurrent
+  state update primitive.
+- The patched MaxText seam is live: the run used the RGRP `lax.scan` FFN-side
+  branch, trained on real HF text, evaluated on validation data, and stayed
+  numerically stable.
+- This run is quality-only. It does not prove a win over attention because the
+  matched MaxText attention baseline has not been run under the same shape,
+  data, and step budget.
+- The throughput number should be read as a MaxText reference-lowering datum,
+  not a final TPU efficiency claim. Prior toy ladders already showed that plain
+  `lax.scan` is adequate for quality smoke testing but not yet the right path
+  for speed claims.
+- The next low-risk rung is an unchanged MaxText attention baseline with the
+  same `TinyStories`, tokenizer, shape, sequence length, batch, optimizer, and
+  `200`-step budget. Only after that comparison should longer quality runs or
+  kernel work resume.
+
+The TPU VM was deleted after copying the log; no TPU was left running.
 
 ## Non-Goals
 

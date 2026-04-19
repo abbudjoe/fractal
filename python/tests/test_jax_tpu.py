@@ -40,6 +40,7 @@ class JaxTpuContractTests(unittest.TestCase):
         self.assertIn("base_num_decoder_layers=4", rendered)
         self.assertIn("base_num_query_heads=4", rendered)
         self.assertIn("base_num_kv_heads=4", rendered)
+        self.assertIn("head_dim=64", rendered)
         self.assertIn("vocab_size=32000", rendered)
         self.assertNotIn("base_num_heads=", rendered)
         self.assertNotIn("enable_profiler=", rendered)
@@ -60,6 +61,9 @@ class JaxTpuContractTests(unittest.TestCase):
             "fractal_adapter_module=python.jax_tpu.adapters.rotary_gated_recurrent_state_update",
             command,
         )
+        self.assertIn("decoder_block=default", command)
+        self.assertIn("fractal_rgrp_state_transform=block-diagonal-4-masked-dense", command)
+        self.assertIn("fractal_rgrp_scan_unroll=3", command)
 
     def test_p20_candidate_contract_tracks_state_carry(self) -> None:
         candidate = get_candidate("rotary-gated-recurrent-state-update")

@@ -53,6 +53,7 @@ class JaxTpuCandidateSpec:
     source_profile: str
     maxtext_model_name: str | None = None
     adapter_module: str | None = None
+    adapter_overrides: dict[str, str | int | float | bool] = field(default_factory=dict)
     requires_patched_maxtext: bool = False
 
     def validate(self) -> None:
@@ -83,6 +84,10 @@ class JaxTpuModelShape:
     @property
     def mlp_dim(self) -> int:
         return self.d_model * self.ffn_multiplier
+
+    @property
+    def head_dim(self) -> int:
+        return self.d_model // self.num_heads
 
     def validate(self) -> None:
         ensure_positive(self.vocab_size, "shape.vocab_size")
@@ -280,6 +285,7 @@ class JaxTpuBenchmarkSpec:
             "base_num_decoder_layers": self.shape.num_layers,
             "base_num_query_heads": self.shape.num_heads,
             "base_num_kv_heads": self.shape.num_heads,
+            "head_dim": self.shape.head_dim,
             "base_mlp_dim": self.shape.mlp_dim,
             "dtype": self.dtype,
         }
@@ -291,6 +297,7 @@ class JaxTpuBenchmarkSpec:
         if include_adapter_overrides and self.candidate.adapter_module:
             overrides["fractal_candidate"] = self.candidate.slug
             overrides["fractal_adapter_module"] = self.candidate.adapter_module
+            overrides.update(self.candidate.adapter_overrides)
         overrides.update(self.parallelism.to_overrides())
         overrides.update(self.dataset.to_overrides())
         overrides.update(self.tokenizer.to_overrides())
@@ -316,6 +323,14 @@ def candidate_registry() -> dict[str, JaxTpuCandidateSpec]:
         label="Fractal rotary gated recurrent state update",
         source_profile="python-path1-primitive-p2-0-runtime-family",
         adapter_module="python.jax_tpu.adapters.rotary_gated_recurrent_state_update",
+        adapter_overrides={
+            "decoder_block": "default",
+            "fractal_rgrp_state_transform": "block-diagonal-4-masked-dense",
+            "fractal_rgrp_scan_unroll": 3,
+            "fractal_rgrp_projection_mode": "sequence",
+            "fractal_rgrp_trig_mode": "precompute",
+            "fractal_rgrp_residual_scale": 1.0,
+        },
         requires_patched_maxtext=True,
         kernel_contract=JaxTpuKernelContract(
             architecture_family=JaxTpuArchitectureFamily.ROTARY_GATED_RECURRENT_STATE_UPDATE,
