@@ -1722,3 +1722,28 @@ Interpretation:
 - It also trades away whole-corpus accuracy and math-context accuracy.
 - The next test should reduce teacher-KL weight and/or increase answer-safety
   pressure before stacking it with other changes.
+
+Teacher-KL weight tuning:
+
+```text
+artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-teacher-kl-w025-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-teacher-kl-w050-v1/
+```
+
+The sweep keeps answer-span fusion off and changes only
+`--non-answer-teacher-kl-loss-weight`.
+
+| teacher KL weight | whole acc | whole NLL | math-answer acc | math-answer NLL | prose acc | prose NLL | answer unsafe mass | contract |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 0.0 | 0.256 | 5.992 | 0.544 | 2.301 | 0.167 | 7.214 | 0.041 | true |
+| 0.25 | 0.227 | 5.364 | 0.569 | 2.526 | 0.162 | 6.238 | 0.035 | true |
+| 0.5 | 0.244 | 5.120 | 0.562 | 2.502 | 0.185 | 5.984 | 0.043 | true |
+| 1.0 | 0.213 | 5.165 | 0.556 | 3.165 | 0.162 | 5.891 | 0.106 | false |
+
+Verdict:
+
+- `0.5` is the current best single-knob teacher-KL setting.
+- It improves whole NLL and prose NLL while keeping answer unsafe mass under
+  the safety gate.
+- It still hurts math-context behavior, so the next step should be a composition
+  test with answer-span fusion, not a broad LM promotion.

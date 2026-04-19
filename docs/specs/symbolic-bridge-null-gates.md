@@ -747,7 +747,7 @@ Resolution block:
 | Resolution needed | Determine whether the EML bridge is useful outside the controlled synthetic language/math grammar. |
 | Promotion condition | The hybrid must improve math-answer accuracy/NLL without degrading pure-language/prose behavior and without violating unsafe-call or unsafe-mass gates. |
 | Current blocker | Math-answer transfer passes, but prose retention does not. The fusion path is useful as an answer/action bridge, not yet as a general next-token improvement. |
-| Next action | Run the ablation ladder one step at a time. Ablation 1 preserved answer gains but did not solve prose NLL. Ablation 2 retention-only worsened prose and broke answer safety. Ablation 3 teacher KL repaired prose NLL but still broke answer safety. The next clean test should lower teacher-KL weight and/or strengthen answer safety calibration before any composition claim. |
+| Next action | Run the ablation ladder one step at a time. Ablation 1 preserved answer gains but did not solve prose NLL. Ablation 2 retention-only worsened prose and broke answer safety. Ablation 3 showed teacher KL is the right prose-retention direction, and the weight sweep found `0.5` as the current best safe teacher-KL point. The next clean test can combine `0.5` teacher KL with answer-span fusion, but should still be treated as a composition test rather than assumed solved. |
 
 ### Gate 5 Ablation 1: Answer-Span-Only Fusion
 
@@ -976,3 +976,72 @@ Interpretation:
 - This is a partial/unsafe result, not a repair. The next ablation should lower
   teacher-KL weight or pair teacher KL with stronger answer-safety calibration
   before considering it for the bridge recipe.
+
+### Gate 5 Ablation 3b: Teacher-KL Weight Tuning
+
+Question:
+
+> Can a smaller frozen-teacher KL weight preserve the prose-NLL improvement
+> while keeping answer unsafe mass under the `<= 0.05` safety gate?
+
+Artifacts:
+
+```text
+artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-teacher-kl-w025-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-teacher-kl-w050-v1/
+```
+
+Commands:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260430/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260431/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260432/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260433/summary.json \
+  --run-label gate5-ablation-teacher-kl-w025-v1 \
+  --output-dir artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-teacher-kl-w025-v1 \
+  --backbone transformer \
+  --transformer-layers 2 \
+  --transformer-heads 4 \
+  --transformer-ffn-multiplier 2 \
+  --epochs 600 \
+  --learning-rate 0.004 \
+  --hidden-units 64 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 1.0 \
+  --answer-call-abstain-loss-weight 8.0 \
+  --answer-unsafe-loss-weight 5.0 \
+  --non-answer-abstain-loss-weight 2.0 \
+  --non-answer-teacher-kl-loss-weight 0.25 \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --device mps \
+  --output table
+```
+
+The `0.5` run used the same command with
+`--run-label gate5-ablation-teacher-kl-w050-v1`, matching output directory, and
+`--non-answer-teacher-kl-loss-weight 0.5`.
+
+Caption: Gate 5 teacher-KL weight sweep. This table tunes only the frozen
+teacher KL weight; answer-span fusion remains off.
+
+| teacher KL weight | whole acc | whole NLL | math-answer acc | math-answer NLL | prose acc | prose NLL | context acc | context NLL | answer unsafe mass | answer contract |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 0.0 | 0.256 | 5.992 | 0.544 | 2.301 | 0.167 | 7.214 | 0.565 | 1.677 | 0.041 | true |
+| 0.25 | 0.227 | 5.364 | 0.569 | 2.526 | 0.162 | 6.238 | 0.408 | 2.340 | 0.035 | true |
+| 0.5 | 0.244 | 5.120 | 0.562 | 2.502 | 0.185 | 5.984 | 0.408 | 2.069 | 0.043 | true |
+| 1.0 | 0.213 | 5.165 | 0.556 | 3.165 | 0.162 | 5.891 | 0.333 | 2.535 | 0.106 | false |
+
+Interpretation:
+
+- `0.5` is the current best safe teacher-KL setting. It improves whole NLL
+  (`5.992 -> 5.120`) and prose NLL (`7.214 -> 5.984`) while preserving the
+  answer safety gate (`0.043 <= 0.05`).
+- `0.25` is also safe but weaker on prose NLL and whole NLL.
+- `1.0` buys only a little more prose NLL and breaks answer safety.
+- Teacher KL still trades off math-context behavior versus repaired Gate 5, so
+  this is not a finished bridge recipe. It is the best single-knob
+  prose-retention candidate before composition with answer-span fusion.
