@@ -23,7 +23,9 @@ from python.symbolic.bridge_corpus import run_bridge_corpus
 from python.symbolic.bridge_lm import (
     FusionCalibrationPolicy,
     SymbolicBridgeBatch,
+    build_contract_splits,
     fused_token_outputs,
+    role_gated_features,
     run_symbolic_bridge_lm,
 )
 from python.symbolic.bridge_sequence import run_sequence_bridge
@@ -922,6 +924,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 router_call_threshold=0.25,
                 expert_logit_scale=3.0,
                 fusion_allowed_roles=("math_answer",),
+                feature_allowed_roles=("symbolic",),
                 device="cpu",
                 extra_fit_bridge_summary_paths=(extra_bridge_summary,),
                 extra_fit_splits=("train", "safety_calibration", "extrapolation"),
@@ -950,6 +953,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertEqual(report.router_call_threshold, 0.25)
             self.assertEqual(report.expert_logit_scale, 3.0)
             self.assertEqual(report.fusion_allowed_roles, ("math_answer",))
+            self.assertEqual(report.feature_allowed_roles, ("symbolic",))
             self.assertEqual(report.extra_fit_bridge_summary_paths, (str(extra_bridge_summary.resolve()),))
             self.assertEqual(report.extra_fit_feature_table_paths, (str(extra_feature_table.resolve()),))
             self.assertEqual(report.summary["extra_fit_row_count"], 4)
@@ -985,6 +989,83 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertTrue((output_dir / "summary.json").exists())
             self.assertTrue((output_dir / "runs.jsonl").exists())
             self.assertTrue((output_dir / "summary.md").exists())
+
+    @unittest.skipUnless(importlib.util.find_spec("torch") is not None, "PyTorch is optional for default unit tests")
+    def test_symbolic_bridge_lm_role_gates_side_channel_features(self) -> None:
+        import torch
+
+        rows = [
+            {
+                "task_id": "toy_formula",
+                "sequence_id": "seq",
+                "seed": 1,
+                "split": "train",
+                "index": 0,
+                "x": 0.25,
+                "target_y": 0.0,
+                "target_token": 0,
+                "token_bins": 2,
+                "quantizer": {"minimum": 0.0, "maximum": 1.0},
+                "in_training_range": True,
+                "best_expert_id": "paper-complex-eml",
+                "oracle_has_safe_expert": False,
+                "safe_expert_mask": {"paper-complex-eml": False},
+                "experts": {
+                    "paper-complex-eml": {
+                        "prediction": None,
+                        "token": -1,
+                        "residual": None,
+                        "abs_residual": 1.0e300,
+                        "token_match": False,
+                    }
+                },
+                "eval_role": "prose",
+            },
+            {
+                "task_id": "toy_formula",
+                "sequence_id": "seq",
+                "seed": 1,
+                "split": "train",
+                "index": 1,
+                "x": 0.75,
+                "target_y": 1.0,
+                "target_token": 1,
+                "token_bins": 2,
+                "quantizer": {"minimum": 0.0, "maximum": 1.0},
+                "in_training_range": True,
+                "best_expert_id": "paper-complex-eml",
+                "oracle_has_safe_expert": True,
+                "safe_expert_mask": {"paper-complex-eml": True},
+                "experts": {
+                    "paper-complex-eml": {
+                        "prediction": 1.0,
+                        "token": 1,
+                        "residual": 0.0,
+                        "abs_residual": 0.0,
+                        "token_match": True,
+                    }
+                },
+                "eval_role": "math_answer",
+            },
+        ]
+
+        batch = build_contract_splits(
+            torch,
+            rows,
+            ("toy_formula",),
+            ("paper-complex-eml",),
+            2,
+            "side-channel",
+            torch.device("cpu"),
+        )["train"]
+
+        gated = role_gated_features(torch, batch, ("math_answer",))
+        prose_mask = batch.role_ids == batch.role_names.index("prose")
+        answer_mask = batch.role_ids == batch.role_names.index("math_answer")
+
+        self.assertTrue(torch.all(gated[prose_mask] == 0.0).item())
+        self.assertTrue(torch.allclose(gated[answer_mask], batch.features[answer_mask]))
+        self.assertTrue(torch.allclose(role_gated_features(torch, batch, ()), batch.features))
 
     def test_bridge_corpus_v1_generates_language_math_and_math_only_contracts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

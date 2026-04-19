@@ -88,6 +88,14 @@ def build_parser() -> argparse.ArgumentParser:
             "Empty means all roles."
         ),
     )
+    parser.add_argument(
+        "--feature-allowed-roles",
+        default="",
+        help=(
+            "Comma-separated eval_role names allowed to receive bridge side-channel features. "
+            "Empty means all roles."
+        ),
+    )
     parser.add_argument("--backbone", choices=["gru", "transformer"], default="gru")
     parser.add_argument("--transformer-layers", type=int, default=2)
     parser.add_argument("--transformer-heads", type=int, default=4)
@@ -101,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     output_dir = args.output_dir or (REPO_ROOT / "artifacts" / "symbolic-bridge-lm" / args.run_label)
     fusion_allowed_roles = parse_comma_separated(args.fusion_allowed_roles)
+    feature_allowed_roles = parse_comma_separated(args.feature_allowed_roles)
     non_answer_teacher_kl_roles = parse_comma_separated(args.non_answer_teacher_kl_roles)
     calibration_answer_roles = parse_comma_separated(args.calibration_answer_roles)
     calibration_selection_modes = parse_comma_separated(args.calibration_selection_modes)
@@ -133,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         router_call_threshold=args.router_call_threshold,
         expert_logit_scale=args.expert_logit_scale,
         fusion_allowed_roles=fusion_allowed_roles,
+        feature_allowed_roles=feature_allowed_roles,
         backbone=args.backbone,
         transformer_layers=args.transformer_layers,
         transformer_heads=args.transformer_heads,
@@ -148,6 +158,7 @@ def main(argv: list[str] | None = None) -> int:
             f"backbone={report.backbone}\tconfig={report.backbone_config}"
         )
         print(f"fusion_allowed_roles={report.fusion_allowed_roles or 'all'}")
+        print(f"feature_allowed_roles={report.feature_allowed_roles or 'all'}")
         print(f"non_answer_teacher_kl_roles={report.non_answer_teacher_kl_roles or 'none'}")
         print(f"role_aware_calibration={report.role_aware_calibration}")
         print(f"calibration_answer_roles={report.calibration_answer_roles or 'none'}")

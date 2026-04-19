@@ -39,7 +39,11 @@ That is a real bridge result, but still not a broad LM result. A follow-up
 family-seed expert-bank test doubled the available experts from four to eight.
 It preserved zero unsafe answer calls, but lowered mean answer accuracy and
 increased variance, so the next bridge should focus on role-aware calibration
-and expert quality rather than simply adding more experts.
+and expert quality rather than simply adding more experts. A subsequent
+feature-role-gating diagnostic showed the same lesson from the interface side:
+blocking side-channel features on prose improves prose NLL, but answer-only
+feature access breaks math-context/answer performance; allowing features on
+math-context plus answer is safer but still does not beat the champion.
 
 ## Metric Glossary
 
@@ -1665,3 +1669,89 @@ Interpretation:
   The best-supported candidate remains the four-expert `top-expert-only gain04`
   recipe. Expanded banks should continue only as a controlled router-calibration
   experiment, not as the next broad-LM bridge default.
+
+### Gate 5 Ablation 9: Role-Gated Side-Channel Features
+
+Question:
+
+> Can we protect prose by preventing bridge side-channel features from entering
+> the LM state on non-answer roles?
+
+Implementation:
+
+- Add `--feature-allowed-roles`, separate from `--fusion-allowed-roles`.
+- The existing fusion gate controls where expert token mass can enter the final
+  output distribution. The new feature gate controls where side-channel feature
+  vectors are projected into the decoder hidden state.
+- Default behavior remains unchanged: empty `feature_allowed_roles` means all
+  roles receive the feature projection.
+- Test two seed-777 diagnostics against the current four-expert champion:
+  answer-only feature access and math-role feature access.
+
+Artifacts:
+
+```text
+artifacts/bridge-corpus-v1-gate5-lm/gate5-feature-answer-gated-top-expert-gain04-s777-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-feature-math-gated-top-expert-gain04-s777-v1/
+```
+
+Command pattern:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260430/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260431/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260432/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260433/summary.json \
+  --extra-fit-splits train,safety_calibration,extrapolation \
+  --run-label gate5-feature-math-gated-top-expert-gain04-s777-v1 \
+  --output-dir artifacts/bridge-corpus-v1-gate5-lm/gate5-feature-math-gated-top-expert-gain04-s777-v1 \
+  --seed 777 \
+  --backbone transformer \
+  --transformer-layers 2 \
+  --transformer-heads 4 \
+  --transformer-ffn-multiplier 2 \
+  --epochs 600 \
+  --learning-rate 0.004 \
+  --hidden-units 64 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 1.0 \
+  --answer-call-abstain-loss-weight 8.0 \
+  --answer-unsafe-loss-weight 5.0 \
+  --non-answer-abstain-loss-weight 2.0 \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --role-aware-calibration \
+  --calibration-selection-modes top-expert \
+  --calibration-target-answer-unsafe 0.05 \
+  --calibration-min-answer-accuracy-gain 0.4 \
+  --feature-allowed-roles math_context,math_answer,math_only \
+  --device mps \
+  --output table
+```
+
+Caption: Seed-777 feature-role gating diagnostics. All rows use the same
+four-expert top-expert calibration recipe. The only change is where side-channel
+features are injected into the decoder state.
+
+| condition | feature roles | whole acc | whole NLL | answer acc | answer NLL | prose acc | prose NLL | context acc | context NLL | answer unsafe |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| champion | all | 0.250 | 6.178 | 0.487 | 3.086 | 0.158 | 7.371 | 0.588 | 1.787 | 0.000 |
+| answer-only feature gate | math_answer, math_only | 0.163 | 6.249 | 0.381 | 4.421 | 0.146 | 6.557 | 0.167 | 5.459 | 0.000 |
+| math-role feature gate | math_context, math_answer, math_only | 0.243 | 5.706 | 0.431 | 4.473 | 0.194 | 6.473 | 0.402 | 2.630 | 0.000 |
+
+Interpretation:
+
+- Feature-role gating is a useful control surface, but it is not a repair by
+  itself.
+- Answer-only feature access protects prose NLL somewhat, but it starves the
+  math wrapper: math-context accuracy collapses and answer quality falls.
+- Math-role feature access is the better diagnostic. It improves prose accuracy
+  and NLL and improves whole-corpus NLL, while keeping answer unsafe calls at
+  zero. However, answer NLL and math-context accuracy are still worse than the
+  champion, so it should not replace the four-expert top-expert recipe.
+- The next repair should not be a hard feature gate alone. A better target is a
+  role-aware side-channel adapter or auxiliary objective that preserves the
+  math-context pathway while making prose-only sequences behave like the pure
+  transformer.

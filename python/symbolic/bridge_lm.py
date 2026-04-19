@@ -171,6 +171,7 @@ class BridgeLmReport:
     router_call_threshold: float
     expert_logit_scale: float
     fusion_allowed_roles: tuple[str, ...]
+    feature_allowed_roles: tuple[str, ...]
     device: str
     expert_ids: tuple[str, ...]
     abstain_index: int
@@ -213,6 +214,7 @@ class BridgeLmReport:
             "router_call_threshold": self.router_call_threshold,
             "expert_logit_scale": self.expert_logit_scale,
             "fusion_allowed_roles": list(self.fusion_allowed_roles),
+            "feature_allowed_roles": list(self.feature_allowed_roles),
             "device": self.device,
             "expert_ids": list(self.expert_ids),
             "abstain_index": self.abstain_index,
@@ -251,6 +253,7 @@ def run_symbolic_bridge_lm(
     router_call_threshold: float = 0.0,
     expert_logit_scale: float = 6.0,
     fusion_allowed_roles: tuple[str, ...] = (),
+    feature_allowed_roles: tuple[str, ...] = (),
     backbone: str = "gru",
     transformer_layers: int = 2,
     transformer_heads: int = 4,
@@ -361,6 +364,7 @@ def run_symbolic_bridge_lm(
                 router_call_threshold=router_call_threshold,
                 expert_logit_scale=expert_logit_scale,
                 fusion_allowed_roles=fusion_allowed_roles,
+                feature_allowed_roles=feature_allowed_roles,
                 teacher_probabilities_by_split=teacher_probabilities_by_split,
                 backbone=backbone,
                 transformer_layers=transformer_layers,
@@ -412,6 +416,7 @@ def run_symbolic_bridge_lm(
         router_call_threshold=router_call_threshold,
         expert_logit_scale=expert_logit_scale,
         fusion_allowed_roles=fusion_allowed_roles,
+        feature_allowed_roles=feature_allowed_roles,
         device=str(selected_device),
         expert_ids=expert_ids,
         abstain_index=abstain_index,
@@ -459,6 +464,7 @@ def train_lm_contract_variant(
     router_call_threshold: float,
     expert_logit_scale: float,
     fusion_allowed_roles: tuple[str, ...],
+    feature_allowed_roles: tuple[str, ...],
     teacher_probabilities_by_split: dict[str, Any] | None,
     backbone: str,
     transformer_layers: int,
@@ -497,7 +503,10 @@ def train_lm_contract_variant(
     for _epoch in range(epochs):
         model.train()
         optimizer.zero_grad(set_to_none=True)
-        token_logits, router_logits = model(fit_batch.previous_tokens, fit_batch.features)
+        token_logits, router_logits = model(
+            fit_batch.previous_tokens,
+            role_gated_features(torch, fit_batch, feature_allowed_roles),
+        )
         final_logits, final_probabilities, _router_stats = fused_token_outputs(
             torch,
             fit_batch,
@@ -611,7 +620,7 @@ def train_lm_contract_variant(
             calibration_batch = splits[calibration_split]
             calibration_token_logits, calibration_router_logits = model(
                 calibration_batch.previous_tokens,
-                calibration_batch.features,
+                role_gated_features(torch, calibration_batch, feature_allowed_roles),
             )
             capability_batch = splits.get("validation")
             capability_token_logits = None
@@ -619,7 +628,7 @@ def train_lm_contract_variant(
             if capability_batch is not None:
                 capability_token_logits, capability_router_logits = model(
                     capability_batch.previous_tokens,
-                    capability_batch.features,
+                    role_gated_features(torch, capability_batch, feature_allowed_roles),
                 )
             calibration_policy = fit_role_aware_fusion_calibration(
                 torch,
@@ -640,7 +649,10 @@ def train_lm_contract_variant(
             )
         split_metrics = {}
         for split, batch in splits.items():
-            token_logits, router_logits = model(batch.previous_tokens, batch.features)
+            token_logits, router_logits = model(
+                batch.previous_tokens,
+                role_gated_features(torch, batch, feature_allowed_roles),
+            )
             final_logits, final_probabilities, router_stats = fused_token_outputs(
                 torch,
                 batch,
@@ -969,6 +981,13 @@ def fusion_role_gate(torch: Any, batch: SymbolicBridgeBatch, allowed_roles: tupl
         if role in batch.role_names:
             selected = selected | (batch.role_ids == batch.role_names.index(role))
     return selected & batch.symbolic_mask
+
+
+def role_gated_features(torch: Any, batch: SymbolicBridgeBatch, allowed_roles: tuple[str, ...]) -> Any:
+    if not allowed_roles:
+        return batch.features
+    gate = fusion_role_gate(torch, batch, allowed_roles).to(batch.features.dtype).unsqueeze(-1)
+    return batch.features * gate
 
 
 def fit_role_aware_fusion_calibration(
@@ -2323,6 +2342,7 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
         f"Router call threshold: `{report.router_call_threshold}`",
         f"Expert logit scale: `{report.expert_logit_scale}`",
         f"Fusion allowed roles: `{list(report.fusion_allowed_roles) or 'all'}`",
+        f"Feature allowed roles: `{list(report.feature_allowed_roles) or 'all'}`",
         "",
         "| run | mode | features | val final acc | extrap final acc | val final NLL | extrap final NLL | extrap LM acc | router extrap acc | expert call rate | unsafe call rate | abstain recall |",
         "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
