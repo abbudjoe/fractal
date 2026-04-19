@@ -83,6 +83,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--calibration-target-answer-unsafe", type=float, default=0.05)
     parser.add_argument("--calibration-min-answer-accuracy-gain", type=float, default=0.01)
     parser.add_argument(
+        "--calibration-score-mode",
+        choices=["answer-accuracy", "answer-nll", "whole-accuracy", "whole-nll"],
+        default="answer-accuracy",
+        help=(
+            "Objective used to choose among safe role-aware calibration policies. "
+            "Default preserves the prior answer-accuracy picker."
+        ),
+    )
+    parser.add_argument(
         "--calibration-answer-roles",
         default="math_answer,math_only",
         help="Comma-separated eval_role names treated as answer roles during calibration.",
@@ -168,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         non_answer_teacher_kl_loss_weight=args.non_answer_teacher_kl_loss_weight,
         non_answer_teacher_kl_roles=non_answer_teacher_kl_roles,
         role_aware_calibration=args.role_aware_calibration,
+        calibration_score_mode=args.calibration_score_mode,
         calibration_target_answer_unsafe=args.calibration_target_answer_unsafe,
         calibration_min_answer_accuracy_gain=args.calibration_min_answer_accuracy_gain,
         calibration_answer_roles=calibration_answer_roles,
@@ -202,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"feature_invariance_roles={report.feature_invariance_roles or 'none'}")
         print(f"non_answer_teacher_kl_roles={report.non_answer_teacher_kl_roles or 'none'}")
         print(f"role_aware_calibration={report.role_aware_calibration}")
+        print(f"calibration_score_mode={report.calibration_score_mode}")
         print(f"calibration_answer_roles={report.calibration_answer_roles or 'none'}")
         print(f"calibration_selection_modes={report.calibration_selection_modes or 'none'}")
         print(f"extra_fit_splits={report.extra_fit_splits or 'none'}")

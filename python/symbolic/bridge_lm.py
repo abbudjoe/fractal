@@ -44,6 +44,7 @@ class FusionCalibrationPolicy:
     answer_call_threshold: float
     answer_fusion_cap: float
     non_answer_fusion_cap: float
+    score_mode: str
     target_answer_unsafe: float
     min_answer_accuracy_gain: float
     selected_split: str
@@ -59,6 +60,7 @@ class FusionCalibrationPolicy:
             "answer_call_threshold": self.answer_call_threshold,
             "answer_fusion_cap": self.answer_fusion_cap,
             "non_answer_fusion_cap": self.non_answer_fusion_cap,
+            "score_mode": self.score_mode,
             "target_answer_unsafe": self.target_answer_unsafe,
             "min_answer_accuracy_gain": self.min_answer_accuracy_gain,
             "selected_split": self.selected_split,
@@ -162,6 +164,7 @@ class BridgeLmReport:
     non_answer_teacher_kl_loss_weight: float
     non_answer_teacher_kl_roles: tuple[str, ...]
     role_aware_calibration: bool
+    calibration_score_mode: str
     calibration_target_answer_unsafe: float
     calibration_min_answer_accuracy_gain: float
     calibration_answer_roles: tuple[str, ...]
@@ -208,6 +211,7 @@ class BridgeLmReport:
             "non_answer_teacher_kl_loss_weight": self.non_answer_teacher_kl_loss_weight,
             "non_answer_teacher_kl_roles": list(self.non_answer_teacher_kl_roles),
             "role_aware_calibration": self.role_aware_calibration,
+            "calibration_score_mode": self.calibration_score_mode,
             "calibration_target_answer_unsafe": self.calibration_target_answer_unsafe,
             "calibration_min_answer_accuracy_gain": self.calibration_min_answer_accuracy_gain,
             "calibration_answer_roles": list(self.calibration_answer_roles),
@@ -250,6 +254,7 @@ def run_symbolic_bridge_lm(
     non_answer_teacher_kl_loss_weight: float = 0.0,
     non_answer_teacher_kl_roles: tuple[str, ...] = ("prose", "math_context"),
     role_aware_calibration: bool = False,
+    calibration_score_mode: str = "answer-accuracy",
     calibration_target_answer_unsafe: float = 0.05,
     calibration_min_answer_accuracy_gain: float = 0.01,
     calibration_answer_roles: tuple[str, ...] = ("math_answer", "math_only"),
@@ -280,6 +285,7 @@ def run_symbolic_bridge_lm(
         transformer_ffn_multiplier=transformer_ffn_multiplier,
     )
     calibration_selection_modes = validate_calibration_selection_modes(calibration_selection_modes)
+    calibration_score_mode = validate_calibration_score_mode(calibration_score_mode)
     extra_fit_splits = validate_extra_fit_splits(extra_fit_splits)
     feature_role_scales = validate_feature_role_scales(feature_role_scales)
     feature_invariance_roles = tuple(dict.fromkeys(feature_invariance_roles))
@@ -366,6 +372,7 @@ def run_symbolic_bridge_lm(
                 non_answer_teacher_kl_loss_weight=non_answer_teacher_kl_loss_weight,
                 non_answer_teacher_kl_roles=non_answer_teacher_kl_roles,
                 role_aware_calibration=role_aware_calibration,
+                calibration_score_mode=calibration_score_mode,
                 calibration_target_answer_unsafe=calibration_target_answer_unsafe,
                 calibration_min_answer_accuracy_gain=calibration_min_answer_accuracy_gain,
                 calibration_answer_roles=calibration_answer_roles,
@@ -421,6 +428,7 @@ def run_symbolic_bridge_lm(
         non_answer_teacher_kl_loss_weight=non_answer_teacher_kl_loss_weight,
         non_answer_teacher_kl_roles=non_answer_teacher_kl_roles,
         role_aware_calibration=role_aware_calibration,
+        calibration_score_mode=calibration_score_mode,
         calibration_target_answer_unsafe=calibration_target_answer_unsafe,
         calibration_min_answer_accuracy_gain=calibration_min_answer_accuracy_gain,
         calibration_answer_roles=calibration_answer_roles,
@@ -472,6 +480,7 @@ def train_lm_contract_variant(
     non_answer_teacher_kl_loss_weight: float,
     non_answer_teacher_kl_roles: tuple[str, ...],
     role_aware_calibration: bool,
+    calibration_score_mode: str,
     calibration_target_answer_unsafe: float,
     calibration_min_answer_accuracy_gain: float,
     calibration_answer_roles: tuple[str, ...],
@@ -676,6 +685,7 @@ def train_lm_contract_variant(
                 fusion_allowed_roles=fusion_allowed_roles,
                 answer_roles=calibration_answer_roles,
                 selection_modes=calibration_selection_modes,
+                score_mode=calibration_score_mode,
                 target_answer_unsafe=calibration_target_answer_unsafe,
                 min_answer_accuracy_gain=calibration_min_answer_accuracy_gain,
                 selected_split=calibration_split,
@@ -1065,6 +1075,7 @@ def fit_role_aware_fusion_calibration(
     fusion_allowed_roles: tuple[str, ...],
     answer_roles: tuple[str, ...],
     selection_modes: tuple[str, ...],
+    score_mode: str,
     target_answer_unsafe: float,
     min_answer_accuracy_gain: float,
     selected_split: str,
@@ -1087,6 +1098,7 @@ def fit_role_aware_fusion_calibration(
                             answer_call_threshold=answer_call_threshold,
                             answer_fusion_cap=answer_fusion_cap,
                             non_answer_fusion_cap=0.0,
+                            score_mode=score_mode,
                             target_answer_unsafe=target_answer_unsafe,
                             min_answer_accuracy_gain=min_answer_accuracy_gain,
                             selected_split=selected_split,
@@ -1133,6 +1145,8 @@ def fit_role_aware_fusion_calibration(
                         capability_lm_accuracy = answer_lm_accuracy
                         capability_gain = capability_accuracy - capability_lm_accuracy
                         capability_unsafe = answer_unsafe
+                        capability_whole_accuracy = float(metrics["final_token_accuracy"])
+                        capability_whole_nll = float(metrics["final_nll"])
                         if (
                             capability_batch is not None
                             and capability_token_logits is not None
@@ -1168,6 +1182,8 @@ def fit_role_aware_fusion_calibration(
                                 capability_metrics.get("role_metrics", {}),
                                 answer_roles,
                             )
+                            capability_whole_accuracy = float(capability_metrics["final_token_accuracy"])
+                            capability_whole_nll = float(capability_metrics["final_nll"])
                             capability_accuracy = float(capability_answer_metrics.get("final_token_accuracy", 0.0))
                             capability_nll = float(capability_answer_metrics.get("final_nll", float("inf")))
                             capability_unsafe = float(capability_answer_metrics.get("unsafe_call_rate", 1.0))
@@ -1191,8 +1207,12 @@ def fit_role_aware_fusion_calibration(
                             "calibration_answer_nll": answer_nll,
                             "calibration_answer_unsafe": answer_unsafe,
                             "capability_answer_unsafe": capability_unsafe,
-                            "whole_accuracy": float(metrics["final_token_accuracy"]),
-                            "whole_nll": float(metrics["final_nll"]),
+                            "calibration_whole_accuracy": float(metrics["final_token_accuracy"]),
+                            "calibration_whole_nll": float(metrics["final_nll"]),
+                            "capability_whole_accuracy": capability_whole_accuracy,
+                            "capability_whole_nll": capability_whole_nll,
+                            "whole_accuracy": capability_whole_accuracy,
+                            "whole_nll": capability_whole_nll,
                         }
                         final_policy = FusionCalibrationPolicy(
                             answer_roles=answer_roles,
@@ -1202,13 +1222,22 @@ def fit_role_aware_fusion_calibration(
                             answer_call_threshold=answer_call_threshold,
                             answer_fusion_cap=answer_fusion_cap,
                             non_answer_fusion_cap=0.0,
+                            score_mode=score_mode,
                             target_answer_unsafe=target_answer_unsafe,
                             min_answer_accuracy_gain=min_answer_accuracy_gain,
                             selected_split=selected_split,
                             selected_feasible=feasible,
                             selected_metrics=selected_metrics,
                         )
-                        score = (selected_unsafe, -capability_accuracy, capability_nll, -capability_gain)
+                        score = calibration_policy_score(
+                            score_mode,
+                            selected_unsafe=selected_unsafe,
+                            capability_accuracy=capability_accuracy,
+                            capability_nll=capability_nll,
+                            capability_gain=capability_gain,
+                            capability_whole_accuracy=capability_whole_accuracy,
+                            capability_whole_nll=capability_whole_nll,
+                        )
                         candidates.append((feasible, score, final_policy))
     feasible_candidates = [candidate for candidate in candidates if candidate[0]]
     candidate_pool = feasible_candidates or candidates
@@ -1221,6 +1250,27 @@ def first_role_metrics(role_metrics: dict[str, Any], roles: tuple[str, ...]) -> 
         if metrics is not None:
             return metrics
     return {}
+
+
+def calibration_policy_score(
+    score_mode: str,
+    *,
+    selected_unsafe: float,
+    capability_accuracy: float,
+    capability_nll: float,
+    capability_gain: float,
+    capability_whole_accuracy: float,
+    capability_whole_nll: float,
+) -> tuple[float, ...]:
+    if score_mode == "answer-accuracy":
+        return (selected_unsafe, -capability_accuracy, capability_nll, -capability_gain)
+    if score_mode == "answer-nll":
+        return (selected_unsafe, capability_nll, -capability_accuracy, -capability_gain)
+    if score_mode == "whole-accuracy":
+        return (selected_unsafe, -capability_whole_accuracy, capability_whole_nll, -capability_accuracy)
+    if score_mode == "whole-nll":
+        return (selected_unsafe, capability_whole_nll, -capability_whole_accuracy, capability_nll)
+    raise ValueError(f"unsupported calibration score mode: {score_mode}")
 
 
 def build_symbolic_bridge_lm_model(
@@ -1364,6 +1414,18 @@ def validate_calibration_selection_modes(selection_modes: tuple[str, ...]) -> tu
             f"got {','.join(invalid)}"
         )
     return modes
+
+
+def validate_calibration_score_mode(score_mode: str) -> str:
+    mode = str(score_mode).strip()
+    allowed = {"answer-accuracy", "answer-nll", "whole-accuracy", "whole-nll"}
+    if mode not in allowed:
+        raise ValueError(
+            "calibration score mode must be one of "
+            "answer-accuracy|answer-nll|whole-accuracy|whole-nll; "
+            f"got {score_mode!r}"
+        )
+    return mode
 
 
 def validate_extra_fit_splits(extra_fit_splits: tuple[str, ...]) -> tuple[str, ...]:
@@ -2446,6 +2508,7 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
         f"Non-answer teacher KL loss weight: `{report.non_answer_teacher_kl_loss_weight}`",
         f"Non-answer teacher KL roles: `{list(report.non_answer_teacher_kl_roles) or 'none'}`",
         f"Role-aware calibration: `{report.role_aware_calibration}`",
+        f"Calibration score mode: `{report.calibration_score_mode}`",
         f"Calibration answer roles: `{list(report.calibration_answer_roles) or 'none'}`",
         f"Calibration selection modes: `{list(report.calibration_selection_modes) or 'none'}`",
         f"Calibration target answer unsafe: `{report.calibration_target_answer_unsafe}`",
@@ -2486,8 +2549,8 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
                 "",
                 "## Calibration Policies",
                 "",
-                "| run | split | feasible | temperature | abstain bias | answer threshold | answer cap | answer unsafe | answer acc | answer NLL |",
-                "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                "| run | score mode | split | feasible | temperature | abstain bias | answer threshold | answer cap | answer unsafe | answer acc | answer NLL | whole NLL |",
+                "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         for run in calibration_rows:
@@ -2496,6 +2559,7 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
             lines.append(
                 "| "
                 f"`{run.name}` | "
+                f"{calibration.get('score_mode')} | "
                 f"{calibration.get('selected_split')} | "
                 f"{calibration.get('selected_feasible')} | "
                 f"{float(calibration.get('temperature', 0.0)):.3f} | "
@@ -2504,7 +2568,8 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
                 f"{float(calibration.get('answer_fusion_cap', 0.0)):.3f} | "
                 f"{float(selected.get('answer_unsafe', 0.0)):.3f} | "
                 f"{float(selected.get('answer_accuracy', 0.0)):.3f} | "
-                f"{float(selected.get('answer_nll', 0.0)):.4g} |"
+                f"{float(selected.get('answer_nll', 0.0)):.4g} | "
+                f"{float(selected.get('whole_nll', 0.0)):.4g} |"
             )
     role_rows = []
     for run in report.runs:

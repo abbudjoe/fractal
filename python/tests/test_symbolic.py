@@ -361,6 +361,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
             answer_call_threshold=0.0,
             answer_fusion_cap=1.0,
             non_answer_fusion_cap=0.0,
+            score_mode="answer-accuracy",
             target_answer_unsafe=0.05,
             min_answer_accuracy_gain=0.0,
             selected_split="unit",
@@ -916,6 +917,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
                 non_answer_teacher_kl_loss_weight=0.4,
                 non_answer_teacher_kl_roles=("symbolic",),
                 role_aware_calibration=True,
+                calibration_score_mode="answer-nll",
                 calibration_target_answer_unsafe=0.2,
                 calibration_min_answer_accuracy_gain=0.0,
                 calibration_answer_roles=("symbolic",),
@@ -947,6 +949,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
             self.assertEqual(report.non_answer_teacher_kl_loss_weight, 0.4)
             self.assertEqual(report.non_answer_teacher_kl_roles, ("symbolic",))
             self.assertTrue(report.role_aware_calibration)
+            self.assertEqual(report.calibration_score_mode, "answer-nll")
             self.assertEqual(report.calibration_target_answer_unsafe, 0.2)
             self.assertEqual(report.calibration_min_answer_accuracy_gain, 0.0)
             self.assertEqual(report.calibration_answer_roles, ("symbolic",))
@@ -975,6 +978,7 @@ class SymbolicEvaluationTests(unittest.TestCase):
             assert prob_mixture.calibration is not None
             self.assertEqual(prob_mixture.calibration["answer_roles"], ["symbolic"])
             self.assertEqual(prob_mixture.calibration["selection_mode"], "top-expert")
+            self.assertEqual(prob_mixture.calibration["score_mode"], "answer-nll")
             self.assertIn("selected_metrics", prob_mixture.calibration)
             self.assertEqual(prob_mixture.extrapolation_expert_call_rate, 0.0)
             self.assertEqual(prob_mixture.extrapolation_unsafe_call_rate, 0.0)

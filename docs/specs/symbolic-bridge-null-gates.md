@@ -1859,3 +1859,130 @@ Interpretation:
 - Current resolution: do not promote soft scaling. Treat prose-invariance KL as
   the next candidate for seed variance and role-aware calibration tuning, not as
   a finished repair.
+
+### Gate 5 Ablation 11: Prose-Invariance Seed Variance and Calibration Tuning
+
+Question:
+
+> Is the prose-invariance auxiliary objective stable across seeds, and can
+> role-aware calibration choose a better safe fusion policy than the default
+> answer-accuracy picker?
+
+Implementation:
+
+- Add `--calibration-score-mode` with four options:
+  `answer-accuracy`, `answer-nll`, `whole-accuracy`, and `whole-nll`.
+- The default remains `answer-accuracy`, preserving prior behavior. The new
+  modes only affect post-training role-aware calibration policy selection; they
+  do not change the training objective.
+- Calibration candidate metrics now record validation/capability whole accuracy
+  and NLL separately from calibration-split whole accuracy and NLL.
+- All runs below used sequential MPS execution. No MPS jobs were run in
+  parallel for this pass.
+
+Artifacts:
+
+```text
+artifacts/bridge-lm-gate5-repair/gate5-feature-invariance-prose-w050-top-expert-gain04-s778-v1/
+artifacts/bridge-lm-gate5-repair/gate5-feature-invariance-prose-w050-top-expert-gain04-s779-v1/
+artifacts/bridge-lm-gate5-repair/gate5-feature-invariance-prose-w050-wholenll-dense-top-gain04-s779-v1/
+artifacts/bridge-lm-gate5-repair/gate5-feature-invariance-prose-w050-answernll-dense-top-gain04-s779-v1/
+```
+
+Command pattern:
+
+```bash
+uv run --python 3.12 --with torch --with numpy python scripts/symbolic_bridge_lm.py \
+  --bridge-summary artifacts/bridge-corpus-v1-gate5/bridge-corpus-v1-language-math-natural-gate5/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260430/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260431/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260432/summary.json \
+  --extra-fit-bridge-summary artifacts/bridge-corpus-v1-repair/bridge-corpus-v1-language-math-calibration-s20260433/summary.json \
+  --extra-fit-splits train,safety_calibration,extrapolation \
+  --epochs 600 \
+  --learning-rate 0.004 \
+  --hidden-units 64 \
+  --router-loss-weight 10.0 \
+  --call-abstain-loss-weight 1.0 \
+  --answer-call-abstain-loss-weight 8.0 \
+  --answer-unsafe-loss-weight 5.0 \
+  --non-answer-abstain-loss-weight 2.0 \
+  --role-aware-calibration \
+  --calibration-target-answer-unsafe 0.05 \
+  --calibration-min-answer-accuracy-gain 0.4 \
+  --router-call-threshold 0.99999 \
+  --expert-logit-scale 6.0 \
+  --feature-invariance-loss-weight 0.5 \
+  --feature-invariance-roles prose \
+  --backbone transformer \
+  --transformer-layers 2 \
+  --transformer-heads 4 \
+  --transformer-ffn-multiplier 2 \
+  --device mps \
+  --output table
+```
+
+Caption: Prose-invariance KL `0.5` seed variance. All rows use top-expert
+role-aware calibration scored by answer accuracy. The seed-777 artifact was
+created before `calibration_score_mode` was serialized, but it uses the same
+default answer-accuracy selection behavior.
+
+| seed | whole acc | whole NLL | side acc | side NLL | token acc | token NLL | answer acc | answer NLL | answer unsafe | prose acc | prose NLL |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 777 | 0.244 | 5.819 | 0.276 | 6.583 | 0.161 | 6.409 | 0.556 | 2.519 | 0.000 | 0.153 | 6.935 |
+| 778 | 0.241 | 6.112 | 0.203 | 6.909 | 0.174 | 6.128 | 0.463 | 4.077 | 0.000 | 0.167 | 7.052 |
+| 779 | 0.255 | 6.197 | 0.212 | 6.859 | 0.171 | 6.145 | 0.475 | 3.162 | 0.000 | 0.180 | 7.120 |
+
+Caption: Three-seed aggregate for the prose-invariance candidate.
+
+| metric | mean | sd |
+| --- | ---: | ---: |
+| whole acc | 0.247 | 0.007 |
+| whole NLL | 6.042 | 0.199 |
+| answer acc | 0.498 | 0.051 |
+| answer NLL | 3.253 | 0.783 |
+| answer unsafe | 0.000 | 0.000 |
+| prose acc | 0.167 | 0.014 |
+| prose NLL | 7.036 | 0.093 |
+
+Caption: Seed-779 calibration score-mode tuning. Both tuning rows allowed
+`dense,top-expert` selection. The default row allowed `top-expert` only.
+
+| calibration score | selection modes | whole acc | whole NLL | side acc | side NLL | token NLL | answer acc | answer NLL | answer call | answer unsafe | prose acc | prose NLL |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| answer-accuracy | top-expert | 0.255 | 6.197 | 0.212 | 6.859 | 6.145 | 0.475 | 3.162 | 0.188 | 0.000 | 0.180 | 7.120 |
+| whole-nll | dense, top-expert | 0.252 | 6.113 | 0.218 | 6.784 | 6.171 | 0.481 | 3.224 | 0.256 | 0.050 | 0.169 | 7.072 |
+| answer-nll | dense, top-expert | 0.269 | 6.204 | 0.216 | 6.815 | 6.126 | 0.419 | 3.851 | 0.188 | 0.000 | 0.183 | 7.130 |
+
+Interpretation:
+
+- The prose-invariance KL candidate is more convincing than soft feature
+  scaling as an answer-safety repair: all three seeds keep math-answer unsafe
+  calls at `0.000`, and answer accuracy stays far above the pure LM.
+- It is not a clean whole-LM win. Mean whole accuracy is `0.247`, and the
+  candidate does not consistently beat the strongest in-run control. Seed 779
+  beats frozen side-channel accuracy but still loses NLL to token-only.
+- The calibration score-mode knob is useful instrumentation, but not a root
+  repair. `whole-nll` scoring improves seed-779 whole NLL from `6.197` to
+  `6.113`, but spends the full answer unsafe budget (`0.050`) and does not
+  improve whole accuracy. `answer-nll` scoring improves whole accuracy to
+  `0.269`, but worsens answer recovery and still loses NLL to token-only.
+- The recurring failure is not mostly the final fusion policy. Prose remains
+  weak because the base side-channel-conditioned decoder state is still
+  damaged on prose. Calibration can move mass among safe answer calls, but it
+  cannot repair prose-only logits once the backbone has learned the wrong
+  dependence.
+
+Gate status after Ablation 11:
+
+- Resolved: the auxiliary prose-invariance objective is worth keeping as a
+  controlled candidate for math-answer safety.
+- Resolved: role-aware calibration score choice matters, but does not by itself
+  solve the bridge contract.
+- Unresolved: prose-only and mixed prose/math-context calibration at the
+  backbone level. The next repair should target role-aware feature adaptation
+  before hidden-state fusion, not just final-token calibration.
+- Unresolved: larger sweeps are inefficient because changing calibration score
+  currently retrains the same model. Before broader tuning, save or replay
+  trained logits/checkpoints so calibration-only sweeps are cheap and exactly
+  comparable.

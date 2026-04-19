@@ -149,6 +149,7 @@ def run_symbolic_bridge_path1(
         non_answer_teacher_kl_loss_weight=0.0,
         non_answer_teacher_kl_roles=(),
         role_aware_calibration=False,
+        calibration_score_mode="answer-accuracy",
         calibration_target_answer_unsafe=0.05,
         calibration_min_answer_accuracy_gain=0.01,
         calibration_answer_roles=(),
