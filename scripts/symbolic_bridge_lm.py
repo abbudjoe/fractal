@@ -14,6 +14,10 @@ if str(REPO_ROOT) not in sys.path:
 from python.symbolic.bridge_lm import run_symbolic_bridge_lm  # noqa: E402
 
 
+def parse_comma_separated(value: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Confirm the symbolic router contract on a tiny LM-style model.")
     parser.add_argument("--bridge-summary", type=Path, required=True)
@@ -39,6 +43,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--non-answer-abstain-loss-weight", type=float, default=0.0)
     parser.add_argument("--non-answer-lm-retention-loss-weight", type=float, default=0.0)
     parser.add_argument("--non-answer-teacher-kl-loss-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--non-answer-teacher-kl-roles",
+        default="prose,math_context",
+        help=(
+            "Comma-separated eval_role names that receive the non-answer teacher-KL loss. "
+            "Empty disables the KL mask."
+        ),
+    )
     parser.add_argument("--unsafe-margin-loss-weight", type=float, default=0.0)
     parser.add_argument("--unsafe-margin", type=float, default=0.5)
     parser.add_argument("--router-call-threshold", type=float, default=0.0)
@@ -63,9 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     output_dir = args.output_dir or (REPO_ROOT / "artifacts" / "symbolic-bridge-lm" / args.run_label)
-    fusion_allowed_roles = tuple(
-        role.strip() for role in args.fusion_allowed_roles.split(",") if role.strip()
-    )
+    fusion_allowed_roles = parse_comma_separated(args.fusion_allowed_roles)
+    non_answer_teacher_kl_roles = parse_comma_separated(args.non_answer_teacher_kl_roles)
     report = run_symbolic_bridge_lm(
         args.bridge_summary,
         output_dir,
@@ -83,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         non_answer_abstain_loss_weight=args.non_answer_abstain_loss_weight,
         non_answer_lm_retention_loss_weight=args.non_answer_lm_retention_loss_weight,
         non_answer_teacher_kl_loss_weight=args.non_answer_teacher_kl_loss_weight,
+        non_answer_teacher_kl_roles=non_answer_teacher_kl_roles,
         unsafe_margin_loss_weight=args.unsafe_margin_loss_weight,
         unsafe_margin=args.unsafe_margin,
         router_call_threshold=args.router_call_threshold,
@@ -102,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
             f"backbone={report.backbone}\tconfig={report.backbone_config}"
         )
         print(f"fusion_allowed_roles={report.fusion_allowed_roles or 'all'}")
+        print(f"non_answer_teacher_kl_roles={report.non_answer_teacher_kl_roles or 'none'}")
         print(
             "run\tmode\tfeatures\tval_final_acc\textrap_final_acc\tval_final_nll\textrap_final_nll\textrap_lm_acc\t"
             "router_extrap_acc\texpert_call_rate\tunsafe_call_rate\tabstain_recall"

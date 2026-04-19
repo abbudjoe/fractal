@@ -1728,22 +1728,28 @@ Teacher-KL weight tuning:
 ```text
 artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-teacher-kl-w025-v1/
 artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-teacher-kl-w050-v1/
+artifacts/bridge-corpus-v1-gate5-lm/gate5-ablation-teacher-kl-prose-w050-v1/
 ```
 
 The sweep keeps answer-span fusion off and changes only
-`--non-answer-teacher-kl-loss-weight`.
+`--non-answer-teacher-kl-loss-weight`. The prose-only follow-up keeps the
+weight at `0.5` and adds `--non-answer-teacher-kl-roles prose`.
 
-| teacher KL weight | whole acc | whole NLL | math-answer acc | math-answer NLL | prose acc | prose NLL | answer unsafe mass | contract |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| 0.0 | 0.256 | 5.992 | 0.544 | 2.301 | 0.167 | 7.214 | 0.041 | true |
-| 0.25 | 0.227 | 5.364 | 0.569 | 2.526 | 0.162 | 6.238 | 0.035 | true |
-| 0.5 | 0.244 | 5.120 | 0.562 | 2.502 | 0.185 | 5.984 | 0.043 | true |
-| 1.0 | 0.213 | 5.165 | 0.556 | 3.165 | 0.162 | 5.891 | 0.106 | false |
+| condition | KL roles | whole acc | whole NLL | math-answer acc | math-answer NLL | prose acc | prose NLL | context acc | context NLL | answer unsafe mass | contract |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| weight `0.0` | none | 0.256 | 5.992 | 0.544 | 2.301 | 0.167 | 7.214 | 0.565 | 1.677 | 0.041 | true |
+| weight `0.25` | prose, math_context | 0.227 | 5.364 | 0.569 | 2.526 | 0.162 | 6.238 | 0.408 | 2.340 | 0.035 | true |
+| weight `0.5` | prose, math_context | 0.244 | 5.120 | 0.562 | 2.502 | 0.185 | 5.984 | 0.408 | 2.069 | 0.043 | true |
+| weight `1.0` | prose, math_context | 0.213 | 5.165 | 0.556 | 3.165 | 0.162 | 5.891 | 0.333 | 2.535 | 0.106 | false |
+| weight `0.5` prose-only | prose | 0.265 | 5.250 | 0.550 | 1.877 | 0.179 | 6.241 | 0.558 | 1.877 | 0.037 | true |
 
 Verdict:
 
-- `0.5` is the current best single-knob teacher-KL setting.
-- It improves whole NLL and prose NLL while keeping answer unsafe mass under
-  the safety gate.
-- It still hurts math-context behavior, so the next step should be a composition
-  test with answer-span fusion, not a broad LM promotion.
+- All-non-answer `0.5` remains the best prose-NLL single-knob repair, but it
+  hurts math-context behavior.
+- Prose-only `0.5` is the cleaner bridge component: it preserves math-context
+  accuracy, improves math-answer NLL and safety, and still improves prose NLL
+  versus repaired Gate 5.
+- Neither setting is a broad LM promotion. The next test should compose
+  prose-only teacher KL with answer-span-only fusion and keep the result judged
+  by role-specific controls, not only whole-corpus loss.

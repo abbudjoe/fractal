@@ -124,6 +124,7 @@ class BridgeLmReport:
     non_answer_abstain_loss_weight: float
     non_answer_lm_retention_loss_weight: float
     non_answer_teacher_kl_loss_weight: float
+    non_answer_teacher_kl_roles: tuple[str, ...]
     unsafe_margin_loss_weight: float
     unsafe_margin: float
     router_call_threshold: float
@@ -159,6 +160,7 @@ class BridgeLmReport:
             "non_answer_abstain_loss_weight": self.non_answer_abstain_loss_weight,
             "non_answer_lm_retention_loss_weight": self.non_answer_lm_retention_loss_weight,
             "non_answer_teacher_kl_loss_weight": self.non_answer_teacher_kl_loss_weight,
+            "non_answer_teacher_kl_roles": list(self.non_answer_teacher_kl_roles),
             "unsafe_margin_loss_weight": self.unsafe_margin_loss_weight,
             "unsafe_margin": self.unsafe_margin,
             "router_call_threshold": self.router_call_threshold,
@@ -191,6 +193,7 @@ def run_symbolic_bridge_lm(
     non_answer_abstain_loss_weight: float = 0.0,
     non_answer_lm_retention_loss_weight: float = 0.0,
     non_answer_teacher_kl_loss_weight: float = 0.0,
+    non_answer_teacher_kl_roles: tuple[str, ...] = ("prose", "math_context"),
     unsafe_margin_loss_weight: float = 0.0,
     unsafe_margin: float = 0.5,
     router_call_threshold: float = 0.0,
@@ -291,6 +294,7 @@ def run_symbolic_bridge_lm(
                 non_answer_abstain_loss_weight=non_answer_abstain_loss_weight,
                 non_answer_lm_retention_loss_weight=non_answer_lm_retention_loss_weight,
                 non_answer_teacher_kl_loss_weight=non_answer_teacher_kl_loss_weight,
+                non_answer_teacher_kl_roles=non_answer_teacher_kl_roles,
                 unsafe_margin_loss_weight=unsafe_margin_loss_weight,
                 unsafe_margin=unsafe_margin,
                 router_call_threshold=router_call_threshold,
@@ -335,6 +339,7 @@ def run_symbolic_bridge_lm(
         non_answer_abstain_loss_weight=non_answer_abstain_loss_weight,
         non_answer_lm_retention_loss_weight=non_answer_lm_retention_loss_weight,
         non_answer_teacher_kl_loss_weight=non_answer_teacher_kl_loss_weight,
+        non_answer_teacher_kl_roles=non_answer_teacher_kl_roles,
         unsafe_margin_loss_weight=unsafe_margin_loss_weight,
         unsafe_margin=unsafe_margin,
         router_call_threshold=router_call_threshold,
@@ -376,6 +381,7 @@ def train_lm_contract_variant(
     non_answer_abstain_loss_weight: float,
     non_answer_lm_retention_loss_weight: float,
     non_answer_teacher_kl_loss_weight: float,
+    non_answer_teacher_kl_roles: tuple[str, ...],
     unsafe_margin_loss_weight: float,
     unsafe_margin: float,
     router_call_threshold: float,
@@ -503,6 +509,7 @@ def train_lm_contract_variant(
                 final_probabilities,
                 teacher_probabilities_by_split,
                 split="fit",
+                roles=non_answer_teacher_kl_roles,
             )
             loss = (
                 token_loss
@@ -626,6 +633,7 @@ def train_lm_contract_variant(
                     final_probabilities,
                     teacher_probabilities_by_split,
                     split=split,
+                    roles=non_answer_teacher_kl_roles,
                 )
                 non_answer_teacher_kl_loss_value = float(non_answer_teacher_kl_loss.detach().cpu().item())
             split_metrics[split] = evaluate_contract_outputs(
@@ -1081,6 +1089,7 @@ def teacher_kl_loss_for_split(
     teacher_probabilities_by_split: dict[str, Any] | None,
     *,
     split: str,
+    roles: tuple[str, ...],
 ) -> Any:
     if teacher_probabilities_by_split is None or split not in teacher_probabilities_by_split:
         source = final_logits if final_logits is not None else final_probabilities
@@ -1096,7 +1105,7 @@ def teacher_kl_loss_for_split(
         teacher_probabilities,
         final_logits,
         final_probabilities,
-        role_mask(torch, batch, ("prose", "math_context")),
+        role_mask(torch, batch, roles),
     )
 
 
@@ -1922,6 +1931,7 @@ def render_bridge_lm_markdown(report: BridgeLmReport) -> str:
         f"Non-answer abstain loss weight: `{report.non_answer_abstain_loss_weight}`",
         f"Non-answer LM retention loss weight: `{report.non_answer_lm_retention_loss_weight}`",
         f"Non-answer teacher KL loss weight: `{report.non_answer_teacher_kl_loss_weight}`",
+        f"Non-answer teacher KL roles: `{list(report.non_answer_teacher_kl_roles) or 'none'}`",
         f"Unsafe margin loss weight: `{report.unsafe_margin_loss_weight}`",
         f"Unsafe margin: `{report.unsafe_margin}`",
         f"Router call threshold: `{report.router_call_threshold}`",
