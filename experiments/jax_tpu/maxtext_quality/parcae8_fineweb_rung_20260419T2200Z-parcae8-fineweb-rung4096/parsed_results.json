@@ -1,0 +1,121 @@
+{
+  "rows": [
+    {
+      "lane": "attention",
+      "params": 10000000,
+      "final_eval": 4.742,
+      "final_train": 4.783,
+      "final_tps": 773486.923,
+      "median_fast_tps": 764785.511,
+      "mean_fast_tps": 859349.2754900523,
+      "train_nonpad": 64873455.0,
+      "eval_nonpad": 4046440.0,
+      "duration_s": 752.0,
+      "evals": [
+        [
+          1023,
+          5.361,
+          213.001,
+          1011610.0
+        ],
+        [
+          2047,
+          4.977,
+          145.016,
+          1011610.0
+        ],
+        [
+          3071,
+          4.808,
+          122.447,
+          1011610.0
+        ],
+        [
+          4095,
+          4.742,
+          114.614,
+          1011610.0
+        ]
+      ],
+      "log": "experiments/jax_tpu/maxtext_quality/parcae8_fineweb_rung_20260419T2200Z-parcae8-fineweb-rung4096/parcae8-attention-seed42-20260419T2200Z-parcae8-fineweb-rung4096.log"
+    },
+    {
+      "lane": "parcae-bx",
+      "params": 10000000,
+      "final_eval": 4.711,
+      "final_train": 4.749,
+      "final_tps": 638031.076,
+      "median_fast_tps": 637509.728,
+      "mean_fast_tps": 735626.362982199,
+      "train_nonpad": 64873455.0,
+      "eval_nonpad": 4046440.0,
+      "duration_s": 767.0,
+      "evals": [
+        [
+          1023,
+          5.359,
+          212.612,
+          1011610.0
+        ],
+        [
+          2047,
+          4.964,
+          143.161,
+          1011610.0
+        ],
+        [
+          3071,
+          4.783,
+          119.465,
+          1011610.0
+        ],
+        [
+          4095,
+          4.711,
+          111.149,
+          1011610.0
+        ]
+      ],
+      "log": "experiments/jax_tpu/maxtext_quality/parcae8_fineweb_rung_20260419T2200Z-parcae8-fineweb-rung4096/parcae8-parcae-bx-seed42-20260419T2200Z-parcae8-fineweb-rung4096.log"
+    },
+    {
+      "lane": "parcae-rgrp-control",
+      "params": 10000000,
+      "final_eval": 4.7,
+      "final_train": 4.74,
+      "final_tps": 571050.155,
+      "median_fast_tps": 573167.745,
+      "mean_fast_tps": 672440.7071598114,
+      "train_nonpad": 64873455.0,
+      "eval_nonpad": 4046440.0,
+      "duration_s": 784.0,
+      "evals": [
+        [
+          1023,
+          5.352,
+          210.983,
+          1011610.0
+        ],
+        [
+          2047,
+          4.951,
+          141.283,
+          1011610.0
+        ],
+        [
+          3071,
+          4.771,
+          118.003,
+          1011610.0
+        ],
+        [
+          4095,
+          4.7,
+          109.9,
+          1011610.0
+        ]
+      ],
+      "log": "experiments/jax_tpu/maxtext_quality/parcae8_fineweb_rung_20260419T2200Z-parcae8-fineweb-rung4096/parcae8-parcae-rgrp-control-seed42-20260419T2200Z-parcae8-fineweb-rung4096.log"
+    }
+  ]
+}

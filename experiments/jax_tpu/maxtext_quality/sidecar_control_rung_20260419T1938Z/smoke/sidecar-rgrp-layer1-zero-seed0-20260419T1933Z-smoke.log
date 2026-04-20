@@ -1,0 +1,77 @@
+PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-04-19 19:33:52.508284: E external/local_xla/xla/stream_executor/cuda/cuda_platform.cc:51] failed call to cuInit: INTERNAL: CUDA error: Failed call to cuInit: UNKNOWN ERROR (303)
+W0419 19:33:52.508503 139968207297664 pyconfig.py:88] No config file provided, using default config mapping: /home/joseph/maxtext-sidecar-controls/src/maxtext/configs/base.yml
+I0419 19:33:53.601445 139968207297664 max_utils.py:800] System Information: Jax Version: 0.9.2
+I0419 19:33:53.601562 139968207297664 max_utils.py:801] System Information: Jaxlib Version: 0.9.2
+I0419 19:33:53.601609 139968207297664 max_utils.py:802] System Information: Jax Backend: PJRT C API
+TFRT TPU v5 lite
+Built on Mar 4 2026 11:32:08 (1772652728) cl/878335365
+I0419 19:33:54.345142 139968207297664 maxtext_utils.py:1551] Num_devices: 1, shape (1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
+I0419 19:33:54.345415 139968207297664 checkpointing.py:677] Setting up checkpoint logger...
+I0419 19:33:54.345471 139968207297664 checkpointing.py:230] Checkpointing disabled, not creating checkpoint manager.
+I0419 19:33:54.479980 139968207297664 config.py:112] TensorFlow version 2.20.0 available.
+I0419 19:33:54.480578 139968207297664 config.py:125] JAX version 0.9.2 available.
+I0419 19:33:54.865631 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/README.md "HTTP/1.1 307 Temporary Redirect"
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+W0419 19:33:54.866047 139968207297664 _http.py:916] Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+I0419 19:33:54.879276 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/datasets/roneneldan/TinyStories/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/README.md "HTTP/1.1 200 OK"
+I0419 19:33:54.893506 139968207297664 _client.py:1025] HTTP Request: GET https://huggingface.co/api/resolve-cache/datasets/roneneldan/TinyStories/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/README.md "HTTP/1.1 200 OK"
+I0419 19:33:54.969228 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/TinyStories.py "HTTP/1.1 404 Not Found"
+I0419 19:33:55.178443 139968207297664 _client.py:1025] HTTP Request: HEAD https://s3.amazonaws.com/datasets.huggingface.co/datasets/datasets/roneneldan/TinyStories/roneneldan/TinyStories.py "HTTP/1.1 404 Not Found"
+I0419 19:33:55.266380 139968207297664 _client.py:1025] HTTP Request: GET https://huggingface.co/api/datasets/roneneldan/TinyStories/revision/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64 "HTTP/1.1 200 OK"
+I0419 19:33:55.342523 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/.huggingface.yaml "HTTP/1.1 404 Not Found"
+I0419 19:33:55.466577 139968207297664 _client.py:1025] HTTP Request: GET https://datasets-server.huggingface.co/info?dataset=roneneldan/TinyStories "HTTP/1.1 200 OK"
+I0419 19:33:55.545600 139968207297664 _client.py:1025] HTTP Request: GET https://huggingface.co/api/datasets/roneneldan/TinyStories/tree/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data?recursive=true&expand=false "HTTP/1.1 200 OK"
+I0419 19:33:55.627852 139968207297664 _client.py:1025] HTTP Request: GET https://huggingface.co/api/datasets/roneneldan/TinyStories/tree/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64?recursive=false&expand=false "HTTP/1.1 200 OK"
+I0419 19:33:55.706825 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/dataset_infos.json "HTTP/1.1 404 Not Found"
+I0419 19:33:56.214575 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/config.json "HTTP/1.1 200 OK"
+I0419 19:33:56.294136 139968207297664 _client.py:1025] HTTP Request: GET https://huggingface.co/gpt2/resolve/main/config.json "HTTP/1.1 200 OK"
+I0419 19:33:56.378586 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/tokenizer_config.json "HTTP/1.1 200 OK"
+I0419 19:33:56.459160 139968207297664 _client.py:1025] HTTP Request: GET https://huggingface.co/gpt2/resolve/main/tokenizer_config.json "HTTP/1.1 200 OK"
+I0419 19:33:56.537384 139968207297664 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/gpt2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 307 Temporary Redirect"
+I0419 19:33:56.613765 139968207297664 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/openai-community/gpt2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+I0419 19:33:56.690941 139968207297664 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/gpt2/tree/main?recursive=true&expand=false "HTTP/1.1 307 Temporary Redirect"
+I0419 19:33:56.772283 139968207297664 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/openai-community/gpt2/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+I0419 19:33:56.848072 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/vocab.json "HTTP/1.1 200 OK"
+I0419 19:33:56.929755 139968207297664 _client.py:1025] HTTP Request: GET https://huggingface.co/gpt2/resolve/main/vocab.json "HTTP/1.1 200 OK"
+I0419 19:33:57.096645 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/merges.txt "HTTP/1.1 200 OK"
+I0419 19:33:57.192300 139968207297664 _client.py:1025] HTTP Request: GET https://huggingface.co/gpt2/resolve/main/merges.txt "HTTP/1.1 200 OK"
+I0419 19:33:57.339907 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/added_tokens.json "HTTP/1.1 404 Not Found"
+I0419 19:33:57.423035 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/special_tokens_map.json "HTTP/1.1 404 Not Found"
+I0419 19:33:57.511601 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/tokenizer.json "HTTP/1.1 200 OK"
+I0419 19:33:57.590899 139968207297664 _client.py:1025] HTTP Request: GET https://huggingface.co/gpt2/resolve/main/tokenizer.json "HTTP/1.1 200 OK"
+I0419 19:33:57.731897 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/chat_template.jinja "HTTP/1.1 404 Not Found"
+E0419 19:33:57.904880 139968207297664 packing.py:209] PackAndBatchOperation is deprecated. Please use lazy_dataset.FirstFitPackIterDataset instead.
+I0419 19:33:57.988952 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/README.md "HTTP/1.1 307 Temporary Redirect"
+I0419 19:33:58.003012 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/datasets/roneneldan/TinyStories/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/README.md "HTTP/1.1 200 OK"
+I0419 19:33:58.079019 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/TinyStories.py "HTTP/1.1 404 Not Found"
+I0419 19:33:58.148268 139968207297664 _client.py:1025] HTTP Request: HEAD https://s3.amazonaws.com/datasets.huggingface.co/datasets/datasets/roneneldan/TinyStories/roneneldan/TinyStories.py "HTTP/1.1 404 Not Found"
+I0419 19:33:58.243385 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/.huggingface.yaml "HTTP/1.1 404 Not Found"
+I0419 19:33:58.342442 139968207297664 _client.py:1025] HTTP Request: GET https://datasets-server.huggingface.co/info?dataset=roneneldan/TinyStories "HTTP/1.1 200 OK"
+I0419 19:33:58.423101 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/dataset_infos.json "HTTP/1.1 404 Not Found"
+I0419 19:33:58.501638 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/config.json "HTTP/1.1 200 OK"
+I0419 19:33:58.581097 139968207297664 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/tokenizer_config.json "HTTP/1.1 200 OK"
+I0419 19:33:58.657839 139968207297664 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/gpt2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 307 Temporary Redirect"
+I0419 19:33:58.737075 139968207297664 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/openai-community/gpt2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+I0419 19:33:58.815006 139968207297664 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/gpt2/tree/main?recursive=true&expand=false "HTTP/1.1 307 Temporary Redirect"
+I0419 19:33:58.896315 139968207297664 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/openai-community/gpt2/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+E0419 19:33:59.060628 139968207297664 packing.py:209] PackAndBatchOperation is deprecated. Please use lazy_dataset.FirstFitPackIterDataset instead.
+I0419 19:33:59.503821 139968207297664 checkpointing.py:665] No existing checkpoints found, not restoring checkpoint.
+I0419 19:34:12.622982 139968207297664 max_utils.py:791] Total memory size: 0.6 GB, Output size: 0.3 GB, Temp size: 0.3 GB, Argument size: 0.3 GB, Host temp size: 0.0 GB.
+I0419 19:34:12.647329 139968207297664 metric_logger.py:301] number parameters: 0.030 billion
+Per train step:
+ Total TFLOPs: 0.22 
+ split as 97.02% learnable weight flops and 2.98% attention flops
+PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+I0419 19:34:31.564697 139968207297664 max_utils.py:750] 
+Memstats: After params initialized:
+I0419 19:34:31.564828 139968207297664 max_utils.py:756] 	Using (GB) 0.37 / 15.75 (2.349206%) on TPU_0(process=0,(0,0,0,0))
+I0419 19:34:31.719629 139968207297664 metric_logger.py:196] completed step: 0, seconds: 18.857, TFLOP/s/device: 0.011, Tokens/s/device: 108.604, total_weights: 1579, loss: 11.356, lm_loss: 11.356, perplexity: 85483.000
+I0419 19:34:31.721751 139968207297664 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/sidecar-rgrp-layer1-zero-seed0-20260419T1933Z-smoke/tensorboard/'
+I0419 19:34:31.810939 139968207297664 metric_logger.py:196] completed step: 1, seconds: 0.154, TFLOP/s/device: 1.400, Tokens/s/device: 13265.795, total_weights: 1691, loss: 10.153, lm_loss: 10.153, perplexity: 25667.539
+I0419 19:34:31.817512 139968207297664 metric_logger.py:196] completed step: 2, seconds: 0.091, TFLOP/s/device: 2.365, Tokens/s/device: 22419.267, total_weights: 1777, loss: 9.525, lm_loss: 9.525, perplexity: 13691.161
+PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+I0419 19:34:42.695128 139968207297664 train.py:620] Completed eval step 0
+I0419 19:34:42.697641 139968207297664 metric_logger.py:216] eval metrics after step: 4, loss=8.892, perplexity=7276.536, total_weights=1733.0
+I0419 19:34:42.699538 139968207297664 metric_logger.py:196] completed step: 3, seconds: 0.007, TFLOP/s/device: 32.818, Tokens/s/device: 311057.108, total_weights: 1764, loss: 9.238, lm_loss: 9.238, perplexity: 10276.872
+I0419 19:34:42.702636 139968207297664 metric_logger.py:196] completed step: 4, seconds: 0.006, TFLOP/s/device: 35.307, Tokens/s/device: 334640.523, total_weights: 1826, loss: 9.178, lm_loss: 9.178, perplexity: 9685.160

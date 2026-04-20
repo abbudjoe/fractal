@@ -851,6 +851,1109 @@ Interpretation:
 
 The TPU VM was deleted after copying the log; no TPU was left running.
 
+## Faithful RGRP MLP-Sidecar Probe
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-sidecar-202604190512`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- matched raw logs:
+  `experiments/jax_tpu/maxtext_quality/attention_unscanned_maxtext_20260419T0512Z.log`
+  and
+  `experiments/jax_tpu/maxtext_quality/rgrp_mlp_sidecar_maxtext_20260419T0522Z.log`
+- scorecard:
+  `experiments/jax_tpu/maxtext_quality/20260419T0512Z_0522Z_rgrp_mlp_sidecar_scorecard.md`
+
+This run exists because the all-layer RGRP FFN replacement was not faithful to
+the earlier sparse/mid-layer positive signal. The new lane keeps MaxText
+attention and MLP intact, disables layer scanning only to expose static layer
+identity, and adds one bottlenecked RGRP side branch beside the MLP in layer
+`1`.
+
+Result:
+
+| Lane | Params | Memory After Init | Eval Loss @99 | Final Eval Loss @199 | Final Eval PPL | Final Train Loss | Median Tok/s/Device |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Attention control, unscanned | `0.030B` | `0.37 GB` | `4.019` | `3.756` | `42.795` | `3.839` | `327,549` |
+| RGRP one-layer MLP sidecar | `0.030B` | `0.37 GB` | `4.026` | `3.754` | `42.696` | `3.839` | `303,925` |
+
+Interpretation:
+
+- The faithful sidecar contract is stable and trainable.
+- It is essentially tied with the matched unscanned attention control, with a
+  tiny final-eval edge and about `7%` lower median throughput.
+- This does not prove superiority. It does show the sparse sidecar hypothesis
+  remains alive, unlike the all-layer FFN replacement lane.
+- The patcher now handles two MaxText control-plane contracts that the first
+  attempt exposed: numeric CLI parsing for `fractal_rgrp_layers`, and static
+  sidecar enablement at module construction rather than traced layer-index
+  branching inside the Linen module.
+
+The TPU VM was deleted after copying logs; no TPU was left running.
+
+## RGRP MLP-Sidecar Seed Replication
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-sidecar-seeds-202604190529`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- matched artifact:
+  `experiments/jax_tpu/maxtext_quality/seed_replicates_20260419T0529Z/20260419T0529Z_rgrp_mlp_sidecar_seed_replicates.md`
+
+This replicated the one-layer MLP-sidecar contract across three matched seeds.
+Both lanes used `scan_layers=false`; seeds varied `data_shuffle_seed` and
+`init_weights_seed` together.
+
+| Lane | Mean Eval Loss @99 | Mean Final Eval Loss | Mean Final Eval PPL | Mean Final Train Loss | Mean Median Tok/s/Device |
+|---|---:|---:|---:|---:|---:|
+| Attention control, unscanned | `4.0147` | `3.7510` | `42.5593` | `3.9123` | `334,377` |
+| RGRP one-layer MLP sidecar | `4.0167` | `3.7503` | `42.5383` | `3.9117` | `303,671` |
+| Sidecar minus control | `+0.0020` | `-0.0007` | `-0.0210` | `-0.0007` | `-30,706` |
+
+Interpretation:
+
+- The sparse sidecar signal replicated as a near-tie, with the sidecar winning
+  final eval loss on `2 / 3` seeds.
+- The mean final-eval edge was only about `-0.0007`, so this is not a proof of
+  superiority.
+- Throughput regressed consistently by about `9.2%` on median tok/s/device.
+- The sidecar remains alive as a quality hypothesis, but not as a TPU efficiency
+  claim under the current `lax.scan` reference lowering.
+
+The TPU VM was deleted after copying logs; `gcloud compute tpus tpu-vm list`
+reported no running TPU VMs.
+
+## RGRP MLP-Sidecar Location and Knob Ablation
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-sidecar-ablate-202604190904`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- matched artifact:
+  `experiments/jax_tpu/maxtext_quality/sidecar_ablation_20260419T0904Z/20260419T0904Z_rgrp_sidecar_ablation_scorecard.md`
+
+This ablation tested whether the faithful one-layer RGRP MLP sidecar depends on
+layer location or small integration knobs. It used the same 200-step TinyStories
+MaxText contract as the sidecar seed replication, with seed `0`.
+
+| Lane | Sidecar Layer | Side Scale | Bottleneck | Output Init | Final Eval Loss | Delta vs Attention | Median Tok/s/Device |
+|---|---:|---:|---:|---|---:|---:|---:|
+| `layer1-zero` | `1` | `0.10` | `64` | `zero` | `3.751` | `-0.005` | `304,467` |
+| `layer1-default` | `1` | `0.10` | `64` | `xavier` | `3.754` | `-0.002` | `303,925` |
+| `layer1-bn128` | `1` | `0.10` | `128` | `xavier` | `3.755` | `-0.001` | `278,564` |
+| `attention-control` | - | - | - | - | `3.756` | `0.000` | `331,044` |
+| `layer1-scale020` | `1` | `0.20` | `64` | `xavier` | `3.756` | `0.000` | `304,649` |
+| `layer0-default` | `0` | `0.10` | `64` | `xavier` | `3.757` | `+0.001` | `303,385` |
+| `layer1-bn32` | `1` | `0.10` | `32` | `xavier` | `3.758` | `+0.002` | `339,101` |
+| `layer3-default` | `3` | `0.10` | `64` | `xavier` | `3.758` | `+0.002` | `304,174` |
+| `layer1-scale005` | `1` | `0.05` | `64` | `xavier` | `3.759` | `+0.003` | `303,318` |
+| `layer2-default` | `2` | `0.10` | `64` | `xavier` | `3.759` | `+0.003` | `303,970` |
+
+Interpretation:
+
+- Layer `1` remains the best sidecar location under the default Xavier-init
+  contract.
+- Zero-initializing the sidecar output projection produced the best single-seed
+  result, suggesting the recurrent sidecar should start as a dormant residual
+  path and earn influence during training.
+- Smaller bottleneck `32` recovered speed but lost quality. Larger bottleneck
+  `128` did not beat the zero-init contract.
+- Do not promote a longer run yet. Replicate `layer1-zero` across seeds first.
+
+The TPU VM was deleted after copying logs; `gcloud compute tpus tpu-vm list`
+reported no running TPU VMs.
+
+## RGRP Layer-1 Zero-Init Sidecar Seed Replication
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-zero-seeds-202604191448`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- matched artifact:
+  `experiments/jax_tpu/maxtext_quality/sidecar_zero_seed_replicates_20260419T1448Z/20260419T1448Z_rgrp_sidecar_zero_seed_replicates.md`
+
+This replicated the best single-seed sidecar ablation: layer `1`, bottleneck
+`64`, side scale `0.1`, and zero-initialized sidecar output projection. It ran
+matched seeds `0`, `1`, and `2` against both the unscanned attention control and
+the layer `1` Xavier-init sidecar.
+
+| Lane | Mean Eval Loss @99 | Mean Final Eval Loss | Eval Loss Std Dev | Mean Final Train Loss | Mean Median Tok/s/Device | Wins vs Attention |
+|---|---:|---:|---:|---:|---:|---:|
+| `attention` | `4.0147` | `3.7510` | `0.0051` | `3.9123` | `360,203` | - |
+| `layer1-default` | `4.0167` | `3.7503` | `0.0052` | `3.9117` | `302,660` | `2 / 3` |
+| `layer1-zero` | `4.0143` | `3.7493` | `0.0017` | `3.9113` | `303,079` | `2 / 3` |
+
+Paired final-eval deltas:
+
+| Comparison | Mean Delta | Per-Seed Deltas |
+|---|---:|---|
+| `layer1-default - attention` | `-0.0007` | `[-0.002, +0.001, -0.001]` |
+| `layer1-zero - attention` | `-0.0017` | `[-0.005, -0.003, +0.003]` |
+| `layer1-zero - layer1-default` | `-0.0010` | `[-0.003, -0.004, +0.004]` |
+
+Interpretation:
+
+- The zero-init sidecar replicated directionally, but the effect remains small.
+- Zero-init is now the preferred faithful sidecar contract because it starts as
+  a dormant residual path instead of perturbing the MLP stream at step zero.
+- The TPU `lax.scan` reference sidecar remains slower: about `303k` mean median
+  tok/s/device versus about `360k` for attention in this run.
+- Promote `layer1-zero` only as the current quality-reference sidecar contract,
+  not as a speed or decisive architecture win.
+
+The TPU VM was deleted after copying logs; `gcloud compute tpus tpu-vm list`
+reported no running TPU VMs.
+
+## RGRP Layer-1 Zero-Init Sidecar Long Quality Run
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-zero-long-202604191651`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- matched artifact:
+  `experiments/jax_tpu/maxtext_quality/sidecar_zero_long_20260419T1651Z/20260419T1651Z_rgrp_sidecar_zero_long_quality.md`
+
+This extended the best sidecar contract from `200` to `1000` training steps on
+seed `0`, with `eval_interval=250` and `eval_steps=10`.
+
+| Eval Step | Attention Eval Loss | Layer1-Zero Eval Loss | Delta |
+|---:|---:|---:|---:|
+| `249` | `3.529` | `3.521` | `-0.008` |
+| `499` | `3.253` | `3.225` | `-0.028` |
+| `749` | `3.046` | `3.019` | `-0.027` |
+| `999` | `2.952` | `2.921` | `-0.031` |
+
+| Lane | Final Train Loss | Median Tok/s/Device | Mean Tok/s/Device | Final Eval PPL |
+|---|---:|---:|---:|---:|
+| `attention` | `3.255` | `343,797` | `342,806` | `19.151` |
+| `layer1-zero` | `3.247` | `301,531` | `302,822` | `18.553` |
+
+Interpretation:
+
+- The zero-init sidecar edge widened under longer training, from the tiny
+  200-step signal to a `-0.031` final eval-loss improvement at step `999`.
+- The sidecar won every evaluation checkpoint in this run.
+- The TPU reference-lowering speed cost remains material: about `12.3%` lower
+  median tok/s/device.
+- Promote `layer1-zero` to "quality-promising under longer training," but do
+  not make robustness claims until the 1000-step rung is replicated across
+  seeds.
+
+The TPU VM was deleted after copying logs; `gcloud compute tpus tpu-vm list`
+reported no running TPU VMs.
+
+## RGRP Layer-1 Zero-Init Sidecar 1000-Step Seed Replication
+
+Validated on 2026-04-19 with:
+
+- seed `0` source artifact:
+  `experiments/jax_tpu/maxtext_quality/sidecar_zero_long_20260419T1651Z/20260419T1651Z_rgrp_sidecar_zero_long_quality.md`
+- seeds `1` and `2` TPU VM: `fractal-zero-long-seeds-202604191834`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- matched artifact:
+  `experiments/jax_tpu/maxtext_quality/sidecar_zero_long_seed_replicates_20260419T1834Z/20260419T1834Z_rgrp_sidecar_zero_long_seed_replicates.md`
+
+This replicated the `1000`-step layer `1` zero-init sidecar rung across seeds
+`0`, `1`, and `2`.
+
+| Seed | Attention Final Eval | Layer1-Zero Final Eval | Delta |
+|---:|---:|---:|---:|
+| `0` | `2.952` | `2.921` | `-0.031` |
+| `1` | `2.847` | `2.832` | `-0.015` |
+| `2` | `2.930` | `2.910` | `-0.020` |
+
+| Lane | Mean Final Eval Loss | Final Eval Std Dev | Mean Final Eval PPL | Mean Final Train Loss | Mean Median Tok/s/Device |
+|---|---:|---:|---:|---:|---:|
+| `attention` | `2.9097` | `0.0452` | `18.3747` | `3.2643` | `339,664` |
+| `layer1-zero` | `2.8877` | `0.0396` | `17.9647` | `3.2517` | `301,531` |
+
+Interpretation:
+
+- The layer `1` zero-init sidecar won `3 / 3` seeds at the `1000`-step rung.
+- Mean final eval loss improved by `-0.0220`.
+- Mean median throughput regressed by about `11.2%` under TPU `lax.scan`.
+- This is now a repeatable TinyStories quality signal, not just a seed `0`
+  curiosity. It is still not a broad architecture or speed claim.
+
+The TPU VM for seeds `1` and `2` was deleted after copying logs; `gcloud compute
+tpus tpu-vm list` reported no running TPU VMs.
+
+## RGRP Sidecar Matched-Control Rung
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-sidecar-controls-202604191928`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- runner script: `scripts/run_maxtext_sidecar_control_rung_tpu.sh`
+- matched artifact:
+  `experiments/jax_tpu/maxtext_quality/sidecar_control_rung_20260419T1938Z/20260419T1938Z_sidecar_control_rung.md`
+
+This rung kept the layer `1`, bottleneck `64`, side scale `0.1`, zero-init
+sidecar contract fixed and changed only the sidecar operator:
+
+- `rgrp`: rotary gated recurrent state update with token-axis state carry
+- `tiny-mlp`: matched small non-recurrent MLP sidecar
+- `tiny-glu`: matched small gated non-recurrent sidecar
+- `binary-tree`: matched generic differentiable binary-tree sidecar
+
+The same patched checkout also reran the attention baseline, so this is a
+same-checkout comparison rather than a stitched cross-run table.
+
+| Lane | Mean Final Eval | Std | Mean Delta vs Attention | Wins vs Attention | Mean Final Train | Mean Median Tok/s |
+|---|---:|---:|---:|---:|---:|---:|
+| `attention` | `2.9097` | `0.0452` | `+0.0000` | `0/3` | `3.2643` | `360,003` |
+| `rgrp` | `2.8877` | `0.0396` | `-0.0220` | `3/3` | `3.2517` | `302,123` |
+| `tiny-mlp` | `2.9013` | `0.0435` | `-0.0083` | `3/3` | `3.2640` | `355,576` |
+| `tiny-glu` | `2.9073` | `0.0423` | `-0.0023` | `2/3` | `3.2647` | `352,543` |
+| `binary-tree` | `2.9057` | `0.0451` | `-0.0040` | `3/3` | `3.2627` | `357,680` |
+
+Pairwise against RGRP:
+
+| Control | Per-Seed Delta vs RGRP | Mean Delta vs RGRP | Wins vs RGRP |
+|---|---:|---:|---:|
+| `tiny-mlp` | `[+0.021, +0.009, +0.011]` | `+0.0137` | `0/3` |
+| `tiny-glu` | `[+0.027, +0.017, +0.015]` | `+0.0197` | `0/3` |
+| `binary-tree` | `[+0.026, +0.011, +0.017]` | `+0.0180` | `0/3` |
+
+Interpretation:
+
+- The sidecar effect is not purely "any small side branch helps." The controls
+  help a little, especially `tiny-mlp`, but RGRP beats every matched control on
+  every seed.
+- This is the strongest TPU evidence so far that the recurrent state carry is
+  contributing quality, not only extra capacity.
+- The speed tradeoff remains real. RGRP is roughly `16.1%` slower than
+  attention on mean median tok/s/device in this same-checkout run, while the
+  non-recurrent controls stay near attention speed.
+- Keep `tiny-mlp` as the default matched extra-capacity control for future
+  larger-data rungs.
+
+The TPU VM was deleted after copying logs; `gcloud compute tpus tpu-vm list`
+reported no running TPU VMs.
+
+## RGRP Sidecar WikiText-103 Rung
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-wikitext-rung-202604192010`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- runner script: `scripts/run_maxtext_sidecar_wikitext_rung_tpu.sh`
+- matched artifact:
+  `experiments/jax_tpu/maxtext_quality/sidecar_wikitext_rung_20260419T2019Z/20260419T2019Z_sidecar_wikitext_rung.md`
+
+This rung moved the current best sidecar contract off TinyStories and onto
+`Salesforce/wikitext`, config `wikitext-103-raw-v1`, with the MaxText HF input
+path and `validation` split. It kept the model shape and sidecar contract fixed:
+4 layers, `d_model=256`, `mlp_dim=1024`, 4 heads, sequence length 512,
+1000 training steps, eval every 250 steps, 20 eval steps, and seeds `0 1 2`.
+
+The comparison narrowed to the three decision-relevant lanes:
+
+- `attention`: baseline transformer
+- `rgrp`: layer `1`, bottleneck `64`, side scale `0.1`, zero-init rotary gated
+  recurrent state update sidecar
+- `tiny-mlp`: strongest matched extra-capacity non-recurrent control
+
+| Lane | Mean Final Eval | Std | Mean Delta vs Attention | Wins vs Attention | Mean Final Train | Mean Median Tok/s |
+|---|---:|---:|---:|---:|---:|---:|
+| `attention` | `5.9437` | `0.0052` | `+0.0000` | `0/3` | `5.8733` | `334,426` |
+| `rgrp` | `5.9340` | `0.0037` | `-0.0097` | `3/3` | `5.8717` | `304,831` |
+| `tiny-mlp` | `5.9380` | `0.0016` | `-0.0057` | `3/3` | `5.8787` | `336,951` |
+
+Pairwise against RGRP:
+
+| Control | Per-Seed Delta vs RGRP | Mean Delta vs RGRP | Wins vs RGRP |
+|---|---:|---:|---:|
+| `tiny-mlp` | `[+0.003, +0.002, +0.007]` | `+0.0040` | `0/3` |
+
+Interpretation:
+
+- RGRP beat attention on all three WikiText-103 seeds.
+- RGRP also beat the strongest matched extra-capacity control on all three
+  seeds.
+- The margin is smaller than on TinyStories: this is a survivability signal on
+  broader text, not a large-quality claim.
+- The TPU `lax.scan` speed tax remains meaningful. RGRP averaged about `8.9%`
+  slower than attention and about `9.5%` slower than `tiny-mlp` on mean median
+  tok/s/device.
+- The recurrent state carry remains alive as an architectural hypothesis because
+  it survived the dataset shift and the matched-control check.
+
+The TPU VM was deleted after copying logs; `gcloud compute tpus tpu-vm list`
+reported no running TPU VMs.
+
+## Parcae/RGRP-Control 8-Layer MaxText Port Smoke
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-parcae-port-202604192052`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- runner script: `scripts/run_maxtext_parcae_proof_ladder_tpu.sh`
+- matched artifact:
+  `experiments/jax_tpu/maxtext_quality/parcae8_port_smoke_20260419T2057Z-parcae8-smoke/20260419T2057Z_parcae8_port_smoke.md`
+
+This smoke retired the 4-layer cheap-shape track as the main proof ladder. It
+ported the H100 Parcae/P20-control architectural shape into MaxText/JAX:
+
+- physical decoder layers: `8`
+- loop count: `2`
+- middle loop band: `layers 3..4`, matching the Torch `_middle_loop_bounds`
+  rule for 8 layers
+- `d_model=128`, `heads=4`, `head_dim=32`, `mlp_dim=512`
+- context `256`, batch `64`
+- vocab size `32000`, tokenizer `openlm-research/open_llama_3b_v2`
+
+The MaxText patch now has explicit candidate profiles:
+
+- `parcae-looped-attention`
+- `parcae-bx-looped-attention`
+- `parcae-rgrp-control-looped-attention`
+
+The decoder-level scaffold is:
+
+```text
+prelude layers -> normalized loop input -> looped middle layers -> coda layers
+```
+
+For `parcae-rgrp-control-looped-attention`, a full-width RGRP scan runs over the
+prelude stream and controls the loop injection value/gate. This is the TPU port
+target for the earlier H100 P20-control winner.
+
+Smoke results at 5 steps:
+
+| Lane | Logged Params | Eval Step | Eval Loss | Eval Tokens | Final Train Loss | Median Post-Step0 Tok/s |
+|---|---:|---:|---:|---:|---:|---:|
+| `attention` | `0.010B` | `4` | `9.501` | `15,302` | `9.665` | `478,140` |
+| `parcae-looped` | `0.010B` | `4` | `9.626` | `15,302` | `9.792` | `402,634` |
+| `parcae-bx` | `0.010B` | `4` | `9.624` | `15,302` | `9.791` | `421,685` |
+| `parcae-rgrp-control` | `0.010B` | `4` | `9.625` | `15,302` | `9.791` | `400,111` |
+
+Interpretation:
+
+- All four proof-ladder lanes compile, train, and evaluate under MaxText/JAX/TPU.
+- The 5-step loss ordering is not quality evidence.
+- This validates the port and the Flax parameter-sharing contract for the
+  looped middle band.
+- The next serious rung should use this 8-layer Parcae proof-ladder shape, not
+  the earlier 4-layer sidecar smoke shape.
+- The remaining mismatch versus the H100 proof ladder is data ingress: H100 used
+  the local 750M-token OpenLLaMA-tokenized FineWeb cache, while this smoke used
+  WikiText text through MaxText's HF path.
+
+The TPU VM was deleted after copying logs; `gcloud compute tpus tpu-vm list`
+reported no running TPU VMs.
+
+## Parcae/RGRP-Control 8-Layer MaxText Sanity Rung
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-parcae-sanity-202604192115`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- runner script: `scripts/run_maxtext_parcae_proof_ladder_tpu.sh`
+- matched artifact:
+  `experiments/jax_tpu/maxtext_quality/parcae8_sanity_20260419T2119Z-parcae8-sanity/20260419T2119Z_parcae8_sanity.md`
+
+This run was the first non-trivial TPU/JAX rung on the 8-layer Parcae proof
+ladder shape:
+
+- physical decoder layers: `8`
+- loop count: `2`
+- middle loop band: `layers 3..4`
+- execution scaffold: `A0 A1 A2 [A3 A4] [A3 A4] A5 A6 A7`
+- `d_model=128`, `heads=4`, `head_dim=32`, `mlp_dim=512`
+- context `256`, batch `64`
+- vocab size `32000`, tokenizer `openlm-research/open_llama_3b_v2`
+- dataset: `Salesforce/wikitext`, config `wikitext-103-raw-v1`
+- seed: `42`
+- steps: `1000`
+- eval interval: `250`
+- eval steps: `20`
+
+Per lane, the configured train budget was
+`1000 * 64 * 256 = 16,384,000` token positions. WikiText padding reduced this
+to `15,236,828` non-padding train tokens per lane. Four eval passes consumed
+`1,074,268` non-padding eval tokens per lane.
+
+Results:
+
+| Lane | Logged Params | Final Eval Loss | Delta vs Attention | Final Train Loss | Median Checkpoint Tok/s | Log Duration |
+|---|---:|---:|---:|---:|---:|---:|
+| `attention` | `0.010B` | `4.923` | `+0.000` | `4.979` | `219,809` | `159s` |
+| `parcae-looped` | `0.010B` | `4.911` | `-0.012` | `4.974` | `260,579` | `168s` |
+| `parcae-bx` | `0.010B` | `4.910` | `-0.013` | `4.974` | `279,668` | `167s` |
+| `parcae-rgrp-control` | `0.010B` | `4.894` | `-0.029` | `4.959` | `325,079` | `176s` |
+
+Eval curves:
+
+| Lane | Step 249 | Step 499 | Step 749 | Step 999 |
+|---|---:|---:|---:|---:|
+| `attention` | `5.589` | `5.199` | `5.006` | `4.923` |
+| `parcae-looped` | `5.599` | `5.205` | `4.998` | `4.911` |
+| `parcae-bx` | `5.596` | `5.207` | `4.998` | `4.910` |
+| `parcae-rgrp-control` | `5.582` | `5.184` | `4.982` | `4.894` |
+
+Interpretation:
+
+- All three Parcae lanes beat the attention control by the final 1,000-step
+  eval.
+- `parcae-rgrp-control` was the best lane in this sanity rung, at `-0.029`
+  final eval loss versus attention.
+- This supports climbing one more TPU/JAX rung with the faithful 8-layer shape.
+- It does not prove CUDA/H100 transfer, FineWeb parity, multi-seed robustness,
+  or general superiority over attention.
+- The remaining major mismatch versus the H100 proof ladder is data ingress:
+  this run used WikiText-103 through MaxText's HF path, not the local
+  OpenLLaMA-tokenized FineWeb cache.
+
+The TPU VM was deleted after copying logs; `gcloud compute tpus tpu-vm list`
+reported no running TPU VMs.
+
+## Parcae/RGRP-Control 8-Layer FineWeb-EDU Rung
+
+Validated on 2026-04-19 with:
+
+- TPU VM: `fractal-parcae-fw-202604192148`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- runner script: `scripts/run_maxtext_parcae_proof_ladder_tpu.sh`
+- matched artifact:
+  `experiments/jax_tpu/maxtext_quality/parcae8_fineweb_rung_20260419T2200Z-parcae8-fineweb-rung4096/20260419T2200Z_parcae8_fineweb_rung.md`
+
+This rung kept the faithful 8-layer Parcae proof-ladder shape and moved from
+WikiText-103 to a larger FineWeb-EDU parquet stream:
+
+- physical decoder layers: `8`
+- loop count: `2`
+- middle loop band: `layers 3..4`
+- execution scaffold: `A0 A1 A2 [A3 A4] [A3 A4] A5 A6 A7`
+- `d_model=128`, `heads=4`, `head_dim=32`, `mlp_dim=512`
+- context `256`, batch `64`
+- vocab size `32000`, tokenizer `openlm-research/open_llama_3b_v2`
+- dataset: `HuggingFaceFW/fineweb-edu`, config dump `CC-MAIN-2013-20`,
+  streamed through MaxText's parquet/HF path
+- train file: `train/0000.parquet`
+- eval file: `train/0013.parquet`
+- seed: `42`
+- steps: `4096`
+- eval interval: `1024`
+- eval steps: `64`
+
+Per lane, the configured train budget was
+`4096 * 64 * 256 = 67,108,864` token positions. Packed variable-length examples
+reduced this to `64,873,455` non-padding train tokens per lane. Four eval passes
+consumed `4,046,440` non-padding eval tokens per lane.
+
+Results:
+
+| Lane | Logged Params | Final Eval Loss | Delta vs Attention | Final Train Loss | Median Fast Tok/s | Log Duration |
+|---|---:|---:|---:|---:|---:|---:|
+| `attention` | `0.010B` | `4.7420` | `+0.0000` | `4.7830` | `764,786` | `752s` |
+| `parcae-rgrp-control` | `0.010B` | `4.7000` | `-0.0420` | `4.7400` | `573,168` | `784s` |
+| `parcae-bx` | `0.010B` | `4.7110` | `-0.0310` | `4.7490` | `637,510` | `767s` |
+
+Eval curves:
+
+| Lane | Step 1023 | Step 2047 | Step 3071 | Step 4095 |
+|---|---:|---:|---:|---:|
+| `attention` | `5.3610` | `4.9770` | `4.8080` | `4.7420` |
+| `parcae-rgrp-control` | `5.3520` | `4.9510` | `4.7710` | `4.7000` |
+| `parcae-bx` | `5.3590` | `4.9640` | `4.7830` | `4.7110` |
+
+Interpretation:
+
+- Both Parcae lanes beat attention on final eval loss at the same logged `~10M`
+  parameter target.
+- `parcae-rgrp-control` was best, at `-0.0420` final eval loss versus attention
+  and `-0.0110` versus `parcae-bx`.
+- `parcae-bx` also beat attention, so the looped Parcae scaffold remains a live
+  control independent of the RGRP primitive.
+- Attention remains the TPU throughput winner in this lowering. On median fast
+  training steps, `parcae-rgrp-control` reached about `75%` of attention and
+  `parcae-bx` reached about `83%`.
+- This is stronger evidence than the WikiText sanity rung because it uses a
+  larger FineWeb-EDU source and a 4096-step budget, but it is still one seed and
+  a small `~10M` model. Do not use it to claim general attention replacement,
+  CUDA/H100 transfer, or frontier-scale competitiveness.
+
+The TPU VM was deleted after copying logs; `gcloud compute tpus tpu-vm list`
+reported no running TPU VMs.
+
+## Parcae/RGRP-Control 8-Layer FineWeb-EDU GCS Rung
+
+Validated on 2026-04-19 to 2026-04-20 with:
+
+- TPU VM: `fractal-parcae-fw2-202604192316`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- runner script: `scripts/run_maxtext_parcae_proof_ladder_tpu.sh`
+- matched artifact:
+  `experiments/jax_tpu/maxtext_quality/parcae8_fineweb_gcs_rung_20260419T2327Z-parcae8-fineweb-gcs-rung8192/20260419T2327Z_parcae8_fineweb_gcs_rung.md`
+
+This rung kept the faithful 8-layer Parcae proof-ladder shape, doubled the step
+budget, and moved the FineWeb-EDU parquet files into GCS so MaxText could stream
+a broader train wildcard without relying on repeated remote HTTP file access:
+
+- physical decoder layers: `8`
+- loop count: `2`
+- middle loop band: `layers 3..4`
+- execution scaffold: `A0 A1 A2 [A3 A4] [A3 A4] A5 A6 A7`
+- `d_model=128`, `heads=4`, `head_dim=32`, `mlp_dim=512`
+- context `256`, batch `64`
+- vocab size `32000`, tokenizer `openlm-research/open_llama_3b_v2`
+- dataset: `HuggingFaceFW/fineweb-edu`, config dump `CC-MAIN-2013-20`
+- train files:
+  `gs://fractal-maxtext-runs-81f2add4/fineweb_edu_ccmain2013_20_parquet/train/*.parquet`
+- eval files:
+  `gs://fractal-maxtext-runs-81f2add4/fineweb_edu_ccmain2013_20_parquet/eval/*.parquet`
+- staged train shards: `0000.parquet`, `0001.parquet`, `0002.parquet`,
+  `0003.parquet`
+- staged eval shard: `0013.parquet`
+- staged compressed bytes: `9,462,253,997` train, `2,284,902,248` eval,
+  `11,747,156,245` total
+- seed: `42`
+- steps: `8192`
+- eval interval: `2048`
+- eval steps: `64`
+
+Per lane, the configured train budget was
+`8192 * 64 * 256 = 134,217,728` token positions. Packed variable-length examples
+reduced this to `129,678,585` non-padding train tokens per lane. Four eval
+passes consumed `4,046,440` non-padding eval tokens per lane.
+
+Results:
+
+| Lane | Logged Params | Final Eval Loss | Delta vs Attention | Final Train Loss | Median Fast Tok/s | Speed vs Attention | Log Duration |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `attention` | `0.010B` | `4.4840` | `+0.0000` | `4.3470` | `765,321` | `100.0%` | `1277s` |
+| `parcae-rgrp-control` | `0.010B` | `4.4010` | `-0.0830` | `4.2500` | `573,489` | `74.9%` | `1316s` |
+| `parcae-bx` | `0.010B` | `4.4050` | `-0.0790` | `4.2640` | `637,510` | `83.3%` | `1279s` |
+
+Eval curves:
+
+| Lane | Step 2047 | Step 4095 | Step 6143 | Step 8191 |
+|---|---:|---:|---:|---:|
+| `attention` | `5.0260` | `4.7080` | `4.5500` | `4.4840` |
+| `parcae-rgrp-control` | `5.0080` | `4.6660` | `4.4810` | `4.4010` |
+| `parcae-bx` | `5.0160` | `4.6700` | `4.4810` | `4.4050` |
+
+Interpretation:
+
+- Both Parcae lanes beat attention at every eval checkpoint in this doubled
+  FineWeb-EDU GCS rung.
+- `parcae-rgrp-control` remained the loss winner, but only narrowly: final eval
+  loss was `0.0040` better than `parcae-bx`.
+- `parcae-bx` captured most of the quality gain while running materially faster
+  than `parcae-rgrp-control`: about `83.3%` of attention speed versus `74.9%`.
+- The gap between `parcae-rgrp-control` and `parcae-bx` narrowed relative to the
+  4096-step rung. At 4096 steps RGRP led BX by `0.0110`; here the final gap is
+  `0.0040`.
+- Attention is still the TPU throughput winner, but it is no longer the quality
+  winner at this `~10M` proof-ladder shape and data budget.
+- This is stronger evidence than the 4096-step remote-parquet run because the
+  train stream is broader and the budget is doubled. It is still one seed, a
+  small model, and a TPU/JAX lowering, so do not use it to claim CUDA transfer,
+  frontier scaling, or general attention replacement.
+
+The TPU VM was deleted after copying logs; `gcloud compute tpus tpu-vm list`
+reported no running TPU VMs.
+
+## Parcae Training Contract Retest
+
+Validated on 2026-04-20 with:
+
+- TPU VM: `fractal-parcae-contract-202604200132`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- runner script: `scripts/run_maxtext_parcae_proof_ladder_tpu.sh`
+- matched artifact:
+  `experiments/jax_tpu/maxtext_quality/parcae_contract_retest_20260420T020311Z/20260420T020311Z_parcae_contract_retest.md`
+
+This rung retested the 8-layer Parcae proof-ladder lanes after making the
+Parcae training contract explicit:
+
+- fixed vs stochastic per-sequence loop policy
+- clipped-Poisson per-sequence loop-depth sampling for the stochastic ablation
+- separate recurrence and backward active-depth knobs
+- explicit discretization policy
+- the same outer loop policy available to both `parcae-bx` and
+  `parcae-rgrp-control`
+
+Shared shape:
+
+- physical decoder layers: `8`
+- loop count: `2`
+- middle loop band: `layers 3..4`
+- execution scaffold: `A0 A1 A2 [A3 A4] [A3 A4] A5 A6 A7`
+- `d_model=128`, `heads=4`, `head_dim=32`, `mlp_dim=512`
+- context `256`, batch `64`
+- vocab size `32000`, tokenizer `openlm-research/open_llama_3b_v2`
+- dataset: `HuggingFaceFW/fineweb-edu`, config dump `CC-MAIN-2013-20`
+- train files:
+  `gs://fractal-maxtext-runs-81f2add4/fineweb_edu_ccmain2013_20_parquet/train/*.parquet`
+- eval files:
+  `gs://fractal-maxtext-runs-81f2add4/fineweb_edu_ccmain2013_20_parquet/eval/*.parquet`
+- seed: `42`
+- steps: `4096`
+- eval interval: `1024`
+- eval steps: `64`
+- observed non-padding train tokens per lane: `64,842,323`
+
+All Parcae lanes used `PARCAE_DISCRETIZATION=zoh` in this retest.
+
+Results:
+
+| Lane | Final Eval Loss | Delta vs Attention | PPL | Final Train Loss | Median Fast Tok/s | Log Duration |
+|---|---:|---:|---:|---:|---:|---:|
+| `attention` | `4.739` | `+0.000` | `114.369` | `4.796` | `765,250` | `747s` |
+| `parcae-bx` | `4.705` | `-0.034` | `110.471` | `4.766` | `638,379` | `764s` |
+| `parcae-rgrp-control` | `4.681` | `-0.058` | `107.828` | `4.738` | `555,051` | `778s` |
+| `parcae-bx-perseq` | `4.805` | `+0.066` | `122.068` | `4.882` | `470,291` | `790s` |
+| `parcae-rgrp-control-perseq` | `4.779` | `+0.040` | `118.946` | `4.853` | `437,794` | `806s` |
+
+Eval curves:
+
+| Lane | Step 1023 | Step 2047 | Step 3071 | Step 4095 |
+|---|---:|---:|---:|---:|
+| `attention` | `5.363` | `4.971` | `4.805` | `4.739` |
+| `parcae-bx` | `5.365` | `4.950` | `4.771` | `4.705` |
+| `parcae-rgrp-control` | `5.335` | `4.922` | `4.746` | `4.681` |
+| `parcae-bx-perseq` | `5.490` | `5.063` | `4.877` | `4.805` |
+| `parcae-rgrp-control-perseq` | `5.480` | `5.042` | `4.852` | `4.779` |
+
+Interpretation:
+
+- Fixed `parcae-rgrp-control` was the best lane in this retest.
+- Fixed `parcae-bx` also beat attention, so the Parcae loop scaffold remains a
+  live control independent of the rotary gated recurrent state update primitive.
+- Stochastic per-sequence loop depth hurt both quality and speed at this scale.
+- Per-sequence loop depth should not become the proof-ladder default. Keep it as
+  an explicit ablation only.
+- Because every Parcae lane used `zoh`, this run does not isolate `zoh` against
+  `stable-exp`. The next clean ablation is fixed `parcae-rgrp-control` with
+  `zoh` vs fixed `parcae-rgrp-control` with `stable-exp`.
+
+The TPU VM was deleted after copying logs; `gcloud compute tpus tpu-vm list`
+reported no running TPU VMs.
+
+## Parcae RGRP-Control Discretization Ablation
+
+Validated on 2026-04-20 with:
+
+- TPU VM: `fractal-zoh-ablate-20260420033857`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- runner script: `scripts/run_maxtext_parcae_proof_ladder_tpu.sh`
+- matched artifact:
+  `experiments/jax_tpu/maxtext_quality/parcae_discretization_ablation_20260420T035019Z/20260420T035019Z_parcae_discretization_ablation.md`
+
+This ablation isolated the Parcae discretization policy for the fixed
+`parcae-rgrp-control` lane:
+
+- `fractal_parcae_discretization=stable-exp`
+- `fractal_parcae_discretization=zoh`
+
+Shared shape:
+
+- candidate: `parcae-rgrp-control-looped-attention`
+- physical decoder layers: `8`
+- loop count: `2`
+- loop policy: `fixed`
+- recurrence active depth: `2`
+- backward active depth: `1`
+- middle loop band: `layers 3..4`
+- `d_model=128`, `heads=4`, `head_dim=32`, `mlp_dim=512`
+- context `256`, batch `64`
+- vocab size `32000`, tokenizer `openlm-research/open_llama_3b_v2`
+- dataset: `HuggingFaceFW/fineweb-edu`, config dump `CC-MAIN-2013-20`
+- train files:
+  `gs://fractal-maxtext-runs-81f2add4/fineweb_edu_ccmain2013_20_parquet/train/*.parquet`
+- eval files:
+  `gs://fractal-maxtext-runs-81f2add4/fineweb_edu_ccmain2013_20_parquet/eval/*.parquet`
+- seed: `42`
+- steps: `2048`
+- eval interval: `512`
+- eval steps: `64`
+- observed non-padding train tokens per lane: `32,420,430`
+
+Results:
+
+| Discretization | Final Eval Loss | PPL | Final Train Loss | Median Fast Tok/s | Log Duration |
+|---|---:|---:|---:|---:|---:|
+| `stable-exp` | `5.015` | `150.584` | `4.972` | `548,988` | `467s` |
+| `zoh` | `5.015` | `150.700` | `4.974` | `554,976` | `465s` |
+
+Eval curves:
+
+| Discretization | Step 511 | Step 1023 | Step 1535 | Step 2047 |
+|---|---:|---:|---:|---:|
+| `stable-exp` | `5.736` | `5.287` | `5.090` | `5.015` |
+| `zoh` | `5.737` | `5.288` | `5.091` | `5.015` |
+
+Interpretation:
+
+- The discretization knob was effectively neutral at this `2048`-step rung.
+- `stable-exp` had a tiny final perplexity edge; `zoh` had a tiny median
+  throughput edge. Neither difference is large enough to promote as a finding.
+- The earlier fixed-policy Parcae/RGRP-control win does not appear dependent on
+  `zoh`.
+- Use `stable-exp` as the proof-ladder default because it is simpler and avoids
+  the extra learned `dt_raw` parameter. Keep `zoh` as an explicit ablation knob.
+
+The TPU VM was deleted after copying logs; `gcloud compute tpus tpu-vm list`
+reported no running TPU VMs.
+
+## Parcae 16k Scale Rung
+
+Validated on 2026-04-20 with:
+
+- TPU VM: `fractal-parcae-scale-20260420041649`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- runner script: `scripts/run_maxtext_parcae_proof_ladder_tpu.sh`
+- matched artifact:
+  `experiments/jax_tpu/maxtext_quality/parcae_scale_20260420T042711Z/20260420T042711Z_parcae_scale_16k.md`
+
+This rung promoted the fixed-policy Parcae lanes to `16,384` training steps on
+the FineWeb-EDU GCS parquet surface:
+
+- `attention`
+- `parcae-bx`
+- `parcae-rgrp-control`
+
+Shared shape:
+
+- physical decoder layers: `8`
+- Parcae loop count: `2`
+- loop policy: `fixed`
+- recurrence active depth: `2`
+- backward active depth: `1`
+- middle loop band: `layers 3..4`
+- execution scaffold: `A0 A1 A2 [A3 A4] [A3 A4] A5 A6 A7`
+- `d_model=128`, `heads=4`, `head_dim=32`, `mlp_dim=512`
+- context `256`, batch `64`
+- vocab size `32000`, tokenizer `openlm-research/open_llama_3b_v2`
+- dataset: `HuggingFaceFW/fineweb-edu`, config dump `CC-MAIN-2013-20`
+- train files:
+  `gs://fractal-maxtext-runs-81f2add4/fineweb_edu_ccmain2013_20_parquet/train/*.parquet`
+- eval files:
+  `gs://fractal-maxtext-runs-81f2add4/fineweb_edu_ccmain2013_20_parquet/eval/*.parquet`
+- seed: `42`
+- steps: `16,384`
+- eval interval: `2,048`
+- eval steps: `64`
+- observed non-padding train tokens per lane: `259,352,782`
+- Parcae discretization: `stable-exp`
+
+Results:
+
+| Lane | Final Eval Loss | Delta vs Attention | Delta vs BX | PPL | Final Train Loss | Median Fast Tok/s | Log Duration |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `attention` | `4.240` | `+0.000` | `+0.064` | `69.421` | `4.218` | `765,464` | `2,526s` |
+| `parcae-bx` | `4.176` | `-0.064` | `+0.000` | `65.075` | `4.159` | `637,064` | `2,586s` |
+| `parcae-rgrp-control` | `4.151` | `-0.089` | `-0.025` | `63.476` | `4.149` | `548,970` | `2,617s` |
+
+Eval curves:
+
+| Lane | 2047 | 4095 | 6143 | 8191 | 10239 | 12287 | 14335 | 16383 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `attention` | `5.165` | `4.770` | `4.583` | `4.454` | `4.368` | `4.304` | `4.262` | `4.240` |
+| `parcae-bx` | `5.144` | `4.710` | `4.497` | `4.381` | `4.300` | `4.237` | `4.197` | `4.176` |
+| `parcae-rgrp-control` | `5.120` | `4.693` | `4.490` | `4.364` | `4.277` | `4.214` | `4.172` | `4.151` |
+
+Interpretation:
+
+- `parcae-rgrp-control` won every eval checkpoint against both controls.
+- `parcae-bx` also beat attention, so the looped Parcae scaffold remains a live
+  architectural control independent of the rotary gated recurrent state update
+  primitive.
+- RGRP-control still pays a fast-step speed tax: about `71.7%` of attention
+  median throughput and about `86.2%` of `parcae-bx`.
+- This is quality evidence for the TPU/JAX proof ladder, not a CUDA speed claim.
+
+The TPU VM was deleted after copying logs; `gcloud compute tpus tpu-vm list`
+reported no running TPU VMs.
+
+## Parcae 16k Seed Replication
+
+Validated on 2026-04-20 with:
+
+- TPU VM: `fractal-parcae-seeds-20260420T065356`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- runner script: `scripts/run_maxtext_parcae_proof_ladder_tpu.sh`
+- matched artifact:
+  `experiments/jax_tpu/maxtext_quality/parcae_seedrep_20260420T070416Z/20260420T070416Z_parcae_seedrep_16k.md`
+
+This run replicated the `16,384`-step Parcae proof-ladder rung for two new
+seeds after the initial seed-42 run showed `parcae-rgrp-control` beating both
+attention and the Parcae B(x) scaffold control.
+
+Shared shape matched the seed-42 rung:
+
+- physical decoder layers: `8`
+- Parcae loop count: `2`
+- loop policy: `fixed`
+- recurrence active depth: `2`
+- backward active depth: `1`
+- middle loop band: `layers 3..4`
+- execution scaffold: `A0 A1 A2 [A3 A4] [A3 A4] A5 A6 A7`
+- `d_model=128`, `heads=4`, `head_dim=32`, `mlp_dim=512`
+- context `256`, batch `64`
+- vocab size `32000`, tokenizer `openlm-research/open_llama_3b_v2`
+- dataset: `HuggingFaceFW/fineweb-edu`, config dump `CC-MAIN-2013-20`
+- train files:
+  `gs://fractal-maxtext-runs-81f2add4/fineweb_edu_ccmain2013_20_parquet/train/*.parquet`
+- eval files:
+  `gs://fractal-maxtext-runs-81f2add4/fineweb_edu_ccmain2013_20_parquet/eval/*.parquet`
+- new seeds: `7`, `123`
+- prior comparison seed: `42`
+- steps: `16,384`
+- eval interval: `2,048`
+- eval steps: `64`
+- observed non-padding train tokens per lane:
+  - seed `7`: `259,416,359`
+  - seed `123`: `259,428,995`
+- Parcae discretization: `stable-exp`
+
+New seed results:
+
+| Seed | Lane | Final Eval Loss | Delta vs Attention | Delta vs BX | PPL | Final Train Loss | Median Fast Tok/s | Log Duration |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| `7` | `attention` | `4.223` | `+0.000` | `+0.047` | `68.238` | `4.122` | `765,107` | `2,622s` |
+| `7` | `parcae-bx` | `4.176` | `-0.047` | `+0.000` | `65.106` | `4.078` | `636,519` | `2,675s` |
+| `7` | `parcae-rgrp-control` | `4.170` | `-0.053` | `-0.006` | `64.691` | `4.060` | `548,988` | `2,711s` |
+| `123` | `attention` | `4.242` | `+0.000` | `+0.068` | `69.522` | `4.102` | `765,143` | `2,601s` |
+| `123` | `parcae-bx` | `4.174` | `-0.068` | `+0.000` | `64.988` | `4.039` | `636,544` | `2,646s` |
+| `123` | `parcae-rgrp-control` | `4.163` | `-0.079` | `-0.011` | `64.242` | `4.030` | `548,951` | `2,563s` |
+
+Three-seed aggregate including the prior seed-42 run:
+
+| Lane | Seed 42 | Seed 7 | Seed 123 | Mean Final Eval Loss | Mean PPL | Mean Median Fast Tok/s |
+|---|---:|---:|---:|---:|---:|---:|
+| `attention` | `4.240` | `4.223` | `4.242` | `4.235` | `69.060` | `765,238` |
+| `parcae-bx` | `4.176` | `4.176` | `4.174` | `4.175` | `65.056` | `636,709` |
+| `parcae-rgrp-control` | `4.151` | `4.170` | `4.163` | `4.161` | `64.136` | `548,970` |
+
+Interpretation:
+
+- `parcae-rgrp-control` won both new seeds against attention and B(x).
+- Across all three seeds, RGRP-control is now `3/3` against both controls.
+- The mean RGRP-control advantage is `-0.074` eval loss vs attention and
+  `-0.014` eval loss vs B(x).
+- B(x) remains a required scaffold control because it explains most of the
+  improvement over attention.
+- RGRP-control still pays a speed tax: about `71.7%` of attention median
+  throughput and about `86.2%` of B(x) at this TPU shape.
+
+Decision: the seed-replication gate passed. Promote to a model-size scale rung
+while carrying all three lanes.
+
+The TPU VM was deleted after copying logs; `gcloud compute tpus tpu-vm list`
+reported no running TPU VMs.
+
+## Parcae Width-Scale 16k Rung
+
+Validated on 2026-04-20 with:
+
+- TPU VM: `fractal-parcae-width-20260420T115012`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- runner script: `scripts/run_maxtext_parcae_proof_ladder_tpu.sh`
+- matched artifact:
+  `experiments/jax_tpu/maxtext_quality/parcae_width_20260420T115012Z/20260420T115012Z_parcae_width_16k.md`
+
+This run scaled the fixed-policy Parcae proof-ladder shape from `d_model=128`
+to `d_model=192` while preserving the same data, tokenizer, 8-layer schedule,
+middle-band Parcae loop, step budget, eval cadence, and seed.
+
+Shared shape:
+
+- physical decoder layers: `8`
+- Parcae loop count: `2`
+- loop policy: `fixed`
+- recurrence active depth: `2`
+- backward active depth: `1`
+- middle loop band: `layers 3..4`
+- execution scaffold: `A0 A1 A2 [A3 A4] [A3 A4] A5 A6 A7`
+- `d_model=192`, `heads=6`, `head_dim=32`, `mlp_dim=768`
+- MaxText reported parameter size: `0.017B`
+- context `256`, batch `64`
+- vocab size `32000`, tokenizer `openlm-research/open_llama_3b_v2`
+- dataset: `HuggingFaceFW/fineweb-edu`, config dump `CC-MAIN-2013-20`
+- train files:
+  `gs://fractal-maxtext-runs-81f2add4/fineweb_edu_ccmain2013_20_parquet/train/*.parquet`
+- eval files:
+  `gs://fractal-maxtext-runs-81f2add4/fineweb_edu_ccmain2013_20_parquet/eval/*.parquet`
+- seed: `42`
+- steps: `16,384`
+- eval interval: `2,048`
+- eval steps: `64`
+- observed non-padding train tokens per lane: `259,352,782`
+- Parcae discretization: `stable-exp`
+
+Results:
+
+| Lane | Final Eval Loss | Delta vs Attention | Delta vs BX | PPL | Final Train Loss | Median Fast Tok/s | Log Duration |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `attention` | `3.978` | `+0.000` | `+0.032` | `53.404` | `3.952` | `474,857` | `2,591s` |
+| `parcae-bx` | `3.946` | `-0.032` | `+0.000` | `51.716` | `3.924` | `387,027` | `2,671s` |
+| `parcae-rgrp-control` | `3.905` | `-0.073` | `-0.041` | `49.675` | `3.889` | `354,939` | `2,700s` |
+
+Eval curves:
+
+| Lane | 2047 | 4095 | 6143 | 8191 | 10239 | 12287 | 14335 | 16383 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `attention` | `4.947` | `4.526` | `4.323` | `4.203` | `4.118` | `4.048` | `4.002` | `3.978` |
+| `parcae-bx` | `4.911` | `4.438` | `4.266` | `4.164` | `4.084` | `4.015` | `3.968` | `3.946` |
+| `parcae-rgrp-control` | `4.885` | `4.438` | `4.243` | `4.130` | `4.046` | `3.977` | `3.930` | `3.905` |
+
+Interpretation:
+
+- `parcae-rgrp-control` survived the first model-size scale rung.
+- The final RGRP-control advantage was `0.073` eval loss over attention and
+  `0.041` eval loss over B(x).
+- The incremental RGRP-over-B(x) margin increased relative to the three-seed
+  `d_model=128` mean (`0.014`) and relative to seed-42 at `d_model=128`
+  (`0.025`).
+- B(x) still beat attention, so the Parcae scaffold remains a real control.
+- RGRP-control still pays a throughput tax: about `74.7%` of attention median
+  throughput and about `91.7%` of B(x).
+
+Decision: replicate `d_model=192` across at least two more seeds before
+increasing width again. Carry all three lanes for stronger claims; run only
+B(x) and RGRP-control if compute budget favors speed and the question is the
+incremental recurrent-control edge.
+
+The TPU VM was deleted after copying logs; `gcloud compute tpus tpu-vm list`
+reported no running TPU VMs.
+
+## Parcae Width-Scale 16k Seed Replication
+
+Validated on 2026-04-20 with:
+
+- TPU VM: `fractal-parcae-wrep-20260420T143015`
+- hardware: `v5litepod-1` spot in `us-west4-a`
+- runtime: `v2-tpuv5-litepod`
+- MaxText checkout: `AI-Hypercomputer/maxtext`, patched with
+  `scripts/patch_maxtext_rgrp.py`
+- runner script: `scripts/run_maxtext_parcae_proof_ladder_tpu.sh`
+- matched artifact:
+  `experiments/jax_tpu/maxtext_quality/parcae_width_rep_20260420T143015Z/20260420T143015Z_parcae_width_seedrep_16k.md`
+
+This run replicated the `d_model=192` Parcae width-scale rung on two new seeds
+after seed `42` showed RGRP-control beating both attention and B(x).
+
+Shared shape:
+
+- physical decoder layers: `8`
+- Parcae loop count: `2`
+- loop policy: `fixed`
+- recurrence active depth: `2`
+- backward active depth: `1`
+- middle loop band: `layers 3..4`
+- execution scaffold: `A0 A1 A2 [A3 A4] [A3 A4] A5 A6 A7`
+- `d_model=192`, `heads=6`, `head_dim=32`, `mlp_dim=768`
+- MaxText reported parameter size: `0.017B`
+- context `256`, batch `64`
+- vocab size `32000`, tokenizer `openlm-research/open_llama_3b_v2`
+- dataset: `HuggingFaceFW/fineweb-edu`, config dump `CC-MAIN-2013-20`
+- train files:
+  `gs://fractal-maxtext-runs-81f2add4/fineweb_edu_ccmain2013_20_parquet/train/*.parquet`
+- eval files:
+  `gs://fractal-maxtext-runs-81f2add4/fineweb_edu_ccmain2013_20_parquet/eval/*.parquet`
+- new seeds: `7`, `123`
+- prior comparison seed: `42`
+- steps: `16,384`
+- eval interval: `2,048`
+- eval steps: `64`
+- Parcae discretization: `stable-exp`
+
+New seed results:
+
+| Seed | Lane | Final Eval Loss | Delta vs Attention | Delta vs BX | PPL | Final Train Loss | Median Fast Tok/s | Log Duration |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| `7` | `attention` | `3.995` | `+0.000` | `+0.054` | `54.316` | `3.888` | `474,967` | `2,594s` |
+| `7` | `parcae-bx` | `3.941` | `-0.054` | `+0.000` | `51.445` | `3.830` | `386,972` | `2,679s` |
+| `7` | `parcae-rgrp-control` | `3.907` | `-0.088` | `-0.034` | `49.740` | `3.804` | `354,878` | `2,712s` |
+| `123` | `attention` | `3.987` | `+0.000` | `+0.054` | `53.893` | `3.846` | `474,961` | `2,569s` |
+| `123` | `parcae-bx` | `3.933` | `-0.054` | `+0.000` | `51.050` | `3.794` | `387,027` | `2,630s` |
+| `123` | `parcae-rgrp-control` | `3.904` | `-0.083` | `-0.029` | `49.610` | `3.764` | `354,878` | `2,670s` |
+
+Three-seed aggregate including the prior seed-42 run:
+
+| Lane | Seed 7 | Seed 42 | Seed 123 | Mean Final Eval Loss | Loss Std | Mean PPL | Mean Median Fast Tok/s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `attention` | `3.995` | `3.978` | `3.987` | `3.987` | `0.0069` | `53.871` | `474,928` |
+| `parcae-bx` | `3.941` | `3.946` | `3.933` | `3.940` | `0.0054` | `51.404` | `387,009` |
+| `parcae-rgrp-control` | `3.907` | `3.905` | `3.904` | `3.905` | `0.0012` | `49.675` | `354,898` |
+
+Interpretation:
+
+- `parcae-rgrp-control` beat both controls on all three `d_model=192` seeds.
+- The aggregate RGRP-control margin was `-0.082` eval loss vs attention and
+  `-0.035` eval loss vs B(x).
+- The RGRP-over-B(x) edge strengthened with width:
+  - `d_model=128` three-seed mean RGRP-vs-B(x): `-0.014`
+  - `d_model=192` three-seed mean RGRP-vs-B(x): `-0.035`
+- B(x) remained a strong scaffold control and beat attention on all three
+  seeds.
+- RGRP-control still pays a throughput tax: about `74.7%` of attention median
+  throughput and about `91.7%` of B(x).
+
+Decision: the first width-scale result is now replicated across three seeds.
+The next proof-ladder rung can be a single-seed larger-width scout, carrying all
+three lanes. Candidate shape: `d_model=256`, `heads=8`, `head_dim=32`,
+`mlp_dim=1024`, `layers=8`, same middle-band Parcae schedule, same data,
+tokenizer, context, and batch if it fits. If `batch=64` does not fit, retry at
+`batch=32` and document the token-budget difference explicitly.
+
+The TPU VM was deleted after copying logs; `gcloud compute tpus tpu-vm list`
+reported no running TPU VMs.
+
 ## Non-Goals
 
 - Do not use this lane to make CUDA speed claims.

@@ -7,6 +7,7 @@ from python.specs.common import StringEnum, ValidationError, ensure_positive
 
 class JaxTpuArchitectureFamily(StringEnum):
     ATTENTION_BASELINE = "attention-baseline"
+    PARCAE_LOOPED_ATTENTION = "parcae-looped-attention"
     ROTARY_GATED_RECURRENT_STATE_UPDATE = "rotary-gated-recurrent-state-update"
     GATED_DELTANET = "gated-deltanet"
     MAMBA3 = "mamba3"
@@ -344,7 +345,164 @@ def candidate_registry() -> dict[str, JaxTpuCandidateSpec]:
             ),
         ),
     )
-    return {candidate.slug: candidate for candidate in (attention, p20)}
+    rgrp_mlp_sidecar = JaxTpuCandidateSpec(
+        slug="rotary-gated-recurrent-state-update-mlp-sidecar",
+        label="Fractal rotary gated recurrent state update MLP sidecar",
+        source_profile="python-path1-primitive-p2-0-runtime-family-selected-layer-control",
+        adapter_module="python.jax_tpu.adapters.rotary_gated_recurrent_state_update",
+        adapter_overrides={
+            "decoder_block": "default",
+            "scan_layers": False,
+            "fractal_candidate": "rotary-gated-recurrent-state-update",
+            "fractal_rgrp_integration_mode": "mlp-sidecar",
+            "fractal_rgrp_layers": "1",
+            "fractal_rgrp_bottleneck_dim": 64,
+            "fractal_rgrp_sidecar_type": "rgrp",
+            "fractal_rgrp_state_transform": "block-diagonal-4-masked-dense",
+            "fractal_rgrp_scan_unroll": 3,
+            "fractal_rgrp_projection_mode": "sequence",
+            "fractal_rgrp_trig_mode": "precompute",
+            "fractal_rgrp_side_scale": 0.1,
+            "fractal_rgrp_output_init": "xavier",
+        },
+        requires_patched_maxtext=True,
+        kernel_contract=JaxTpuKernelContract(
+            architecture_family=JaxTpuArchitectureFamily.ROTARY_GATED_RECURRENT_STATE_UPDATE,
+            lowering="jax-lax-scan-sidecar",
+            recurrence_axis="tokens",
+            carries_state_across_tokens=True,
+            fusion_boundary="selected-mlp-sidecar-recurrent-state-update",
+            notes=(
+                "Keeps MaxText attention and MLP intact and adds one bottlenecked RGRP side branch.",
+                "scan_layers=false is intentional so selected-layer sidecar placement is explicit.",
+                "This is the faithful TPU probe for the earlier sparse/mid-layer positive signal.",
+            ),
+        ),
+    )
+    control_candidates = []
+    for sidecar_type in ("tiny-mlp", "tiny-glu", "binary-tree"):
+        control_candidates.append(
+            JaxTpuCandidateSpec(
+                slug=f"{sidecar_type}-mlp-sidecar-control",
+                label=f"Matched {sidecar_type} MLP sidecar control",
+                source_profile="maxtext-selected-layer-small-sidecar-control",
+                adapter_module="python.jax_tpu.adapters.rotary_gated_recurrent_state_update",
+                adapter_overrides={
+                    **rgrp_mlp_sidecar.adapter_overrides,
+                    "fractal_rgrp_sidecar_type": sidecar_type,
+                    "fractal_rgrp_output_init": "zero",
+                    "fractal_rgrp_tree_depth": 2,
+                    "fractal_rgrp_slot_count": 4,
+                },
+                requires_patched_maxtext=True,
+                kernel_contract=JaxTpuKernelContract(
+                    architecture_family=JaxTpuArchitectureFamily.CUSTOM,
+                    lowering="jax-small-sidecar-control",
+                    recurrence_axis=None,
+                    carries_state_across_tokens=False,
+                    fusion_boundary="selected-mlp-sidecar-control",
+                    notes=(
+                        "Keeps MaxText attention and MLP intact and swaps only the sidecar operator.",
+                        "Used to isolate whether the RGRP quality signal is recurrent-state-specific.",
+                    ),
+                ),
+            )
+        )
+    parcae_common_overrides = {
+        "decoder_block": "default",
+        "scan_layers": False,
+        "fractal_parcae_loop_count": 2,
+        "fractal_parcae_loop_policy": "fixed",
+        "fractal_parcae_depth_distribution": "poisson",
+        "fractal_parcae_mu_rec": 2.0,
+        "fractal_parcae_mu_bwd": 2,
+        "fractal_parcae_min_loop_count": 1,
+        "fractal_parcae_max_loop_count": 0,
+        "fractal_parcae_discretization": "stable-exp",
+    }
+    parcae_looped = JaxTpuCandidateSpec(
+        slug="parcae-looped-attention",
+        label="Parcae looped-middle attention scaffold",
+        source_profile="python-path1-parcae-looped-attention",
+        adapter_module="python.jax_tpu.adapters.rotary_gated_recurrent_state_update",
+        adapter_overrides={
+            **parcae_common_overrides,
+            "fractal_candidate": "parcae-looped-attention",
+        },
+        requires_patched_maxtext=True,
+        kernel_contract=JaxTpuKernelContract(
+            architecture_family=JaxTpuArchitectureFamily.PARCAE_LOOPED_ATTENTION,
+            lowering="maxtext-unscanned-looped-middle-reference",
+            recurrence_axis="decoder-layer-depth",
+            carries_state_across_tokens=False,
+            fusion_boundary="decoder-stack-looped-middle-scaffold",
+            notes=(
+                "Runs prelude layers once, reuses the middle layer band for recurrent depth, then runs coda layers.",
+                "This is the non-RGRP Parcae scaffold control from the H100 proof ladder.",
+            ),
+        ),
+    )
+    parcae_bx = JaxTpuCandidateSpec(
+        slug="parcae-bx-looped-attention",
+        label="Parcae B(x) looped-middle attention scaffold",
+        source_profile="python-path1-parcae-bx-looped-attention",
+        adapter_module="python.jax_tpu.adapters.rotary_gated_recurrent_state_update",
+        adapter_overrides={
+            **parcae_common_overrides,
+            "fractal_candidate": "parcae-bx-looped-attention",
+        },
+        requires_patched_maxtext=True,
+        kernel_contract=JaxTpuKernelContract(
+            architecture_family=JaxTpuArchitectureFamily.PARCAE_LOOPED_ATTENTION,
+            lowering="maxtext-unscanned-looped-middle-bx-reference",
+            recurrence_axis="decoder-layer-depth",
+            carries_state_across_tokens=False,
+            fusion_boundary="decoder-stack-looped-middle-bx-injection",
+            notes=(
+                "Adds learned B(x) value and gate projections at the Parcae loop injection seam.",
+                "This is the closest current Parcae-reference lane; stochastic depth remains an explicit run override.",
+            ),
+        ),
+    )
+    parcae_rgrp_control = JaxTpuCandidateSpec(
+        slug="parcae-rgrp-control-looped-attention",
+        label="Parcae looped-middle scaffold with RGRP control",
+        source_profile="python-path1-parcae-p20-control-looped-attention",
+        adapter_module="python.jax_tpu.adapters.rotary_gated_recurrent_state_update",
+        adapter_overrides={
+            **parcae_common_overrides,
+            "fractal_candidate": "parcae-rgrp-control-looped-attention",
+            "fractal_rgrp_state_transform": "block-diagonal-4-masked-dense",
+            "fractal_rgrp_scan_unroll": 3,
+            "fractal_rgrp_projection_mode": "sequence",
+            "fractal_rgrp_trig_mode": "precompute",
+        },
+        requires_patched_maxtext=True,
+        kernel_contract=JaxTpuKernelContract(
+            architecture_family=JaxTpuArchitectureFamily.PARCAE_LOOPED_ATTENTION,
+            lowering="maxtext-unscanned-looped-middle-rgrp-control-reference",
+            recurrence_axis="tokens-and-decoder-layer-depth",
+            carries_state_across_tokens=True,
+            fusion_boundary="decoder-stack-loop-injection-rgrp-controller",
+            notes=(
+                "Runs a full-width RGRP scan over the prelude stream and uses it to control the Parcae injection value/gate.",
+                "Uses the same outer Parcae loop-depth policy as B(x); the RGRP token scan is not privately resampled.",
+                "This is the JAX/TPU port target for the H100 P20-control winner.",
+            ),
+        ),
+    )
+    return {
+        candidate.slug: candidate
+        for candidate in (
+            attention,
+            p20,
+            rgrp_mlp_sidecar,
+            *control_candidates,
+            parcae_looped,
+            parcae_bx,
+            parcae_rgrp_control,
+        )
+    }
 
 
 def get_candidate(slug: str) -> JaxTpuCandidateSpec:

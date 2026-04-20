@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 
 
 FRACTAL_RGRP_MODULE = '''# Copyright 2026
@@ -37,6 +38,135 @@ SUPPORTED_STATE_TRANSFORMS = (
     "block-diagonal-2-masked-dense",
     "block-diagonal-4-masked-dense",
 )
+
+SUPPORTED_OUTPUT_INITS = ("zero", "xavier")
+SUPPORTED_SIDECAR_TYPES = ("rgrp", "tiny-mlp", "tiny-glu", "binary-tree")
+SUPPORTED_PARCAE_PROFILES = (
+    "parcae-looped-attention",
+    "parcae-bx-looped-attention",
+    "parcae-rgrp-control-looped-attention",
+    "parcae-p20-control-looped-attention",
+)
+SUPPORTED_PARCAE_LOOP_POLICIES = ("fixed", "per-sequence")
+SUPPORTED_PARCAE_DEPTH_DISTRIBUTIONS = ("poisson",)
+SUPPORTED_PARCAE_DISCRETIZATIONS = ("stable-exp", "zoh")
+
+
+def is_parcae_profile(candidate: str) -> bool:
+  return candidate in SUPPORTED_PARCAE_PROFILES
+
+
+def middle_loop_bounds(total_layers: int) -> tuple[int, int]:
+  if total_layers <= 0:
+    raise ValueError(f"total_layers must be positive, got {total_layers}")
+  loop_width = max(1, total_layers // 3)
+  start = max(0, (total_layers - loop_width) // 2)
+  end = min(total_layers, start + loop_width)
+  return start, end
+
+
+def parcae_max_loop_count(loop_count: int, max_loop_count: int) -> int:
+  if loop_count <= 0:
+    raise ValueError(f"fractal_parcae_loop_count must be positive, got {loop_count}")
+  if max_loop_count < 0:
+    raise ValueError(f"fractal_parcae_max_loop_count must be non-negative, got {max_loop_count}")
+  return loop_count if max_loop_count == 0 else max_loop_count
+
+
+def parcae_loop_depths(
+    *,
+    cfg: Any,
+    batch_size: int,
+    deterministic: bool,
+    rng: jax.Array | None,
+) -> tuple[jax.Array, jax.Array, int]:
+  """Return per-sequence forward and backward recurrence depths.
+
+  The fixed path preserves the original proof-ladder behavior. The per-sequence
+  path follows the Parcae training contract: sample a recurrence depth for each
+  sequence, align all examples to finish on the final recurrent step, and limit
+  gradients to the last ``mu_bwd`` active recurrent steps.
+  """
+
+  policy = str(cfg.fractal_parcae_loop_policy)
+  if policy not in SUPPORTED_PARCAE_LOOP_POLICIES:
+    raise ValueError(f"fractal_parcae_loop_policy must be one of {SUPPORTED_PARCAE_LOOP_POLICIES}, got {policy!r}")
+  distribution = str(cfg.fractal_parcae_depth_distribution)
+  if distribution not in SUPPORTED_PARCAE_DEPTH_DISTRIBUTIONS:
+    raise ValueError(
+        f"fractal_parcae_depth_distribution must be one of {SUPPORTED_PARCAE_DEPTH_DISTRIBUTIONS}, got {distribution!r}"
+    )
+
+  loop_count = int(cfg.fractal_parcae_loop_count)
+  max_loop_count = parcae_max_loop_count(loop_count, int(cfg.fractal_parcae_max_loop_count))
+  min_loop_count = int(cfg.fractal_parcae_min_loop_count)
+  if min_loop_count <= 0:
+    raise ValueError(f"fractal_parcae_min_loop_count must be positive, got {min_loop_count}")
+  if min_loop_count > max_loop_count:
+    raise ValueError(
+        f"fractal_parcae_min_loop_count={min_loop_count} exceeds effective max loop count {max_loop_count}"
+    )
+  mu_rec = float(cfg.fractal_parcae_mu_rec)
+  if mu_rec <= 0.0:
+    raise ValueError(f"fractal_parcae_mu_rec must be positive, got {mu_rec}")
+  mu_bwd = int(cfg.fractal_parcae_mu_bwd)
+  if mu_bwd <= 0:
+    raise ValueError(f"fractal_parcae_mu_bwd must be positive, got {mu_bwd}")
+
+  fixed_depth = max(min(loop_count, max_loop_count), min_loop_count)
+  if policy == "fixed" or deterministic:
+    depths = jnp.full((batch_size,), fixed_depth, dtype=jnp.int32)
+  else:
+    if rng is None:
+      raise ValueError("per-sequence Parcae loop policy requires a dropout RNG during training")
+    if distribution == "poisson":
+      # MaxText's TPU RNG backend does not support the native Poisson sampler,
+      # so sample an explicitly clipped Poisson distribution from uniform random
+      # numbers. Boundary buckets match the clipping semantics: values <= min
+      # map to min and values >= max map to max.
+      lam = jnp.asarray(mu_rec, dtype=jnp.float32)
+      ks = jnp.arange(max_loop_count + 1, dtype=jnp.float32)
+      pmf = jnp.exp(ks * jnp.log(lam) - lam - jax.lax.lgamma(ks + 1.0))
+      buckets = []
+      for depth in range(min_loop_count, max_loop_count + 1):
+        if depth == min_loop_count:
+          buckets.append(jnp.sum(pmf[: min_loop_count + 1]))
+        elif depth == max_loop_count:
+          buckets.append(jnp.maximum(1.0 - jnp.sum(pmf[:max_loop_count]), 0.0))
+        else:
+          buckets.append(pmf[depth])
+      probs = jnp.asarray(buckets, dtype=jnp.float32)
+      probs = probs / jnp.sum(probs)
+      cdf = jnp.cumsum(probs)
+      uniforms = jax.random.uniform(rng, shape=(batch_size,), dtype=jnp.float32)
+      sampled = jnp.sum(uniforms[:, None] > cdf[None, :], axis=-1) + min_loop_count
+    else:
+      raise ValueError(f"unsupported Parcae depth distribution: {distribution!r}")
+    depths = jnp.clip(sampled.astype(jnp.int32), min_loop_count, max_loop_count)
+
+  bwd_depths = jnp.minimum(depths, jnp.asarray(min(mu_bwd, max_loop_count), dtype=jnp.int32))
+  return depths, bwd_depths, max_loop_count
+
+
+def parcae_depth_masks(
+    depths: jax.Array,
+    bwd_depths: jax.Array,
+    loop_idx: int,
+    max_loop_count: int,
+) -> tuple[jax.Array, jax.Array]:
+  step = jnp.asarray(loop_idx, dtype=jnp.int32)
+  start = jnp.asarray(max_loop_count, dtype=jnp.int32) - depths
+  grad_start = jnp.asarray(max_loop_count, dtype=jnp.int32) - bwd_depths
+  active = step >= start
+  with_grad = active & (step >= grad_start)
+  return active.reshape((-1, 1, 1)), with_grad.reshape((-1, 1, 1))
+
+
+def identity_kernel_init(key: jax.Array, shape: tuple[int, ...], dtype: Any = jnp.float32) -> jax.Array:
+  del key
+  if len(shape) != 2 or shape[0] != shape[1]:
+    raise ValueError(f"identity initializer expects a square rank-2 shape, got {shape}")
+  return jnp.eye(shape[0], dtype=dtype)
 
 
 def _block_count(state_transform: str) -> int:
@@ -197,6 +327,353 @@ def rgrp_block(
       matmul_precision=matmul_precision,
       name=name,
   )
+
+
+class RGRPSidecar(nn.Module):
+  """Small RGRP branch added beside, not instead of, the standard MLP."""
+
+  d_model: int
+  bottleneck_dim: int = 64
+  state_transform: str = "block-diagonal-4-masked-dense"
+  scan_unroll: int = 3
+  projection_mode: str = "sequence"
+  trig_mode: str = "precompute"
+  side_scale: float = 0.1
+  output_init: str = "xavier"
+  dtype: Any = jnp.bfloat16
+  weight_dtype: Any = jnp.float32
+  matmul_precision: str = "default"
+
+  def setup(self):
+    if self.output_init not in SUPPORTED_OUTPUT_INITS:
+      raise ValueError(f"fractal_rgrp_output_init must be one of {SUPPORTED_OUTPUT_INITS}, got {self.output_init!r}")
+    if self.bottleneck_dim < 0:
+      raise ValueError(f"fractal_rgrp_bottleneck_dim must be >= 0, got {self.bottleneck_dim}")
+    width = self.bottleneck_dim or self.d_model
+    if width <= 0:
+      raise ValueError(f"RGRP sidecar width must be positive, got {width}")
+    if width % 2 != 0:
+      raise ValueError(f"RGRP sidecar width must be even for rotary pairs, got {width}")
+
+  @property
+  def width(self) -> int:
+    return self.bottleneck_dim or self.d_model
+
+  @nn.compact
+  def __call__(self, inputs: jax.Array) -> jax.Array:
+    if self.bottleneck_dim:
+      side_inputs = nn.Dense(
+          self.width,
+          use_bias=True,
+          dtype=self.dtype,
+          param_dtype=self.weight_dtype,
+          precision=self.matmul_precision,
+          kernel_init=nn.initializers.xavier_uniform(),
+          name="down_projection",
+      )(inputs)
+    else:
+      side_inputs = inputs
+
+    side_outputs = RotaryGatedRecurrentStateUpdate(
+        d_model=self.width,
+        state_transform=self.state_transform,
+        scan_unroll=self.scan_unroll,
+        projection_mode=self.projection_mode,
+        trig_mode=self.trig_mode,
+        residual_scale=1.0,
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        matmul_precision=self.matmul_precision,
+        name="rgrp",
+    )(side_inputs)
+
+    kernel_init = nn.initializers.zeros if self.output_init == "zero" else nn.initializers.xavier_uniform()
+    side_outputs = nn.Dense(
+        self.d_model,
+        use_bias=True,
+        dtype=self.dtype,
+        param_dtype=self.weight_dtype,
+        precision=self.matmul_precision,
+        kernel_init=kernel_init,
+        name="up_projection",
+    )(side_outputs)
+    return (side_outputs * jnp.asarray(self.side_scale, dtype=side_outputs.dtype)).astype(inputs.dtype)
+
+
+class TinyMLPSidecar(nn.Module):
+  """Matched non-recurrent control branch for the RGRP sidecar contract."""
+
+  d_model: int
+  bottleneck_dim: int = 64
+  side_scale: float = 0.1
+  output_init: str = "xavier"
+  dtype: Any = jnp.bfloat16
+  weight_dtype: Any = jnp.float32
+  matmul_precision: str = "default"
+
+  def setup(self):
+    if self.output_init not in SUPPORTED_OUTPUT_INITS:
+      raise ValueError(f"fractal_rgrp_output_init must be one of {SUPPORTED_OUTPUT_INITS}, got {self.output_init!r}")
+    if self.bottleneck_dim <= 0:
+      raise ValueError(f"fractal_rgrp_bottleneck_dim must be positive for tiny-mlp, got {self.bottleneck_dim}")
+
+  @nn.compact
+  def __call__(self, inputs: jax.Array) -> jax.Array:
+    hidden = nn.Dense(
+        self.bottleneck_dim,
+        use_bias=True,
+        dtype=self.dtype,
+        param_dtype=self.weight_dtype,
+        precision=self.matmul_precision,
+        kernel_init=nn.initializers.xavier_uniform(),
+        name="down_projection",
+    )(inputs)
+    hidden = nn.gelu(hidden)
+    hidden = nn.Dense(
+        self.bottleneck_dim,
+        use_bias=True,
+        dtype=self.dtype,
+        param_dtype=self.weight_dtype,
+        precision=self.matmul_precision,
+        kernel_init=nn.initializers.xavier_uniform(),
+        name="inner_projection",
+    )(hidden)
+    hidden = nn.gelu(hidden)
+    kernel_init = nn.initializers.zeros if self.output_init == "zero" else nn.initializers.xavier_uniform()
+    outputs = nn.Dense(
+        self.d_model,
+        use_bias=True,
+        dtype=self.dtype,
+        param_dtype=self.weight_dtype,
+        precision=self.matmul_precision,
+        kernel_init=kernel_init,
+        name="up_projection",
+    )(hidden)
+    return (outputs * jnp.asarray(self.side_scale, dtype=outputs.dtype)).astype(inputs.dtype)
+
+
+class TinyGLUSidecar(nn.Module):
+  """Matched gated control branch with no recurrent state carry."""
+
+  d_model: int
+  bottleneck_dim: int = 64
+  side_scale: float = 0.1
+  output_init: str = "xavier"
+  dtype: Any = jnp.bfloat16
+  weight_dtype: Any = jnp.float32
+  matmul_precision: str = "default"
+
+  def setup(self):
+    if self.output_init not in SUPPORTED_OUTPUT_INITS:
+      raise ValueError(f"fractal_rgrp_output_init must be one of {SUPPORTED_OUTPUT_INITS}, got {self.output_init!r}")
+    if self.bottleneck_dim <= 0:
+      raise ValueError(f"fractal_rgrp_bottleneck_dim must be positive for tiny-glu, got {self.bottleneck_dim}")
+
+  @nn.compact
+  def __call__(self, inputs: jax.Array) -> jax.Array:
+    packed = nn.Dense(
+        self.bottleneck_dim * 2,
+        use_bias=True,
+        dtype=self.dtype,
+        param_dtype=self.weight_dtype,
+        precision=self.matmul_precision,
+        kernel_init=nn.initializers.xavier_uniform(),
+        name="gate_value_projection",
+    )(inputs)
+    gate, value = jnp.split(packed, 2, axis=-1)
+    hidden = jax.nn.sigmoid(gate) * nn.gelu(value)
+    kernel_init = nn.initializers.zeros if self.output_init == "zero" else nn.initializers.xavier_uniform()
+    outputs = nn.Dense(
+        self.d_model,
+        use_bias=True,
+        dtype=self.dtype,
+        param_dtype=self.weight_dtype,
+        precision=self.matmul_precision,
+        kernel_init=kernel_init,
+        name="up_projection",
+    )(hidden)
+    return (outputs * jnp.asarray(self.side_scale, dtype=outputs.dtype)).astype(inputs.dtype)
+
+
+class BinaryTreeSidecar(nn.Module):
+  """Generic differentiable binary-tree expert control.
+
+  This preserves the tree-shaped small-expert hypothesis without the recurrent
+  state carry or rotary update law, so it is a control for structure rather than
+  for RGRP-specific dynamics.
+  """
+
+  d_model: int
+  bottleneck_dim: int = 64
+  tree_depth: int = 2
+  slot_count: int = 4
+  side_scale: float = 0.1
+  output_init: str = "xavier"
+  dtype: Any = jnp.bfloat16
+  weight_dtype: Any = jnp.float32
+  matmul_precision: str = "default"
+
+  def setup(self):
+    if self.output_init not in SUPPORTED_OUTPUT_INITS:
+      raise ValueError(f"fractal_rgrp_output_init must be one of {SUPPORTED_OUTPUT_INITS}, got {self.output_init!r}")
+    if self.bottleneck_dim <= 0:
+      raise ValueError(f"fractal_rgrp_bottleneck_dim must be positive for binary-tree, got {self.bottleneck_dim}")
+    if self.tree_depth <= 0:
+      raise ValueError(f"fractal_rgrp_tree_depth must be positive, got {self.tree_depth}")
+    if self.slot_count <= 0:
+      raise ValueError(f"fractal_rgrp_slot_count must be positive, got {self.slot_count}")
+
+  @property
+  def leaf_count(self) -> int:
+    return 2 ** self.tree_depth
+
+  @nn.compact
+  def __call__(self, inputs: jax.Array) -> jax.Array:
+    slots = nn.Dense(
+        self.bottleneck_dim * self.slot_count,
+        use_bias=True,
+        dtype=self.dtype,
+        param_dtype=self.weight_dtype,
+        precision=self.matmul_precision,
+        kernel_init=nn.initializers.xavier_uniform(),
+        name="slot_projection",
+    )(inputs)
+    slots = nn.tanh(slots.reshape(*inputs.shape[:-1], self.slot_count, self.bottleneck_dim))
+    constants = jnp.ones((*inputs.shape[:-1], 1, self.bottleneck_dim), dtype=slots.dtype)
+    slot_bank = jnp.concatenate([slots, constants, -constants], axis=-2)
+    selector_logits = self.param(
+        "leaf_selector_logits",
+        nn.initializers.zeros,
+        (self.leaf_count, self.slot_count + 2),
+        self.weight_dtype,
+    )
+    selector = jax.nn.softmax(selector_logits.astype(self.dtype), axis=-1)
+    nodes = jnp.einsum("lc,btcw->bltw", selector, slot_bank, precision=self.matmul_precision)
+    node_count = self.leaf_count
+    level = 0
+    while node_count > 1:
+      left = nodes[:, 0::2, :, :]
+      right = nodes[:, 1::2, :, :]
+      gate = nn.Dense(
+          self.bottleneck_dim,
+          use_bias=True,
+          dtype=self.dtype,
+          param_dtype=self.weight_dtype,
+          precision=self.matmul_precision,
+          kernel_init=nn.initializers.xavier_uniform(),
+          name=f"node_gate_{level}",
+      )(jnp.concatenate([left, right], axis=-1))
+      mixed = jax.nn.sigmoid(gate) * left + (1.0 - jax.nn.sigmoid(gate)) * right
+      interact = nn.Dense(
+          self.bottleneck_dim,
+          use_bias=True,
+          dtype=self.dtype,
+          param_dtype=self.weight_dtype,
+          precision=self.matmul_precision,
+          kernel_init=nn.initializers.xavier_uniform(),
+          name=f"node_interact_{level}",
+      )(left * right)
+      nodes = nn.tanh(mixed + interact)
+      node_count //= 2
+      level += 1
+    hidden = nodes[:, 0, :, :]
+    kernel_init = nn.initializers.zeros if self.output_init == "zero" else nn.initializers.xavier_uniform()
+    outputs = nn.Dense(
+        self.d_model,
+        use_bias=True,
+        dtype=self.dtype,
+        param_dtype=self.weight_dtype,
+        precision=self.matmul_precision,
+        kernel_init=kernel_init,
+        name="up_projection",
+    )(hidden)
+    return (outputs * jnp.asarray(self.side_scale, dtype=outputs.dtype)).astype(inputs.dtype)
+
+
+def sidecar_block(
+    *,
+    sidecar_type: str,
+    d_model: int,
+    bottleneck_dim: int,
+    state_transform: str,
+    scan_unroll: int,
+    projection_mode: str,
+    trig_mode: str,
+    side_scale: float,
+    output_init: str,
+    dtype: Any,
+    weight_dtype: Any,
+    matmul_precision: str,
+    tree_depth: int = 2,
+    slot_count: int = 4,
+    name: str | None = None,
+) -> nn.Module:
+  if sidecar_type == "rgrp":
+    return RGRPSidecar(
+      d_model=d_model,
+      bottleneck_dim=bottleneck_dim,
+      state_transform=state_transform,
+      scan_unroll=scan_unroll,
+      projection_mode=projection_mode,
+      trig_mode=trig_mode,
+      side_scale=side_scale,
+      output_init=output_init,
+      dtype=dtype,
+      weight_dtype=weight_dtype,
+      matmul_precision=matmul_precision,
+      name=name,
+    )
+  if sidecar_type == "tiny-mlp":
+    return TinyMLPSidecar(
+        d_model=d_model,
+        bottleneck_dim=bottleneck_dim,
+        side_scale=side_scale,
+        output_init=output_init,
+        dtype=dtype,
+        weight_dtype=weight_dtype,
+        matmul_precision=matmul_precision,
+        name=name,
+    )
+  if sidecar_type == "tiny-glu":
+    return TinyGLUSidecar(
+        d_model=d_model,
+        bottleneck_dim=bottleneck_dim,
+        side_scale=side_scale,
+        output_init=output_init,
+        dtype=dtype,
+        weight_dtype=weight_dtype,
+        matmul_precision=matmul_precision,
+        name=name,
+    )
+  if sidecar_type == "binary-tree":
+    return BinaryTreeSidecar(
+        d_model=d_model,
+        bottleneck_dim=bottleneck_dim,
+        tree_depth=tree_depth,
+        slot_count=slot_count,
+        side_scale=side_scale,
+        output_init=output_init,
+        dtype=dtype,
+        weight_dtype=weight_dtype,
+        matmul_precision=matmul_precision,
+        name=name,
+    )
+  raise ValueError(f"fractal_rgrp_sidecar_type must be one of {SUPPORTED_SIDECAR_TYPES}, got {sidecar_type!r}")
+
+
+def layer_enabled(layer_spec: Any, layer_idx: int | None) -> bool:
+  normalized = str(layer_spec).strip().lower()
+  if normalized in ("", "none"):
+    return False
+  if normalized in ("*", "all"):
+    return True
+  if layer_idx is None:
+    raise ValueError(
+        "fractal_rgrp_layers selects specific layers, but MaxText is using scanned layers without a visible layer_idx. "
+        "Set scan_layers=false for selected-layer RGRP sidecars."
+    )
+  enabled = {int(part.strip()) for part in normalized.split(",") if part.strip()}
+  return layer_idx in enabled
 '''
 
 
@@ -205,6 +682,15 @@ def replace_once(text: str, old: str, new: str, *, path: Path) -> str:
     if count != 1:
         raise RuntimeError(f"expected exactly one match in {path} for patch fragment; found {count}")
     return text.replace(old, new, 1)
+
+
+def insert_after_once(text: str, marker: str, insert: str, *, path: Path) -> str:
+    if insert in text:
+        return text
+    count = text.count(marker)
+    if count != 1:
+        raise RuntimeError(f"expected exactly one insertion marker in {path}; found {count}")
+    return text.replace(marker, marker + insert, 1)
 
 
 def resolve_package_dir(path: Path) -> Path:
@@ -219,19 +705,43 @@ def resolve_package_dir(path: Path) -> Path:
 def patch_types(package_dir: Path) -> None:
     types_path = package_dir / "configs" / "types.py"
     text = types_path.read_text()
-    if "fractal_candidate" in text:
-        return
-    marker = '  mlp_activations: list[str] = Field(["silu", "linear"], description="Activation functions in the MLP layer.")\n'
-    insert = (
-        '  fractal_candidate: str = Field("", description="Fractal experimental adapter slug. Empty disables adapters.")\n'
-        '  fractal_adapter_module: str = Field("", description="Fractal adapter module identifier used by external manifests.")\n'
-        '  fractal_rgrp_state_transform: str = Field("block-diagonal-4-masked-dense", description="RGRP state transform contract.")\n'
-        '  fractal_rgrp_scan_unroll: int = Field(3, description="RGRP lax.scan unroll factor.")\n'
-        '  fractal_rgrp_projection_mode: str = Field("sequence", description="RGRP projection lowering mode.")\n'
-        '  fractal_rgrp_trig_mode: str = Field("precompute", description="RGRP trigonometric lowering mode.")\n'
-        '  fractal_rgrp_residual_scale: float = Field(1.0, description="Scale applied to the RGRP FFN-seam residual branch.")\n'
+    text = text.replace(
+        '  fractal_rgrp_layers: str = Field("*", description="Comma-separated zero-indexed decoder layers for sidecar mode, or * for all.")\n',
+        '  fractal_rgrp_layers: str | int = Field("*", description="Comma-separated zero-indexed decoder layers for sidecar mode, or * for all.")\n',
     )
-    types_path.write_text(replace_once(text, marker, marker + insert, path=types_path))
+    marker = '  mlp_activations: list[str] = Field(["silu", "linear"], description="Activation functions in the MLP layer.")\n'
+    fields = [
+        '  fractal_candidate: str = Field("", description="Fractal experimental adapter slug. Empty disables adapters.")\n',
+        '  fractal_adapter_module: str = Field("", description="Fractal adapter module identifier used by external manifests.")\n',
+        '  fractal_rgrp_integration_mode: str = Field("replace-mlp", description="RGRP integration mode: replace-mlp or mlp-sidecar.")\n',
+        '  fractal_rgrp_layers: str | int = Field("*", description="Comma-separated zero-indexed decoder layers for sidecar mode, or * for all.")\n',
+        '  fractal_rgrp_bottleneck_dim: int = Field(0, description="Optional sidecar bottleneck width. 0 keeps full hidden width.")\n',
+        '  fractal_rgrp_state_transform: str = Field("block-diagonal-4-masked-dense", description="RGRP state transform contract.")\n',
+        '  fractal_rgrp_scan_unroll: int = Field(3, description="RGRP lax.scan unroll factor.")\n',
+        '  fractal_rgrp_projection_mode: str = Field("sequence", description="RGRP projection lowering mode.")\n',
+        '  fractal_rgrp_trig_mode: str = Field("precompute", description="RGRP trigonometric lowering mode.")\n',
+        '  fractal_rgrp_residual_scale: float = Field(1.0, description="Scale applied to the RGRP replacement branch.")\n',
+        '  fractal_rgrp_sidecar_type: str = Field("rgrp", description="Selected MLP-sidecar operator: rgrp, tiny-mlp, tiny-glu, or binary-tree.")\n',
+        '  fractal_rgrp_side_scale: float = Field(0.1, description="Scale applied to the RGRP MLP-sidecar branch.")\n',
+        '  fractal_rgrp_output_init: str = Field("xavier", description="RGRP sidecar output projection init: zero or xavier.")\n',
+        '  fractal_rgrp_tree_depth: int = Field(2, description="Binary-tree control sidecar depth.")\n',
+        '  fractal_rgrp_slot_count: int = Field(4, description="Binary-tree control sidecar slot count.")\n',
+        '  fractal_parcae_loop_count: int = Field(2, description="Number of recurrent passes through the Parcae middle layer band.")\n',
+        '  fractal_parcae_loop_policy: str = Field("fixed", description="Parcae loop-depth policy: fixed or per-sequence.")\n',
+        '  fractal_parcae_depth_distribution: str = Field("poisson", description="Per-sequence Parcae loop-depth distribution.")\n',
+        '  fractal_parcae_mu_rec: float = Field(2.0, description="Mean forward recurrence depth for stochastic Parcae training.")\n',
+        '  fractal_parcae_mu_bwd: int = Field(2, description="Number of final recurrent steps that receive gradients in stochastic Parcae training.")\n',
+        '  fractal_parcae_min_loop_count: int = Field(1, description="Minimum sampled Parcae recurrence depth.")\n',
+        '  fractal_parcae_max_loop_count: int = Field(0, description="Maximum sampled Parcae recurrence depth. 0 uses fractal_parcae_loop_count.")\n',
+        '  fractal_parcae_discretization: str = Field("stable-exp", description="Parcae stable discretization: stable-exp or zoh.")\n',
+        '  fractal_parcae_dt_raw_init: float = Field(0.54132485, description="Initial raw step size for ZOH Parcae discretization; softplus(raw)=1.0.")\n',
+    ]
+    for field in reversed(fields):
+        name = field.strip().split(":", 1)[0]
+        field_decl = re.compile(rf"^\s*{re.escape(name)}\s*:", re.MULTILINE)
+        if not field_decl.search(text):
+            text = insert_after_once(text, marker, field, path=types_path)
+    types_path.write_text(text)
 
 
 def patch_decoders(package_dir: Path) -> None:
@@ -242,6 +752,20 @@ def patch_decoders(package_dir: Path) -> None:
             text,
             "from maxtext.layers import quantizations\n",
             "from maxtext.layers import quantizations\nfrom maxtext.layers import fractal_rgrp\n",
+            path=decoders_path,
+        )
+    if "enable_fractal_rgrp_sidecar: bool = False" not in text:
+        text = replace_once(
+            text,
+            "  quant: None | Quant = None\n\n  @nn.compact\n",
+            "  quant: None | Quant = None\n  enable_fractal_rgrp_sidecar: bool = False\n\n  @nn.compact\n",
+            path=decoders_path,
+        )
+    if "layer_idx: int | None = None," not in text:
+        text = replace_once(
+            text,
+            "      attention_metadata: dict[str, Any] | None = None,\n  ):",
+            "      attention_metadata: dict[str, Any] | None = None,\n      layer_idx: int | None = None,\n  ):",
             path=decoders_path,
         )
     old = '''    # MLP block.
@@ -259,7 +783,7 @@ def patch_decoders(package_dir: Path) -> None:
         mesh=self.mesh,
     )(lnx, deterministic=deterministic)
 '''
-    new = '''    # FFN block. The Fractal adapter intentionally plugs into the same
+    old_replacement_lane = '''    # FFN block. The Fractal adapter intentionally plugs into the same
     # pre-normalized seam as the standard MLP so attention/output contracts stay
     # MaxText-native.
     if cfg.fractal_candidate == "rotary-gated-recurrent-state-update":
@@ -290,8 +814,354 @@ def patch_decoders(package_dir: Path) -> None:
           mesh=self.mesh,
       )(lnx, deterministic=deterministic)
 '''
-    if "cfg.fractal_candidate == \"rotary-gated-recurrent-state-update\"" not in text:
+    new = '''    # FFN block. The Fractal adapter intentionally plugs into the same
+    # pre-normalized seam as the standard MLP. It can replace the MLP for harsh
+    # ablations, or act as a sidecar while preserving the native MLP contract.
+    if (
+        cfg.fractal_candidate == "rotary-gated-recurrent-state-update"
+        and cfg.fractal_rgrp_integration_mode == "replace-mlp"
+    ):
+      mlp_lnx = fractal_rgrp.rgrp_block(
+          d_model=lnx.shape[-1],
+          state_transform=cfg.fractal_rgrp_state_transform,
+          scan_unroll=cfg.fractal_rgrp_scan_unroll,
+          projection_mode=cfg.fractal_rgrp_projection_mode,
+          trig_mode=cfg.fractal_rgrp_trig_mode,
+          residual_scale=cfg.fractal_rgrp_residual_scale,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          matmul_precision=cfg.matmul_precision,
+          name="mlp",
+      )(lnx)
+    else:
+      mlp_lnx = linears.mlp_block(
+          in_features=lnx.shape[-1],
+          intermediate_dim=cfg.mlp_dim,
+          activations=cfg.mlp_activations,
+          intermediate_dropout_rate=cfg.dropout_rate,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          name="mlp",
+          model_mode=model_mode,
+          config=cfg,
+          quant=self.quant,
+          mesh=self.mesh,
+      )(lnx, deterministic=deterministic)
+      if (
+          cfg.fractal_candidate == "rotary-gated-recurrent-state-update"
+          and cfg.fractal_rgrp_integration_mode == "mlp-sidecar"
+          and self.enable_fractal_rgrp_sidecar
+      ):
+        mlp_lnx = mlp_lnx + fractal_rgrp.sidecar_block(
+            sidecar_type=cfg.fractal_rgrp_sidecar_type,
+            d_model=lnx.shape[-1],
+            bottleneck_dim=cfg.fractal_rgrp_bottleneck_dim,
+            state_transform=cfg.fractal_rgrp_state_transform,
+            scan_unroll=cfg.fractal_rgrp_scan_unroll,
+            projection_mode=cfg.fractal_rgrp_projection_mode,
+            trig_mode=cfg.fractal_rgrp_trig_mode,
+            side_scale=cfg.fractal_rgrp_side_scale,
+            output_init=cfg.fractal_rgrp_output_init,
+            dtype=cfg.dtype,
+            weight_dtype=cfg.weight_dtype,
+            matmul_precision=cfg.matmul_precision,
+            tree_depth=cfg.fractal_rgrp_tree_depth,
+            slot_count=cfg.fractal_rgrp_slot_count,
+            name="fractal_rgrp_sidecar",
+        )(lnx)
+'''
+    if old_replacement_lane in text:
+        text = replace_once(text, old_replacement_lane, new, path=decoders_path)
+    elif "cfg.fractal_rgrp_integration_mode == \"mlp-sidecar\"" not in text:
         text = replace_once(text, old, new, path=decoders_path)
+    else:
+        text = text.replace(
+            "          and fractal_rgrp.layer_enabled(cfg.fractal_rgrp_layers, layer_idx)\n",
+            "          and self.enable_fractal_rgrp_sidecar\n",
+        )
+    if "enable_fractal_rgrp_sidecar=fractal_rgrp.layer_enabled(cfg.fractal_rgrp_layers, lyr)" not in text:
+        text = replace_once(
+            text,
+            "                config=cfg, mesh=mesh, name=f\"layers_{lyr}\", quant=self.quant, model_mode=self.model_mode, **layer_kwargs\n",
+            (
+                "                config=cfg,\n"
+                "                mesh=mesh,\n"
+                "                name=f\"layers_{lyr}\",\n"
+                "                quant=self.quant,\n"
+                "                model_mode=self.model_mode,\n"
+                "                enable_fractal_rgrp_sidecar=fractal_rgrp.layer_enabled(cfg.fractal_rgrp_layers, lyr),\n"
+                "                **layer_kwargs,\n"
+            ),
+            path=decoders_path,
+        )
+    if "layer_idx=lyr," not in text:
+        text = replace_once(
+            text,
+            "                attention_metadata=attention_metadata,\n                **layer_call_kwargs,\n",
+            "                attention_metadata=attention_metadata,\n                layer_idx=lyr,\n                **layer_call_kwargs,\n",
+            path=decoders_path,
+        )
+    parcae_method = '''  def _fractal_apply_parcae_loop(
+      self,
+      y,
+      RemattedBlockLayer,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk,
+      slot,
+      page_state,
+      attention_metadata,
+  ):
+    """Apply the Parcae-inspired looped-middle scaffold.
+
+    This intentionally mirrors the Torch Path 1 Parcae contract:
+
+    prelude layers -> normalized loop input -> looped middle layers -> coda
+
+    The middle layer band reuses the same layer parameters for each recurrent
+    pass. This patch currently supports only the default unscanned decoder block
+    used by the proof ladder; unsupported MaxText control planes fail loudly
+    instead of silently changing the architecture.
+    """
+
+    cfg = self.config
+    if cfg.scan_layers:
+      raise ValueError("Parcae looped scaffold requires scan_layers=false so layer identities are explicit.")
+    if cfg.decoder_block != DecoderBlockType.DEFAULT:
+      raise ValueError("Parcae looped scaffold currently supports decoder_block=default only.")
+    if cfg.using_pipeline_parallelism:
+      raise ValueError("Parcae looped scaffold currently does not support pipeline parallelism.")
+
+    start, end = fractal_rgrp.middle_loop_bounds(cfg.num_decoder_layers)
+    width = y.shape[-1]
+    layer_modules = [
+        RemattedBlockLayer(
+            config=cfg,
+            mesh=self.mesh,
+            name=f"layers_{lyr}",
+            quant=self.quant,
+            model_mode=self.model_mode,
+        )
+        for lyr in range(cfg.num_decoder_layers)
+    ]
+
+    def apply_layer(layer_input, lyr: int):
+      layer_output, _ = layer_modules[lyr](
+          layer_input,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk=previous_chunk,
+          page_state=page_state,
+          slot=slot,
+          kv_cache=None,
+          attention_metadata=attention_metadata,
+          layer_idx=lyr,
+      )
+      return layer_output
+
+    for lyr in range(start):
+      y = apply_layer(y, lyr)
+
+    loop_input = rms_norm(
+        num_features=width,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name="fractal_parcae_prelude_norm",
+        epsilon=cfg.normalization_layer_epsilon,
+        kernel_axes=("norm",),
+    )(y)
+    decay_raw = self.param(
+        "fractal_parcae_decay_raw",
+        nn.initializers.constant(-2.0),
+        (width,),
+        cfg.weight_dtype,
+    )
+    nonlinear_logit = self.param(
+        "fractal_parcae_nonlinear_logit",
+        nn.initializers.zeros,
+        (width,),
+        cfg.weight_dtype,
+    )
+    decay_rate = jax.nn.softplus(decay_raw.astype(cfg.dtype)).reshape(1, 1, -1)
+    if cfg.fractal_parcae_discretization == "stable-exp":
+      decay = jnp.exp(-decay_rate)
+      input_scale = jnp.ones_like(decay)
+    elif cfg.fractal_parcae_discretization == "zoh":
+      dt_raw = self.param(
+          "fractal_parcae_dt_raw",
+          nn.initializers.constant(cfg.fractal_parcae_dt_raw_init),
+          (width,),
+          cfg.weight_dtype,
+      )
+      step_size = jax.nn.softplus(dt_raw.astype(cfg.dtype)).reshape(1, 1, -1)
+      decay = jnp.exp(-step_size * decay_rate)
+      input_scale = (1.0 - decay) / jnp.maximum(decay_rate, jnp.asarray(1.0e-6, dtype=decay_rate.dtype))
+    else:
+      raise ValueError(
+          f"fractal_parcae_discretization must be one of {fractal_rgrp.SUPPORTED_PARCAE_DISCRETIZATIONS}, "
+          f"got {cfg.fractal_parcae_discretization!r}"
+      )
+    nonlinear = jax.nn.sigmoid(nonlinear_logit.astype(cfg.dtype)).reshape(1, 1, -1)
+
+    if cfg.fractal_candidate == "parcae-looped-attention":
+      injection_logit = self.param(
+          "fractal_parcae_injection_logit",
+          nn.initializers.constant(-2.1972246),
+          (width,),
+          cfg.weight_dtype,
+      )
+      injection_gate = jax.nn.sigmoid(injection_logit.astype(cfg.dtype)).reshape(1, 1, -1)
+      injection_value = loop_input
+    elif cfg.fractal_candidate == "parcae-bx-looped-attention":
+      injection_value = nn.Dense(
+          width,
+          use_bias=False,
+          dtype=cfg.dtype,
+          param_dtype=cfg.weight_dtype,
+          precision=cfg.matmul_precision,
+          kernel_init=fractal_rgrp.identity_kernel_init,
+          name="fractal_parcae_b_value_projection",
+      )(loop_input)
+      injection_gate = jax.nn.sigmoid(
+          nn.Dense(
+              width,
+              use_bias=True,
+              dtype=cfg.dtype,
+              param_dtype=cfg.weight_dtype,
+              precision=cfg.matmul_precision,
+              kernel_init=nn.initializers.zeros,
+              bias_init=nn.initializers.constant(-2.1972246),
+              name="fractal_parcae_b_gate_projection",
+          )(loop_input)
+      )
+    elif cfg.fractal_candidate in ("parcae-rgrp-control-looped-attention", "parcae-p20-control-looped-attention"):
+      control = fractal_rgrp.rgrp_block(
+          d_model=width,
+          state_transform=cfg.fractal_rgrp_state_transform,
+          scan_unroll=cfg.fractal_rgrp_scan_unroll,
+          projection_mode=cfg.fractal_rgrp_projection_mode,
+          trig_mode=cfg.fractal_rgrp_trig_mode,
+          residual_scale=1.0,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          matmul_precision=cfg.matmul_precision,
+          name="fractal_parcae_rgrp_control",
+      )(loop_input)
+      control = rms_norm(
+          num_features=width,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          name="fractal_parcae_rgrp_control_norm",
+          epsilon=cfg.normalization_layer_epsilon,
+          kernel_axes=("norm",),
+      )(control)
+      control_gate = nn.Dense(
+          width,
+          use_bias=True,
+          dtype=cfg.dtype,
+          param_dtype=cfg.weight_dtype,
+          precision=cfg.matmul_precision,
+          kernel_init=nn.initializers.normal(stddev=1.0e-3),
+          bias_init=nn.initializers.constant(-2.1972246),
+          name="fractal_parcae_rgrp_gate_projection",
+      )(control)
+      control_value = nn.Dense(
+          width,
+          use_bias=False,
+          dtype=cfg.dtype,
+          param_dtype=cfg.weight_dtype,
+          precision=cfg.matmul_precision,
+          kernel_init=nn.initializers.normal(stddev=1.0e-3),
+          name="fractal_parcae_rgrp_value_projection",
+      )(control)
+      injection_gate = jax.nn.sigmoid(control_gate)
+      injection_value = loop_input + control_value
+    else:
+      raise ValueError(f"unsupported Parcae profile: {cfg.fractal_candidate!r}")
+
+    rng = None if (deterministic or cfg.fractal_parcae_loop_policy == "fixed") else self.make_rng("dropout")
+    loop_depths, bwd_depths, max_loop_count = fractal_rgrp.parcae_loop_depths(
+        cfg=cfg,
+        batch_size=loop_input.shape[0],
+        deterministic=deterministic,
+        rng=rng,
+    )
+
+    state = jnp.zeros_like(loop_input)
+    injection = input_scale * injection_gate * injection_value
+    for loop_idx in range(max_loop_count):
+      active_mask, grad_mask = fractal_rgrp.parcae_depth_masks(
+          loop_depths,
+          bwd_depths,
+          loop_idx,
+          max_loop_count,
+      )
+      mixed = decay * state + injection
+      for lyr in range(start, end):
+        block_out = apply_layer(mixed, lyr)
+        mixed = mixed + nonlinear * (block_out - mixed)
+      mixed = jnp.where(grad_mask, mixed, jax.lax.stop_gradient(mixed))
+      state = jnp.where(active_mask, mixed, state)
+
+    y = state
+    for lyr in range(end, cfg.num_decoder_layers):
+      y = apply_layer(y, lyr)
+    return y
+
+'''
+    if "def _fractal_apply_parcae_loop(" not in text:
+        text = insert_after_once(
+            text,
+            "  def get_pipeline_stage_module(self, decoder_blocks):\n",
+            parcae_method,
+            path=decoders_path,
+        )
+        text = text.replace(
+            "  def get_pipeline_stage_module(self, decoder_blocks):\n" + parcae_method,
+            parcae_method + "  def get_pipeline_stage_module(self, decoder_blocks):\n",
+            1,
+        )
+    if "is_parcae_profile(cfg.fractal_candidate)" not in text:
+        loop_marker = "        else:\n          for lyr in range(cfg.num_decoder_layers):\n"
+        start = text.find(loop_marker)
+        if start == -1:
+            raise RuntimeError(f"could not find unscanned default decoder loop in {decoders_path}")
+        end_marker = "\n    assert isinstance(y, jax.Array)"
+        end = text.find(end_marker, start)
+        if end == -1:
+            raise RuntimeError(f"could not find end of unscanned default decoder loop in {decoders_path}")
+        original_block = text[start:end]
+        original_body = original_block.removeprefix("        else:\n")
+        indented_body = "\n".join(
+            ("  " + line if line else line) for line in original_body.splitlines()
+        )
+        replacement = (
+            "        else:\n"
+            "          if fractal_rgrp.is_parcae_profile(cfg.fractal_candidate):\n"
+            "            if kv_caches is not None:\n"
+            "              raise ValueError(\"Parcae looped scaffold currently does not support kv_caches.\")\n"
+            "            if deepstack_visual_embeds is not None:\n"
+            "              raise ValueError(\"Parcae looped scaffold currently does not support deepstack visual embeddings.\")\n"
+            "            y = self._fractal_apply_parcae_loop(\n"
+            "                y,\n"
+            "                RemattedBlockLayers[0],\n"
+            "                decoder_segment_ids,\n"
+            "                decoder_positions,\n"
+            "                deterministic,\n"
+            "                model_mode,\n"
+            "                previous_chunk,\n"
+            "                slot,\n"
+            "                page_state,\n"
+            "                attention_metadata,\n"
+            "            )\n"
+            "          else:\n"
+            f"{indented_body}\n"
+        )
+        text = text[:start] + replacement + text[end:]
     decoders_path.write_text(text)
 
 

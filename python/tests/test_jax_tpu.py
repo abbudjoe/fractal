@@ -73,6 +73,131 @@ class JaxTpuContractTests(unittest.TestCase):
         self.assertEqual(candidate.kernel_contract.recurrence_axis, "tokens")
         self.assertEqual(candidate.kernel_contract.fusion_boundary, "ffn-side-recurrent-state-update")
 
+    def test_rgrp_mlp_sidecar_candidate_keeps_transformer_backbone(self) -> None:
+        spec = JaxTpuBenchmarkSpec(
+            run_name="rgrp-sidecar-scout",
+            base_output_directory="gs://fractal-maxtext-runs",
+            candidate=get_candidate("rotary-gated-recurrent-state-update-mlp-sidecar"),
+        )
+
+        command = build_maxtext_command(spec, allow_patched_maxtext=True)
+        rendered = render_shell_command(command)
+
+        self.assertIn("decoder_block=default", rendered)
+        self.assertIn("scan_layers=false", rendered)
+        self.assertIn("fractal_candidate=rotary-gated-recurrent-state-update", rendered)
+        self.assertIn("fractal_rgrp_integration_mode=mlp-sidecar", rendered)
+        self.assertIn("fractal_rgrp_layers=1", rendered)
+        self.assertIn("fractal_rgrp_bottleneck_dim=64", rendered)
+        self.assertIn("fractal_rgrp_sidecar_type=rgrp", rendered)
+        self.assertIn("fractal_rgrp_side_scale=0.1", rendered)
+        self.assertIn("fractal_rgrp_output_init=xavier", rendered)
+        self.assertEqual(
+            spec.candidate.kernel_contract.fusion_boundary,
+            "selected-mlp-sidecar-recurrent-state-update",
+        )
+
+    def test_matched_sidecar_controls_swap_only_sidecar_operator(self) -> None:
+        for slug, sidecar_type in (
+            ("tiny-mlp-mlp-sidecar-control", "tiny-mlp"),
+            ("tiny-glu-mlp-sidecar-control", "tiny-glu"),
+            ("binary-tree-mlp-sidecar-control", "binary-tree"),
+        ):
+            with self.subTest(slug=slug):
+                spec = JaxTpuBenchmarkSpec(
+                    run_name=f"{sidecar_type}-control",
+                    base_output_directory="gs://fractal-maxtext-runs",
+                    candidate=get_candidate(slug),
+                )
+
+                command = build_maxtext_command(spec, allow_patched_maxtext=True)
+                rendered = render_shell_command(command)
+
+                self.assertIn("decoder_block=default", rendered)
+                self.assertIn("scan_layers=false", rendered)
+                self.assertIn("fractal_candidate=rotary-gated-recurrent-state-update", rendered)
+                self.assertIn("fractal_rgrp_integration_mode=mlp-sidecar", rendered)
+                self.assertIn("fractal_rgrp_layers=1", rendered)
+                self.assertIn("fractal_rgrp_bottleneck_dim=64", rendered)
+                self.assertIn(f"fractal_rgrp_sidecar_type={sidecar_type}", rendered)
+                self.assertIn("fractal_rgrp_output_init=zero", rendered)
+                self.assertEqual(
+                    spec.candidate.kernel_contract.fusion_boundary,
+                    "selected-mlp-sidecar-control",
+                )
+
+    def test_parcae_rgrp_control_candidate_matches_looped_scaffold_contract(self) -> None:
+        spec = JaxTpuBenchmarkSpec(
+            run_name="parcae-rgrp-scout",
+            base_output_directory="gs://fractal-maxtext-runs",
+            candidate=get_candidate("parcae-rgrp-control-looped-attention"),
+            shape=JaxTpuModelShape(vocab_size=32_000, sequence_length=256, d_model=128, num_layers=8, num_heads=4),
+        )
+
+        command = build_maxtext_command(spec, allow_patched_maxtext=True)
+        rendered = render_shell_command(command)
+
+        self.assertIn("base_num_decoder_layers=8", rendered)
+        self.assertIn("base_emb_dim=128", rendered)
+        self.assertIn("base_mlp_dim=512", rendered)
+        self.assertIn("scan_layers=false", rendered)
+        self.assertIn("fractal_candidate=parcae-rgrp-control-looped-attention", rendered)
+        self.assertIn("fractal_parcae_loop_count=2", rendered)
+        self.assertIn("fractal_parcae_loop_policy=fixed", rendered)
+        self.assertIn("fractal_parcae_mu_rec=2.0", rendered)
+        self.assertIn("fractal_parcae_mu_bwd=2", rendered)
+        self.assertIn("fractal_parcae_discretization=stable-exp", rendered)
+        self.assertIn("fractal_rgrp_state_transform=block-diagonal-4-masked-dense", rendered)
+        self.assertIn("fractal_rgrp_scan_unroll=3", rendered)
+        self.assertTrue(spec.candidate.kernel_contract.carries_state_across_tokens)
+        self.assertEqual(
+            spec.candidate.kernel_contract.fusion_boundary,
+            "decoder-stack-loop-injection-rgrp-controller",
+        )
+
+    def test_parcae_controls_keep_same_looped_scaffold_without_rgrp_state(self) -> None:
+        for slug in ("parcae-looped-attention", "parcae-bx-looped-attention"):
+            with self.subTest(slug=slug):
+                spec = JaxTpuBenchmarkSpec(
+                    run_name=slug,
+                    base_output_directory="gs://fractal-maxtext-runs",
+                    candidate=get_candidate(slug),
+                )
+
+                command = build_maxtext_command(spec, allow_patched_maxtext=True)
+                rendered = render_shell_command(command)
+
+                self.assertIn(f"fractal_candidate={slug}", rendered)
+                self.assertIn("fractal_parcae_loop_count=2", rendered)
+                self.assertIn("fractal_parcae_loop_policy=fixed", rendered)
+                self.assertIn("fractal_parcae_depth_distribution=poisson", rendered)
+                self.assertIn("scan_layers=false", rendered)
+                self.assertFalse(spec.candidate.kernel_contract.carries_state_across_tokens)
+                self.assertIn("looped-middle", spec.candidate.kernel_contract.lowering)
+
+    def test_parcae_per_sequence_loop_contract_is_explicit_override(self) -> None:
+        spec = JaxTpuBenchmarkSpec(
+            run_name="parcae-bx-perseq",
+            base_output_directory="gs://fractal-maxtext-runs",
+            candidate=get_candidate("parcae-bx-looped-attention"),
+            extra_overrides={
+                "fractal_parcae_loop_policy": "per-sequence",
+                "fractal_parcae_mu_rec": 2.0,
+                "fractal_parcae_mu_bwd": 1,
+                "fractal_parcae_max_loop_count": 4,
+                "fractal_parcae_discretization": "zoh",
+            },
+        )
+
+        rendered = render_shell_command(build_maxtext_command(spec, allow_patched_maxtext=True))
+
+        self.assertIn("fractal_candidate=parcae-bx-looped-attention", rendered)
+        self.assertIn("fractal_parcae_loop_policy=per-sequence", rendered)
+        self.assertIn("fractal_parcae_mu_rec=2.0", rendered)
+        self.assertIn("fractal_parcae_mu_bwd=1", rendered)
+        self.assertIn("fractal_parcae_max_loop_count=4", rendered)
+        self.assertIn("fractal_parcae_discretization=zoh", rendered)
+
     def test_tfds_dataset_requires_path_and_name(self) -> None:
         with self.assertRaises(ValidationError):
             JaxTpuDatasetSpec(dataset_type=JaxTpuDatasetType.TFDS).validate()

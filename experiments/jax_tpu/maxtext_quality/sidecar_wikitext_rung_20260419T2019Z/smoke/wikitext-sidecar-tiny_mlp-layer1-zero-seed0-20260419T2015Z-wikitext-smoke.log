@@ -1,0 +1,65 @@
+PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-04-19 20:18:27.460646: E external/local_xla/xla/stream_executor/cuda/cuda_platform.cc:51] failed call to cuInit: INTERNAL: CUDA error: Failed call to cuInit: UNKNOWN ERROR (303)
+W0419 20:18:27.460856 140303812238464 pyconfig.py:88] No config file provided, using default config mapping: /home/joseph/maxtext-wikitext-rung/src/maxtext/configs/base.yml
+I0419 20:18:28.569904 140303812238464 max_utils.py:800] System Information: Jax Version: 0.9.2
+I0419 20:18:28.570019 140303812238464 max_utils.py:801] System Information: Jaxlib Version: 0.9.2
+I0419 20:18:28.570065 140303812238464 max_utils.py:802] System Information: Jax Backend: PJRT C API
+TFRT TPU v5 lite
+Built on Mar 4 2026 11:32:08 (1772652728) cl/878335365
+I0419 20:18:29.053128 140303812238464 maxtext_utils.py:1551] Num_devices: 1, shape (1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
+I0419 20:18:29.053410 140303812238464 checkpointing.py:677] Setting up checkpoint logger...
+I0419 20:18:29.053492 140303812238464 checkpointing.py:230] Checkpointing disabled, not creating checkpoint manager.
+I0419 20:18:29.093715 140303812238464 config.py:112] TensorFlow version 2.20.0 available.
+I0419 20:18:29.094250 140303812238464 config.py:125] JAX version 0.9.2 available.
+I0419 20:18:29.266124 140303812238464 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/main/README.md "HTTP/1.1 307 Temporary Redirect"
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+W0419 20:18:29.266529 140303812238464 _http.py:916] Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+I0419 20:18:29.276470 140303812238464 _client.py:1025] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/datasets/Salesforce/wikitext/b08601e04326c79dfdd32d625aee71d232d685c3/README.md "HTTP/1.1 200 OK"
+I0419 20:18:29.364680 140303812238464 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/b08601e04326c79dfdd32d625aee71d232d685c3/wikitext.py "HTTP/1.1 404 Not Found"
+I0419 20:18:29.567323 140303812238464 _client.py:1025] HTTP Request: HEAD https://s3.amazonaws.com/datasets.huggingface.co/datasets/datasets/Salesforce/wikitext/Salesforce/wikitext.py "HTTP/1.1 404 Not Found"
+I0419 20:18:29.879862 140303812238464 _client.py:1025] HTTP Request: GET https://huggingface.co/api/datasets/Salesforce/wikitext/revision/b08601e04326c79dfdd32d625aee71d232d685c3 "HTTP/1.1 200 OK"
+I0419 20:18:29.967100 140303812238464 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/b08601e04326c79dfdd32d625aee71d232d685c3/.huggingface.yaml "HTTP/1.1 404 Not Found"
+I0419 20:18:30.089843 140303812238464 _client.py:1025] HTTP Request: GET https://datasets-server.huggingface.co/info?dataset=Salesforce/wikitext "HTTP/1.1 200 OK"
+I0419 20:18:30.175183 140303812238464 _client.py:1025] HTTP Request: GET https://huggingface.co/api/datasets/Salesforce/wikitext/tree/b08601e04326c79dfdd32d625aee71d232d685c3/wikitext-103-raw-v1?recursive=true&expand=false "HTTP/1.1 200 OK"
+I0419 20:18:30.264233 140303812238464 _client.py:1025] HTTP Request: GET https://huggingface.co/api/datasets/Salesforce/wikitext/tree/b08601e04326c79dfdd32d625aee71d232d685c3?recursive=false&expand=false "HTTP/1.1 200 OK"
+I0419 20:18:30.351764 140303812238464 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/b08601e04326c79dfdd32d625aee71d232d685c3/dataset_infos.json "HTTP/1.1 404 Not Found"
+I0419 20:18:30.756441 140303812238464 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/config.json "HTTP/1.1 200 OK"
+I0419 20:18:30.848639 140303812238464 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/tokenizer_config.json "HTTP/1.1 200 OK"
+I0419 20:18:30.933404 140303812238464 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/gpt2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 307 Temporary Redirect"
+I0419 20:18:31.018785 140303812238464 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/openai-community/gpt2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+I0419 20:18:31.102398 140303812238464 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/gpt2/tree/main?recursive=true&expand=false "HTTP/1.1 307 Temporary Redirect"
+I0419 20:18:31.196177 140303812238464 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/openai-community/gpt2/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+E0419 20:18:31.367060 140303812238464 packing.py:209] PackAndBatchOperation is deprecated. Please use lazy_dataset.FirstFitPackIterDataset instead.
+I0419 20:18:31.471917 140303812238464 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/main/README.md "HTTP/1.1 307 Temporary Redirect"
+I0419 20:18:31.481997 140303812238464 _client.py:1025] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/datasets/Salesforce/wikitext/b08601e04326c79dfdd32d625aee71d232d685c3/README.md "HTTP/1.1 200 OK"
+I0419 20:18:31.569017 140303812238464 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/b08601e04326c79dfdd32d625aee71d232d685c3/wikitext.py "HTTP/1.1 404 Not Found"
+I0419 20:18:31.637707 140303812238464 _client.py:1025] HTTP Request: HEAD https://s3.amazonaws.com/datasets.huggingface.co/datasets/datasets/Salesforce/wikitext/Salesforce/wikitext.py "HTTP/1.1 404 Not Found"
+I0419 20:18:31.728970 140303812238464 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/b08601e04326c79dfdd32d625aee71d232d685c3/.huggingface.yaml "HTTP/1.1 404 Not Found"
+I0419 20:18:31.826812 140303812238464 _client.py:1025] HTTP Request: GET https://datasets-server.huggingface.co/info?dataset=Salesforce/wikitext "HTTP/1.1 200 OK"
+I0419 20:18:31.914404 140303812238464 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/b08601e04326c79dfdd32d625aee71d232d685c3/dataset_infos.json "HTTP/1.1 404 Not Found"
+I0419 20:18:32.003946 140303812238464 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/config.json "HTTP/1.1 200 OK"
+I0419 20:18:32.089590 140303812238464 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/tokenizer_config.json "HTTP/1.1 200 OK"
+I0419 20:18:32.175645 140303812238464 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/gpt2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 307 Temporary Redirect"
+I0419 20:18:32.265994 140303812238464 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/openai-community/gpt2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+I0419 20:18:32.357632 140303812238464 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/gpt2/tree/main?recursive=true&expand=false "HTTP/1.1 307 Temporary Redirect"
+I0419 20:18:32.446010 140303812238464 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/openai-community/gpt2/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+E0419 20:18:32.616388 140303812238464 packing.py:209] PackAndBatchOperation is deprecated. Please use lazy_dataset.FirstFitPackIterDataset instead.
+I0419 20:18:33.067524 140303812238464 checkpointing.py:665] No existing checkpoints found, not restoring checkpoint.
+I0419 20:18:44.173929 140303812238464 max_utils.py:791] Total memory size: 0.6 GB, Output size: 0.3 GB, Temp size: 0.2 GB, Argument size: 0.3 GB, Host temp size: 0.0 GB.
+I0419 20:18:44.187828 140303812238464 metric_logger.py:301] number parameters: 0.030 billion
+Per train step:
+ Total TFLOPs: 0.22 
+ split as 97.02% learnable weight flops and 2.98% attention flops
+PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+I0419 20:19:00.863159 140303812238464 max_utils.py:750] 
+Memstats: After params initialized:
+I0419 20:19:00.863304 140303812238464 max_utils.py:756] 	Using (GB) 0.37 / 15.75 (2.349206%) on TPU_0(process=0,(0,0,0,0))
+I0419 20:19:01.032210 140303812238464 metric_logger.py:196] completed step: 0, seconds: 16.614, TFLOP/s/device: 0.013, Tokens/s/device: 123.273, total_weights: 1930, loss: 11.376, lm_loss: 11.376, perplexity: 87222.484
+I0419 20:19:01.034140 140303812238464 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/wikitext-sidecar-tiny_mlp-layer1-zero-seed0-20260419T2015Z-wikitext-smoke/tensorboard/'
+I0419 20:19:01.139724 140303812238464 metric_logger.py:196] completed step: 1, seconds: 0.168, TFLOP/s/device: 1.283, Tokens/s/device: 12156.178, total_weights: 1491, loss: 10.535, lm_loss: 10.535, perplexity: 37600.969
+I0419 20:19:01.146400 140303812238464 metric_logger.py:196] completed step: 2, seconds: 0.107, TFLOP/s/device: 2.010, Tokens/s/device: 19052.049, total_weights: 1887, loss: 10.048, lm_loss: 10.048, perplexity: 23106.707
+PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+I0419 20:19:11.632130 140303812238464 train.py:620] Completed eval step 0
+I0419 20:19:11.634596 140303812238464 metric_logger.py:216] eval metrics after step: 4, loss=9.688, perplexity=16125.592, total_weights=1821.0
+I0419 20:19:11.636639 140303812238464 metric_logger.py:196] completed step: 3, seconds: 0.007, TFLOP/s/device: 31.851, Tokens/s/device: 301886.792, total_weights: 1675, loss: 9.699, lm_loss: 9.699, perplexity: 16297.550
+I0419 20:19:11.639746 140303812238464 metric_logger.py:196] completed step: 4, seconds: 0.006, TFLOP/s/device: 34.812, Tokens/s/device: 329950.056, total_weights: 1923, loss: 9.705, lm_loss: 9.705, perplexity: 16395.445

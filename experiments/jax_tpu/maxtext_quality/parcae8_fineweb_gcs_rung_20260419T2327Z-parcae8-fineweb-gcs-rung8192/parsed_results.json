@@ -1,0 +1,139 @@
+{
+  "results": [
+    {
+      "lane": "attention",
+      "log": "experiments/jax_tpu/maxtext_quality/parcae8_fineweb_gcs_rung_20260419T2327Z-parcae8-fineweb-gcs-rung8192/parcae8-attention-seed42-20260419T2327Z-parcae8-fineweb-gcs-rung8192.log",
+      "params_billion_logged": 0.01,
+      "params_approx": 10000000,
+      "final_eval_loss": 4.484,
+      "final_eval_perplexity": 88.615,
+      "final_train_loss": 4.347,
+      "final_train_perplexity": 77.24637584117653,
+      "evals": [
+        {
+          "step": 2047,
+          "loss": 5.026,
+          "perplexity": 152.257,
+          "total_weights": 1011610.0
+        },
+        {
+          "step": 4095,
+          "loss": 4.708,
+          "perplexity": 110.777,
+          "total_weights": 1011610.0
+        },
+        {
+          "step": 6143,
+          "loss": 4.55,
+          "perplexity": 94.605,
+          "total_weights": 1011610.0
+        },
+        {
+          "step": 8191,
+          "loss": 4.484,
+          "perplexity": 88.615,
+          "total_weights": 1011610.0
+        }
+      ],
+      "median_fast_tok_s": 765321.375,
+      "mean_fast_tok_s": 864227.0596899843,
+      "fast_step_count": 7648,
+      "wall_duration_s": 1277.0,
+      "train_nonpad_tokens": 129678585,
+      "eval_nonpad_tokens": 4046440,
+      "configured_train_tokens": 134217728,
+      "eval_loss_delta_vs_attention": 0.0,
+      "speed_ratio_vs_attention": 1.0
+    },
+    {
+      "lane": "parcae-rgrp-control",
+      "log": "experiments/jax_tpu/maxtext_quality/parcae8_fineweb_gcs_rung_20260419T2327Z-parcae8-fineweb-gcs-rung8192/parcae8-parcae-rgrp-control-seed42-20260419T2327Z-parcae8-fineweb-gcs-rung8192.log",
+      "params_billion_logged": 0.01,
+      "params_approx": 10000000,
+      "final_eval_loss": 4.401,
+      "final_eval_perplexity": 81.539,
+      "final_train_loss": 4.25,
+      "final_train_perplexity": 70.10541234668786,
+      "evals": [
+        {
+          "step": 2047,
+          "loss": 5.008,
+          "perplexity": 149.613,
+          "total_weights": 1011610.0
+        },
+        {
+          "step": 4095,
+          "loss": 4.666,
+          "perplexity": 106.267,
+          "total_weights": 1011610.0
+        },
+        {
+          "step": 6143,
+          "loss": 4.481,
+          "perplexity": 88.298,
+          "total_weights": 1011610.0
+        },
+        {
+          "step": 8191,
+          "loss": 4.401,
+          "perplexity": 81.539,
+          "total_weights": 1011610.0
+        }
+      ],
+      "median_fast_tok_s": 573488.747,
+      "mean_fast_tok_s": 684709.2850075916,
+      "fast_step_count": 7640,
+      "wall_duration_s": 1316.0,
+      "train_nonpad_tokens": 129678585,
+      "eval_nonpad_tokens": 4046440,
+      "configured_train_tokens": 134217728,
+      "eval_loss_delta_vs_attention": -0.08300000000000018,
+      "speed_ratio_vs_attention": 0.7493436949934921
+    },
+    {
+      "lane": "parcae-bx",
+      "log": "experiments/jax_tpu/maxtext_quality/parcae8_fineweb_gcs_rung_20260419T2327Z-parcae8-fineweb-gcs-rung8192/parcae8-parcae-bx-seed42-20260419T2327Z-parcae8-fineweb-gcs-rung8192.log",
+      "params_billion_logged": 0.01,
+      "params_approx": 10000000,
+      "final_eval_loss": 4.405,
+      "final_eval_perplexity": 81.827,
+      "final_train_loss": 4.264,
+      "final_train_perplexity": 71.09379062402373,
+      "evals": [
+        {
+          "step": 2047,
+          "loss": 5.016,
+          "perplexity": 150.805,
+          "total_weights": 1011610.0
+        },
+        {
+          "step": 4095,
+          "loss": 4.67,
+          "perplexity": 106.741,
+          "total_weights": 1011610.0
+        },
+        {
+          "step": 6143,
+          "loss": 4.481,
+          "perplexity": 88.331,
+          "total_weights": 1011610.0
+        },
+        {
+          "step": 8191,
+          "loss": 4.405,
+          "perplexity": 81.827,
+          "total_weights": 1011610.0
+        }
+      ],
+      "median_fast_tok_s": 637509.728,
+      "mean_fast_tok_s": 744211.5942374967,
+      "fast_step_count": 7638,
+      "wall_duration_s": 1279.0,
+      "train_nonpad_tokens": 129678585,
+      "eval_nonpad_tokens": 4046440,
+      "configured_train_tokens": 134217728,
+      "eval_loss_delta_vs_attention": -0.07899999999999974,
+      "speed_ratio_vs_attention": 0.8329961096408682
+    }
+  ]
+}

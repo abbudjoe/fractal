@@ -1,0 +1,85 @@
+/home/joseph/maxtext-parcae-port/.venv/lib/python3.12/site-packages/jax/_src/cloud_tpu_init.py:93: UserWarning: Transparent hugepages are not enabled. TPU runtime startup and shutdown time should be significantly improved on TPU v5e and newer. If not already set, you may need to enable transparent hugepages in your VM image (sudo sh -c "echo always > /sys/kernel/mm/transparent_hugepage/enabled")
+  warnings.warn(
+WARNING:matplotlib.font_manager:Matplotlib is building the font cache; this may take a moment.
+PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-04-19 20:58:03.047199: E external/local_xla/xla/stream_executor/cuda/cuda_platform.cc:51] failed call to cuInit: INTERNAL: CUDA error: Failed call to cuInit: UNKNOWN ERROR (303)
+W0419 20:58:03.047411 140543799856256 pyconfig.py:88] No config file provided, using default config mapping: /home/joseph/maxtext-parcae-port/src/maxtext/configs/base.yml
+I0419 20:58:04.591050 140543799856256 max_utils.py:800] System Information: Jax Version: 0.9.2
+I0419 20:58:04.591170 140543799856256 max_utils.py:801] System Information: Jaxlib Version: 0.9.2
+I0419 20:58:04.591216 140543799856256 max_utils.py:802] System Information: Jax Backend: PJRT C API
+TFRT TPU v5 lite
+Built on Mar 4 2026 11:32:08 (1772652728) cl/878335365
+I0419 20:58:05.353777 140543799856256 maxtext_utils.py:1551] Num_devices: 1, shape (1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
+I0419 20:58:05.354044 140543799856256 checkpointing.py:677] Setting up checkpoint logger...
+I0419 20:58:05.354104 140543799856256 checkpointing.py:230] Checkpointing disabled, not creating checkpoint manager.
+I0419 20:58:05.481469 140543799856256 config.py:112] TensorFlow version 2.20.0 available.
+I0419 20:58:05.481995 140543799856256 config.py:125] JAX version 0.9.2 available.
+I0419 20:58:05.861577 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/main/README.md "HTTP/1.1 307 Temporary Redirect"
+I0419 20:58:05.888949 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/datasets/Salesforce/wikitext/b08601e04326c79dfdd32d625aee71d232d685c3/README.md "HTTP/1.1 200 OK"
+I0419 20:58:05.900853 140543799856256 _client.py:1025] HTTP Request: GET https://huggingface.co/api/resolve-cache/datasets/Salesforce/wikitext/b08601e04326c79dfdd32d625aee71d232d685c3/README.md "HTTP/1.1 200 OK"
+I0419 20:58:06.006270 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/b08601e04326c79dfdd32d625aee71d232d685c3/wikitext.py "HTTP/1.1 404 Not Found"
+I0419 20:58:06.204838 140543799856256 _client.py:1025] HTTP Request: HEAD https://s3.amazonaws.com/datasets.huggingface.co/datasets/datasets/Salesforce/wikitext/Salesforce/wikitext.py "HTTP/1.1 404 Not Found"
+I0419 20:58:06.303303 140543799856256 _client.py:1025] HTTP Request: GET https://huggingface.co/api/datasets/Salesforce/wikitext/revision/b08601e04326c79dfdd32d625aee71d232d685c3 "HTTP/1.1 200 OK"
+I0419 20:58:06.408625 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/b08601e04326c79dfdd32d625aee71d232d685c3/.huggingface.yaml "HTTP/1.1 404 Not Found"
+I0419 20:58:06.539673 140543799856256 _client.py:1025] HTTP Request: GET https://datasets-server.huggingface.co/info?dataset=Salesforce/wikitext "HTTP/1.1 200 OK"
+I0419 20:58:06.645239 140543799856256 _client.py:1025] HTTP Request: GET https://huggingface.co/api/datasets/Salesforce/wikitext/tree/b08601e04326c79dfdd32d625aee71d232d685c3/wikitext-103-raw-v1?recursive=true&expand=false "HTTP/1.1 200 OK"
+I0419 20:58:06.752193 140543799856256 _client.py:1025] HTTP Request: GET https://huggingface.co/api/datasets/Salesforce/wikitext/tree/b08601e04326c79dfdd32d625aee71d232d685c3?recursive=false&expand=false "HTTP/1.1 200 OK"
+I0419 20:58:06.860324 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/b08601e04326c79dfdd32d625aee71d232d685c3/dataset_infos.json "HTTP/1.1 404 Not Found"
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+W0419 20:58:06.860463 140543799856256 _http.py:916] Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+I0419 20:58:07.377860 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/openlm-research/open_llama_3b_v2/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+I0419 20:58:07.431279 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/openlm-research/open_llama_3b_v2/bce5d60d3b0c68318862270ec4e794d83308d80a/config.json "HTTP/1.1 200 OK"
+I0419 20:58:07.445371 140543799856256 _client.py:1025] HTTP Request: GET https://huggingface.co/api/resolve-cache/models/openlm-research/open_llama_3b_v2/bce5d60d3b0c68318862270ec4e794d83308d80a/config.json "HTTP/1.1 200 OK"
+I0419 20:58:07.553143 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/openlm-research/open_llama_3b_v2/resolve/main/tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
+I0419 20:58:07.565470 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/openlm-research/open_llama_3b_v2/bce5d60d3b0c68318862270ec4e794d83308d80a/tokenizer_config.json "HTTP/1.1 200 OK"
+I0419 20:58:07.577912 140543799856256 _client.py:1025] HTTP Request: GET https://huggingface.co/api/resolve-cache/models/openlm-research/open_llama_3b_v2/bce5d60d3b0c68318862270ec4e794d83308d80a/tokenizer_config.json "HTTP/1.1 200 OK"
+I0419 20:58:07.681475 140543799856256 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/openlm-research/open_llama_3b_v2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+I0419 20:58:07.772274 140543799856256 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/openlm-research/open_llama_3b_v2/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+I0419 20:58:07.861944 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/openlm-research/open_llama_3b_v2/resolve/main/tokenizer.model "HTTP/1.1 302 Found"
+I0419 20:58:07.946738 140543799856256 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/openlm-research/open_llama_3b_v2/xet-read-token/bce5d60d3b0c68318862270ec4e794d83308d80a "HTTP/1.1 200 OK"
+I0419 20:58:08.845533 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/openlm-research/open_llama_3b_v2/resolve/main/tokenizer.json "HTTP/1.1 404 Not Found"
+I0419 20:58:08.936439 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/openlm-research/open_llama_3b_v2/resolve/main/added_tokens.json "HTTP/1.1 404 Not Found"
+I0419 20:58:09.021724 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/openlm-research/open_llama_3b_v2/resolve/main/special_tokens_map.json "HTTP/1.1 307 Temporary Redirect"
+I0419 20:58:09.033966 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/openlm-research/open_llama_3b_v2/bce5d60d3b0c68318862270ec4e794d83308d80a/special_tokens_map.json "HTTP/1.1 200 OK"
+I0419 20:58:09.052428 140543799856256 _client.py:1025] HTTP Request: GET https://huggingface.co/api/resolve-cache/models/openlm-research/open_llama_3b_v2/bce5d60d3b0c68318862270ec4e794d83308d80a/special_tokens_map.json "HTTP/1.1 200 OK"
+I0419 20:58:09.142720 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/openlm-research/open_llama_3b_v2/resolve/main/chat_template.jinja "HTTP/1.1 404 Not Found"
+E0419 20:58:09.309830 140543799856256 packing.py:209] PackAndBatchOperation is deprecated. Please use lazy_dataset.FirstFitPackIterDataset instead.
+I0419 20:58:09.407091 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/main/README.md "HTTP/1.1 307 Temporary Redirect"
+I0419 20:58:09.417872 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/datasets/Salesforce/wikitext/b08601e04326c79dfdd32d625aee71d232d685c3/README.md "HTTP/1.1 200 OK"
+I0419 20:58:09.504475 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/b08601e04326c79dfdd32d625aee71d232d685c3/wikitext.py "HTTP/1.1 404 Not Found"
+I0419 20:58:09.610324 140543799856256 _client.py:1025] HTTP Request: HEAD https://s3.amazonaws.com/datasets.huggingface.co/datasets/datasets/Salesforce/wikitext/Salesforce/wikitext.py "HTTP/1.1 404 Not Found"
+I0419 20:58:09.703548 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/b08601e04326c79dfdd32d625aee71d232d685c3/.huggingface.yaml "HTTP/1.1 404 Not Found"
+I0419 20:58:09.803216 140543799856256 _client.py:1025] HTTP Request: GET https://datasets-server.huggingface.co/info?dataset=Salesforce/wikitext "HTTP/1.1 200 OK"
+I0419 20:58:09.898345 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/b08601e04326c79dfdd32d625aee71d232d685c3/dataset_infos.json "HTTP/1.1 404 Not Found"
+I0419 20:58:09.984362 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/openlm-research/open_llama_3b_v2/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+I0419 20:58:09.996056 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/openlm-research/open_llama_3b_v2/bce5d60d3b0c68318862270ec4e794d83308d80a/config.json "HTTP/1.1 200 OK"
+I0419 20:58:10.084456 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/openlm-research/open_llama_3b_v2/resolve/main/tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
+I0419 20:58:10.095840 140543799856256 _client.py:1025] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/openlm-research/open_llama_3b_v2/bce5d60d3b0c68318862270ec4e794d83308d80a/tokenizer_config.json "HTTP/1.1 200 OK"
+I0419 20:58:10.188209 140543799856256 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/openlm-research/open_llama_3b_v2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+I0419 20:58:10.274339 140543799856256 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/openlm-research/open_llama_3b_v2/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+E0419 20:58:10.438267 140543799856256 packing.py:209] PackAndBatchOperation is deprecated. Please use lazy_dataset.FirstFitPackIterDataset instead.
+I0419 20:58:11.166578 140543799856256 checkpointing.py:665] No existing checkpoints found, not restoring checkpoint.
+I0419 20:58:26.192263 140543799856256 max_utils.py:791] Total memory size: 1.2 GB, Output size: 0.1 GB, Temp size: 1.1 GB, Argument size: 0.1 GB, Host temp size: 0.0 GB.
+I0419 20:58:26.215310 140543799856256 metric_logger.py:301] number parameters: 0.010 billion
+Per train step:
+ Total TFLOPs: 0.63 
+ split as 95.94% learnable weight flops and 4.06% attention flops
+/home/joseph/maxtext-parcae-port/.venv/lib/python3.12/site-packages/jax/_src/cloud_tpu_init.py:93: UserWarning: Transparent hugepages are not enabled. TPU runtime startup and shutdown time should be significantly improved on TPU v5e and newer. If not already set, you may need to enable transparent hugepages in your VM image (sudo sh -c "echo always > /sys/kernel/mm/transparent_hugepage/enabled")
+  warnings.warn(
+PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+I0419 20:58:47.443914 140543799856256 max_utils.py:750] 
+Memstats: After params initialized:
+I0419 20:58:47.444045 140543799856256 max_utils.py:756] 	Using (GB) 0.19 / 15.75 (1.206349%) on TPU_0(process=0,(0,0,0,0))
+I0419 20:58:47.600082 140543799856256 metric_logger.py:196] completed step: 0, seconds: 21.172, TFLOP/s/device: 0.030, Tokens/s/device: 773.839, total_weights: 14916, loss: 10.930, lm_loss: 10.930, perplexity: 55823.012
+I0419 20:58:47.601936 140543799856256 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/parcae8-attention-seed42-20260419T2057Z-parcae8-smoke/tensorboard/'
+I0419 20:58:47.690473 140543799856256 metric_logger.py:196] completed step: 1, seconds: 0.155, TFLOP/s/device: 4.082, Tokens/s/device: 105386.387, total_weights: 15275, loss: 10.256, lm_loss: 10.256, perplexity: 28454.355
+I0419 20:58:47.711134 140543799856256 metric_logger.py:196] completed step: 2, seconds: 0.091, TFLOP/s/device: 7.010, Tokens/s/device: 180998.674, total_weights: 14231, loss: 9.905, lm_loss: 9.905, perplexity: 20023.664
+/home/joseph/maxtext-parcae-port/.venv/lib/python3.12/site-packages/jax/_src/cloud_tpu_init.py:93: UserWarning: Transparent hugepages are not enabled. TPU runtime startup and shutdown time should be significantly improved on TPU v5e and newer. If not already set, you may need to enable transparent hugepages in your VM image (sudo sh -c "echo always > /sys/kernel/mm/transparent_hugepage/enabled")
+  warnings.warn(
+PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+I0419 20:58:58.535335 140543799856256 train.py:620] Completed eval step 0
+I0419 20:58:58.537831 140543799856256 metric_logger.py:216] eval metrics after step: 4, loss=9.501, perplexity=13378.361, total_weights=15302.0
+I0419 20:58:58.539906 140543799856256 metric_logger.py:196] completed step: 3, seconds: 0.006, TFLOP/s/device: 101.761, Tokens/s/device: 2627325.208, total_weights: 15521, loss: 9.705, lm_loss: 9.705, perplexity: 16395.705
+I0419 20:58:58.542900 140543799856256 metric_logger.py:196] completed step: 4, seconds: 0.021, TFLOP/s/device: 30.028, Tokens/s/device: 775280.367, total_weights: 14238, loss: 9.665, lm_loss: 9.665, perplexity: 15753.063
+/home/joseph/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 5 leaked shared_memory objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

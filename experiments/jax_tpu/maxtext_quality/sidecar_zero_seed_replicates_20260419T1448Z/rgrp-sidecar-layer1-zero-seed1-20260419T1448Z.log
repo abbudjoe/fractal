@@ -1,0 +1,301 @@
+/home/joseph/maxtext-zero-seeds/.venv/lib/python3.12/site-packages/jax/_src/cloud_tpu_init.py:93: UserWarning: Transparent hugepages are not enabled. TPU runtime startup and shutdown time should be significantly improved on TPU v5e and newer. If not already set, you may need to enable transparent hugepages in your VM image (sudo sh -c "echo always > /sys/kernel/mm/transparent_hugepage/enabled")
+  warnings.warn(
+PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-04-19 14:59:08.413270: E external/local_xla/xla/stream_executor/cuda/cuda_platform.cc:51] failed call to cuInit: INTERNAL: CUDA error: Failed call to cuInit: UNKNOWN ERROR (303)
+W0419 14:59:08.413477 140509714623616 pyconfig.py:88] No config file provided, using default config mapping: /home/joseph/maxtext-zero-seeds/src/maxtext/configs/base.yml
+I0419 14:59:10.203228 140509714623616 max_utils.py:800] System Information: Jax Version: 0.9.2
+I0419 14:59:10.203342 140509714623616 max_utils.py:801] System Information: Jaxlib Version: 0.9.2
+I0419 14:59:10.203397 140509714623616 max_utils.py:802] System Information: Jax Backend: PJRT C API
+TFRT TPU v5 lite
+Built on Mar 4 2026 11:32:08 (1772652728) cl/878335365
+I0419 14:59:10.688318 140509714623616 maxtext_utils.py:1551] Num_devices: 1, shape (1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
+I0419 14:59:10.688637 140509714623616 checkpointing.py:677] Setting up checkpoint logger...
+I0419 14:59:10.688714 140509714623616 checkpointing.py:230] Checkpointing disabled, not creating checkpoint manager.
+I0419 14:59:10.729233 140509714623616 config.py:112] TensorFlow version 2.20.0 available.
+I0419 14:59:10.729835 140509714623616 config.py:125] JAX version 0.9.2 available.
+I0419 14:59:10.897276 140509714623616 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/README.md "HTTP/1.1 307 Temporary Redirect"
+I0419 14:59:10.908810 140509714623616 _client.py:1025] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/datasets/roneneldan/TinyStories/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/README.md "HTTP/1.1 200 OK"
+I0419 14:59:10.981498 140509714623616 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/TinyStories.py "HTTP/1.1 404 Not Found"
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+W0419 14:59:10.981662 140509714623616 _http.py:916] Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+I0419 14:59:11.191269 140509714623616 _client.py:1025] HTTP Request: HEAD https://s3.amazonaws.com/datasets.huggingface.co/datasets/datasets/roneneldan/TinyStories/roneneldan/TinyStories.py "HTTP/1.1 404 Not Found"
+I0419 14:59:11.268095 140509714623616 _client.py:1025] HTTP Request: GET https://huggingface.co/api/datasets/roneneldan/TinyStories/revision/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64 "HTTP/1.1 200 OK"
+I0419 14:59:11.344014 140509714623616 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/.huggingface.yaml "HTTP/1.1 404 Not Found"
+I0419 14:59:11.477669 140509714623616 _client.py:1025] HTTP Request: GET https://datasets-server.huggingface.co/info?dataset=roneneldan/TinyStories "HTTP/1.1 200 OK"
+I0419 14:59:11.561881 140509714623616 _client.py:1025] HTTP Request: GET https://huggingface.co/api/datasets/roneneldan/TinyStories/tree/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/data?recursive=true&expand=false "HTTP/1.1 200 OK"
+I0419 14:59:11.641907 140509714623616 _client.py:1025] HTTP Request: GET https://huggingface.co/api/datasets/roneneldan/TinyStories/tree/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64?recursive=false&expand=false "HTTP/1.1 200 OK"
+I0419 14:59:11.723205 140509714623616 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/dataset_infos.json "HTTP/1.1 404 Not Found"
+I0419 14:59:12.104050 140509714623616 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/config.json "HTTP/1.1 200 OK"
+I0419 14:59:12.205423 140509714623616 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/tokenizer_config.json "HTTP/1.1 200 OK"
+I0419 14:59:12.281276 140509714623616 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/gpt2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 307 Temporary Redirect"
+I0419 14:59:12.356853 140509714623616 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/openai-community/gpt2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+I0419 14:59:12.431195 140509714623616 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/gpt2/tree/main?recursive=true&expand=false "HTTP/1.1 307 Temporary Redirect"
+I0419 14:59:12.512088 140509714623616 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/openai-community/gpt2/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+E0419 14:59:12.687649 140509714623616 packing.py:209] PackAndBatchOperation is deprecated. Please use lazy_dataset.FirstFitPackIterDataset instead.
+I0419 14:59:12.769887 140509714623616 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/README.md "HTTP/1.1 307 Temporary Redirect"
+I0419 14:59:12.782891 140509714623616 _client.py:1025] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/datasets/roneneldan/TinyStories/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/README.md "HTTP/1.1 200 OK"
+I0419 14:59:12.857249 140509714623616 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/TinyStories.py "HTTP/1.1 404 Not Found"
+I0419 14:59:12.926066 140509714623616 _client.py:1025] HTTP Request: HEAD https://s3.amazonaws.com/datasets.huggingface.co/datasets/datasets/roneneldan/TinyStories/roneneldan/TinyStories.py "HTTP/1.1 404 Not Found"
+I0419 14:59:13.001645 140509714623616 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/.huggingface.yaml "HTTP/1.1 404 Not Found"
+I0419 14:59:13.088863 140509714623616 _client.py:1025] HTTP Request: GET https://datasets-server.huggingface.co/info?dataset=roneneldan/TinyStories "HTTP/1.1 200 OK"
+I0419 14:59:13.166826 140509714623616 _client.py:1025] HTTP Request: HEAD https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/dataset_infos.json "HTTP/1.1 404 Not Found"
+I0419 14:59:13.245519 140509714623616 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/config.json "HTTP/1.1 200 OK"
+I0419 14:59:13.328081 140509714623616 _client.py:1025] HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/tokenizer_config.json "HTTP/1.1 200 OK"
+I0419 14:59:13.406427 140509714623616 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/gpt2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 307 Temporary Redirect"
+I0419 14:59:13.481645 140509714623616 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/openai-community/gpt2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+I0419 14:59:13.557397 140509714623616 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/gpt2/tree/main?recursive=true&expand=false "HTTP/1.1 307 Temporary Redirect"
+I0419 14:59:13.635193 140509714623616 _client.py:1025] HTTP Request: GET https://huggingface.co/api/models/openai-community/gpt2/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+E0419 14:59:13.810256 140509714623616 packing.py:209] PackAndBatchOperation is deprecated. Please use lazy_dataset.FirstFitPackIterDataset instead.
+I0419 14:59:14.291732 140509714623616 checkpointing.py:665] No existing checkpoints found, not restoring checkpoint.
+W0419 14:59:19.688021    8896 pjrt_executable.cc:642] Assume version compatibility. PjRt-IFRT does not track XLA executable versions.
+I0419 14:59:19.874867 140509714623616 max_utils.py:791] Total memory size: 0.6 GB, Output size: 0.3 GB, Temp size: 0.3 GB, Argument size: 0.3 GB, Host temp size: 0.0 GB.
+I0419 14:59:19.888743 140509714623616 metric_logger.py:301] number parameters: 0.030 billion
+Per train step:
+ Total TFLOPs: 0.22 
+ split as 97.02% learnable weight flops and 2.98% attention flops
+/home/joseph/maxtext-zero-seeds/.venv/lib/python3.12/site-packages/jax/_src/cloud_tpu_init.py:93: UserWarning: Transparent hugepages are not enabled. TPU runtime startup and shutdown time should be significantly improved on TPU v5e and newer. If not already set, you may need to enable transparent hugepages in your VM image (sudo sh -c "echo always > /sys/kernel/mm/transparent_hugepage/enabled")
+  warnings.warn(
+PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+W0419 14:59:31.018026    8896 pjrt_executable.cc:642] Assume version compatibility. PjRt-IFRT does not track XLA executable versions.
+I0419 14:59:31.204331 140509714623616 max_utils.py:750] 
+Memstats: After params initialized:
+I0419 14:59:31.204479 140509714623616 max_utils.py:756] 	Using (GB) 0.37 / 15.75 (2.349206%) on TPU_0(process=0,(0,0,0,0))
+I0419 14:59:31.512645 140509714623616 metric_logger.py:196] completed step: 0, seconds: 11.264, TFLOP/s/device: 0.019, Tokens/s/device: 181.819, total_weights: 1641, loss: 11.345, lm_loss: 11.345, perplexity: 84570.883
+I0419 14:59:31.514453 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:31.596112 140509714623616 metric_logger.py:196] completed step: 1, seconds: 0.308, TFLOP/s/device: 0.702, Tokens/s/device: 6654.060, total_weights: 1728, loss: 11.318, lm_loss: 11.318, perplexity: 82257.328
+I0419 14:59:31.602575 140509714623616 metric_logger.py:196] completed step: 2, seconds: 0.084, TFLOP/s/device: 2.587, Tokens/s/device: 24521.660, total_weights: 1685, loss: 11.270, lm_loss: 11.270, perplexity: 78397.500
+I0419 14:59:31.609336 140509714623616 metric_logger.py:196] completed step: 3, seconds: 0.006, TFLOP/s/device: 34.628, Tokens/s/device: 328205.128, total_weights: 1918, loss: 11.080, lm_loss: 11.080, perplexity: 64836.895
+I0419 14:59:31.616154 140509714623616 metric_logger.py:196] completed step: 4, seconds: 0.006, TFLOP/s/device: 35.123, Tokens/s/device: 332899.870, total_weights: 1689, loss: 10.830, lm_loss: 10.830, perplexity: 50524.629
+I0419 14:59:31.623023 140509714623616 metric_logger.py:196] completed step: 5, seconds: 0.007, TFLOP/s/device: 31.870, Tokens/s/device: 302064.897, total_weights: 1899, loss: 10.535, lm_loss: 10.535, perplexity: 37604.824
+I0419 14:59:31.629790 140509714623616 metric_logger.py:196] completed step: 6, seconds: 0.007, TFLOP/s/device: 32.145, Tokens/s/device: 304671.229, total_weights: 1745, loss: 10.307, lm_loss: 10.307, perplexity: 29940.867
+I0419 14:59:31.636569 140509714623616 metric_logger.py:196] completed step: 7, seconds: 0.007, TFLOP/s/device: 30.828, Tokens/s/device: 292195.748, total_weights: 1639, loss: 9.995, lm_loss: 9.995, perplexity: 21913.402
+I0419 14:59:31.643379 140509714623616 metric_logger.py:196] completed step: 8, seconds: 0.007, TFLOP/s/device: 32.779, Tokens/s/device: 310679.612, total_weights: 1784, loss: 9.796, lm_loss: 9.796, perplexity: 17967.986
+I0419 14:59:31.650185 140509714623616 metric_logger.py:196] completed step: 9, seconds: 0.007, TFLOP/s/device: 32.178, Tokens/s/device: 304988.831, total_weights: 1927, loss: 9.377, lm_loss: 9.377, perplexity: 11817.617
+I0419 14:59:31.656994 140509714623616 metric_logger.py:196] completed step: 10, seconds: 0.007, TFLOP/s/device: 31.748, Tokens/s/device: 300910.961, total_weights: 1905, loss: 9.126, lm_loss: 9.126, perplexity: 9192.116
+I0419 14:59:31.658421 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:31.729956 140509714623616 metric_logger.py:196] completed step: 11, seconds: 0.007, TFLOP/s/device: 32.289, Tokens/s/device: 306037.059, total_weights: 1876, loss: 8.903, lm_loss: 8.903, perplexity: 7357.396
+I0419 14:59:31.736562 140509714623616 metric_logger.py:196] completed step: 12, seconds: 0.074, TFLOP/s/device: 2.912, Tokens/s/device: 27596.987, total_weights: 1717, loss: 8.754, lm_loss: 8.754, perplexity: 6333.061
+I0419 14:59:31.743369 140509714623616 metric_logger.py:196] completed step: 13, seconds: 0.006, TFLOP/s/device: 38.352, Tokens/s/device: 363507.277, total_weights: 1673, loss: 8.277, lm_loss: 8.277, perplexity: 3931.749
+I0419 14:59:31.750183 140509714623616 metric_logger.py:196] completed step: 14, seconds: 0.007, TFLOP/s/device: 32.620, Tokens/s/device: 309178.744, total_weights: 1687, loss: 8.166, lm_loss: 8.166, perplexity: 3519.487
+I0419 14:59:31.756994 140509714623616 metric_logger.py:196] completed step: 15, seconds: 0.007, TFLOP/s/device: 32.102, Tokens/s/device: 304263.854, total_weights: 1731, loss: 7.927, lm_loss: 7.927, perplexity: 2770.217
+I0419 14:59:31.763805 140509714623616 metric_logger.py:196] completed step: 16, seconds: 0.007, TFLOP/s/device: 31.898, Tokens/s/device: 302332.448, total_weights: 1658, loss: 7.784, lm_loss: 7.784, perplexity: 2401.823
+I0419 14:59:31.770604 140509714623616 metric_logger.py:196] completed step: 17, seconds: 0.007, TFLOP/s/device: 31.443, Tokens/s/device: 298020.955, total_weights: 1727, loss: 7.343, lm_loss: 7.343, perplexity: 1545.204
+I0419 14:59:31.777412 140509714623616 metric_logger.py:196] completed step: 18, seconds: 0.007, TFLOP/s/device: 32.236, Tokens/s/device: 305534.835, total_weights: 1662, loss: 7.238, lm_loss: 7.238, perplexity: 1391.968
+I0419 14:59:31.784221 140509714623616 metric_logger.py:196] completed step: 19, seconds: 0.007, TFLOP/s/device: 31.425, Tokens/s/device: 297847.586, total_weights: 1762, loss: 7.061, lm_loss: 7.061, perplexity: 1166.050
+I0419 14:59:31.791035 140509714623616 metric_logger.py:196] completed step: 20, seconds: 0.007, TFLOP/s/device: 31.978, Tokens/s/device: 303093.089, total_weights: 1695, loss: 6.668, lm_loss: 6.668, perplexity: 786.435
+I0419 14:59:31.792498 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:31.862115 140509714623616 metric_logger.py:196] completed step: 21, seconds: 0.007, TFLOP/s/device: 31.701, Tokens/s/device: 300469.484, total_weights: 1696, loss: 6.510, lm_loss: 6.510, perplexity: 671.904
+I0419 14:59:31.868732 140509714623616 metric_logger.py:196] completed step: 22, seconds: 0.072, TFLOP/s/device: 2.985, Tokens/s/device: 28290.419, total_weights: 1709, loss: 6.361, lm_loss: 6.361, perplexity: 578.962
+I0419 14:59:31.875534 140509714623616 metric_logger.py:196] completed step: 23, seconds: 0.006, TFLOP/s/device: 38.926, Tokens/s/device: 368942.533, total_weights: 1856, loss: 6.109, lm_loss: 6.109, perplexity: 450.049
+I0419 14:59:31.882344 140509714623616 metric_logger.py:196] completed step: 24, seconds: 0.007, TFLOP/s/device: 32.655, Tokens/s/device: 309505.818, total_weights: 1496, loss: 6.015, lm_loss: 6.015, perplexity: 409.613
+I0419 14:59:31.889155 140509714623616 metric_logger.py:196] completed step: 25, seconds: 0.007, TFLOP/s/device: 31.926, Tokens/s/device: 302600.473, total_weights: 1819, loss: 5.821, lm_loss: 5.821, perplexity: 337.164
+I0419 14:59:31.895965 140509714623616 metric_logger.py:196] completed step: 26, seconds: 0.007, TFLOP/s/device: 31.567, Tokens/s/device: 299196.494, total_weights: 1302, loss: 5.772, lm_loss: 5.772, perplexity: 321.255
+I0419 14:59:31.902796 140509714623616 metric_logger.py:196] completed step: 27, seconds: 0.007, TFLOP/s/device: 31.669, Tokens/s/device: 300161.219, total_weights: 1824, loss: 5.689, lm_loss: 5.689, perplexity: 295.661
+I0419 14:59:31.909574 140509714623616 metric_logger.py:196] completed step: 28, seconds: 0.007, TFLOP/s/device: 32.178, Tokens/s/device: 304988.831, total_weights: 1426, loss: 5.302, lm_loss: 5.302, perplexity: 200.717
+I0419 14:59:31.916384 140509714623616 metric_logger.py:196] completed step: 29, seconds: 0.007, TFLOP/s/device: 31.530, Tokens/s/device: 298847.220, total_weights: 1734, loss: 5.221, lm_loss: 5.221, perplexity: 185.066
+I0419 14:59:31.923200 140509714623616 metric_logger.py:196] completed step: 30, seconds: 0.007, TFLOP/s/device: 31.512, Tokens/s/device: 298672.889, total_weights: 1557, loss: 5.526, lm_loss: 5.526, perplexity: 251.110
+I0419 14:59:31.924634 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:31.997557 140509714623616 metric_logger.py:196] completed step: 31, seconds: 0.007, TFLOP/s/device: 32.601, Tokens/s/device: 308992.154, total_weights: 1823, loss: 5.218, lm_loss: 5.218, perplexity: 184.577
+I0419 14:59:32.004191 140509714623616 metric_logger.py:196] completed step: 32, seconds: 0.076, TFLOP/s/device: 2.852, Tokens/s/device: 27034.162, total_weights: 1565, loss: 5.287, lm_loss: 5.287, perplexity: 197.715
+I0419 14:59:32.011005 140509714623616 metric_logger.py:196] completed step: 33, seconds: 0.006, TFLOP/s/device: 37.611, Tokens/s/device: 356483.899, total_weights: 1882, loss: 5.319, lm_loss: 5.319, perplexity: 204.120
+I0419 14:59:32.017840 140509714623616 metric_logger.py:196] completed step: 34, seconds: 0.006, TFLOP/s/device: 33.704, Tokens/s/device: 319450.944, total_weights: 1717, loss: 5.177, lm_loss: 5.177, perplexity: 177.106
+I0419 14:59:32.024642 140509714623616 metric_logger.py:196] completed step: 35, seconds: 0.007, TFLOP/s/device: 31.507, Tokens/s/device: 298629.338, total_weights: 1741, loss: 5.317, lm_loss: 5.317, perplexity: 203.792
+I0419 14:59:32.031421 140509714623616 metric_logger.py:196] completed step: 36, seconds: 0.007, TFLOP/s/device: 31.748, Tokens/s/device: 300910.961, total_weights: 1660, loss: 5.025, lm_loss: 5.025, perplexity: 152.179
+I0419 14:59:32.038235 140509714623616 metric_logger.py:196] completed step: 37, seconds: 0.007, TFLOP/s/device: 30.961, Tokens/s/device: 293451.784, total_weights: 1511, loss: 5.044, lm_loss: 5.044, perplexity: 155.042
+I0419 14:59:32.045042 140509714623616 metric_logger.py:196] completed step: 38, seconds: 0.007, TFLOP/s/device: 33.217, Tokens/s/device: 314834.743, total_weights: 1554, loss: 5.183, lm_loss: 5.183, perplexity: 178.137
+I0419 14:59:32.051851 140509714623616 metric_logger.py:196] completed step: 39, seconds: 0.007, TFLOP/s/device: 31.126, Tokens/s/device: 295015.846, total_weights: 1648, loss: 5.165, lm_loss: 5.165, perplexity: 174.977
+I0419 14:59:32.058664 140509714623616 metric_logger.py:196] completed step: 40, seconds: 0.007, TFLOP/s/device: 32.073, Tokens/s/device: 303992.875, total_weights: 1653, loss: 4.948, lm_loss: 4.948, perplexity: 140.886
+I0419 14:59:32.060171 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:32.126288 140509714623616 metric_logger.py:196] completed step: 41, seconds: 0.007, TFLOP/s/device: 31.818, Tokens/s/device: 301575.615, total_weights: 1845, loss: 4.987, lm_loss: 4.987, perplexity: 146.482
+I0419 14:59:32.132908 140509714623616 metric_logger.py:196] completed step: 42, seconds: 0.069, TFLOP/s/device: 3.135, Tokens/s/device: 29709.146, total_weights: 1961, loss: 4.751, lm_loss: 4.751, perplexity: 115.671
+I0419 14:59:32.139716 140509714623616 metric_logger.py:196] completed step: 43, seconds: 0.006, TFLOP/s/device: 38.339, Tokens/s/device: 363378.282, total_weights: 1536, loss: 4.815, lm_loss: 4.815, perplexity: 123.292
+I0419 14:59:32.146590 140509714623616 metric_logger.py:196] completed step: 44, seconds: 0.006, TFLOP/s/device: 33.319, Tokens/s/device: 315805.705, total_weights: 1670, loss: 4.695, lm_loss: 4.695, perplexity: 109.411
+I0419 14:59:32.154373 140509714623616 metric_logger.py:196] completed step: 45, seconds: 0.007, TFLOP/s/device: 29.604, Tokens/s/device: 280586.382, total_weights: 1833, loss: 4.722, lm_loss: 4.722, perplexity: 112.390
+I0419 14:59:32.160998 140509714623616 metric_logger.py:196] completed step: 46, seconds: 0.009, TFLOP/s/device: 25.160, Tokens/s/device: 238472.287, total_weights: 1708, loss: 4.996, lm_loss: 4.996, perplexity: 147.884
+I0419 14:59:32.167790 140509714623616 metric_logger.py:196] completed step: 47, seconds: 0.006, TFLOP/s/device: 35.674, Tokens/s/device: 338121.182, total_weights: 1546, loss: 4.915, lm_loss: 4.915, perplexity: 136.257
+I0419 14:59:32.174550 140509714623616 metric_logger.py:196] completed step: 48, seconds: 0.007, TFLOP/s/device: 32.547, Tokens/s/device: 308480.193, total_weights: 1892, loss: 4.616, lm_loss: 4.616, perplexity: 101.044
+I0419 14:59:32.181383 140509714623616 metric_logger.py:196] completed step: 49, seconds: 0.007, TFLOP/s/device: 33.166, Tokens/s/device: 314351.497, total_weights: 1739, loss: 4.817, lm_loss: 4.817, perplexity: 123.572
+I0419 14:59:32.188155 140509714623616 metric_logger.py:196] completed step: 50, seconds: 0.008, TFLOP/s/device: 28.760, Tokens/s/device: 272594.170, total_weights: 1739, loss: 4.698, lm_loss: 4.698, perplexity: 109.763
+I0419 14:59:32.189680 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:32.263873 140509714623616 metric_logger.py:196] completed step: 51, seconds: 0.006, TFLOP/s/device: 35.163, Tokens/s/device: 333279.089, total_weights: 1802, loss: 4.787, lm_loss: 4.787, perplexity: 119.912
+I0419 14:59:32.270519 140509714623616 metric_logger.py:196] completed step: 52, seconds: 0.077, TFLOP/s/device: 2.818, Tokens/s/device: 26706.309, total_weights: 1597, loss: 4.764, lm_loss: 4.764, perplexity: 117.228
+I0419 14:59:32.277343 140509714623616 metric_logger.py:196] completed step: 53, seconds: 0.006, TFLOP/s/device: 38.244, Tokens/s/device: 362477.876, total_weights: 1904, loss: 4.934, lm_loss: 4.934, perplexity: 139.000
+I0419 14:59:32.284139 140509714623616 metric_logger.py:196] completed step: 54, seconds: 0.007, TFLOP/s/device: 32.150, Tokens/s/device: 304716.560, total_weights: 1594, loss: 4.381, lm_loss: 4.381, perplexity: 79.895
+I0419 14:59:32.290939 140509714623616 metric_logger.py:196] completed step: 55, seconds: 0.007, TFLOP/s/device: 31.439, Tokens/s/device: 297977.593, total_weights: 1649, loss: 4.369, lm_loss: 4.369, perplexity: 78.991
+I0419 14:59:32.297781 140509714623616 metric_logger.py:196] completed step: 56, seconds: 0.007, TFLOP/s/device: 32.586, Tokens/s/device: 308852.360, total_weights: 1782, loss: 4.564, lm_loss: 4.564, perplexity: 96.002
+I0419 14:59:32.304552 140509714623616 metric_logger.py:196] completed step: 57, seconds: 0.007, TFLOP/s/device: 31.379, Tokens/s/device: 297415.045, total_weights: 1892, loss: 4.603, lm_loss: 4.603, perplexity: 99.767
+I0419 14:59:32.311370 140509714623616 metric_logger.py:196] completed step: 58, seconds: 0.007, TFLOP/s/device: 31.926, Tokens/s/device: 302600.473, total_weights: 1644, loss: 4.467, lm_loss: 4.467, perplexity: 87.121
+I0419 14:59:32.318264 140509714623616 metric_logger.py:196] completed step: 59, seconds: 0.007, TFLOP/s/device: 31.439, Tokens/s/device: 297977.593, total_weights: 1919, loss: 4.438, lm_loss: 4.438, perplexity: 84.632
+I0419 14:59:32.325009 140509714623616 metric_logger.py:196] completed step: 60, seconds: 0.007, TFLOP/s/device: 31.108, Tokens/s/device: 294845.955, total_weights: 1827, loss: 4.503, lm_loss: 4.503, perplexity: 90.321
+I0419 14:59:32.326596 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:32.401631 140509714623616 metric_logger.py:196] completed step: 61, seconds: 0.007, TFLOP/s/device: 31.757, Tokens/s/device: 300999.412, total_weights: 1724, loss: 4.375, lm_loss: 4.375, perplexity: 79.439
+I0419 14:59:32.408261 140509714623616 metric_logger.py:196] completed step: 62, seconds: 0.078, TFLOP/s/device: 2.785, Tokens/s/device: 26399.577, total_weights: 1726, loss: 4.740, lm_loss: 4.740, perplexity: 114.423
+I0419 14:59:32.415082 140509714623616 metric_logger.py:196] completed step: 63, seconds: 0.006, TFLOP/s/device: 38.434, Tokens/s/device: 364283.173, total_weights: 1909, loss: 4.378, lm_loss: 4.378, perplexity: 79.668
+I0419 14:59:32.421900 140509714623616 metric_logger.py:196] completed step: 64, seconds: 0.007, TFLOP/s/device: 30.970, Tokens/s/device: 293535.904, total_weights: 1717, loss: 4.736, lm_loss: 4.736, perplexity: 113.927
+I0419 14:59:32.428701 140509714623616 metric_logger.py:196] completed step: 65, seconds: 0.007, TFLOP/s/device: 31.739, Tokens/s/device: 300822.562, total_weights: 1797, loss: 4.402, lm_loss: 4.402, perplexity: 81.613
+I0419 14:59:32.435495 140509714623616 metric_logger.py:196] completed step: 66, seconds: 0.007, TFLOP/s/device: 33.197, Tokens/s/device: 314641.266, total_weights: 1498, loss: 4.623, lm_loss: 4.623, perplexity: 101.793
+I0419 14:59:32.442325 140509714623616 metric_logger.py:196] completed step: 67, seconds: 0.007, TFLOP/s/device: 31.288, Tokens/s/device: 296553.721, total_weights: 1634, loss: 4.483, lm_loss: 4.483, perplexity: 88.527
+I0419 14:59:32.449132 140509714623616 metric_logger.py:196] completed step: 68, seconds: 0.007, TFLOP/s/device: 31.526, Tokens/s/device: 298803.618, total_weights: 1572, loss: 4.578, lm_loss: 4.578, perplexity: 97.356
+I0419 14:59:32.455936 140509714623616 metric_logger.py:196] completed step: 69, seconds: 0.007, TFLOP/s/device: 32.202, Tokens/s/device: 305216.095, total_weights: 1609, loss: 4.465, lm_loss: 4.465, perplexity: 86.948
+I0419 14:59:32.462765 140509714623616 metric_logger.py:196] completed step: 70, seconds: 0.007, TFLOP/s/device: 31.526, Tokens/s/device: 298803.618, total_weights: 1918, loss: 4.337, lm_loss: 4.337, perplexity: 76.496
+I0419 14:59:32.464207 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:32.529865 140509714623616 metric_logger.py:196] completed step: 71, seconds: 0.007, TFLOP/s/device: 32.245, Tokens/s/device: 305626.026, total_weights: 1622, loss: 4.317, lm_loss: 4.317, perplexity: 74.999
+I0419 14:59:32.536395 140509714623616 metric_logger.py:196] completed step: 72, seconds: 0.068, TFLOP/s/device: 3.168, Tokens/s/device: 30028.885, total_weights: 1649, loss: 4.458, lm_loss: 4.458, perplexity: 86.322
+I0419 14:59:32.543207 140509714623616 metric_logger.py:196] completed step: 73, seconds: 0.006, TFLOP/s/device: 35.965, Tokens/s/device: 340878.828, total_weights: 1741, loss: 4.097, lm_loss: 4.097, perplexity: 60.158
+I0419 14:59:32.550014 140509714623616 metric_logger.py:196] completed step: 74, seconds: 0.006, TFLOP/s/device: 33.964, Tokens/s/device: 321911.349, total_weights: 1700, loss: 4.333, lm_loss: 4.333, perplexity: 76.165
+I0419 14:59:32.556824 140509714623616 metric_logger.py:196] completed step: 75, seconds: 0.007, TFLOP/s/device: 31.599, Tokens/s/device: 299502.779, total_weights: 1726, loss: 4.403, lm_loss: 4.403, perplexity: 81.724
+I0419 14:59:32.563640 140509714623616 metric_logger.py:196] completed step: 76, seconds: 0.007, TFLOP/s/device: 32.150, Tokens/s/device: 304716.560, total_weights: 1499, loss: 4.763, lm_loss: 4.763, perplexity: 117.155
+I0419 14:59:32.570436 140509714623616 metric_logger.py:196] completed step: 77, seconds: 0.007, TFLOP/s/device: 31.434, Tokens/s/device: 297934.245, total_weights: 1638, loss: 4.562, lm_loss: 4.562, perplexity: 95.817
+I0419 14:59:32.577253 140509714623616 metric_logger.py:196] completed step: 78, seconds: 0.007, TFLOP/s/device: 31.917, Tokens/s/device: 302511.078, total_weights: 1737, loss: 4.447, lm_loss: 4.447, perplexity: 85.369
+I0419 14:59:32.584053 140509714623616 metric_logger.py:196] completed step: 79, seconds: 0.007, TFLOP/s/device: 31.720, Tokens/s/device: 300645.919, total_weights: 1478, loss: 4.757, lm_loss: 4.757, perplexity: 116.408
+I0419 14:59:32.590866 140509714623616 metric_logger.py:196] completed step: 80, seconds: 0.007, TFLOP/s/device: 30.881, Tokens/s/device: 292696.870, total_weights: 1716, loss: 4.449, lm_loss: 4.449, perplexity: 85.499
+I0419 14:59:32.592537 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:32.662644 140509714623616 metric_logger.py:196] completed step: 81, seconds: 0.007, TFLOP/s/device: 32.444, Tokens/s/device: 307507.508, total_weights: 1422, loss: 4.577, lm_loss: 4.577, perplexity: 97.198
+I0419 14:59:32.669240 140509714623616 metric_logger.py:196] completed step: 82, seconds: 0.073, TFLOP/s/device: 2.969, Tokens/s/device: 28142.692, total_weights: 1687, loss: 4.402, lm_loss: 4.402, perplexity: 81.634
+I0419 14:59:32.676050 140509714623616 metric_logger.py:196] completed step: 83, seconds: 0.006, TFLOP/s/device: 36.679, Tokens/s/device: 347648.956, total_weights: 1891, loss: 4.220, lm_loss: 4.220, perplexity: 68.045
+I0419 14:59:32.682886 140509714623616 metric_logger.py:196] completed step: 84, seconds: 0.007, TFLOP/s/device: 32.908, Tokens/s/device: 311909.839, total_weights: 1815, loss: 4.545, lm_loss: 4.545, perplexity: 94.150
+I0419 14:59:32.689700 140509714623616 metric_logger.py:196] completed step: 85, seconds: 0.007, TFLOP/s/device: 32.164, Tokens/s/device: 304852.635, total_weights: 1635, loss: 4.237, lm_loss: 4.237, perplexity: 69.220
+I0419 14:59:32.696466 140509714623616 metric_logger.py:196] completed step: 86, seconds: 0.007, TFLOP/s/device: 30.798, Tokens/s/device: 291904.219, total_weights: 1439, loss: 4.147, lm_loss: 4.147, perplexity: 63.227
+I0419 14:59:32.703295 140509714623616 metric_logger.py:196] completed step: 87, seconds: 0.007, TFLOP/s/device: 32.303, Tokens/s/device: 306174.316, total_weights: 1696, loss: 4.308, lm_loss: 4.308, perplexity: 74.328
+I0419 14:59:32.710102 140509714623616 metric_logger.py:196] completed step: 88, seconds: 0.007, TFLOP/s/device: 31.955, Tokens/s/device: 302868.974, total_weights: 1662, loss: 4.378, lm_loss: 4.378, perplexity: 79.714
+I0419 14:59:32.716904 140509714623616 metric_logger.py:196] completed step: 89, seconds: 0.007, TFLOP/s/device: 31.448, Tokens/s/device: 298064.328, total_weights: 1900, loss: 3.912, lm_loss: 3.912, perplexity: 49.991
+I0419 14:59:32.723724 140509714623616 metric_logger.py:196] completed step: 90, seconds: 0.007, TFLOP/s/device: 32.188, Tokens/s/device: 305079.696, total_weights: 1894, loss: 4.650, lm_loss: 4.650, perplexity: 104.546
+I0419 14:59:32.725419 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:32.794245 140509714623616 metric_logger.py:196] completed step: 91, seconds: 0.007, TFLOP/s/device: 31.148, Tokens/s/device: 295228.485, total_weights: 1874, loss: 4.379, lm_loss: 4.379, perplexity: 79.720
+I0419 14:59:32.800889 140509714623616 metric_logger.py:196] completed step: 92, seconds: 0.071, TFLOP/s/device: 3.024, Tokens/s/device: 28661.395, total_weights: 1782, loss: 4.565, lm_loss: 4.565, perplexity: 96.083
+I0419 14:59:32.807699 140509714623616 metric_logger.py:196] completed step: 93, seconds: 0.006, TFLOP/s/device: 37.038, Tokens/s/device: 351045.595, total_weights: 1839, loss: 4.317, lm_loss: 4.317, perplexity: 74.985
+I0419 14:59:32.814511 140509714623616 metric_logger.py:196] completed step: 94, seconds: 0.007, TFLOP/s/device: 32.488, Tokens/s/device: 307923.621, total_weights: 1575, loss: 4.304, lm_loss: 4.304, perplexity: 73.961
+I0419 14:59:32.821308 140509714623616 metric_logger.py:196] completed step: 95, seconds: 0.007, TFLOP/s/device: 32.689, Tokens/s/device: 309833.585, total_weights: 1771, loss: 4.401, lm_loss: 4.401, perplexity: 81.547
+I0419 14:59:32.828121 140509714623616 metric_logger.py:196] completed step: 96, seconds: 0.007, TFLOP/s/device: 31.558, Tokens/s/device: 299109.099, total_weights: 1883, loss: 4.212, lm_loss: 4.212, perplexity: 67.494
+I0419 14:59:32.834938 140509714623616 metric_logger.py:196] completed step: 97, seconds: 0.007, TFLOP/s/device: 31.448, Tokens/s/device: 298064.328, total_weights: 1643, loss: 4.491, lm_loss: 4.491, perplexity: 89.182
+/home/joseph/maxtext-zero-seeds/.venv/lib/python3.12/site-packages/jax/_src/cloud_tpu_init.py:93: UserWarning: Transparent hugepages are not enabled. TPU runtime startup and shutdown time should be significantly improved on TPU v5e and newer. If not already set, you may need to enable transparent hugepages in your VM image (sudo sh -c "echo always > /sys/kernel/mm/transparent_hugepage/enabled")
+  warnings.warn(
+PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+W0419 14:59:42.266662    8896 pjrt_executable.cc:642] Assume version compatibility. PjRt-IFRT does not track XLA executable versions.
+I0419 14:59:42.305722 140509714623616 train.py:620] Completed eval step 0
+I0419 14:59:42.310772 140509714623616 train.py:620] Completed eval step 1
+I0419 14:59:42.315394 140509714623616 train.py:620] Completed eval step 2
+I0419 14:59:42.319911 140509714623616 train.py:620] Completed eval step 3
+I0419 14:59:42.324247 140509714623616 train.py:620] Completed eval step 4
+I0419 14:59:42.325981 140509714623616 metric_logger.py:216] eval metrics after step: 99, loss=4.040, perplexity=56.841, total_weights=8813.0
+I0419 14:59:42.327730 140509714623616 metric_logger.py:196] completed step: 98, seconds: 0.007, TFLOP/s/device: 31.113, Tokens/s/device: 294888.409, total_weights: 1749, loss: 4.161, lm_loss: 4.161, perplexity: 64.112
+I0419 14:59:42.334061 140509714623616 metric_logger.py:196] completed step: 99, seconds: 0.007, TFLOP/s/device: 32.284, Tokens/s/device: 305991.334, total_weights: 1722, loss: 4.419, lm_loss: 4.419, perplexity: 83.031
+I0419 14:59:42.340558 140509714623616 metric_logger.py:196] completed step: 100, seconds: 9.493, TFLOP/s/device: 0.023, Tokens/s/device: 215.732, total_weights: 1599, loss: 4.056, lm_loss: 4.056, perplexity: 57.769
+I0419 14:59:42.342124 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:42.413199 140509714623616 metric_logger.py:196] completed step: 101, seconds: 0.006, TFLOP/s/device: 35.739, Tokens/s/device: 338736.355, total_weights: 1779, loss: 4.211, lm_loss: 4.211, perplexity: 67.447
+I0419 14:59:42.419775 140509714623616 metric_logger.py:196] completed step: 102, seconds: 0.073, TFLOP/s/device: 2.954, Tokens/s/device: 28000.328, total_weights: 1813, loss: 4.614, lm_loss: 4.614, perplexity: 100.859
+I0419 14:59:42.426624 140509714623616 metric_logger.py:196] completed step: 103, seconds: 0.006, TFLOP/s/device: 35.220, Tokens/s/device: 333822.331, total_weights: 1758, loss: 4.374, lm_loss: 4.374, perplexity: 79.355
+I0419 14:59:42.433396 140509714623616 metric_logger.py:196] completed step: 104, seconds: 0.007, TFLOP/s/device: 32.939, Tokens/s/device: 312195.122, total_weights: 1721, loss: 4.287, lm_loss: 4.287, perplexity: 72.764
+I0419 14:59:42.440218 140509714623616 metric_logger.py:196] completed step: 105, seconds: 0.006, TFLOP/s/device: 33.417, Tokens/s/device: 316733.684, total_weights: 1795, loss: 4.393, lm_loss: 4.393, perplexity: 80.910
+I0419 14:59:42.447014 140509714623616 metric_logger.py:196] completed step: 106, seconds: 0.007, TFLOP/s/device: 32.439, Tokens/s/device: 307461.342, total_weights: 1711, loss: 4.212, lm_loss: 4.212, perplexity: 67.491
+I0419 14:59:42.453842 140509714623616 metric_logger.py:196] completed step: 107, seconds: 0.007, TFLOP/s/device: 31.729, Tokens/s/device: 300734.214, total_weights: 1708, loss: 4.331, lm_loss: 4.331, perplexity: 76.023
+I0419 14:59:42.460634 140509714623616 metric_logger.py:196] completed step: 108, seconds: 0.007, TFLOP/s/device: 31.959, Tokens/s/device: 302913.770, total_weights: 1855, loss: 4.363, lm_loss: 4.363, perplexity: 78.484
+I0419 14:59:42.467429 140509714623616 metric_logger.py:196] completed step: 109, seconds: 0.007, TFLOP/s/device: 31.365, Tokens/s/device: 297285.528, total_weights: 1894, loss: 4.063, lm_loss: 4.063, perplexity: 58.150
+I0419 14:59:42.474246 140509714623616 metric_logger.py:196] completed step: 110, seconds: 0.007, TFLOP/s/device: 31.701, Tokens/s/device: 300469.484, total_weights: 1671, loss: 3.925, lm_loss: 3.925, perplexity: 50.656
+I0419 14:59:42.475703 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:42.544799 140509714623616 metric_logger.py:196] completed step: 111, seconds: 0.007, TFLOP/s/device: 32.255, Tokens/s/device: 305717.271, total_weights: 1739, loss: 4.174, lm_loss: 4.174, perplexity: 64.997
+I0419 14:59:42.551420 140509714623616 metric_logger.py:196] completed step: 112, seconds: 0.072, TFLOP/s/device: 3.010, Tokens/s/device: 28526.061, total_weights: 1661, loss: 4.297, lm_loss: 4.297, perplexity: 73.504
+I0419 14:59:42.558235 140509714623616 metric_logger.py:196] completed step: 113, seconds: 0.006, TFLOP/s/device: 39.130, Tokens/s/device: 370880.116, total_weights: 1417, loss: 4.212, lm_loss: 4.212, perplexity: 67.505
+I0419 14:59:42.565045 140509714623616 metric_logger.py:196] completed step: 114, seconds: 0.007, TFLOP/s/device: 32.270, Tokens/s/device: 305854.241, total_weights: 1537, loss: 4.305, lm_loss: 4.305, perplexity: 74.045
+I0419 14:59:42.571849 140509714623616 metric_logger.py:196] completed step: 115, seconds: 0.007, TFLOP/s/device: 31.678, Tokens/s/device: 300249.230, total_weights: 1558, loss: 4.162, lm_loss: 4.162, perplexity: 64.226
+I0419 14:59:42.578660 140509714623616 metric_logger.py:196] completed step: 116, seconds: 0.007, TFLOP/s/device: 31.757, Tokens/s/device: 300999.412, total_weights: 1687, loss: 4.309, lm_loss: 4.309, perplexity: 74.359
+I0419 14:59:42.585460 140509714623616 metric_logger.py:196] completed step: 117, seconds: 0.007, TFLOP/s/device: 32.068, Tokens/s/device: 303947.759, total_weights: 1895, loss: 3.905, lm_loss: 3.905, perplexity: 49.641
+I0419 14:59:42.592271 140509714623616 metric_logger.py:196] completed step: 118, seconds: 0.007, TFLOP/s/device: 30.344, Tokens/s/device: 287600.056, total_weights: 1772, loss: 3.842, lm_loss: 3.842, perplexity: 46.599
+I0419 14:59:42.599089 140509714623616 metric_logger.py:196] completed step: 119, seconds: 0.007, TFLOP/s/device: 33.166, Tokens/s/device: 314351.497, total_weights: 1737, loss: 4.019, lm_loss: 4.019, perplexity: 55.635
+I0419 14:59:42.605917 140509714623616 metric_logger.py:196] completed step: 120, seconds: 0.007, TFLOP/s/device: 31.818, Tokens/s/device: 301575.615, total_weights: 1745, loss: 4.069, lm_loss: 4.069, perplexity: 58.519
+I0419 14:59:42.607275 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:42.677762 140509714623616 metric_logger.py:196] completed step: 121, seconds: 0.007, TFLOP/s/device: 32.704, Tokens/s/device: 309974.270, total_weights: 1780, loss: 4.296, lm_loss: 4.296, perplexity: 73.433
+I0419 14:59:42.851392 140509714623616 metric_logger.py:196] completed step: 122, seconds: 0.073, TFLOP/s/device: 2.948, Tokens/s/device: 27941.116, total_weights: 1716, loss: 3.946, lm_loss: 3.946, perplexity: 51.710
+I0419 14:59:42.858048 140509714623616 metric_logger.py:196] completed step: 123, seconds: 0.174, TFLOP/s/device: 1.244, Tokens/s/device: 11792.616, total_weights: 1758, loss: 4.138, lm_loss: 4.138, perplexity: 62.660
+I0419 14:59:42.864850 140509714623616 metric_logger.py:196] completed step: 124, seconds: 0.006, TFLOP/s/device: 38.905, Tokens/s/device: 368743.248, total_weights: 1654, loss: 4.030, lm_loss: 4.030, perplexity: 56.278
+I0419 14:59:42.871651 140509714623616 metric_logger.py:196] completed step: 125, seconds: 0.007, TFLOP/s/device: 32.150, Tokens/s/device: 304716.560, total_weights: 1724, loss: 3.818, lm_loss: 3.818, perplexity: 45.527
+I0419 14:59:42.878457 140509714623616 metric_logger.py:196] completed step: 126, seconds: 0.007, TFLOP/s/device: 31.715, Tokens/s/device: 300601.791, total_weights: 1711, loss: 4.077, lm_loss: 4.077, perplexity: 58.966
+I0419 14:59:42.885264 140509714623616 metric_logger.py:196] completed step: 127, seconds: 0.007, TFLOP/s/device: 32.381, Tokens/s/device: 306908.437, total_weights: 1836, loss: 4.115, lm_loss: 4.115, perplexity: 61.273
+I0419 14:59:42.892076 140509714623616 metric_logger.py:196] completed step: 128, seconds: 0.007, TFLOP/s/device: 32.130, Tokens/s/device: 304535.316, total_weights: 1950, loss: 4.195, lm_loss: 4.195, perplexity: 66.363
+I0419 14:59:42.898885 140509714623616 metric_logger.py:196] completed step: 129, seconds: 0.007, TFLOP/s/device: 31.393, Tokens/s/device: 297544.675, total_weights: 1645, loss: 4.256, lm_loss: 4.256, perplexity: 70.511
+I0419 14:59:42.905709 140509714623616 metric_logger.py:196] completed step: 130, seconds: 0.007, TFLOP/s/device: 31.320, Tokens/s/device: 296854.617, total_weights: 1706, loss: 4.144, lm_loss: 4.144, perplexity: 63.036
+I0419 14:59:42.907145 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:42.973946 140509714623616 metric_logger.py:196] completed step: 131, seconds: 0.007, TFLOP/s/device: 32.250, Tokens/s/device: 305671.642, total_weights: 1645, loss: 4.218, lm_loss: 4.218, perplexity: 67.868
+I0419 14:59:42.980544 140509714623616 metric_logger.py:196] completed step: 132, seconds: 0.070, TFLOP/s/device: 3.108, Tokens/s/device: 29454.064, total_weights: 1517, loss: 4.064, lm_loss: 4.064, perplexity: 58.234
+I0419 14:59:42.987343 140509714623616 metric_logger.py:196] completed step: 133, seconds: 0.006, TFLOP/s/device: 38.312, Tokens/s/device: 363120.567, total_weights: 1731, loss: 3.938, lm_loss: 3.938, perplexity: 51.322
+I0419 14:59:42.994161 140509714623616 metric_logger.py:196] completed step: 134, seconds: 0.007, TFLOP/s/device: 32.660, Tokens/s/device: 309552.600, total_weights: 1821, loss: 4.083, lm_loss: 4.083, perplexity: 59.306
+I0419 14:59:43.000972 140509714623616 metric_logger.py:196] completed step: 135, seconds: 0.007, TFLOP/s/device: 32.547, Tokens/s/device: 308480.193, total_weights: 1708, loss: 4.297, lm_loss: 4.297, perplexity: 73.502
+I0419 14:59:43.007785 140509714623616 metric_logger.py:196] completed step: 136, seconds: 0.007, TFLOP/s/device: 31.471, Tokens/s/device: 298281.387, total_weights: 1732, loss: 3.852, lm_loss: 3.852, perplexity: 47.103
+I0419 14:59:43.014597 140509714623616 metric_logger.py:196] completed step: 137, seconds: 0.007, TFLOP/s/device: 31.425, Tokens/s/device: 297847.586, total_weights: 1809, loss: 4.223, lm_loss: 4.223, perplexity: 68.208
+I0419 14:59:43.021399 140509714623616 metric_logger.py:196] completed step: 138, seconds: 0.007, TFLOP/s/device: 32.352, Tokens/s/device: 306632.729, total_weights: 1474, loss: 4.143, lm_loss: 4.143, perplexity: 62.992
+I0419 14:59:43.028204 140509714623616 metric_logger.py:196] completed step: 139, seconds: 0.007, TFLOP/s/device: 31.983, Tokens/s/device: 303137.951, total_weights: 1872, loss: 3.970, lm_loss: 3.970, perplexity: 52.998
+I0419 14:59:43.035028 140509714623616 metric_logger.py:196] completed step: 140, seconds: 0.007, TFLOP/s/device: 29.961, Tokens/s/device: 283971.159, total_weights: 1718, loss: 4.129, lm_loss: 4.129, perplexity: 62.096
+I0419 14:59:43.036546 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:43.105848 140509714623616 metric_logger.py:196] completed step: 141, seconds: 0.006, TFLOP/s/device: 33.505, Tokens/s/device: 317568.615, total_weights: 1792, loss: 3.909, lm_loss: 3.909, perplexity: 49.835
+I0419 14:59:43.112487 140509714623616 metric_logger.py:196] completed step: 142, seconds: 0.072, TFLOP/s/device: 2.994, Tokens/s/device: 28375.476, total_weights: 1591, loss: 3.960, lm_loss: 3.960, perplexity: 52.455
+I0419 14:59:43.119289 140509714623616 metric_logger.py:196] completed step: 143, seconds: 0.006, TFLOP/s/device: 38.961, Tokens/s/device: 369275.153, total_weights: 1881, loss: 3.923, lm_loss: 3.923, perplexity: 50.572
+I0419 14:59:43.126106 140509714623616 metric_logger.py:196] completed step: 144, seconds: 0.007, TFLOP/s/device: 32.386, Tokens/s/device: 306954.436, total_weights: 1759, loss: 4.182, lm_loss: 4.182, perplexity: 65.473
+I0419 14:59:43.132922 140509714623616 metric_logger.py:196] completed step: 145, seconds: 0.007, TFLOP/s/device: 31.618, Tokens/s/device: 299678.080, total_weights: 1517, loss: 4.010, lm_loss: 4.010, perplexity: 55.145
+I0419 14:59:43.139721 140509714623616 metric_logger.py:196] completed step: 146, seconds: 0.007, TFLOP/s/device: 32.140, Tokens/s/device: 304625.911, total_weights: 1652, loss: 4.039, lm_loss: 4.039, perplexity: 56.781
+I0419 14:59:43.146535 140509714623616 metric_logger.py:196] completed step: 147, seconds: 0.007, TFLOP/s/device: 32.150, Tokens/s/device: 304716.560, total_weights: 1832, loss: 4.544, lm_loss: 4.544, perplexity: 94.044
+I0419 14:59:43.153333 140509714623616 metric_logger.py:196] completed step: 148, seconds: 0.007, TFLOP/s/device: 30.170, Tokens/s/device: 285953.644, total_weights: 1828, loss: 4.314, lm_loss: 4.314, perplexity: 74.709
+I0419 14:59:43.160153 140509714623616 metric_logger.py:196] completed step: 149, seconds: 0.007, TFLOP/s/device: 32.804, Tokens/s/device: 310915.440, total_weights: 1524, loss: 4.079, lm_loss: 4.079, perplexity: 59.111
+I0419 14:59:43.166967 140509714623616 metric_logger.py:196] completed step: 150, seconds: 0.007, TFLOP/s/device: 31.636, Tokens/s/device: 299853.587, total_weights: 1814, loss: 4.066, lm_loss: 4.066, perplexity: 58.321
+I0419 14:59:43.168407 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:43.234494 140509714623616 metric_logger.py:196] completed step: 151, seconds: 0.007, TFLOP/s/device: 31.715, Tokens/s/device: 300601.791, total_weights: 1543, loss: 4.167, lm_loss: 4.167, perplexity: 64.525
+I0419 14:59:43.241129 140509714623616 metric_logger.py:196] completed step: 152, seconds: 0.069, TFLOP/s/device: 3.144, Tokens/s/device: 29794.725, total_weights: 1726, loss: 4.441, lm_loss: 4.441, perplexity: 84.858
+I0419 14:59:43.247937 140509714623616 metric_logger.py:196] completed step: 153, seconds: 0.005, TFLOP/s/device: 39.430, Tokens/s/device: 373722.628, total_weights: 1593, loss: 4.017, lm_loss: 4.017, perplexity: 55.525
+I0419 14:59:43.254768 140509714623616 metric_logger.py:196] completed step: 154, seconds: 0.007, TFLOP/s/device: 31.842, Tokens/s/device: 301797.819, total_weights: 1809, loss: 3.856, lm_loss: 3.856, perplexity: 47.276
+I0419 14:59:43.261561 140509714623616 metric_logger.py:196] completed step: 155, seconds: 0.007, TFLOP/s/device: 32.606, Tokens/s/device: 309038.781, total_weights: 1768, loss: 4.039, lm_loss: 4.039, perplexity: 56.790
+I0419 14:59:43.268366 140509714623616 metric_logger.py:196] completed step: 156, seconds: 0.007, TFLOP/s/device: 31.365, Tokens/s/device: 297285.528, total_weights: 1531, loss: 4.255, lm_loss: 4.255, perplexity: 70.478
+I0419 14:59:43.275175 140509714623616 metric_logger.py:196] completed step: 157, seconds: 0.007, TFLOP/s/device: 31.530, Tokens/s/device: 298847.220, total_weights: 1932, loss: 4.043, lm_loss: 4.043, perplexity: 57.002
+I0419 14:59:43.282429 140509714623616 metric_logger.py:196] completed step: 158, seconds: 0.007, TFLOP/s/device: 31.851, Tokens/s/device: 301886.792, total_weights: 1405, loss: 3.667, lm_loss: 3.667, perplexity: 39.150
+I0419 14:59:43.289894 140509714623616 metric_logger.py:196] completed step: 159, seconds: 0.008, TFLOP/s/device: 26.071, Tokens/s/device: 247104.247, total_weights: 1586, loss: 3.641, lm_loss: 3.641, perplexity: 38.142
+I0419 14:59:43.296615 140509714623616 metric_logger.py:196] completed step: 160, seconds: 0.008, TFLOP/s/device: 28.563, Tokens/s/device: 270720.423, total_weights: 1521, loss: 4.065, lm_loss: 4.065, perplexity: 58.264
+I0419 14:59:43.298557 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:43.363209 140509714623616 metric_logger.py:196] completed step: 161, seconds: 0.007, TFLOP/s/device: 31.969, Tokens/s/device: 303003.403, total_weights: 1626, loss: 4.105, lm_loss: 4.105, perplexity: 60.638
+I0419 14:59:43.369627 140509714623616 metric_logger.py:196] completed step: 162, seconds: 0.067, TFLOP/s/device: 3.245, Tokens/s/device: 30752.136, total_weights: 1759, loss: 3.921, lm_loss: 3.921, perplexity: 50.432
+I0419 14:59:43.376411 140509714623616 metric_logger.py:196] completed step: 163, seconds: 0.006, TFLOP/s/device: 37.776, Tokens/s/device: 358041.958, total_weights: 1417, loss: 3.777, lm_loss: 3.777, perplexity: 43.670
+I0419 14:59:43.383233 140509714623616 metric_logger.py:196] completed step: 164, seconds: 0.006, TFLOP/s/device: 33.916, Tokens/s/device: 321456.600, total_weights: 1631, loss: 3.756, lm_loss: 3.756, perplexity: 42.794
+I0419 14:59:43.390038 140509714623616 metric_logger.py:196] completed step: 165, seconds: 0.007, TFLOP/s/device: 31.692, Tokens/s/device: 300381.344, total_weights: 1479, loss: 3.771, lm_loss: 3.771, perplexity: 43.413
+I0419 14:59:43.396841 140509714623616 metric_logger.py:196] completed step: 166, seconds: 0.007, TFLOP/s/device: 32.145, Tokens/s/device: 304671.229, total_weights: 1956, loss: 3.759, lm_loss: 3.759, perplexity: 42.904
+I0419 14:59:43.403655 140509714623616 metric_logger.py:196] completed step: 167, seconds: 0.007, TFLOP/s/device: 31.997, Tokens/s/device: 303272.620, total_weights: 1387, loss: 3.602, lm_loss: 3.602, perplexity: 36.663
+I0419 14:59:43.410457 140509714623616 metric_logger.py:196] completed step: 168, seconds: 0.007, TFLOP/s/device: 31.365, Tokens/s/device: 297285.528, total_weights: 1539, loss: 4.040, lm_loss: 4.040, perplexity: 56.824
+I0419 14:59:43.417262 140509714623616 metric_logger.py:196] completed step: 169, seconds: 0.007, TFLOP/s/device: 31.926, Tokens/s/device: 302600.473, total_weights: 1490, loss: 4.052, lm_loss: 4.052, perplexity: 57.534
+I0419 14:59:43.424076 140509714623616 metric_logger.py:196] completed step: 170, seconds: 0.007, TFLOP/s/device: 32.769, Tokens/s/device: 310585.381, total_weights: 1470, loss: 3.692, lm_loss: 3.692, perplexity: 40.140
+I0419 14:59:43.425539 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:43.497148 140509714623616 metric_logger.py:196] completed step: 171, seconds: 0.007, TFLOP/s/device: 30.078, Tokens/s/device: 285077.951, total_weights: 1860, loss: 4.034, lm_loss: 4.034, perplexity: 56.495
+I0419 14:59:43.503786 140509714623616 metric_logger.py:196] completed step: 172, seconds: 0.074, TFLOP/s/device: 2.913, Tokens/s/device: 27610.381, total_weights: 1762, loss: 3.874, lm_loss: 3.874, perplexity: 48.157
+I0419 14:59:43.510598 140509714623616 metric_logger.py:196] completed step: 173, seconds: 0.006, TFLOP/s/device: 38.592, Tokens/s/device: 365779.604, total_weights: 1533, loss: 3.686, lm_loss: 3.686, perplexity: 39.895
+I0419 14:59:43.517404 140509714623616 metric_logger.py:196] completed step: 174, seconds: 0.007, TFLOP/s/device: 32.759, Tokens/s/device: 310491.207, total_weights: 1893, loss: 3.861, lm_loss: 3.861, perplexity: 47.499
+I0419 14:59:43.524228 140509714623616 metric_logger.py:196] completed step: 175, seconds: 0.007, TFLOP/s/device: 32.571, Tokens/s/device: 308712.692, total_weights: 1635, loss: 3.754, lm_loss: 3.754, perplexity: 42.692
+I0419 14:59:43.531025 140509714623616 metric_logger.py:196] completed step: 176, seconds: 0.007, TFLOP/s/device: 30.166, Tokens/s/device: 285913.723, total_weights: 1768, loss: 4.073, lm_loss: 4.073, perplexity: 58.711
+I0419 14:59:43.537851 140509714623616 metric_logger.py:196] completed step: 177, seconds: 0.007, TFLOP/s/device: 32.434, Tokens/s/device: 307415.191, total_weights: 1882, loss: 3.995, lm_loss: 3.995, perplexity: 54.316
+I0419 14:59:43.544639 140509714623616 metric_logger.py:196] completed step: 178, seconds: 0.007, TFLOP/s/device: 32.260, Tokens/s/device: 305762.914, total_weights: 1569, loss: 4.227, lm_loss: 4.227, perplexity: 68.494
+I0419 14:59:43.551468 140509714623616 metric_logger.py:196] completed step: 179, seconds: 0.007, TFLOP/s/device: 31.148, Tokens/s/device: 295228.485, total_weights: 1746, loss: 3.892, lm_loss: 3.892, perplexity: 48.995
+I0419 14:59:43.558266 140509714623616 metric_logger.py:196] completed step: 180, seconds: 0.007, TFLOP/s/device: 32.279, Tokens/s/device: 305945.623, total_weights: 1383, loss: 4.026, lm_loss: 4.026, perplexity: 56.061
+I0419 14:59:43.559718 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:43.624222 140509714623616 metric_logger.py:196] completed step: 181, seconds: 0.007, TFLOP/s/device: 31.674, Tokens/s/device: 300205.218, total_weights: 1819, loss: 3.821, lm_loss: 3.821, perplexity: 45.652
+I0419 14:59:43.630858 140509714623616 metric_logger.py:196] completed step: 182, seconds: 0.067, TFLOP/s/device: 3.213, Tokens/s/device: 30455.796, total_weights: 1752, loss: 4.103, lm_loss: 4.103, perplexity: 60.513
+I0419 14:59:43.637692 140509714623616 metric_logger.py:196] completed step: 183, seconds: 0.006, TFLOP/s/device: 39.194, Tokens/s/device: 371485.580, total_weights: 1847, loss: 3.811, lm_loss: 3.811, perplexity: 45.190
+I0419 14:59:43.644469 140509714623616 metric_logger.py:196] completed step: 184, seconds: 0.007, TFLOP/s/device: 32.294, Tokens/s/device: 306082.798, total_weights: 1693, loss: 3.874, lm_loss: 3.874, perplexity: 48.158
+I0419 14:59:43.651282 140509714623616 metric_logger.py:196] completed step: 185, seconds: 0.007, TFLOP/s/device: 31.266, Tokens/s/device: 296339.169, total_weights: 1642, loss: 4.191, lm_loss: 4.191, perplexity: 66.100
+I0419 14:59:43.658086 140509714623616 metric_logger.py:196] completed step: 186, seconds: 0.007, TFLOP/s/device: 32.665, Tokens/s/device: 309599.395, total_weights: 1483, loss: 3.602, lm_loss: 3.602, perplexity: 36.683
+I0419 14:59:43.664889 140509714623616 metric_logger.py:196] completed step: 187, seconds: 0.007, TFLOP/s/device: 31.599, Tokens/s/device: 299502.779, total_weights: 1593, loss: 4.119, lm_loss: 4.119, perplexity: 61.494
+I0419 14:59:43.671701 140509714623616 metric_logger.py:196] completed step: 188, seconds: 0.007, TFLOP/s/device: 31.753, Tokens/s/device: 300955.180, total_weights: 1525, loss: 3.958, lm_loss: 3.958, perplexity: 52.329
+I0419 14:59:43.678522 140509714623616 metric_logger.py:196] completed step: 189, seconds: 0.007, TFLOP/s/device: 32.030, Tokens/s/device: 303587.311, total_weights: 1665, loss: 3.743, lm_loss: 3.743, perplexity: 42.223
+I0419 14:59:43.685312 140509714623616 metric_logger.py:196] completed step: 190, seconds: 0.007, TFLOP/s/device: 31.526, Tokens/s/device: 298803.618, total_weights: 1715, loss: 3.764, lm_loss: 3.764, perplexity: 43.121
+I0419 14:59:43.686743 140509714623616 metric_logger.py:281] To see full metrics 'tensorboard --logdir=gs://fractal-maxtext-runs-81f2add4/rgrp-sidecar-layer1-zero-seed1-20260419T1448Z/tensorboard/'
+I0419 14:59:43.767481 140509714623616 metric_logger.py:196] completed step: 191, seconds: 0.007, TFLOP/s/device: 31.618, Tokens/s/device: 299678.080, total_weights: 1680, loss: 3.885, lm_loss: 3.885, perplexity: 48.646
+I0419 14:59:43.774129 140509714623616 metric_logger.py:196] completed step: 192, seconds: 0.083, TFLOP/s/device: 2.590, Tokens/s/device: 24543.700, total_weights: 1767, loss: 3.793, lm_loss: 3.793, perplexity: 44.386
+I0419 14:59:43.780937 140509714623616 metric_logger.py:196] completed step: 193, seconds: 0.006, TFLOP/s/device: 38.257, Tokens/s/device: 362606.232, total_weights: 1706, loss: 4.067, lm_loss: 4.067, perplexity: 58.374
+I0419 14:59:43.787753 140509714623616 metric_logger.py:196] completed step: 194, seconds: 0.007, TFLOP/s/device: 32.665, Tokens/s/device: 309599.395, total_weights: 1495, loss: 3.955, lm_loss: 3.955, perplexity: 52.200
+I0419 14:59:43.794549 140509714623616 metric_logger.py:196] completed step: 195, seconds: 0.007, TFLOP/s/device: 31.893, Tokens/s/device: 302287.823, total_weights: 1358, loss: 4.037, lm_loss: 4.037, perplexity: 56.679
+I0419 14:59:43.801352 140509714623616 metric_logger.py:196] completed step: 196, seconds: 0.007, TFLOP/s/device: 31.743, Tokens/s/device: 300866.755, total_weights: 1703, loss: 3.875, lm_loss: 3.875, perplexity: 48.187
+I0419 14:59:43.808168 140509714623616 metric_logger.py:196] completed step: 197, seconds: 0.007, TFLOP/s/device: 31.687, Tokens/s/device: 300337.293, total_weights: 1707, loss: 3.813, lm_loss: 3.813, perplexity: 45.304
+/home/joseph/maxtext-zero-seeds/.venv/lib/python3.12/site-packages/jax/_src/cloud_tpu_init.py:93: UserWarning: Transparent hugepages are not enabled. TPU runtime startup and shutdown time should be significantly improved on TPU v5e and newer. If not already set, you may need to enable transparent hugepages in your VM image (sudo sh -c "echo always > /sys/kernel/mm/transparent_hugepage/enabled")
+  warnings.warn(
+PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+I0419 14:59:54.543991 140509714623616 train.py:620] Completed eval step 0
+I0419 14:59:54.548619 140509714623616 train.py:620] Completed eval step 1
+I0419 14:59:54.553034 140509714623616 train.py:620] Completed eval step 2
+I0419 14:59:54.557440 140509714623616 train.py:620] Completed eval step 3
+I0419 14:59:54.561877 140509714623616 train.py:620] Completed eval step 4
+I0419 14:59:54.563541 140509714623616 metric_logger.py:216] eval metrics after step: 199, loss=3.750, perplexity=42.536, total_weights=8813.0
+I0419 14:59:54.565091 140509714623616 metric_logger.py:196] completed step: 198, seconds: 0.007, TFLOP/s/device: 31.507, Tokens/s/device: 298629.338, total_weights: 1460, loss: 3.842, lm_loss: 3.842, perplexity: 46.624
+I0419 14:59:54.568242 140509714623616 metric_logger.py:196] completed step: 199, seconds: 0.007, TFLOP/s/device: 31.818, Tokens/s/device: 301575.615, total_weights: 1665, loss: 4.039, lm_loss: 4.039, perplexity: 56.794
