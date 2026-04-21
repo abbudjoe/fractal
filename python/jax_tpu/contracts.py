@@ -419,6 +419,7 @@ def candidate_registry() -> dict[str, JaxTpuCandidateSpec]:
         "fractal_parcae_min_loop_count": 1,
         "fractal_parcae_max_loop_count": 0,
         "fractal_parcae_discretization": "stable-exp",
+        "fractal_parcae_control_diagnostics": False,
     }
     parcae_looped = JaxTpuCandidateSpec(
         slug="parcae-looped-attention",

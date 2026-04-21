@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import unittest
 
 from python.jax_tpu import (
@@ -147,6 +148,7 @@ class JaxTpuContractTests(unittest.TestCase):
         self.assertIn("fractal_parcae_mu_rec=2.0", rendered)
         self.assertIn("fractal_parcae_mu_bwd=2", rendered)
         self.assertIn("fractal_parcae_discretization=stable-exp", rendered)
+        self.assertIn("fractal_parcae_control_diagnostics=false", rendered)
         self.assertIn("fractal_rgrp_state_transform=block-diagonal-4-masked-dense", rendered)
         self.assertIn("fractal_rgrp_scan_unroll=3", rendered)
         self.assertTrue(spec.candidate.kernel_contract.carries_state_across_tokens)
@@ -154,6 +156,39 @@ class JaxTpuContractTests(unittest.TestCase):
             spec.candidate.kernel_contract.fusion_boundary,
             "decoder-stack-loop-injection-rgrp-controller",
         )
+
+    def test_parcae_rgrp_control_diagnostics_are_explicit_opt_in(self) -> None:
+        spec = JaxTpuBenchmarkSpec(
+            run_name="parcae-rgrp-diagnostics",
+            base_output_directory="gs://fractal-maxtext-runs",
+            candidate=get_candidate("parcae-rgrp-control-looped-attention"),
+            extra_overrides={"fractal_parcae_control_diagnostics": True},
+        )
+
+        rendered = render_shell_command(build_maxtext_command(spec, allow_patched_maxtext=True))
+
+        self.assertIn("fractal_candidate=parcae-rgrp-control-looped-attention", rendered)
+        self.assertIn("fractal_parcae_control_diagnostics=true", rendered)
+
+    def test_parcae_rgrp_control_diagnostics_patch_is_gated_and_scalar_only(self) -> None:
+        patch_text = Path("scripts/patch_maxtext_rgrp.py").read_text()
+        runner_text = Path("scripts/run_maxtext_parcae_proof_ladder_tpu.sh").read_text()
+
+        self.assertIn("fractal_parcae_control_diagnostics: bool = Field(False", patch_text)
+        self.assertIn("PARCAE_CONTROL_DIAGNOSTIC_BASE_METRICS", patch_text)
+        self.assertIn("collect_parcae_control_diagnostics(intermediate_outputs)", patch_text)
+        self.assertIn("cfg.fractal_parcae_control_diagnostics", patch_text)
+        self.assertIn('cfg.fractal_candidate in ("parcae-rgrp-control-looped-attention"', patch_text)
+        self.assertIn("sow_parcae_control_diagnostic", patch_text)
+        self.assertIn('"controller/gate_saturation_low_frac"', patch_text)
+        self.assertIn('"controller/injection_delta_to_loop_input_ratio"', patch_text)
+        self.assertIn('f"loop/state_norm_step_{loop_idx}"', patch_text)
+        self.assertIn('f"loop/step_delta_norm_step_{loop_idx}"', patch_text)
+        self.assertIn('f"loop/acceleration_norm_step_{loop_idx}"', patch_text)
+        self.assertIn('"stability/nan_or_inf_seen"', patch_text)
+        self.assertIn('metric_name.startswith(("evaluation/controller/"', patch_text)
+        self.assertIn('PARCAE_CONTROL_DIAGNOSTICS="${PARCAE_CONTROL_DIAGNOSTICS:-false}"', runner_text)
+        self.assertIn('"fractal_parcae_control_diagnostics=${PARCAE_CONTROL_DIAGNOSTICS}"', runner_text)
 
     def test_parcae_controls_keep_same_looped_scaffold_without_rgrp_state(self) -> None:
         for slug in ("parcae-looped-attention", "parcae-bx-looped-attention"):

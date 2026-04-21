@@ -50,6 +50,84 @@ SUPPORTED_PARCAE_PROFILES = (
 SUPPORTED_PARCAE_LOOP_POLICIES = ("fixed", "per-sequence")
 SUPPORTED_PARCAE_DEPTH_DISTRIBUTIONS = ("poisson",)
 SUPPORTED_PARCAE_DISCRETIZATIONS = ("stable-exp", "zoh")
+PARCAE_CONTROL_DIAGNOSTIC_INTERMEDIATE_PREFIX = "fractal_parcae_control_diagnostics/"
+PARCAE_CONTROL_DIAGNOSTIC_BASE_METRICS = (
+    "controller/control_norm_mean",
+    "controller/control_norm_rms",
+    "controller/gate_mean",
+    "controller/gate_std",
+    "controller/gate_min",
+    "controller/gate_max",
+    "controller/gate_saturation_low_frac",
+    "controller/gate_saturation_high_frac",
+    "controller/value_norm_mean",
+    "controller/value_to_loop_input_norm_ratio",
+    "controller/injection_delta_norm_mean",
+    "controller/injection_delta_to_loop_input_ratio",
+    "loop/steps_used_mean",
+    "loop/early_exit_fraction",
+    "stability/nan_or_inf_seen",
+)
+
+
+def _as_f32(value: jax.Array) -> jax.Array:
+  return value.astype(jnp.float32)
+
+
+def _global_l2_norm(value: jax.Array) -> jax.Array:
+  return jnp.linalg.norm(_as_f32(value))
+
+
+def _mean_l2_norm(value: jax.Array) -> jax.Array:
+  return jnp.mean(jnp.linalg.norm(_as_f32(value), axis=-1))
+
+
+def _rms(value: jax.Array) -> jax.Array:
+  return jnp.sqrt(jnp.mean(jnp.square(_as_f32(value))))
+
+
+def _safe_ratio(numerator: jax.Array, denominator: jax.Array) -> jax.Array:
+  return numerator / jnp.maximum(denominator, jnp.asarray(1.0e-6, dtype=jnp.float32))
+
+
+def _nan_or_inf_seen(*values: jax.Array) -> jax.Array:
+  seen = jnp.asarray(False)
+  for value in values:
+    seen = seen | jnp.any(~jnp.isfinite(_as_f32(value)))
+  return seen.astype(jnp.float32)
+
+
+def sow_parcae_control_diagnostic(module: nn.Module, metric_name: str, value: jax.Array) -> None:
+  module.sow(
+      "intermediates",
+      PARCAE_CONTROL_DIAGNOSTIC_INTERMEDIATE_PREFIX + metric_name,
+      jnp.asarray(value, dtype=jnp.float32),
+  )
+
+
+def collect_parcae_control_diagnostics(intermediate_outputs: dict[str, Any]) -> dict[str, jax.Array]:
+  """Collect scalar Parcae/RGRP-control diagnostics from Flax intermediates.
+
+  Flax stores each ``sow`` value as a tuple leaf. This collector searches by
+  metric-key prefix, so it works for both scanned and unscanned module paths.
+  """
+
+  grouped: dict[str, list[jax.Array]] = {}
+  for path, value in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
+    metric_name = None
+    for path_part in path:
+      key = getattr(path_part, "key", None)
+      if isinstance(key, str) and key.startswith(PARCAE_CONTROL_DIAGNOSTIC_INTERMEDIATE_PREFIX):
+        metric_name = key.removeprefix(PARCAE_CONTROL_DIAGNOSTIC_INTERMEDIATE_PREFIX)
+        break
+    if metric_name is None:
+      continue
+    grouped.setdefault(metric_name, []).append(jnp.ravel(jnp.asarray(value, dtype=jnp.float32)))
+  return {
+      metric_name: jnp.mean(jnp.concatenate(values))
+      for metric_name, values in grouped.items()
+      if values
+  }
 
 
 def is_parcae_profile(candidate: str) -> bool:
@@ -735,6 +813,7 @@ def patch_types(package_dir: Path) -> None:
         '  fractal_parcae_max_loop_count: int = Field(0, description="Maximum sampled Parcae recurrence depth. 0 uses fractal_parcae_loop_count.")\n',
         '  fractal_parcae_discretization: str = Field("stable-exp", description="Parcae stable discretization: stable-exp or zoh.")\n',
         '  fractal_parcae_dt_raw_init: float = Field(0.54132485, description="Initial raw step size for ZOH Parcae discretization; softplus(raw)=1.0.")\n',
+        '  fractal_parcae_control_diagnostics: bool = Field(False, description="Emit optional scalar diagnostics for the Parcae RGRP-control loop injection path.")\n',
     ]
     for field in reversed(fields):
         name = field.strip().split(":", 1)[0]
@@ -1006,6 +1085,11 @@ def patch_decoders(package_dir: Path) -> None:
           f"got {cfg.fractal_parcae_discretization!r}"
       )
     nonlinear = jax.nn.sigmoid(nonlinear_logit.astype(cfg.dtype)).reshape(1, 1, -1)
+    diagnostics_enabled = (
+        cfg.fractal_parcae_control_diagnostics
+        and cfg.fractal_candidate in ("parcae-rgrp-control-looped-attention", "parcae-p20-control-looped-attention")
+    )
+    diagnostics_nan_or_inf_seen = jnp.asarray(False)
 
     if cfg.fractal_candidate == "parcae-looped-attention":
       injection_logit = self.param(
@@ -1080,6 +1164,35 @@ def patch_decoders(package_dir: Path) -> None:
       )(control)
       injection_gate = jax.nn.sigmoid(control_gate)
       injection_value = loop_input + control_value
+      if diagnostics_enabled:
+        loop_input_norm = fractal_rgrp._global_l2_norm(loop_input)
+        fractal_rgrp.sow_parcae_control_diagnostic(
+            self, "controller/control_norm_mean", fractal_rgrp._mean_l2_norm(control)
+        )
+        fractal_rgrp.sow_parcae_control_diagnostic(
+            self, "controller/control_norm_rms", fractal_rgrp._rms(control)
+        )
+        fractal_rgrp.sow_parcae_control_diagnostic(self, "controller/gate_mean", jnp.mean(injection_gate))
+        fractal_rgrp.sow_parcae_control_diagnostic(self, "controller/gate_std", jnp.std(injection_gate))
+        fractal_rgrp.sow_parcae_control_diagnostic(self, "controller/gate_min", jnp.min(injection_gate))
+        fractal_rgrp.sow_parcae_control_diagnostic(self, "controller/gate_max", jnp.max(injection_gate))
+        fractal_rgrp.sow_parcae_control_diagnostic(
+            self, "controller/gate_saturation_low_frac", jnp.mean((injection_gate < 0.05).astype(jnp.float32))
+        )
+        fractal_rgrp.sow_parcae_control_diagnostic(
+            self, "controller/gate_saturation_high_frac", jnp.mean((injection_gate > 0.95).astype(jnp.float32))
+        )
+        fractal_rgrp.sow_parcae_control_diagnostic(
+            self, "controller/value_norm_mean", fractal_rgrp._mean_l2_norm(control_value)
+        )
+        fractal_rgrp.sow_parcae_control_diagnostic(
+            self,
+            "controller/value_to_loop_input_norm_ratio",
+            fractal_rgrp._safe_ratio(fractal_rgrp._global_l2_norm(control_value), loop_input_norm),
+        )
+        diagnostics_nan_or_inf_seen = fractal_rgrp._nan_or_inf_seen(
+            loop_input, control, control_gate, control_value, injection_gate, injection_value
+        )
     else:
       raise ValueError(f"unsupported Parcae profile: {cfg.fractal_candidate!r}")
 
@@ -1093,7 +1206,34 @@ def patch_decoders(package_dir: Path) -> None:
 
     state = jnp.zeros_like(loop_input)
     injection = input_scale * injection_gate * injection_value
+    if diagnostics_enabled:
+      loop_input_norm = fractal_rgrp._global_l2_norm(loop_input)
+      injection_delta = injection - loop_input
+      fractal_rgrp.sow_parcae_control_diagnostic(
+          self,
+          "controller/injection_delta_norm_mean",
+          fractal_rgrp._mean_l2_norm(injection_delta),
+      )
+      fractal_rgrp.sow_parcae_control_diagnostic(
+          self,
+          "controller/injection_delta_to_loop_input_ratio",
+          fractal_rgrp._safe_ratio(fractal_rgrp._global_l2_norm(injection_delta), loop_input_norm),
+      )
+      fractal_rgrp.sow_parcae_control_diagnostic(
+          self, "loop/steps_used_mean", jnp.mean(loop_depths.astype(jnp.float32))
+      )
+      fractal_rgrp.sow_parcae_control_diagnostic(
+          self,
+          "loop/early_exit_fraction",
+          jnp.mean((loop_depths < jnp.asarray(max_loop_count, dtype=loop_depths.dtype)).astype(jnp.float32)),
+      )
+      diagnostics_nan_or_inf_seen = diagnostics_nan_or_inf_seen | fractal_rgrp._nan_or_inf_seen(
+          injection, injection_delta
+      )
+    if diagnostics_enabled:
+      previous_step_delta = jnp.zeros_like(state)
     for loop_idx in range(max_loop_count):
+      previous_state = state
       active_mask, grad_mask = fractal_rgrp.parcae_depth_masks(
           loop_depths,
           bwd_depths,
@@ -1106,6 +1246,28 @@ def patch_decoders(package_dir: Path) -> None:
         mixed = mixed + nonlinear * (block_out - mixed)
       mixed = jnp.where(grad_mask, mixed, jax.lax.stop_gradient(mixed))
       state = jnp.where(active_mask, mixed, state)
+      if diagnostics_enabled:
+        step_delta = state - previous_state
+        # Step 0 reports acceleration against a zero previous delta.
+        acceleration = step_delta - previous_step_delta
+        fractal_rgrp.sow_parcae_control_diagnostic(
+            self, f"loop/state_norm_step_{loop_idx}", fractal_rgrp._mean_l2_norm(state)
+        )
+        fractal_rgrp.sow_parcae_control_diagnostic(
+            self, f"loop/step_delta_norm_step_{loop_idx}", fractal_rgrp._mean_l2_norm(step_delta)
+        )
+        fractal_rgrp.sow_parcae_control_diagnostic(
+            self, f"loop/acceleration_norm_step_{loop_idx}", fractal_rgrp._mean_l2_norm(acceleration)
+        )
+        diagnostics_nan_or_inf_seen = diagnostics_nan_or_inf_seen | fractal_rgrp._nan_or_inf_seen(
+            mixed, state, step_delta, acceleration
+        )
+        previous_step_delta = step_delta
+
+    if diagnostics_enabled:
+      fractal_rgrp.sow_parcae_control_diagnostic(
+          self, "stability/nan_or_inf_seen", diagnostics_nan_or_inf_seen.astype(jnp.float32)
+      )
 
     y = state
     for lyr in range(end, cfg.num_decoder_layers):
@@ -1165,6 +1327,101 @@ def patch_decoders(package_dir: Path) -> None:
     decoders_path.write_text(text)
 
 
+def patch_train(package_dir: Path) -> None:
+    train_path = package_dir / "trainers" / "pre_train" / "train.py"
+    text = train_path.read_text()
+    if "from maxtext.layers import fractal_rgrp" not in text:
+        text = replace_once(
+            text,
+            "from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss\n",
+            (
+                "from maxtext.layers import fractal_rgrp\n"
+                "from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss\n"
+            ),
+            path=train_path,
+        )
+    train_marker = '''  if config.use_dpo:
+    scalar_metrics["learning/dpo_loss"] = aux["dpo_loss"]
+    scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
+  metrics = {
+'''
+    train_insert = '''  if config.use_dpo:
+    scalar_metrics["learning/dpo_loss"] = aux["dpo_loss"]
+    scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
+  if config.fractal_parcae_control_diagnostics:
+    scalar_metrics.update(fractal_rgrp.collect_parcae_control_diagnostics(intermediate_outputs))
+  metrics = {
+'''
+    if "collect_parcae_control_diagnostics(intermediate_outputs)" not in text:
+        text = replace_once(text, train_marker, train_insert, path=train_path)
+
+    eval_marker = '''  if config.use_dpo:
+    metrics["scalar"]["evaluation/dpo_reward_accuracy"] = aux["reward_accuracy"]
+
+  return metrics
+'''
+    eval_insert = '''  if config.use_dpo:
+    metrics["scalar"]["evaluation/dpo_reward_accuracy"] = aux["reward_accuracy"]
+  if config.fractal_parcae_control_diagnostics:
+    for metric_name, metric_value in fractal_rgrp.collect_parcae_control_diagnostics(
+        aux["intermediate_outputs"]
+    ).items():
+      metrics["scalar"][f"evaluation/{metric_name}"] = metric_value
+
+  return metrics
+'''
+    if 'metrics["scalar"][f"evaluation/{metric_name}"]' not in text:
+        text = replace_once(text, eval_marker, eval_insert, path=train_path)
+    train_path.write_text(text)
+
+
+def patch_metric_logger(package_dir: Path) -> None:
+    logger_path = package_dir / "common" / "metric_logger.py"
+    text = logger_path.read_text()
+    accumulation_marker = '''      if self.config.use_dpo:
+        self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] += float(
+            metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0)
+        )
+
+    if eval_step_count:
+'''
+    accumulation_insert = '''      if self.config.use_dpo:
+        self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] += float(
+            metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0)
+        )
+      for metric_name, metric_value in metrics["scalar"].items():
+        if metric_name.startswith(("evaluation/controller/", "evaluation/loop/", "evaluation/stability/")):
+          self.cumulative_eval_metrics["scalar"][f"eval/{metric_name.removeprefix('evaluation/')}"] += float(metric_value)
+
+    if eval_step_count:
+'''
+    if "metric_name.startswith((\"evaluation/controller/\"" not in text:
+        text = replace_once(text, accumulation_marker, accumulation_insert, path=logger_path)
+
+    averaging_marker = '''      if self.config.use_dpo:
+        self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = (
+            self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] / eval_step_count
+        )
+
+      self.write_metrics(self.cumulative_eval_metrics, step, is_training=False)
+'''
+    averaging_insert = '''      if self.config.use_dpo:
+        self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = (
+            self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] / eval_step_count
+        )
+      for metric_name in list(self.cumulative_eval_metrics["scalar"].keys()):
+        if metric_name.startswith(("eval/controller/", "eval/loop/", "eval/stability/")):
+          self.cumulative_eval_metrics["scalar"][metric_name] = (
+              self.cumulative_eval_metrics["scalar"][metric_name] / eval_step_count
+          )
+
+      self.write_metrics(self.cumulative_eval_metrics, step, is_training=False)
+'''
+    if "metric_name.startswith((\"eval/controller/\"" not in text:
+        text = replace_once(text, averaging_marker, averaging_insert, path=logger_path)
+    logger_path.write_text(text)
+
+
 def patch_fractal_module(package_dir: Path) -> None:
     module_path = package_dir / "layers" / "fractal_rgrp.py"
     module_path.write_text(FRACTAL_RGRP_MODULE)
@@ -1175,6 +1432,8 @@ def patch_maxtext(path: Path) -> None:
     patch_fractal_module(package_dir)
     patch_types(package_dir)
     patch_decoders(package_dir)
+    patch_train(package_dir)
+    patch_metric_logger(package_dir)
 
 
 def main() -> int:

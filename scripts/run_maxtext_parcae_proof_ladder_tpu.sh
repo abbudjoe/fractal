@@ -31,6 +31,7 @@ MIN_LOOP_COUNT="${MIN_LOOP_COUNT:-1}"
 MAX_LOOP_COUNT="${MAX_LOOP_COUNT:-0}"
 PERSEQ_MAX_LOOP_COUNT="${PERSEQ_MAX_LOOP_COUNT:-4}"
 PARCAE_DISCRETIZATION="${PARCAE_DISCRETIZATION:-stable-exp}"
+PARCAE_CONTROL_DIAGNOSTICS="${PARCAE_CONTROL_DIAGNOSTICS:-false}"
 
 BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://fractal-maxtext-runs-81f2add4}"
 HF_PATH="${HF_PATH:-Salesforce/wikitext}"
@@ -166,6 +167,7 @@ run_parcae() {
     "fractal_parcae_min_loop_count=${MIN_LOOP_COUNT}" \
     "fractal_parcae_max_loop_count=${max_loop_count}" \
     "fractal_parcae_discretization=${PARCAE_DISCRETIZATION}" \
+    "fractal_parcae_control_diagnostics=${PARCAE_CONTROL_DIAGNOSTICS}" \
     fractal_rgrp_state_transform=block-diagonal-4-masked-dense \
     fractal_rgrp_scan_unroll=3 \
     fractal_rgrp_projection_mode=sequence \
