@@ -90,9 +90,9 @@ impl MiniMoeSurfaceSpec {
         self.architecture.validate()?;
         self.runtime.validate()?;
         self.observability.validate()?;
-        let resolved_dispatch =
-            self.runtime
-                .resolve_dispatch_contract(self.architecture.moe.active_experts_per_token);
+        let resolved_dispatch = self
+            .runtime
+            .resolve_dispatch_contract(self.architecture.moe.active_experts_per_token);
         if resolved_dispatch.active_experts_per_token
             != self.architecture.moe.active_experts_per_token
         {
@@ -224,8 +224,7 @@ impl MiniMoeStackSpec {
         }
         if !(self.load_balance_loss_weight.is_finite() && self.load_balance_loss_weight >= 0.0) {
             return Err(FractalError::InvalidConfig(
-                "mini_moe.moe.load_balance_loss_weight must be finite and non-negative"
-                    .to_string(),
+                "mini_moe.moe.load_balance_loss_weight must be finite and non-negative".to_string(),
             ));
         }
         Ok(())
@@ -345,8 +344,7 @@ impl RecurrentPreExpertRouterSpec {
     pub fn validate(&self, _moe: &MiniMoeStackSpec) -> Result<(), FractalError> {
         if self.round_count < 2 {
             return Err(FractalError::InvalidConfig(
-                "mini_moe.recurrent_pre_expert_router.round_count must be at least 2"
-                    .to_string(),
+                "mini_moe.recurrent_pre_expert_router.round_count must be at least 2".to_string(),
             ));
         }
         if self.state_dim == 0 {
@@ -463,8 +461,7 @@ impl<B: Backend> SharedAttentionSublayer<B> {
     pub fn new(spec: SharedAttentionSpec, device: &B::Device) -> Result<Self, FractalError> {
         if spec.hidden_dim == 0 || spec.head_count == 0 {
             return Err(FractalError::InvalidConfig(
-                "mini_moe.shared_attention requires positive hidden_dim and head_count"
-                    .to_string(),
+                "mini_moe.shared_attention requires positive hidden_dim and head_count".to_string(),
             ));
         }
         if spec.hidden_dim % spec.head_count != 0 {
@@ -493,7 +490,9 @@ impl<B: Backend> AttentionSublayer<B> for SharedAttentionSublayer<B> {
         hidden: Tensor<B, 3>,
         mask: Tensor<B, 3, Bool>,
     ) -> Result<AttentionForwardOutput<B>, FractalError> {
-        let output = self.inner.forward(MhaInput::self_attn(hidden).mask_attn(mask));
+        let output = self
+            .inner
+            .forward(MhaInput::self_attn(hidden).mask_attn(mask));
         Ok(AttentionForwardOutput {
             hidden: output.context,
             trace: Some(AttentionTrace {
@@ -558,8 +557,7 @@ impl<B: Backend> ExpertFfn<B> {
     ) -> Result<Self, FractalError> {
         if spec.hidden_dim == 0 || spec.expansion_dim == 0 {
             return Err(FractalError::InvalidConfig(
-                "mini_moe.expert_ffn requires positive hidden_dim and expansion_dim"
-                    .to_string(),
+                "mini_moe.expert_ffn requires positive hidden_dim and expansion_dim".to_string(),
             ));
         }
         let projection = |d_input, d_output| {
@@ -575,13 +573,18 @@ impl<B: Backend> ExpertFfn<B> {
             id: Ignored(id),
             spec: Ignored(spec.clone()),
             up_projection: projection(spec.hidden_dim, spec.expansion_dim),
-            gate_projection: spec.gated.then(|| projection(spec.hidden_dim, spec.expansion_dim)),
+            gate_projection: spec
+                .gated
+                .then(|| projection(spec.hidden_dim, spec.expansion_dim)),
             down_projection: projection(spec.expansion_dim, spec.hidden_dim),
         })
     }
 
     pub fn forward(&self, hidden: Tensor<B, 2>) -> Result<Tensor<B, 2>, FractalError> {
-        let mut activated = activate(self.spec.activation.clone(), self.up_projection.forward(hidden.clone()));
+        let mut activated = activate(
+            self.spec.activation.clone(),
+            self.up_projection.forward(hidden.clone()),
+        );
         if let Some(gate_projection) = &self.gate_projection {
             let gate = silu_like(gate_projection.forward(hidden));
             activated = activated * gate;
@@ -601,10 +604,7 @@ pub struct PreExpertRouterInput<B: Backend> {
 }
 
 pub trait PreExpertRouterController<B: Backend>: Module<B> + ModuleDisplay + Clone {
-    fn route(
-        &self,
-        input: PreExpertRouterInput<B>,
-    ) -> Result<RoutePlan<B>, FractalError>;
+    fn route(&self, input: PreExpertRouterInput<B>) -> Result<RoutePlan<B>, FractalError>;
 }
 
 #[derive(Debug)]
@@ -666,22 +666,16 @@ impl MoeDispatcher {
                     adjusted.topk_with_indices(self.contract.active_experts_per_token, 2);
                 top_indices
             }
-            MiniMoeDispatchMode::DenseDebug => dense_debug_indices::<B>(
-                batch_size,
-                seq_len,
-                expert_count,
-                &device,
-            ),
+            MiniMoeDispatchMode::DenseDebug => {
+                dense_debug_indices::<B>(batch_size, seq_len, expert_count, &device)
+            }
         };
         let selected_expert_weights = route_plan
             .expert_weights
             .clone()
             .gather(2, selected_expert_indices.clone());
-        let assignments = build_dispatch_assignments::<B>(
-            &selected_expert_indices,
-            expert_count,
-            &device,
-        )?;
+        let assignments =
+            build_dispatch_assignments::<B>(&selected_expert_indices, expert_count, &device)?;
         Ok(DispatchPlan {
             site,
             mode: self.contract.mode,
@@ -705,7 +699,8 @@ impl MoeDispatcher {
             .selected_expert_weights
             .clone()
             .reshape([flat_count, selected_width]);
-        let mut output_flat = Tensor::<B, 2>::zeros([flat_count, hidden_dim], &hidden_flat.device());
+        let mut output_flat =
+            Tensor::<B, 2>::zeros([flat_count, hidden_dim], &hidden_flat.device());
 
         for assignment in &dispatch_plan.assignments {
             if assignment.token_indices.dims()[0] == 0 {
@@ -732,16 +727,13 @@ impl MoeDispatcher {
                 .reshape([token_count, 1])
                 .repeat(&[1, selected_width]);
             let row_subset = selected_weights.clone().gather(0, row_indices);
-            let scalar_weights = row_subset.gather(
-                1,
-                assignment.slot_indices.clone().reshape([token_count, 1]),
-            );
+            let scalar_weights =
+                row_subset.gather(1, assignment.slot_indices.clone().reshape([token_count, 1]));
             let weighted = expert_output
                 * scalar_weights
                     .reshape([token_count, 1])
                     .repeat(&[1, hidden_dim]);
-            output_flat =
-                output_flat.scatter(0, hidden_indices, weighted, IndexingUpdateOp::Add);
+            output_flat = output_flat.scatter(0, hidden_indices, weighted, IndexingUpdateOp::Add);
         }
 
         Ok(output_flat.reshape([batch_size, seq_len, hidden_dim]))
@@ -782,10 +774,7 @@ impl<B: Backend> OneShotRouter<B> {
 }
 
 impl<B: Backend> PreExpertRouterController<B> for OneShotRouter<B> {
-    fn route(
-        &self,
-        input: PreExpertRouterInput<B>,
-    ) -> Result<RoutePlan<B>, FractalError> {
+    fn route(&self, input: PreExpertRouterInput<B>) -> Result<RoutePlan<B>, FractalError> {
         let expert_logits = self.route_projection.forward(input.hidden);
         let expert_weights = softmax(expert_logits.clone(), 2);
         Ok(RoutePlan {
@@ -852,10 +841,7 @@ impl<B: Backend> RecurrentPreExpertRouter<B> {
 }
 
 impl<B: Backend> PreExpertRouterController<B> for RecurrentPreExpertRouter<B> {
-    fn route(
-        &self,
-        input: PreExpertRouterInput<B>,
-    ) -> Result<RoutePlan<B>, FractalError> {
+    fn route(&self, input: PreExpertRouterInput<B>) -> Result<RoutePlan<B>, FractalError> {
         let [batch_size, seq_len, _hidden_dim] = input.hidden.dims();
         let token_state = self.token_state_projection.forward(input.hidden);
         let token_logits = self.token_route_projection.forward(token_state.clone());
@@ -878,12 +864,14 @@ impl<B: Backend> PreExpertRouterController<B> for RecurrentPreExpertRouter<B> {
 
             if round_index + 1 < self.spec.round_count {
                 let route_summary = mean_over_tokens(expert_weights);
-                let controller_drive =
-                    pooled_token_state.clone() + self.route_feedback_projection.forward(route_summary);
+                let controller_drive = pooled_token_state.clone()
+                    + self.route_feedback_projection.forward(route_summary);
                 let reset_gate =
                     gated_sigmoid(self.reset_gate_projection.forward(controller_drive.clone()));
-                let update_gate =
-                    gated_sigmoid(self.update_gate_projection.forward(controller_drive.clone()));
+                let update_gate = gated_sigmoid(
+                    self.update_gate_projection
+                        .forward(controller_drive.clone()),
+                );
                 let candidate = (self.candidate_input_projection.forward(controller_drive)
                     + reset_gate * self.candidate_state_projection.forward(state.clone()))
                 .tanh();
@@ -926,7 +914,11 @@ pub struct DenseFfnSublayer<B: Backend> {
 }
 
 impl<B: Backend> DenseFfnSublayer<B> {
-    pub fn new(layer_index: usize, spec: ExpertFfnSpec, device: &B::Device) -> Result<Self, FractalError> {
+    pub fn new(
+        layer_index: usize,
+        spec: ExpertFfnSpec,
+        device: &B::Device,
+    ) -> Result<Self, FractalError> {
         Ok(Self {
             expert: ExpertFfn::new(
                 ExpertId {
@@ -1255,15 +1247,15 @@ impl<B: Backend> MiniMoeModel<B, ConfiguredMiniMoeFfn<B>> {
             let attention = SharedAttentionSublayer::new(attention_spec.clone(), device)?;
             let ffn = if resolved_layout.moe_layers.contains(&layer_index) {
                 match &architecture.router {
-                    MiniMoeRouterSpec::OneShot(_) => ConfiguredMiniMoeFfn::OneShotMoe(
-                        OneShotMoeFfnSublayer::new(
+                    MiniMoeRouterSpec::OneShot(_) => {
+                        ConfiguredMiniMoeFfn::OneShotMoe(OneShotMoeFfnSublayer::new(
                             site,
                             architecture.backbone.hidden_dim,
                             &architecture.moe,
                             resolved_dispatch.clone(),
                             device,
-                        )?,
-                    ),
+                        )?)
+                    }
                     MiniMoeRouterSpec::RecurrentPreExpert(router) => {
                         ConfiguredMiniMoeFfn::RecurrentMoe(RecurrentMoeFfnSublayer::new(
                             site,
@@ -1480,7 +1472,8 @@ pub struct MiniMoeTraceBundle {
 impl MiniMoeTraceBundle {
     pub fn merge(&mut self, mut other: Self) {
         self.layer_summaries.append(&mut other.layer_summaries);
-        self.dispatch_summaries.append(&mut other.dispatch_summaries);
+        self.dispatch_summaries
+            .append(&mut other.dispatch_summaries);
         self.controller_round_summaries
             .append(&mut other.controller_round_summaries);
         self.sampled_token_traces
@@ -1620,7 +1613,8 @@ impl MiniMoeTraceCollector {
         let mut rerouted_count = 0usize;
 
         for token_index in 0..sampled_tokens {
-            let token_slice = &weights[token_index * expert_count..(token_index + 1) * expert_count];
+            let token_slice =
+                &weights[token_index * expert_count..(token_index + 1) * expert_count];
             for (expert_index, weight) in token_slice.iter().enumerate() {
                 mean_weights[expert_index] += *weight as f64;
             }
@@ -1635,12 +1629,15 @@ impl MiniMoeTraceCollector {
             }
             if route_plan.round_summaries.len() > 1 {
                 let first_round = tensor_to_vec_i64(select_winners(
-                    route_plan.round_summaries.first().unwrap().expert_weights.clone(),
+                    route_plan
+                        .round_summaries
+                        .first()
+                        .unwrap()
+                        .expert_weights
+                        .clone(),
                 ))
                 .unwrap_or_default();
-                if first_round.get(token_index).copied().unwrap_or_default()
-                    != winner as i64
-                {
+                if first_round.get(token_index).copied().unwrap_or_default() != winner as i64 {
                     rerouted_count += 1;
                 }
             }
@@ -1699,28 +1696,35 @@ impl MiniMoeTraceCollector {
                 None
             } else {
                 let prev = &route_plan.round_summaries[round_index - 1];
-                Some(mean_l1_between(prev.expert_weights.clone(), round_summary.expert_weights.clone()).unwrap_or(0.0))
+                Some(
+                    mean_l1_between(
+                        prev.expert_weights.clone(),
+                        round_summary.expert_weights.clone(),
+                    )
+                    .unwrap_or(0.0),
+                )
             };
-            self.controller_round_summaries.push(ControllerRoundSummary {
-                site: site.clone(),
-                round_index,
-                mean_route_entropy_bits: if sampled_tokens == 0 {
-                    0.0
-                } else {
-                    round_entropy_sum / sampled_tokens as f64
-                },
-                mean_winner_margin: if sampled_tokens == 0 {
-                    0.0
-                } else {
-                    winner_margin_sum / sampled_tokens as f64
-                },
-                mean_route_adjustment_l1,
-                rerouted_token_fraction: if sampled_tokens == 0 || round_index == 0 {
-                    0.0
-                } else {
-                    rerouted_count as f64 / sampled_tokens as f64
-                },
-            });
+            self.controller_round_summaries
+                .push(ControllerRoundSummary {
+                    site: site.clone(),
+                    round_index,
+                    mean_route_entropy_bits: if sampled_tokens == 0 {
+                        0.0
+                    } else {
+                        round_entropy_sum / sampled_tokens as f64
+                    },
+                    mean_winner_margin: if sampled_tokens == 0 {
+                        0.0
+                    } else {
+                        winner_margin_sum / sampled_tokens as f64
+                    },
+                    mean_route_adjustment_l1,
+                    rerouted_token_fraction: if sampled_tokens == 0 || round_index == 0 {
+                        0.0
+                    } else {
+                        rerouted_count as f64 / sampled_tokens as f64
+                    },
+                });
         }
     }
 
@@ -1870,8 +1874,7 @@ impl MiniMoeRunManifest {
         let expected_layout = self.surface.resolve_layout()?;
         if self.resolved_layout != expected_layout {
             return Err(FractalError::InvalidConfig(
-                "mini_moe.manifest.resolved_layout must match surface.resolve_layout()"
-                    .to_string(),
+                "mini_moe.manifest.resolved_layout must match surface.resolve_layout()".to_string(),
             ));
         }
         let expected_dispatch = self.surface.resolve_dispatch_contract();
@@ -1969,9 +1972,10 @@ fn apply_tie_break_bias<B: Backend>(
             for index in 0..expert_count {
                 bias.push(-(index as f32) * 1.0e-7);
             }
-            let bias = Tensor::<B, 1>::from_data(TensorData::new(bias, [expert_count]), &weights.device())
-                .reshape([1, 1, expert_count])
-                .repeat(&[batch_size, seq_len, 1]);
+            let bias =
+                Tensor::<B, 1>::from_data(TensorData::new(bias, [expert_count]), &weights.device())
+                    .reshape([1, 1, expert_count])
+                    .repeat(&[batch_size, seq_len, 1]);
             weights + bias
         }
     }
@@ -2059,7 +2063,9 @@ fn tensor_to_vec_i64<B: Backend, const D: usize>(
         .into_data()
         .convert::<i64>()
         .into_vec::<i64>()
-        .map_err(|error| FractalError::InvalidState(format!("tensor data conversion failed: {error}")))
+        .map_err(|error| {
+            FractalError::InvalidState(format!("tensor data conversion failed: {error}"))
+        })
 }
 
 fn tensor_to_vec_f32<B: Backend, const D: usize>(
@@ -2069,7 +2075,9 @@ fn tensor_to_vec_f32<B: Backend, const D: usize>(
         .into_data()
         .convert::<f32>()
         .into_vec::<f32>()
-        .map_err(|error| FractalError::InvalidState(format!("tensor data conversion failed: {error}")))
+        .map_err(|error| {
+            FractalError::InvalidState(format!("tensor data conversion failed: {error}"))
+        })
 }
 
 fn entropy_bits(values: &[f32]) -> f64 {
@@ -2085,7 +2093,11 @@ fn entropy_bits(values: &[f32]) -> f64 {
 
 fn winner_margin(values: &[f32]) -> f64 {
     let mut sorted = values.iter().copied().collect::<Vec<_>>();
-    sorted.sort_by(|left, right| right.partial_cmp(left).unwrap_or(core::cmp::Ordering::Equal));
+    sorted.sort_by(|left, right| {
+        right
+            .partial_cmp(left)
+            .unwrap_or(core::cmp::Ordering::Equal)
+    });
     let winner = sorted.first().copied().unwrap_or_default() as f64;
     let runner_up = sorted.get(1).copied().unwrap_or_default() as f64;
     winner - runner_up
@@ -2093,13 +2105,20 @@ fn winner_margin(values: &[f32]) -> f64 {
 
 fn winner_margin_f64(values: &[f64]) -> f64 {
     let mut sorted = values.to_vec();
-    sorted.sort_by(|left, right| right.partial_cmp(left).unwrap_or(core::cmp::Ordering::Equal));
+    sorted.sort_by(|left, right| {
+        right
+            .partial_cmp(left)
+            .unwrap_or(core::cmp::Ordering::Equal)
+    });
     let winner = sorted.first().copied().unwrap_or_default();
     let runner_up = sorted.get(1).copied().unwrap_or_default();
     winner - runner_up
 }
 
-fn mean_l1_between<B: Backend>(left: Tensor<B, 3>, right: Tensor<B, 3>) -> Result<f64, FractalError> {
+fn mean_l1_between<B: Backend>(
+    left: Tensor<B, 3>,
+    right: Tensor<B, 3>,
+) -> Result<f64, FractalError> {
     let left = tensor_to_vec_f32(left)?;
     let right = tensor_to_vec_f32(right)?;
     if left.len() != right.len() {
@@ -2140,7 +2159,10 @@ mod tests {
         recurrent.validate().unwrap();
         assert_eq!(reference.architecture.backbone.total_layers, 8);
         assert_eq!(reference.architecture.moe.experts_per_block, 4);
-        assert_eq!(reference.resolve_layout().unwrap().moe_layers, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(
+            reference.resolve_layout().unwrap().moe_layers,
+            vec![0, 1, 2, 3, 4, 5, 6, 7]
+        );
         assert!(matches!(
             recurrent.architecture.router,
             MiniMoeRouterSpec::RecurrentPreExpert(_)
@@ -2184,9 +2206,16 @@ mod tests {
         let device = Default::default();
         let hidden = Tensor::<TestBackend, 3>::zeros([1, 3, 8], &device);
         let one_shot = OneShotRouter::new(8, 4, &device).unwrap();
-        let recurrent =
-            RecurrentPreExpertRouter::new(8, 4, RecurrentPreExpertRouterSpec { round_count: 2, state_dim: 6 }, &device)
-                .unwrap();
+        let recurrent = RecurrentPreExpertRouter::new(
+            8,
+            4,
+            RecurrentPreExpertRouterSpec {
+                round_count: 2,
+                state_dim: 6,
+            },
+            &device,
+        )
+        .unwrap();
         let one_shot_plan = one_shot
             .route(PreExpertRouterInput {
                 hidden: hidden.clone(),
@@ -2207,11 +2236,9 @@ mod tests {
     fn model_builds_and_returns_logits_with_trace() {
         let device = Default::default();
         let surface = MiniMoeSurfaceSpec::phase1_reference_default();
-        let model = MiniMoeModel::<TestBackend, ConfiguredMiniMoeFfn<TestBackend>>::new(
-            &surface,
-            &device,
-        )
-        .unwrap();
+        let model =
+            MiniMoeModel::<TestBackend, ConfiguredMiniMoeFfn<TestBackend>>::new(&surface, &device)
+                .unwrap();
         let input_ids = Tensor::<TestBackend, 2, Int>::zeros([1, 4], &device);
         let output = model.forward_with_trace(input_ids).unwrap();
         assert_eq!(output.logits.dims(), [1, 4, 257]);

@@ -1766,6 +1766,7 @@ mod tests {
             eval_holdout_every: super::DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY,
             learning_rate: super::DEFAULT_V3A_SMOKE_LEARNING_RATE,
             seed: super::DEFAULT_V3A_SMOKE_SEED,
+            data_seed: None,
             variant: VariantSelection::AttentionOnly,
             primitive_profile: PrimitiveProfile::P1,
             reference_ssm_profile: ReferenceSsmProfile::RustMimoReference,

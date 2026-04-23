@@ -5,15 +5,15 @@ use std::{
 };
 
 use fractal_core::{
-    initialize_metal_runtime, CpuTrainBackend, MiniMoeBackendKind, MiniMoeSurfaceSpec,
-    MetalTrainBackend,
+    initialize_metal_runtime, CpuTrainBackend, MetalTrainBackend, MiniMoeBackendKind,
+    MiniMoeSurfaceSpec,
 };
 use fractal_eval_private::{
     default_v3a_fineweb_stage0_canary_corpus_source, run_mini_moe_smoke_train,
     ByteLevelSmokeCorpusSource, MiniMoeSmokeTrainConfig, MiniMoeSmokeTrainReport,
-    DEFAULT_V3A_SMOKE_BATCH_SIZE, DEFAULT_V3A_SMOKE_EVAL_BATCHES,
-    DEFAULT_V3A_SMOKE_LEARNING_RATE, DEFAULT_V3A_SMOKE_SEED, DEFAULT_V3A_SMOKE_SEQ_LEN,
-    DEFAULT_V3A_SMOKE_TRAIN_STEPS, DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
+    DEFAULT_V3A_SMOKE_BATCH_SIZE, DEFAULT_V3A_SMOKE_EVAL_BATCHES, DEFAULT_V3A_SMOKE_LEARNING_RATE,
+    DEFAULT_V3A_SMOKE_SEED, DEFAULT_V3A_SMOKE_SEQ_LEN, DEFAULT_V3A_SMOKE_TRAIN_STEPS,
+    DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
 };
 use serde::Serialize;
 
@@ -81,12 +81,15 @@ where
     let mut variants = Vec::new();
 
     if args.variant.includes_reference() {
-        let report = run_mini_moe_smoke_train::<B>(mini_moe_config(
-            corpus_source.clone(),
-            isolated_variant_dir(output_dir, "reference"),
-            MiniMoeSurfaceSpec::phase1_reference_default(),
-            args,
-        )?, device)
+        let report = run_mini_moe_smoke_train::<B>(
+            mini_moe_config(
+                corpus_source.clone(),
+                isolated_variant_dir(output_dir, "reference"),
+                MiniMoeSurfaceSpec::phase1_reference_default(),
+                args,
+            )?,
+            device,
+        )
         .map_err(|error| format!("failed to run reference mini-moe: {error}"))?;
         variants.push(ExperimentVariantSummary::from_report(
             "Mini-MoE Reference",
@@ -95,12 +98,15 @@ where
     }
 
     if args.variant.includes_recurrent() {
-        let report = run_mini_moe_smoke_train::<B>(mini_moe_config(
-            corpus_source,
-            isolated_variant_dir(output_dir, "recurrent"),
-            MiniMoeSurfaceSpec::phase1_recurrent_default(),
-            args,
-        )?, device)
+        let report = run_mini_moe_smoke_train::<B>(
+            mini_moe_config(
+                corpus_source,
+                isolated_variant_dir(output_dir, "recurrent"),
+                MiniMoeSurfaceSpec::phase1_recurrent_default(),
+                args,
+            )?,
+            device,
+        )
         .map_err(|error| format!("failed to run recurrent mini-moe: {error}"))?;
         variants.push(ExperimentVariantSummary::from_report(
             "Mini-MoE Recurrent",
@@ -360,10 +366,8 @@ impl CliArgs {
                         parse_usize(&next_arg(&mut args, "--batch-size")?, "--batch-size")?;
                 }
                 "--learning-rate" => {
-                    cli.learning_rate = parse_f64(
-                        &next_arg(&mut args, "--learning-rate")?,
-                        "--learning-rate",
-                    )?;
+                    cli.learning_rate =
+                        parse_f64(&next_arg(&mut args, "--learning-rate")?, "--learning-rate")?;
                 }
                 "--seed" => {
                     cli.seed = parse_u64(&next_arg(&mut args, "--seed")?, "--seed")?;

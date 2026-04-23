@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from .common import StringEnum, ValidationError, ensure_positive
 from .runtime import PrimitiveStateTransformMode
 
-
 BYTE_LEVEL_PAD_TOKEN = 0
 BYTE_LEVEL_VOCAB_SIZE = 257
 DEFAULT_D_MODEL = 128
@@ -30,12 +29,70 @@ class FeedForwardProfile(StringEnum):
     GENERIC_TREE_GATED = "generic-tree-gated"
 
 
+class AttentionProfile(StringEnum):
+    STANDARD = "standard"
+    MODA_DEPTH_KV = "moda-depth-kv"
+    PAPER_MODA_DEPTH_KV = "paper-moda-depth-kv"
+
+
+class RecurrentHaltingProfile(StringEnum):
+    FIXED = "fixed"
+    ACCELERATION = "acceleration"
+    VECTOR_ACCELERATION = "vector-acceleration"
+    NORMALIZED_STEP_NORM = "normalized-step-norm"
+
+
+class TokenRoutingProfile(StringEnum):
+    NONE = "none"
+    CAUSAL_TOPK_BLOCK = "causal-topk-block"
+    MOD_TRAIN_TOPC_BLOCK = "mod-train-topc-block"
+    SOFT_GATE_BLOCK = "soft-gate-block"
+    ROTARY_SOFT_GATE_BLOCK = "rotary-soft-gate-block"
+
+
+class RecurrentTokenRoutingProfile(StringEnum):
+    NONE = "none"
+    CAUSAL_TOPK_STATE = "causal-topk-state"
+
+
 class Path1ScaffoldProfile(StringEnum):
     STANDARD = "standard"
     PR5_HYBRID_GDN = "pr5-hybrid-gdn"
     PARCAE_LOOPED_ATTENTION = "parcae-looped-attention"
     PARCAE_BX_LOOPED_ATTENTION = "parcae-bx-looped-attention"
     PARCAE_P20_CONTROL_LOOPED_ATTENTION = "parcae-p20-control-looped-attention"
+    PARCAE_P20_THIN_CONTROL_LOOPED_ATTENTION = (
+        "parcae-p20-thin-control-looped-attention"
+    )
+    PARCAE_P20_THIN_GATE_CONTROL_LOOPED_ATTENTION = (
+        "parcae-p20-thin-gate-control-looped-attention"
+    )
+    PARCAE_P20_QUARTER_CONTROL_LOOPED_ATTENTION = (
+        "parcae-p20-quarter-control-looped-attention"
+    )
+    PARCAE_P20_THIN_VALUE_CONTROL_LOOPED_ATTENTION = (
+        "parcae-p20-thin-value-control-looped-attention"
+    )
+    PARCAE_P20_THIN_GATE_BASEBLEND_LOOPED_ATTENTION = (
+        "parcae-p20-thin-gate-baseblend-looped-attention"
+    )
+    PARCAE_P20_THIN_BASEBLEND_CONTROL_LOOPED_ATTENTION = (
+        "parcae-p20-thin-baseblend-control-looped-attention"
+    )
+    PARCAE_P20_MOD_GATE_BIAS_LOOPED_ATTENTION = (
+        "parcae-p20-mod-gate-bias-looped-attention"
+    )
+    PARCAE_P20_MOD_VALUE_SCALE_LOOPED_ATTENTION = (
+        "parcae-p20-mod-value-scale-looped-attention"
+    )
+    FIXED_LOOPED_LM = "fixed-looped-lm"
+    LOOPED_ADDITIVE_INPUT = "looped-additive-input"
+    HUGINN_ADAPTER_RECURRENCE = "huginn-adapter-recurrence"
+    UNIVERSAL_TRANSFORMER = "universal-transformer"
+    UNIVERSAL_TRANSFORMER_ACT = "universal-transformer-act"
+    OURO_LEARNED_EXIT = "ouro-learned-exit"
+    RRT_CYCLE = "rrt-cycle"
+    MOR_EXPERT_CHOICE = "mor-expert-choice"
 
 
 class HybridAttentionLayerRole(StringEnum):
@@ -54,9 +111,13 @@ class ReferenceSsmProfile(StringEnum):
     GATED_DELTANET_MAMBA3_TORCH = "gated-deltanet-mamba3-torch"
     GATED_DELTANET_P20_FUSED_ALL_TORCH = "gated-deltanet-p20-fused-all-torch"
     GATED_DELTANET_P20_FUSED_BETA_TORCH = "gated-deltanet-p20-fused-beta-torch"
-    GATED_DELTANET_P20_FUSED_MULTI_READ_TORCH = "gated-deltanet-p20-fused-multi-read-torch"
+    GATED_DELTANET_P20_FUSED_MULTI_READ_TORCH = (
+        "gated-deltanet-p20-fused-multi-read-torch"
+    )
     GATED_DELTANET_P20_FUSED_QKV_TORCH = "gated-deltanet-p20-fused-qkv-torch"
-    GATED_DELTANET_P20_FUSED_RESIDUAL_READOUT_TORCH = "gated-deltanet-p20-fused-residual-readout-torch"
+    GATED_DELTANET_P20_FUSED_RESIDUAL_READOUT_TORCH = (
+        "gated-deltanet-p20-fused-residual-readout-torch"
+    )
     GATED_DELTANET_P20_FUSED_TORCH = "gated-deltanet-p20-fused-torch"
     GATED_DELTANET_P20_MAMBA3_TORCH = "gated-deltanet-p20-mamba3-torch"
     GATED_DELTANET_P20_THIN_TORCH = "gated-deltanet-p20-thin-torch"
@@ -119,7 +180,9 @@ class ReferenceSsmProfile(StringEnum):
             return "single-read"
         if self is ReferenceSsmProfile.GATED_DELTANET_FLA_P20_MULTI_READ:
             return "multi-read"
-        raise ValueError(f"reference SSM profile {self.value} is not an FLA-compatible GDN/P20 profile")
+        raise ValueError(
+            f"reference SSM profile {self.value} is not an FLA-compatible GDN/P20 profile"
+        )
 
     @property
     def is_gdnp_fused(self) -> bool:
@@ -146,7 +209,9 @@ class ReferenceSsmProfile(StringEnum):
             return "residual-readout"
         if self is ReferenceSsmProfile.GATED_DELTANET_P20_FUSED_TORCH:
             return "value"
-        raise ValueError(f"reference SSM profile {self.value} is not a fused GDN/P20 profile")
+        raise ValueError(
+            f"reference SSM profile {self.value} is not a fused GDN/P20 profile"
+        )
 
     @property
     def composite_branches(self) -> tuple[str, ...]:
@@ -331,30 +396,141 @@ class Path1VariantSpec:
     eml_tree_depth: int = 3
     eml_route_fraction: float = 0.25
     parcae_loop_count: int = 2
+    parcae_p20_value_scale: float = 1.0
     final_norm_kind: str = "identity"
     scaffold_profile: Path1ScaffoldProfile = Path1ScaffoldProfile.STANDARD
+    attention_profile: AttentionProfile = AttentionProfile.STANDARD
+    depth_memory_layers: int = 2
+    recurrent_halting_profile: RecurrentHaltingProfile = RecurrentHaltingProfile.FIXED
+    recurrent_min_steps: int = 1
+    recurrent_halting_threshold: float = 0.01
+    token_routing_profile: TokenRoutingProfile = TokenRoutingProfile.NONE
+    token_route_fraction: float = 0.25
+    token_routing_layer_indices: tuple[int, ...] | None = None
+    recurrent_token_routing_profile: RecurrentTokenRoutingProfile = (
+        RecurrentTokenRoutingProfile.NONE
+    )
+    recurrent_token_route_fraction: float = 0.25
+    act_halting_threshold: float = 0.99
+    act_ponder_loss_weight: float = 0.01
+    ouro_entropy_weight: float = 0.05
+    ouro_q_exit_threshold: float = 0.5
+    mor_router_aux_loss_weight: float = 0.01
+    mor_update_scale: float = 0.1
 
     def validate(self) -> None:
         self.shape.validate()
         ensure_positive(self.eml_slot_count, "path1_variant.eml_slot_count")
         ensure_positive(self.eml_tree_depth, "path1_variant.eml_tree_depth")
         ensure_positive(self.parcae_loop_count, "path1_variant.parcae_loop_count")
+        if self.parcae_p20_value_scale <= 0.0:
+            raise ValidationError(
+                "path1_variant.parcae_p20_value_scale must be greater than zero, "
+                f"got {self.parcae_p20_value_scale}"
+            )
+        ensure_positive(self.depth_memory_layers, "path1_variant.depth_memory_layers")
+        ensure_positive(self.recurrent_min_steps, "path1_variant.recurrent_min_steps")
+        if self.recurrent_min_steps > self.parcae_loop_count:
+            raise ValidationError(
+                "path1_variant.recurrent_min_steps must be <= parcae_loop_count, "
+                f"got {self.recurrent_min_steps} and {self.parcae_loop_count}"
+            )
+        if self.recurrent_halting_threshold <= 0.0:
+            raise ValidationError(
+                "path1_variant.recurrent_halting_threshold must be greater than zero, "
+                f"got {self.recurrent_halting_threshold}"
+            )
+        if not 0.0 < self.act_halting_threshold < 1.0:
+            raise ValidationError(
+                "path1_variant.act_halting_threshold must be in (0, 1), "
+                f"got {self.act_halting_threshold}"
+            )
+        if self.act_ponder_loss_weight < 0.0:
+            raise ValidationError(
+                "path1_variant.act_ponder_loss_weight must be non-negative, "
+                f"got {self.act_ponder_loss_weight}"
+            )
+        if self.ouro_entropy_weight < 0.0:
+            raise ValidationError(
+                "path1_variant.ouro_entropy_weight must be non-negative, "
+                f"got {self.ouro_entropy_weight}"
+            )
+        if not 0.0 < self.ouro_q_exit_threshold <= 1.0:
+            raise ValidationError(
+                "path1_variant.ouro_q_exit_threshold must be in (0, 1], "
+                f"got {self.ouro_q_exit_threshold}"
+            )
+        if self.mor_router_aux_loss_weight < 0.0:
+            raise ValidationError(
+                "path1_variant.mor_router_aux_loss_weight must be non-negative, "
+                f"got {self.mor_router_aux_loss_weight}"
+            )
+        if not 0.0 < self.mor_update_scale <= 1.0:
+            raise ValidationError(
+                "path1_variant.mor_update_scale must be in (0, 1], "
+                f"got {self.mor_update_scale}"
+            )
         if not 0.0 < self.eml_route_fraction <= 1.0:
             raise ValidationError(
                 "path1_variant.eml_route_fraction must be in (0, 1], "
                 f"got {self.eml_route_fraction}"
             )
-        if self.feed_forward_profile is FeedForwardProfile.STANDARD and self.feed_forward_layer_indices is not None:
-            raise ValidationError("standard feed-forward profile must not set feed_forward_layer_indices")
+        if not 0.0 < self.token_route_fraction <= 1.0:
+            raise ValidationError(
+                "path1_variant.token_route_fraction must be in (0, 1], "
+                f"got {self.token_route_fraction}"
+            )
+        if not 0.0 < self.recurrent_token_route_fraction <= 1.0:
+            raise ValidationError(
+                "path1_variant.recurrent_token_route_fraction must be in (0, 1], "
+                f"got {self.recurrent_token_route_fraction}"
+            )
+        if (
+            self.feed_forward_profile is FeedForwardProfile.STANDARD
+            and self.feed_forward_layer_indices is not None
+        ):
+            raise ValidationError(
+                "standard feed-forward profile must not set feed_forward_layer_indices"
+            )
         if self.feed_forward_layer_indices is not None:
             if not self.feed_forward_layer_indices:
-                raise ValidationError("feed_forward_layer_indices must not be empty when provided")
-            if len(set(self.feed_forward_layer_indices)) != len(self.feed_forward_layer_indices):
-                raise ValidationError("feed_forward_layer_indices must not contain duplicates")
+                raise ValidationError(
+                    "feed_forward_layer_indices must not be empty when provided"
+                )
+            if len(set(self.feed_forward_layer_indices)) != len(
+                self.feed_forward_layer_indices
+            ):
+                raise ValidationError(
+                    "feed_forward_layer_indices must not contain duplicates"
+                )
             for layer_index in self.feed_forward_layer_indices:
                 if layer_index < 0 or layer_index >= self.shape.total_layers:
                     raise ValidationError(
                         "feed_forward_layer_indices entries must be valid layer indices, "
+                        f"got {layer_index} for total_layers={self.shape.total_layers}"
+                    )
+        if (
+            self.token_routing_profile is TokenRoutingProfile.NONE
+            and self.token_routing_layer_indices is not None
+        ):
+            raise ValidationError(
+                "token_routing_layer_indices requires a non-none token_routing_profile"
+            )
+        if self.token_routing_layer_indices is not None:
+            if not self.token_routing_layer_indices:
+                raise ValidationError(
+                    "token_routing_layer_indices must not be empty when provided"
+                )
+            if len(set(self.token_routing_layer_indices)) != len(
+                self.token_routing_layer_indices
+            ):
+                raise ValidationError(
+                    "token_routing_layer_indices must not contain duplicates"
+                )
+            for layer_index in self.token_routing_layer_indices:
+                if layer_index < 0 or layer_index >= self.shape.total_layers:
+                    raise ValidationError(
+                        "token_routing_layer_indices entries must be valid layer indices, "
                         f"got {layer_index} for total_layers={self.shape.total_layers}"
                     )
         if not self.label.strip():
@@ -363,30 +539,170 @@ class Path1VariantSpec:
             raise ValidationError(
                 "path1_variant.layer_schedule length must match shape.total_layers"
             )
+        looped_transformer_scaffolds = {
+            Path1ScaffoldProfile.FIXED_LOOPED_LM,
+            Path1ScaffoldProfile.LOOPED_ADDITIVE_INPUT,
+            Path1ScaffoldProfile.HUGINN_ADAPTER_RECURRENCE,
+        }
+        universal_transformer_scaffolds = {
+            Path1ScaffoldProfile.UNIVERSAL_TRANSFORMER,
+            Path1ScaffoldProfile.UNIVERSAL_TRANSFORMER_ACT,
+        }
+        learned_exit_scaffolds = {
+            Path1ScaffoldProfile.OURO_LEARNED_EXIT,
+        }
+        recursive_compression_scaffolds = {
+            Path1ScaffoldProfile.RRT_CYCLE,
+        }
+        mixture_of_recursions_scaffolds = {
+            Path1ScaffoldProfile.MOR_EXPERT_CHOICE,
+        }
+        tied_recurrent_attention_scaffolds = (
+            looped_transformer_scaffolds
+            | universal_transformer_scaffolds
+            | learned_exit_scaffolds
+            | recursive_compression_scaffolds
+            | mixture_of_recursions_scaffolds
+        )
+        if (
+            self.scaffold_profile is Path1ScaffoldProfile.RRT_CYCLE
+            and self.shape.total_layers % self.parcae_loop_count != 0
+        ):
+            raise ValidationError(
+                "rrt-cycle requires shape.total_layers divisible by parcae_loop_count, "
+                f"got {self.shape.total_layers} and {self.parcae_loop_count}"
+            )
+        if (
+            self.scaffold_profile is Path1ScaffoldProfile.MOR_EXPERT_CHOICE
+            and self.shape.total_layers < 3
+        ):
+            raise ValidationError(
+                "mor-expert-choice requires at least three stored layers "
+                "(unique first, shared middle, unique last)"
+            )
         exact_attention_layers = sum(
             1 for role in self.layer_schedule if role in _EXACT_ATTENTION_ROLES
         )
         if exact_attention_layers == 0:
-            raise ValidationError("path1_variant must retain at least one exact-attention layer")
+            raise ValidationError(
+                "path1_variant must retain at least one exact-attention layer"
+            )
         if self.kind is Path1VariantKind.ATTENTION_ONLY:
             if any(role not in _EXACT_ATTENTION_ROLES for role in self.layer_schedule):
-                raise ValidationError("attention-only variant must contain only exact-attention layers")
+                raise ValidationError(
+                    "attention-only variant must contain only exact-attention layers"
+                )
             if self.feed_forward_layer_indices is not None:
                 for layer_index in self.feed_forward_layer_indices:
                     if self.layer_schedule[layer_index] not in _EXACT_ATTENTION_ROLES:
                         raise ValidationError(
                             "feed_forward_layer_indices may only target exact-attention layers"
                         )
+            if self.token_routing_layer_indices is not None:
+                for layer_index in self.token_routing_layer_indices:
+                    if self.layer_schedule[layer_index] not in _EXACT_ATTENTION_ROLES:
+                        raise ValidationError(
+                            "token_routing_layer_indices may only target exact-attention layers"
+                        )
             if self.reference_ssm_profile_schedule is not None:
-                raise ValidationError("attention-only variant must not set reference_ssm_profile_schedule")
+                raise ValidationError(
+                    "attention-only variant must not set reference_ssm_profile_schedule"
+                )
+            if (
+                self.token_routing_profile is not TokenRoutingProfile.NONE
+                and self.attention_profile is not AttentionProfile.STANDARD
+            ):
+                raise ValidationError(
+                    "token block routing currently supports standard attention only"
+                )
+            if (
+                self.recurrent_token_routing_profile
+                is RecurrentTokenRoutingProfile.CAUSAL_TOPK_STATE
+            ):
+                if self.attention_profile is not AttentionProfile.STANDARD:
+                    raise ValidationError(
+                        "causal top-k recurrent token routing currently supports standard attention only"
+                    )
+                if self.scaffold_profile not in {
+                    Path1ScaffoldProfile.PARCAE_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_BX_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_THIN_CONTROL_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_THIN_GATE_CONTROL_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_QUARTER_CONTROL_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_THIN_VALUE_CONTROL_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_THIN_GATE_BASEBLEND_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_THIN_BASEBLEND_CONTROL_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_MOD_GATE_BIAS_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_MOD_VALUE_SCALE_LOOPED_ATTENTION,
+                }:
+                    raise ValidationError(
+                        "recurrent token routing requires a Parcae-family looped scaffold"
+                    )
+            if (
+                self.recurrent_halting_profile is not RecurrentHaltingProfile.FIXED
+                and self.scaffold_profile
+                not in {
+                    Path1ScaffoldProfile.PARCAE_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_BX_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_THIN_CONTROL_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_THIN_GATE_CONTROL_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_QUARTER_CONTROL_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_THIN_VALUE_CONTROL_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_THIN_GATE_BASEBLEND_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_THIN_BASEBLEND_CONTROL_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_MOD_GATE_BIAS_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_MOD_VALUE_SCALE_LOOPED_ATTENTION,
+                }
+            ):
+                raise ValidationError(
+                    "adaptive recurrent halting requires a Parcae-family looped scaffold"
+                )
             if self.scaffold_profile not in {
                 Path1ScaffoldProfile.STANDARD,
                 Path1ScaffoldProfile.PARCAE_LOOPED_ATTENTION,
                 Path1ScaffoldProfile.PARCAE_BX_LOOPED_ATTENTION,
                 Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+                Path1ScaffoldProfile.PARCAE_P20_THIN_CONTROL_LOOPED_ATTENTION,
+                Path1ScaffoldProfile.PARCAE_P20_THIN_GATE_CONTROL_LOOPED_ATTENTION,
+                Path1ScaffoldProfile.PARCAE_P20_QUARTER_CONTROL_LOOPED_ATTENTION,
+                Path1ScaffoldProfile.PARCAE_P20_THIN_VALUE_CONTROL_LOOPED_ATTENTION,
+                Path1ScaffoldProfile.PARCAE_P20_THIN_GATE_BASEBLEND_LOOPED_ATTENTION,
+                Path1ScaffoldProfile.PARCAE_P20_THIN_BASEBLEND_CONTROL_LOOPED_ATTENTION,
+                Path1ScaffoldProfile.PARCAE_P20_MOD_GATE_BIAS_LOOPED_ATTENTION,
+                Path1ScaffoldProfile.PARCAE_P20_MOD_VALUE_SCALE_LOOPED_ATTENTION,
+                *tied_recurrent_attention_scaffolds,
             }:
                 raise ValidationError(
-                    "attention-only variant may only use standard or Parcae-family looped-attention scaffold"
+                    "attention-only variant may only use standard, Parcae-family, looped-transformer, Universal Transformer, learned-exit, recursive-compression, or mixture-of-recursions scaffold"
+                )
+            if self.scaffold_profile in tied_recurrent_attention_scaffolds:
+                if any(
+                    role is not HybridAttentionLayerRole.EXACT_ATTENTION
+                    for role in self.layer_schedule
+                ):
+                    raise ValidationError(
+                        "tied recurrent attention scaffold requires exact-attention layers only"
+                    )
+                if self.attention_profile is not AttentionProfile.STANDARD:
+                    raise ValidationError(
+                        "tied recurrent attention scaffold currently supports standard attention only"
+                    )
+                if self.feed_forward_profile is not FeedForwardProfile.STANDARD:
+                    raise ValidationError(
+                        "tied recurrent attention scaffold currently supports standard feed-forward blocks only"
+                    )
+                if self.token_routing_profile is not TokenRoutingProfile.NONE:
+                    raise ValidationError(
+                        "tied recurrent attention scaffold does not support token block routing"
+                    )
+            if (
+                self.attention_profile is AttentionProfile.PAPER_MODA_DEPTH_KV
+                and self.scaffold_profile is not Path1ScaffoldProfile.STANDARD
+            ):
+                raise ValidationError(
+                    "paper-moda-depth-kv currently supports only the standard scaffold"
                 )
             if any(
                 value is not None
@@ -401,23 +717,57 @@ class Path1VariantSpec:
                     self.primitive_state_transform_mode,
                 )
             ):
-                raise ValidationError("attention-only variant must not set reference or primitive options")
+                raise ValidationError(
+                    "attention-only variant must not set reference or primitive options"
+                )
         elif self.kind is Path1VariantKind.REFERENCE_SSM_HYBRID:
             if self.reference_ssm_profile is None:
-                raise ValidationError("reference-ssm-hybrid variant must set reference_ssm_profile")
+                raise ValidationError(
+                    "reference-ssm-hybrid variant must set reference_ssm_profile"
+                )
             if self.feed_forward_layer_indices is not None:
                 for layer_index in self.feed_forward_layer_indices:
                     if self.layer_schedule[layer_index] not in _EXACT_ATTENTION_ROLES:
                         raise ValidationError(
                             "feed_forward_layer_indices may only target exact-attention layers"
                         )
+            if self.token_routing_layer_indices is not None:
+                for layer_index in self.token_routing_layer_indices:
+                    if self.layer_schedule[layer_index] not in _EXACT_ATTENTION_ROLES:
+                        raise ValidationError(
+                            "token_routing_layer_indices may only target exact-attention layers"
+                        )
             if self.primitive_profile is not None:
-                raise ValidationError("reference-ssm-hybrid variant must not set primitive_profile")
-            if any(role not in {*_EXACT_ATTENTION_ROLES, HybridAttentionLayerRole.REFERENCE_SSM} for role in self.layer_schedule):
-                raise ValidationError("reference-ssm-hybrid schedule may contain only exact-attention and reference-SSM roles")
+                raise ValidationError(
+                    "reference-ssm-hybrid variant must not set primitive_profile"
+                )
+            if (
+                self.scaffold_profile is Path1ScaffoldProfile.PR5_HYBRID_GDN
+                and self.attention_profile is not AttentionProfile.STANDARD
+            ):
+                raise ValidationError(
+                    "PR5 scaffold does not support depth-augmented attention"
+                )
+            if any(
+                role
+                not in {*_EXACT_ATTENTION_ROLES, HybridAttentionLayerRole.REFERENCE_SSM}
+                for role in self.layer_schedule
+            ):
+                raise ValidationError(
+                    "reference-ssm-hybrid schedule may contain only exact-attention and reference-SSM roles"
+                )
+            if (
+                self.recurrent_token_routing_profile
+                is not RecurrentTokenRoutingProfile.NONE
+            ):
+                raise ValidationError(
+                    "reference-ssm-hybrid variant does not support recurrent token routing"
+                )
             if self.reference_ssm_profile_schedule is not None:
                 reference_layer_count = sum(
-                    1 for role in self.layer_schedule if role is HybridAttentionLayerRole.REFERENCE_SSM
+                    1
+                    for role in self.layer_schedule
+                    if role is HybridAttentionLayerRole.REFERENCE_SSM
                 )
                 if len(self.reference_ssm_profile_schedule) != reference_layer_count:
                     raise ValidationError(
@@ -425,21 +775,45 @@ class Path1VariantSpec:
                     )
         elif self.kind is Path1VariantKind.PRIMITIVE_HYBRID:
             if self.primitive_profile is None:
-                raise ValidationError("primitive-hybrid variant must set primitive_profile")
+                raise ValidationError(
+                    "primitive-hybrid variant must set primitive_profile"
+                )
             if self.reference_ssm_profile is not None:
-                raise ValidationError("primitive-hybrid variant must not set reference_ssm_profile")
+                raise ValidationError(
+                    "primitive-hybrid variant must not set reference_ssm_profile"
+                )
             if self.reference_ssm_profile_schedule is not None:
-                raise ValidationError("primitive-hybrid variant must not set reference_ssm_profile_schedule")
+                raise ValidationError(
+                    "primitive-hybrid variant must not set reference_ssm_profile_schedule"
+                )
             if self.scaffold_profile is not Path1ScaffoldProfile.STANDARD:
-                raise ValidationError("primitive-hybrid variant must use the standard scaffold")
+                raise ValidationError(
+                    "primitive-hybrid variant must use the standard scaffold"
+                )
+            if self.recurrent_halting_profile is not RecurrentHaltingProfile.FIXED:
+                raise ValidationError(
+                    "primitive-hybrid variant does not support recurrent halting"
+                )
             if self.feed_forward_layer_indices is not None:
                 for layer_index in self.feed_forward_layer_indices:
                     if self.layer_schedule[layer_index] not in _EXACT_ATTENTION_ROLES:
                         raise ValidationError(
                             "feed_forward_layer_indices may only target exact-attention layers"
                         )
-            if any(role not in {*_EXACT_ATTENTION_ROLES, HybridAttentionLayerRole.PRIMITIVE} for role in self.layer_schedule):
-                raise ValidationError("primitive-hybrid schedule may contain only exact-attention and primitive roles")
+            if self.token_routing_layer_indices is not None:
+                for layer_index in self.token_routing_layer_indices:
+                    if self.layer_schedule[layer_index] not in _EXACT_ATTENTION_ROLES:
+                        raise ValidationError(
+                            "token_routing_layer_indices may only target exact-attention layers"
+                        )
+            if any(
+                role
+                not in {*_EXACT_ATTENTION_ROLES, HybridAttentionLayerRole.PRIMITIVE}
+                for role in self.layer_schedule
+            ):
+                raise ValidationError(
+                    "primitive-hybrid schedule may contain only exact-attention and primitive roles"
+                )
             if any(
                 value is None
                 for value in (
@@ -454,8 +828,27 @@ class Path1VariantSpec:
                 raise ValidationError(
                     "primitive-hybrid variant must set primitive residual/readout/norm/wrapper/execution/state-transform modes"
                 )
+            if (
+                self.recurrent_token_routing_profile
+                is not RecurrentTokenRoutingProfile.NONE
+            ):
+                raise ValidationError(
+                    "primitive-hybrid variant does not support recurrent token routing"
+                )
         else:
             raise ValidationError(f"unsupported path1 variant kind: {self.kind}")
+        if (
+            self.scaffold_profile is Path1ScaffoldProfile.PR5_HYBRID_GDN
+            and self.token_routing_profile is not TokenRoutingProfile.NONE
+        ):
+            raise ValidationError("PR5 scaffold does not support token block routing")
+        if (
+            self.token_routing_profile is not TokenRoutingProfile.NONE
+            and self.attention_profile is not AttentionProfile.STANDARD
+        ):
+            raise ValidationError(
+                "token block routing currently supports standard attention only"
+            )
         if self.final_norm_kind not in {"identity", "rmsnorm"}:
             raise ValidationError(
                 f"path1_variant.final_norm_kind must be identity|rmsnorm, got {self.final_norm_kind}"
@@ -466,10 +859,14 @@ class Path1VariantSpec:
                 f"got {self.reference_p20_ramp_init}"
             )
 
-    def reference_profile_for_ordinal(self, reference_ordinal: int) -> ReferenceSsmProfile:
+    def reference_profile_for_ordinal(
+        self, reference_ordinal: int
+    ) -> ReferenceSsmProfile:
         if self.reference_ssm_profile_schedule is None:
             if self.reference_ssm_profile is None:
-                raise ValidationError("reference profile requested for non-reference variant")
+                raise ValidationError(
+                    "reference profile requested for non-reference variant"
+                )
             return self.reference_ssm_profile
         return self.reference_ssm_profile_schedule[reference_ordinal]
 
@@ -487,14 +884,18 @@ class Path1BaselineMatrix:
         reference_shape = self.attention_only.shape
         for variant in (self.reference_ssm_hybrid, self.primitive_hybrid):
             if variant.shape != reference_shape:
-                raise ValidationError("Path1 baseline matrix variants must share the same model shape")
+                raise ValidationError(
+                    "Path1 baseline matrix variants must share the same model shape"
+                )
 
 
 def _attention_schedule(total_layers: int) -> tuple[HybridAttentionLayerRole, ...]:
     return tuple(HybridAttentionLayerRole.EXACT_ATTENTION for _ in range(total_layers))
 
 
-def _alternating_schedule(total_layers: int, odd_role: HybridAttentionLayerRole) -> tuple[HybridAttentionLayerRole, ...]:
+def _alternating_schedule(
+    total_layers: int, odd_role: HybridAttentionLayerRole
+) -> tuple[HybridAttentionLayerRole, ...]:
     return tuple(
         HybridAttentionLayerRole.EXACT_ATTENTION if index % 2 == 0 else odd_role
         for index in range(total_layers)
@@ -507,7 +908,12 @@ def _variant_label(*parts: str) -> str:
 
 def parse_layer_schedule_spec(schedule: str) -> tuple[HybridAttentionLayerRole, ...]:
     normalized = (
-        schedule.strip().replace(",", "").replace("-", "").replace("_", "").replace(" ", "").upper()
+        schedule.strip()
+        .replace(",", "")
+        .replace("-", "")
+        .replace("_", "")
+        .replace(" ", "")
+        .upper()
     )
     if not normalized:
         raise ValidationError("path1_variant.layer_schedule override must not be empty")
@@ -521,35 +927,49 @@ def parse_layer_schedule_spec(schedule: str) -> tuple[HybridAttentionLayerRole, 
 
 def layer_schedule_signature(schedule: tuple[HybridAttentionLayerRole, ...]) -> str:
     return "".join(
-        "a"
-        if role is HybridAttentionLayerRole.EXACT_ATTENTION
-        else "s"
-        if role is HybridAttentionLayerRole.SHARED_EXACT_ATTENTION
-        else "r"
-        if role is HybridAttentionLayerRole.REFERENCE_SSM
-        else "p"
+        (
+            "a"
+            if role is HybridAttentionLayerRole.EXACT_ATTENTION
+            else (
+                "s"
+                if role is HybridAttentionLayerRole.SHARED_EXACT_ATTENTION
+                else "r" if role is HybridAttentionLayerRole.REFERENCE_SSM else "p"
+            )
+        )
         for role in schedule
     )
 
 
-def parse_reference_ssm_profile_schedule_spec(schedule: str) -> tuple[ReferenceSsmProfile, ...]:
-    tokens = tuple(token.strip() for token in schedule.replace(",", " ").split() if token.strip())
+def parse_reference_ssm_profile_schedule_spec(
+    schedule: str,
+) -> tuple[ReferenceSsmProfile, ...]:
+    tokens = tuple(
+        token.strip() for token in schedule.replace(",", " ").split() if token.strip()
+    )
     if not tokens:
-        raise ValidationError("reference SSM profile schedule override must not be empty")
+        raise ValidationError(
+            "reference SSM profile schedule override must not be empty"
+        )
     try:
         return tuple(ReferenceSsmProfile(token) for token in tokens)
     except ValueError as exc:
-        raise ValidationError("reference SSM profile schedule contains an unknown profile") from exc
+        raise ValidationError(
+            "reference SSM profile schedule contains an unknown profile"
+        ) from exc
 
 
 def parse_layer_index_spec(indices: str) -> tuple[int, ...]:
-    tokens = tuple(token.strip() for token in indices.replace(",", " ").split() if token.strip())
+    tokens = tuple(
+        token.strip() for token in indices.replace(",", " ").split() if token.strip()
+    )
     if not tokens:
         raise ValidationError("layer index override must not be empty")
     try:
         parsed = tuple(int(token) for token in tokens)
     except ValueError as exc:
-        raise ValidationError("layer index override must contain only integers") from exc
+        raise ValidationError(
+            "layer index override must contain only integers"
+        ) from exc
     if len(set(parsed)) != len(parsed):
         raise ValidationError("layer index override must not contain duplicates")
     if any(index < 0 for index in parsed):
@@ -565,6 +985,10 @@ def layer_index_signature(indices: tuple[int, ...] | None) -> str:
 
 def fraction_signature(value: float) -> str:
     return f"{int(round(value * 100))}pct"
+
+
+def threshold_signature(value: float) -> str:
+    return f"{value:.3g}".replace(".", "p").replace("-", "m").replace("+", "")
 
 
 _REFERENCE_PROFILE_LABEL_ALIASES = {
@@ -593,7 +1017,9 @@ _REFERENCE_PROFILE_LABEL_ALIASES = {
 }
 
 
-def reference_profile_schedule_signature(schedule: tuple[ReferenceSsmProfile, ...] | None) -> str:
+def reference_profile_schedule_signature(
+    schedule: tuple[ReferenceSsmProfile, ...] | None,
+) -> str:
     if schedule is None:
         return ""
     segments: list[str] = []
@@ -605,13 +1031,18 @@ def reference_profile_schedule_signature(schedule: tuple[ReferenceSsmProfile, ..
             current_count += 1
             continue
         if current_token is not None:
-            segments.append(f"{current_token}x{current_count}" if current_count > 1 else current_token)
+            segments.append(
+                f"{current_token}x{current_count}"
+                if current_count > 1
+                else current_token
+            )
         current_token = token
         current_count = 1
     if current_token is not None:
-        segments.append(f"{current_token}x{current_count}" if current_count > 1 else current_token)
+        segments.append(
+            f"{current_token}x{current_count}" if current_count > 1 else current_token
+        )
     return "profiles-" + "-".join(segments)
-
 
 
 def phase1_attention_only_variant(
@@ -624,6 +1055,25 @@ def phase1_attention_only_variant(
     eml_route_fraction: float = 0.25,
     scaffold_profile: Path1ScaffoldProfile = Path1ScaffoldProfile.STANDARD,
     parcae_loop_count: int = 2,
+    parcae_p20_value_scale: float = 1.0,
+    attention_profile: AttentionProfile = AttentionProfile.STANDARD,
+    depth_memory_layers: int = 2,
+    recurrent_halting_profile: RecurrentHaltingProfile = RecurrentHaltingProfile.FIXED,
+    recurrent_min_steps: int = 1,
+    recurrent_halting_threshold: float = 0.01,
+    token_routing_profile: TokenRoutingProfile = TokenRoutingProfile.NONE,
+    token_route_fraction: float = 0.25,
+    token_routing_layer_indices: tuple[int, ...] | None = None,
+    recurrent_token_routing_profile: RecurrentTokenRoutingProfile = (
+        RecurrentTokenRoutingProfile.NONE
+    ),
+    recurrent_token_route_fraction: float = 0.25,
+    act_halting_threshold: float = 0.99,
+    act_ponder_loss_weight: float = 0.01,
+    ouro_entropy_weight: float = 0.05,
+    ouro_q_exit_threshold: float = 0.5,
+    mor_router_aux_loss_weight: float = 0.01,
+    mor_update_scale: float = 0.1,
 ) -> Path1VariantSpec:
     schedule = layer_schedule or _attention_schedule(shape.total_layers)
     default_schedule = _attention_schedule(shape.total_layers)
@@ -634,7 +1084,8 @@ def phase1_attention_only_variant(
     )
     layer_suffix = (
         f"layers{layer_index_signature(feed_forward_layer_indices)}"
-        if feed_forward_profile is not FeedForwardProfile.STANDARD and feed_forward_layer_indices is not None
+        if feed_forward_profile is not FeedForwardProfile.STANDARD
+        and feed_forward_layer_indices is not None
         else ""
     )
     route_suffix = (
@@ -654,18 +1105,100 @@ def phase1_attention_only_variant(
         else ""
     )
     scaffold_suffix = (
-        _variant_label(scaffold_profile.value, f"loops{parcae_loop_count}")
+        _variant_label(
+            scaffold_profile.value,
+            f"loops{parcae_loop_count}",
+            f"route{fraction_signature(recurrent_token_route_fraction)}",
+        )
+        if scaffold_profile is Path1ScaffoldProfile.MOR_EXPERT_CHOICE
+        else ""
+    )
+    scaffold_suffix = scaffold_suffix or (
+        _variant_label(
+            scaffold_profile.value,
+            f"loops{parcae_loop_count}",
+            (
+                f"vscale{threshold_signature(parcae_p20_value_scale)}"
+                if parcae_p20_value_scale != 1.0
+                else ""
+            ),
+            (
+                f"route{fraction_signature(token_route_fraction)}"
+                if scaffold_profile
+                in {
+                    Path1ScaffoldProfile.PARCAE_P20_MOD_GATE_BIAS_LOOPED_ATTENTION,
+                    Path1ScaffoldProfile.PARCAE_P20_MOD_VALUE_SCALE_LOOPED_ATTENTION,
+                }
+                else ""
+            ),
+        )
         if scaffold_profile
         in {
             Path1ScaffoldProfile.PARCAE_LOOPED_ATTENTION,
             Path1ScaffoldProfile.PARCAE_BX_LOOPED_ATTENTION,
             Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_THIN_CONTROL_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_THIN_GATE_CONTROL_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_QUARTER_CONTROL_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_THIN_VALUE_CONTROL_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_THIN_GATE_BASEBLEND_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_THIN_BASEBLEND_CONTROL_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_MOD_GATE_BIAS_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_MOD_VALUE_SCALE_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.FIXED_LOOPED_LM,
+            Path1ScaffoldProfile.LOOPED_ADDITIVE_INPUT,
+            Path1ScaffoldProfile.HUGINN_ADAPTER_RECURRENCE,
+            Path1ScaffoldProfile.UNIVERSAL_TRANSFORMER,
+            Path1ScaffoldProfile.UNIVERSAL_TRANSFORMER_ACT,
+            Path1ScaffoldProfile.OURO_LEARNED_EXIT,
+            Path1ScaffoldProfile.RRT_CYCLE,
+            Path1ScaffoldProfile.MOR_EXPERT_CHOICE,
         }
+        else ""
+    )
+    attention_suffix = (
+        _variant_label(attention_profile.value, f"depthmem{depth_memory_layers}")
+        if attention_profile is not AttentionProfile.STANDARD
+        else ""
+    )
+    halting_suffix = (
+        _variant_label(
+            f"halt-{recurrent_halting_profile.value}",
+            f"min{recurrent_min_steps}",
+            f"t{threshold_signature(recurrent_halting_threshold)}",
+        )
+        if recurrent_halting_profile is not RecurrentHaltingProfile.FIXED
+        else ""
+    )
+    token_routing_suffix = (
+        _variant_label(
+            token_routing_profile.value,
+            f"route{fraction_signature(token_route_fraction)}",
+            f"layers{layer_index_signature(token_routing_layer_indices)}",
+        )
+        if token_routing_profile is not TokenRoutingProfile.NONE
+        else ""
+    )
+    recurrent_token_suffix = (
+        _variant_label(
+            recurrent_token_routing_profile.value,
+            f"route{fraction_signature(recurrent_token_route_fraction)}",
+        )
+        if recurrent_token_routing_profile is not RecurrentTokenRoutingProfile.NONE
         else ""
     )
     return Path1VariantSpec(
         kind=Path1VariantKind.ATTENTION_ONLY,
-        label=_variant_label("attention-only", scaffold_suffix, ffn_suffix, schedule_suffix),
+        label=_variant_label(
+            "attention-only",
+            attention_suffix,
+            token_routing_suffix,
+            scaffold_suffix,
+            halting_suffix,
+            recurrent_token_suffix,
+            ffn_suffix,
+            schedule_suffix,
+        ),
         shape=shape,
         layer_schedule=schedule,
         feed_forward_profile=feed_forward_profile,
@@ -675,6 +1208,23 @@ def phase1_attention_only_variant(
         eml_route_fraction=eml_route_fraction,
         scaffold_profile=scaffold_profile,
         parcae_loop_count=parcae_loop_count,
+        parcae_p20_value_scale=parcae_p20_value_scale,
+        attention_profile=attention_profile,
+        depth_memory_layers=depth_memory_layers,
+        recurrent_halting_profile=recurrent_halting_profile,
+        recurrent_min_steps=recurrent_min_steps,
+        recurrent_halting_threshold=recurrent_halting_threshold,
+        token_routing_profile=token_routing_profile,
+        token_route_fraction=token_route_fraction,
+        token_routing_layer_indices=token_routing_layer_indices,
+        recurrent_token_routing_profile=recurrent_token_routing_profile,
+        recurrent_token_route_fraction=recurrent_token_route_fraction,
+        act_halting_threshold=act_halting_threshold,
+        act_ponder_loss_weight=act_ponder_loss_weight,
+        ouro_entropy_weight=ouro_entropy_weight,
+        ouro_q_exit_threshold=ouro_q_exit_threshold,
+        mor_router_aux_loss_weight=mor_router_aux_loss_weight,
+        mor_update_scale=mor_update_scale,
     )
 
 
@@ -690,6 +1240,11 @@ def phase1_reference_ssm_variant(
     eml_slot_count: int = 8,
     eml_tree_depth: int = 3,
     eml_route_fraction: float = 0.25,
+    attention_profile: AttentionProfile = AttentionProfile.STANDARD,
+    depth_memory_layers: int = 2,
+    token_routing_profile: TokenRoutingProfile = TokenRoutingProfile.NONE,
+    token_route_fraction: float = 0.25,
+    token_routing_layer_indices: tuple[int, ...] | None = None,
 ) -> Path1VariantSpec:
     profiles_for_norm = profile_schedule or (profile,)
     final_norm = (
@@ -708,7 +1263,9 @@ def phase1_reference_ssm_variant(
         )
         else "identity"
     )
-    default_schedule = _alternating_schedule(shape.total_layers, HybridAttentionLayerRole.REFERENCE_SSM)
+    default_schedule = _alternating_schedule(
+        shape.total_layers, HybridAttentionLayerRole.REFERENCE_SSM
+    )
     schedule = layer_schedule or default_schedule
     schedule_suffix = (
         f"schedule-{layer_schedule_signature(schedule)}"
@@ -717,16 +1274,39 @@ def phase1_reference_ssm_variant(
     )
     profile_schedule_suffix = (
         reference_profile_schedule_signature(profile_schedule)
-        if profile_schedule is not None and any(candidate is not profile for candidate in profile_schedule)
+        if profile_schedule is not None
+        and any(candidate is not profile for candidate in profile_schedule)
         else ""
     )
-    scaffold_suffix = "" if scaffold_profile is Path1ScaffoldProfile.STANDARD else scaffold_profile.value
+    scaffold_suffix = (
+        ""
+        if scaffold_profile is Path1ScaffoldProfile.STANDARD
+        else scaffold_profile.value
+    )
+    attention_suffix = (
+        _variant_label(attention_profile.value, f"depthmem{depth_memory_layers}")
+        if attention_profile is not AttentionProfile.STANDARD
+        else ""
+    )
+    token_routing_suffix = (
+        _variant_label(
+            token_routing_profile.value,
+            f"route{fraction_signature(token_route_fraction)}",
+            f"layers{layer_index_signature(token_routing_layer_indices)}",
+        )
+        if token_routing_profile is not TokenRoutingProfile.NONE
+        else ""
+    )
     ffn_suffix = (
         _variant_label(
             feed_forward_profile.value,
             f"slots{eml_slot_count}",
             f"depth{eml_tree_depth}",
-            f"layers{layer_index_signature(feed_forward_layer_indices)}" if feed_forward_layer_indices is not None else "",
+            (
+                f"layers{layer_index_signature(feed_forward_layer_indices)}"
+                if feed_forward_layer_indices is not None
+                else ""
+            ),
         )
         if feed_forward_profile is not FeedForwardProfile.STANDARD
         else ""
@@ -737,6 +1317,8 @@ def phase1_reference_ssm_variant(
             "reference-ssm-hybrid",
             profile.value,
             profile_schedule_suffix,
+            attention_suffix,
+            token_routing_suffix,
             scaffold_suffix,
             ffn_suffix,
             schedule_suffix,
@@ -753,6 +1335,11 @@ def phase1_reference_ssm_variant(
         eml_route_fraction=eml_route_fraction,
         final_norm_kind=final_norm,
         scaffold_profile=scaffold_profile,
+        attention_profile=attention_profile,
+        depth_memory_layers=depth_memory_layers,
+        token_routing_profile=token_routing_profile,
+        token_route_fraction=token_route_fraction,
+        token_routing_layer_indices=token_routing_layer_indices,
     )
 
 
@@ -771,8 +1358,15 @@ def phase1_primitive_variant(
     eml_slot_count: int = 8,
     eml_tree_depth: int = 3,
     eml_route_fraction: float = 0.25,
+    attention_profile: AttentionProfile = AttentionProfile.STANDARD,
+    depth_memory_layers: int = 2,
+    token_routing_profile: TokenRoutingProfile = TokenRoutingProfile.NONE,
+    token_route_fraction: float = 0.25,
+    token_routing_layer_indices: tuple[int, ...] | None = None,
 ) -> Path1VariantSpec:
-    default_schedule = _alternating_schedule(shape.total_layers, HybridAttentionLayerRole.PRIMITIVE)
+    default_schedule = _alternating_schedule(
+        shape.total_layers, HybridAttentionLayerRole.PRIMITIVE
+    )
     schedule = layer_schedule or default_schedule
     schedule_suffix = (
         f"schedule-{layer_schedule_signature(schedule)}"
@@ -784,9 +1378,27 @@ def phase1_primitive_variant(
             feed_forward_profile.value,
             f"slots{eml_slot_count}",
             f"depth{eml_tree_depth}",
-            f"layers{layer_index_signature(feed_forward_layer_indices)}" if feed_forward_layer_indices is not None else "",
+            (
+                f"layers{layer_index_signature(feed_forward_layer_indices)}"
+                if feed_forward_layer_indices is not None
+                else ""
+            ),
         )
         if feed_forward_profile is not FeedForwardProfile.STANDARD
+        else ""
+    )
+    attention_suffix = (
+        _variant_label(attention_profile.value, f"depthmem{depth_memory_layers}")
+        if attention_profile is not AttentionProfile.STANDARD
+        else ""
+    )
+    token_routing_suffix = (
+        _variant_label(
+            token_routing_profile.value,
+            f"route{fraction_signature(token_route_fraction)}",
+            f"layers{layer_index_signature(token_routing_layer_indices)}",
+        )
+        if token_routing_profile is not TokenRoutingProfile.NONE
         else ""
     )
     return Path1VariantSpec(
@@ -800,6 +1412,8 @@ def phase1_primitive_variant(
             norm_mode.value,
             wrapper_mode.value,
             state_transform_mode.value,
+            attention_suffix,
+            token_routing_suffix,
             ffn_suffix,
             schedule_suffix,
         ),
@@ -817,6 +1431,11 @@ def phase1_primitive_variant(
         eml_slot_count=eml_slot_count,
         eml_tree_depth=eml_tree_depth,
         eml_route_fraction=eml_route_fraction,
+        attention_profile=attention_profile,
+        depth_memory_layers=depth_memory_layers,
+        token_routing_profile=token_routing_profile,
+        token_route_fraction=token_route_fraction,
+        token_routing_layer_indices=token_routing_layer_indices,
     )
 
 

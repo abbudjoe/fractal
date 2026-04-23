@@ -10,12 +10,56 @@ import torch
 import torch.nn.functional as F
 
 from python.data.byte_corpus import TokenBatch
-from python.reporting.schema import BenchmarkReport, EvalSummary, RuntimeSummary, TrainStepRecord
+from python.reporting.schema import (
+    BenchmarkReport,
+    EvalSummary,
+    RuntimeSummary,
+    TrainStepRecord,
+)
 
 
 class LanguageModelProtocol(Protocol):
-    def forward_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
-        ...
+    def forward_logits(self, input_ids: torch.Tensor) -> torch.Tensor: ...
+
+
+def auxiliary_training_loss(
+    model: LanguageModelProtocol, reference: torch.Tensor
+) -> torch.Tensor:
+    loss_fn = getattr(model, "auxiliary_loss", None)
+    if not callable(loss_fn):
+        return reference.new_zeros(())
+    loss = loss_fn()
+    if loss is None:
+        return reference.new_zeros(())
+    if not isinstance(loss, torch.Tensor):
+        raise TypeError("model auxiliary_loss() must return a torch.Tensor or None")
+    return loss.to(device=reference.device, dtype=reference.dtype)
+
+
+def supervised_language_model_loss(
+    model: LanguageModelProtocol,
+    logits: torch.Tensor,
+    target_ids: torch.Tensor,
+    *,
+    pad_token: int,
+    training: bool,
+) -> torch.Tensor:
+    loss_fn = getattr(model, "supervised_loss", None)
+    if callable(loss_fn):
+        loss = loss_fn(
+            logits,
+            target_ids,
+            pad_token=pad_token,
+            training=training,
+        )
+        if not isinstance(loss, torch.Tensor):
+            raise TypeError("model supervised_loss() must return a torch.Tensor")
+        return loss
+    return F.cross_entropy(
+        logits.reshape(-1, logits.shape[-1]),
+        target_ids.reshape(-1),
+        ignore_index=pad_token,
+    )
 
 
 def perplexity_from_loss(loss: float) -> float:
@@ -64,12 +108,18 @@ def evaluate_model(
     with torch.no_grad():
         for batch in selected:
             batch_on_device = materialize_batch(batch, device)
-            with torch.autocast(device_type=device_type, dtype=autocast_dtype, enabled=autocast_dtype is not None):
+            with torch.autocast(
+                device_type=device_type,
+                dtype=autocast_dtype,
+                enabled=autocast_dtype is not None,
+            ):
                 logits = model.forward_logits(batch_on_device.input_ids)
-                loss = F.cross_entropy(
-                    logits.reshape(-1, logits.shape[-1]),
-                    batch_on_device.target_ids.reshape(-1),
-                    ignore_index=pad_token,
+                loss = supervised_language_model_loss(
+                    model,
+                    logits,
+                    batch_on_device.target_ids,
+                    pad_token=pad_token,
+                    training=False,
                 )
             total_loss += float(loss.detach().float().item())
             total_batches += 1
@@ -109,14 +159,21 @@ def warmup_model(
         for step in range(warmup_train_steps):
             batch = materialize_batch(train_batches[step % len(train_batches)], device)
             optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(device_type=device_type, dtype=autocast_dtype, enabled=autocast_dtype is not None):
+            with torch.autocast(
+                device_type=device_type,
+                dtype=autocast_dtype,
+                enabled=autocast_dtype is not None,
+            ):
                 logits = model.forward_logits(batch.input_ids)
-                loss = F.cross_entropy(
-                    logits.reshape(-1, logits.shape[-1]),
-                    batch.target_ids.reshape(-1),
-                    ignore_index=pad_token,
+                loss = supervised_language_model_loss(
+                    model,
+                    logits,
+                    batch.target_ids,
+                    pad_token=pad_token,
+                    training=True,
                 )
-            loss.backward()
+                total_loss = loss + auxiliary_training_loss(model, loss)
+            total_loss.backward()
         optimizer.zero_grad(set_to_none=True)
 
 
@@ -169,14 +226,21 @@ def run_training_benchmark(
     for step in range(train_steps):
         batch = materialize_batch(train_batches[step % len(train_batches)], device)
         optimizer.zero_grad(set_to_none=True)
-        with torch.autocast(device_type=device_type, dtype=autocast_dtype, enabled=autocast_dtype is not None):
+        with torch.autocast(
+            device_type=device_type,
+            dtype=autocast_dtype,
+            enabled=autocast_dtype is not None,
+        ):
             logits = model.forward_logits(batch.input_ids)
-            loss = F.cross_entropy(
-                logits.reshape(-1, logits.shape[-1]),
-                batch.target_ids.reshape(-1),
-                ignore_index=pad_token,
+            loss = supervised_language_model_loss(
+                model,
+                logits,
+                batch.target_ids,
+                pad_token=pad_token,
+                training=True,
             )
-        loss.backward()
+            total_loss = loss + auxiliary_training_loss(model, loss)
+        total_loss.backward()
         optimizer.step()
         train_loss = float(loss.detach().float().item())
         seen_tokens += batch.token_count
@@ -210,12 +274,16 @@ def run_training_benchmark(
     total_wall_time_ms = (time.perf_counter() - total_start) * 1000.0
     peak_process_memory = max(peak_process_memory, process_peak_rss_bytes())
 
-    selected_eval_tokens = sum(batch.token_count for batch in eval_batches[:eval_batch_count])
+    selected_eval_tokens = sum(
+        batch.token_count for batch in eval_batches[:eval_batch_count]
+    )
     cuda_memory_payload = None
     if device_type == "cuda":
         _, peak_cuda_used = cuda_memory_stats(device)
         device_props = torch.cuda.get_device_properties(device)
-        device_index = device.index if device.index is not None else torch.cuda.current_device()
+        device_index = (
+            device.index if device.index is not None else torch.cuda.current_device()
+        )
         cuda_memory_payload = {
             "device_index": int(device_index),
             "device_name": str(device_props.name),
@@ -240,7 +308,9 @@ def run_training_benchmark(
         / (total_wall_time_ms / 1000.0),
         process_memory_metric="peak_rss",
         peak_process_memory_bytes=peak_process_memory,
-        peak_process_memory_delta_bytes=max(0, peak_process_memory - baseline_process_memory),
+        peak_process_memory_delta_bytes=max(
+            0, peak_process_memory - baseline_process_memory
+        ),
         cuda_device_memory=cuda_memory_payload,
         memory_note="process memory metrics are sampled via getrusage(RUSAGE_SELF).ru_maxrss; CUDA memory uses torch.cuda.max_memory_allocated",
     )

@@ -17,6 +17,7 @@ from python.specs.common import (
     ValidationError,
 )
 from python.specs.path1 import (
+    AttentionProfile,
     DEFAULT_PATH1_MODEL_SHAPE,
     FeedForwardProfile,
     HybridAttentionLayerRole,
@@ -30,7 +31,10 @@ from python.specs.path1 import (
     PrimitiveResidualMode,
     PrimitiveStateTransformMode,
     PrimitiveWrapperMode,
+    RecurrentHaltingProfile,
+    RecurrentTokenRoutingProfile,
     ReferenceSsmProfile,
+    TokenRoutingProfile,
     parse_layer_schedule_spec,
     parse_layer_index_spec,
     parse_reference_ssm_profile_schedule_spec,
@@ -38,7 +42,6 @@ from python.specs.path1 import (
     phase1_primitive_variant,
     phase1_reference_ssm_variant,
 )
-
 
 CUDA_FAITHFUL_SMALL_V1 = "cuda-faithful-small-v1"
 CUDA_FAITHFUL_SMALL_CORPUS = "fineweb-stage0-local-bench-9row-v1"
@@ -78,6 +81,104 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=2,
         help="Number of recurrent passes through the middle attention block for parcae-looped-attention.",
+    )
+    parser.add_argument(
+        "--parcae-p20-value-scale",
+        type=float,
+        default=1.0,
+        help="Scale applied to the Parcae P20-control value projection before loop injection.",
+    )
+    parser.add_argument(
+        "--attention-profile",
+        default=AttentionProfile.STANDARD.value,
+        choices=[profile.value for profile in AttentionProfile],
+    )
+    parser.add_argument(
+        "--depth-memory-layers",
+        type=int,
+        default=2,
+        help="Number of prior block outputs exposed to MoDA-style depth attention.",
+    )
+    parser.add_argument(
+        "--recurrent-halting-profile",
+        default=RecurrentHaltingProfile.FIXED.value,
+        choices=[profile.value for profile in RecurrentHaltingProfile],
+    )
+    parser.add_argument(
+        "--recurrent-min-steps",
+        type=int,
+        default=1,
+        help="Minimum recurrent loop steps before adaptive halting may fire.",
+    )
+    parser.add_argument(
+        "--recurrent-halting-threshold",
+        type=float,
+        default=0.01,
+        help="Hidden-state halting threshold for adaptive recurrent exits.",
+    )
+    parser.add_argument(
+        "--token-routing-profile",
+        default=TokenRoutingProfile.NONE.value,
+        choices=[profile.value for profile in TokenRoutingProfile],
+        help="Optional causal token-routed block execution profile.",
+    )
+    parser.add_argument(
+        "--token-route-fraction",
+        type=float,
+        default=0.25,
+        help="Approximate fraction of tokens routed through token-routed blocks.",
+    )
+    parser.add_argument(
+        "--token-routing-layer-indices",
+        help="Comma or whitespace separated layer indices for token-routed blocks.",
+    )
+    parser.add_argument(
+        "--recurrent-token-routing-profile",
+        default=RecurrentTokenRoutingProfile.NONE.value,
+        choices=[profile.value for profile in RecurrentTokenRoutingProfile],
+        help="Optional token-selective routing profile inside recurrent Parcae loops.",
+    )
+    parser.add_argument(
+        "--recurrent-token-route-fraction",
+        type=float,
+        default=0.25,
+        help="Approximate fraction of tokens refined by token-selective recurrence.",
+    )
+    parser.add_argument(
+        "--act-halting-threshold",
+        type=float,
+        default=0.99,
+        help="Cumulative per-token halt threshold for universal-transformer-act.",
+    )
+    parser.add_argument(
+        "--act-ponder-loss-weight",
+        type=float,
+        default=0.01,
+        help="Auxiliary ponder-loss weight for universal-transformer-act.",
+    )
+    parser.add_argument(
+        "--ouro-entropy-weight",
+        type=float,
+        default=0.05,
+        help="Stage-1 exit-distribution entropy reward weight for ouro-learned-exit.",
+    )
+    parser.add_argument(
+        "--ouro-q-exit-threshold",
+        type=float,
+        default=0.5,
+        help="Deterministic CDF threshold used for ouro-learned-exit q-exit diagnostics.",
+    )
+    parser.add_argument(
+        "--mor-router-aux-loss-weight",
+        type=float,
+        default=0.01,
+        help="Auxiliary BCE router-loss weight for mor-expert-choice.",
+    )
+    parser.add_argument(
+        "--mor-update-scale",
+        type=float,
+        default=0.1,
+        help="Maximum sigmoid gate scale for mor-expert-choice selected-token updates.",
     )
     parser.add_argument(
         "--reference-p20-ramp-init",
@@ -125,7 +226,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dtype", default="bf16", choices=["bf16", "fp32"])
     parser.add_argument(
         "--env-kind",
-        choices=["requirements-only", "official-mamba3", "compile-safe", "primitive-triton"],
+        choices=[
+            "requirements-only",
+            "official-mamba3",
+            "compile-safe",
+            "primitive-triton",
+        ],
     )
     parser.add_argument(
         "--compile-mode",
@@ -169,7 +275,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning-rate", type=float, default=1.0e-3)
     parser.add_argument("--benchmark-profile", choices=[CUDA_FAITHFUL_SMALL_V1])
     parser.add_argument("--benchmark-name")
-    parser.add_argument("--corpus-format", default="jsonl-text", choices=["jsonl-text", "token-ids"])
+    parser.add_argument(
+        "--corpus-format", default="jsonl-text", choices=["jsonl-text", "token-ids"]
+    )
     parser.add_argument("--jsonl-train-path", type=Path)
     parser.add_argument("--jsonl-eval-path", type=Path)
     parser.add_argument("--tokenized-manifest-path", type=Path)
@@ -191,20 +299,32 @@ def _resolve_corpus_args(
     benchmark_name = args.benchmark_name
     if args.corpus_format == "token-ids":
         if args.benchmark_profile is not None:
-            parser.error("--corpus-format token-ids may not be combined with --benchmark-profile")
+            parser.error(
+                "--corpus-format token-ids may not be combined with --benchmark-profile"
+            )
         if args.jsonl_train_path is not None or args.jsonl_eval_path is not None:
-            parser.error("--corpus-format token-ids may not be combined with JSONL corpus paths")
+            parser.error(
+                "--corpus-format token-ids may not be combined with JSONL corpus paths"
+            )
         if args.tokenized_manifest_path is None:
-            parser.error("--tokenized-manifest-path is required with --corpus-format token-ids")
+            parser.error(
+                "--tokenized-manifest-path is required with --corpus-format token-ids"
+            )
         corpus = TokenIdCorpusSpec(manifest_path=args.tokenized_manifest_path)
         try:
-            manifest_payload = json.loads(args.tokenized_manifest_path.read_text(encoding="utf-8"))
+            manifest_payload = json.loads(
+                args.tokenized_manifest_path.read_text(encoding="utf-8")
+            )
             tokenizer_payload = manifest_payload.get("tokenizer", {})
             manifest_vocab_size = tokenizer_payload.get("vocab_size")
         except Exception as exc:
-            parser.error(f"failed to read tokenized manifest for vocab-size inference: {exc}")
+            parser.error(
+                f"failed to read tokenized manifest for vocab-size inference: {exc}"
+            )
         if not isinstance(manifest_vocab_size, int) or manifest_vocab_size <= 0:
-            parser.error("tokenized manifest tokenizer.vocab_size must be a positive integer")
+            parser.error(
+                "tokenized manifest tokenizer.vocab_size must be a positive integer"
+            )
         if args.vocab_size is None:
             args.vocab_size = manifest_vocab_size
         elif args.vocab_size != manifest_vocab_size:
@@ -273,7 +393,9 @@ def _build_shape_and_schedule(
     *,
     parser: argparse.ArgumentParser,
 ) -> tuple[Path1ModelShape, tuple[HybridAttentionLayerRole, ...] | None]:
-    layer_schedule = parse_layer_schedule_spec(args.layer_schedule) if args.layer_schedule else None
+    layer_schedule = (
+        parse_layer_schedule_spec(args.layer_schedule) if args.layer_schedule else None
+    )
     if layer_schedule is None:
         total_layers = (
             args.total_layers
@@ -282,7 +404,9 @@ def _build_shape_and_schedule(
         )
     else:
         if args.total_layers is not None and args.total_layers != len(layer_schedule):
-            parser.error("--total-layers must match the explicit --layer-schedule length")
+            parser.error(
+                "--total-layers must match the explicit --layer-schedule length"
+            )
         total_layers = len(layer_schedule)
     shape = Path1ModelShape(
         vocab_size=(
@@ -290,7 +414,11 @@ def _build_shape_and_schedule(
             if args.vocab_size is not None
             else DEFAULT_PATH1_MODEL_SHAPE.vocab_size
         ),
-        d_model=args.d_model if args.d_model is not None else DEFAULT_PATH1_MODEL_SHAPE.d_model,
+        d_model=(
+            args.d_model
+            if args.d_model is not None
+            else DEFAULT_PATH1_MODEL_SHAPE.d_model
+        ),
         head_count=(
             args.head_count
             if args.head_count is not None
@@ -333,6 +461,31 @@ def _build_variant(args: argparse.Namespace, *, parser: argparse.ArgumentParser)
             eml_route_fraction=args.eml_route_fraction,
             scaffold_profile=Path1ScaffoldProfile(args.scaffold_profile),
             parcae_loop_count=args.parcae_loop_count,
+            parcae_p20_value_scale=args.parcae_p20_value_scale,
+            attention_profile=AttentionProfile(args.attention_profile),
+            depth_memory_layers=args.depth_memory_layers,
+            recurrent_halting_profile=RecurrentHaltingProfile(
+                args.recurrent_halting_profile
+            ),
+            recurrent_min_steps=args.recurrent_min_steps,
+            recurrent_halting_threshold=args.recurrent_halting_threshold,
+            token_routing_profile=TokenRoutingProfile(args.token_routing_profile),
+            token_route_fraction=args.token_route_fraction,
+            token_routing_layer_indices=(
+                parse_layer_index_spec(args.token_routing_layer_indices)
+                if args.token_routing_layer_indices
+                else None
+            ),
+            recurrent_token_routing_profile=RecurrentTokenRoutingProfile(
+                args.recurrent_token_routing_profile
+            ),
+            recurrent_token_route_fraction=args.recurrent_token_route_fraction,
+            act_halting_threshold=args.act_halting_threshold,
+            act_ponder_loss_weight=args.act_ponder_loss_weight,
+            ouro_entropy_weight=args.ouro_entropy_weight,
+            ouro_q_exit_threshold=args.ouro_q_exit_threshold,
+            mor_router_aux_loss_weight=args.mor_router_aux_loss_weight,
+            mor_update_scale=args.mor_update_scale,
         )
     if kind is Path1VariantKind.REFERENCE_SSM_HYBRID:
         feed_forward_layer_indices = (
@@ -345,7 +498,9 @@ def _build_variant(args: argparse.Namespace, *, parser: argparse.ArgumentParser)
             profile=ReferenceSsmProfile(args.reference_ssm_profile),
             layer_schedule=layer_schedule,
             profile_schedule=(
-                parse_reference_ssm_profile_schedule_spec(args.reference_ssm_profile_schedule)
+                parse_reference_ssm_profile_schedule_spec(
+                    args.reference_ssm_profile_schedule
+                )
                 if args.reference_ssm_profile_schedule
                 else None
             ),
@@ -356,6 +511,15 @@ def _build_variant(args: argparse.Namespace, *, parser: argparse.ArgumentParser)
             eml_slot_count=args.eml_slot_count,
             eml_tree_depth=args.eml_tree_depth,
             eml_route_fraction=args.eml_route_fraction,
+            attention_profile=AttentionProfile(args.attention_profile),
+            depth_memory_layers=args.depth_memory_layers,
+            token_routing_profile=TokenRoutingProfile(args.token_routing_profile),
+            token_route_fraction=args.token_route_fraction,
+            token_routing_layer_indices=(
+                parse_layer_index_spec(args.token_routing_layer_indices)
+                if args.token_routing_layer_indices
+                else None
+            ),
         )
     feed_forward_layer_indices = (
         parse_layer_index_spec(args.feed_forward_layer_indices)
@@ -370,23 +534,73 @@ def _build_variant(args: argparse.Namespace, *, parser: argparse.ArgumentParser)
         readout_mode=PrimitiveReadoutMode(args.primitive_readout_profile),
         norm_mode=PrimitiveNormMode(args.primitive_norm_profile),
         wrapper_mode=PrimitiveWrapperMode(args.primitive_wrapper_profile),
-        state_transform_mode=PrimitiveStateTransformMode(args.primitive_state_transform_profile),
+        state_transform_mode=PrimitiveStateTransformMode(
+            args.primitive_state_transform_profile
+        ),
         layer_schedule=layer_schedule,
         feed_forward_profile=FeedForwardProfile(args.feed_forward_profile),
         feed_forward_layer_indices=feed_forward_layer_indices,
         eml_slot_count=args.eml_slot_count,
         eml_tree_depth=args.eml_tree_depth,
         eml_route_fraction=args.eml_route_fraction,
+        attention_profile=AttentionProfile(args.attention_profile),
+        depth_memory_layers=args.depth_memory_layers,
+        token_routing_profile=TokenRoutingProfile(args.token_routing_profile),
+        token_route_fraction=args.token_route_fraction,
+        token_routing_layer_indices=(
+            parse_layer_index_spec(args.token_routing_layer_indices)
+            if args.token_routing_layer_indices
+            else None
+        ),
     )
 
 
 def _implementation_kind_for_variant(variant, *, primitive_runtime_backend: str) -> str:
     if variant.kind is Path1VariantKind.ATTENTION_ONLY:
+        if variant.token_routing_profile is not TokenRoutingProfile.NONE:
+            return f"python_attention_{variant.token_routing_profile.value.replace('-', '_')}"
+        if (
+            variant.recurrent_token_routing_profile
+            is not RecurrentTokenRoutingProfile.NONE
+        ):
+            return f"python_attention_parcae_{variant.recurrent_token_routing_profile.value.replace('-', '_')}"
+        if variant.scaffold_profile in {
+            Path1ScaffoldProfile.PARCAE_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_BX_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_THIN_CONTROL_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_THIN_GATE_CONTROL_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_QUARTER_CONTROL_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_THIN_VALUE_CONTROL_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_THIN_GATE_BASEBLEND_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_THIN_BASEBLEND_CONTROL_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_MOD_GATE_BIAS_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_P20_MOD_VALUE_SCALE_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.FIXED_LOOPED_LM,
+            Path1ScaffoldProfile.LOOPED_ADDITIVE_INPUT,
+            Path1ScaffoldProfile.HUGINN_ADAPTER_RECURRENCE,
+            Path1ScaffoldProfile.UNIVERSAL_TRANSFORMER,
+            Path1ScaffoldProfile.UNIVERSAL_TRANSFORMER_ACT,
+            Path1ScaffoldProfile.OURO_LEARNED_EXIT,
+            Path1ScaffoldProfile.RRT_CYCLE,
+            Path1ScaffoldProfile.MOR_EXPERT_CHOICE,
+        }:
+            return (
+                f"python_attention_{variant.scaffold_profile.value.replace('-', '_')}"
+            )
+        if variant.attention_profile is not AttentionProfile.STANDARD:
+            return (
+                f"python_attention_{variant.attention_profile.value.replace('-', '_')}"
+            )
         if variant.feed_forward_profile is not FeedForwardProfile.STANDARD:
             return f"python_attention_{variant.feed_forward_profile.value.replace('-', '_')}"
+        if variant.recurrent_halting_profile is not RecurrentHaltingProfile.FIXED:
+            return f"python_attention_parcae_{variant.recurrent_halting_profile.value.replace('-', '_')}"
         return "python_attention_sdpa"
     if variant.kind is Path1VariantKind.REFERENCE_SSM_HYBRID:
-        profiles = variant.reference_ssm_profile_schedule or (variant.reference_ssm_profile,)
+        profiles = variant.reference_ssm_profile_schedule or (
+            variant.reference_ssm_profile,
+        )
         if len(set(profiles)) > 1:
             return "python_reference_ssm_profile_scheduled"
         if variant.reference_ssm_profile.is_composite:
@@ -398,7 +612,9 @@ def _implementation_kind_for_variant(variant, *, primitive_runtime_backend: str)
         if variant.reference_ssm_profile.is_fla_gdnp_control_conditioned:
             return "python_reference_ssm_gdnp_fla_control_tiny"
         if variant.reference_ssm_profile.is_fla_gdnp_compatible:
-            law = variant.reference_ssm_profile.fla_gdnp_compatible_law.replace("-", "_")
+            law = variant.reference_ssm_profile.fla_gdnp_compatible_law.replace(
+                "-", "_"
+            )
             return f"python_reference_ssm_gdnp_fla_compatible_{law}"
         if variant.reference_ssm_profile.is_gdnp_fused:
             law = variant.reference_ssm_profile.gdnp_fused_law.replace("-", "_")

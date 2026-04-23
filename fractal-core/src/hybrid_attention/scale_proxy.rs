@@ -136,8 +136,8 @@ pub fn scale_proxy_one_shot_over_attention_only_variant() -> AttentionOnlyScaleP
     }
 }
 
-pub fn scale_proxy_recurrent_over_attention_only_variant()
--> AttentionOnlyRecurrentScaleProxyVariantSpec {
+pub fn scale_proxy_recurrent_over_attention_only_variant(
+) -> AttentionOnlyRecurrentScaleProxyVariantSpec {
     scale_proxy_recurrent_over_attention_only_variant_with_router(
         RecurrentRouterSpec::minimal_dense_gru(),
     )
@@ -179,12 +179,9 @@ impl<B: Backend> TwoChannelHiddenStateRouter<B> {
             ));
         }
         Ok(Self {
-            route_projection: StructuredProjectionConfig::new(
-                d_model,
-                SCALE_PROXY_CHANNEL_COUNT,
-            )
-            .with_layout_policy(ProjectionLayoutPolicy::OutputByInput)
-            .init(device),
+            route_projection: StructuredProjectionConfig::new(d_model, SCALE_PROXY_CHANNEL_COUNT)
+                .with_layout_policy(ProjectionLayoutPolicy::OutputByInput)
+                .init(device),
         })
     }
 
@@ -254,7 +251,10 @@ impl<B: Backend> TwoChannelHiddenStateRecurrentRouter<B> {
         })
     }
 
-    fn routing_probe(&self, hidden: Tensor<B, 3>) -> Result<ScaleProxyRoutingProbe<B>, FractalError> {
+    fn routing_probe(
+        &self,
+        hidden: Tensor<B, 3>,
+    ) -> Result<ScaleProxyRoutingProbe<B>, FractalError> {
         let [batch_size, seq_len, _width] = hidden.dims();
         let router = &self.contract;
         let token_state = self.token_state_projection.forward(hidden);
@@ -366,11 +366,9 @@ impl<B: Backend> AttentionOnlyScaleProxyModel<B> {
                 .forward(TransformerEncoderInput::new(hidden).mask_attn(mask.clone())),
             probe.final_weights,
         );
-        Ok(self.output.forward(forward_layers(
-            mixed,
-            &self.shared_suffix_layers,
-            mask,
-        )))
+        Ok(self
+            .output
+            .forward(forward_layers(mixed, &self.shared_suffix_layers, mask)))
     }
 
     pub fn vocab_size(&self) -> usize {
@@ -455,11 +453,9 @@ impl<B: Backend> AttentionOnlyRecurrentScaleProxyModel<B> {
                 .forward(TransformerEncoderInput::new(hidden).mask_attn(mask.clone())),
             probe.final_weights,
         );
-        Ok(self.output.forward(forward_layers(
-            mixed,
-            &self.shared_suffix_layers,
-            mask,
-        )))
+        Ok(self
+            .output
+            .forward(forward_layers(mixed, &self.shared_suffix_layers, mask)))
     }
 
     pub fn vocab_size(&self) -> usize {
@@ -575,7 +571,10 @@ fn mix_expert_outputs<B: Backend>(
 ) -> Tensor<B, 3> {
     let [batch_size, seq_len, width] = expert_a.dims();
     debug_assert_eq!(expert_b.dims(), [batch_size, seq_len, width]);
-    debug_assert_eq!(weights.dims(), [batch_size, seq_len, SCALE_PROXY_CHANNEL_COUNT]);
+    debug_assert_eq!(
+        weights.dims(),
+        [batch_size, seq_len, SCALE_PROXY_CHANNEL_COUNT]
+    );
     let stacked = Tensor::cat(
         vec![
             expert_a.reshape([batch_size, seq_len, 1, width]),
@@ -593,8 +592,8 @@ fn mix_expert_outputs<B: Backend>(
 
 #[cfg(test)]
 mod tests {
-    use burn::{backend::Candle, module::Module};
     use burn::tensor::{Int, Tensor};
+    use burn::{backend::Candle, module::Module};
 
     use super::{
         build_attention_only_recurrent_scale_proxy_model, build_attention_only_scale_proxy_model,
@@ -605,8 +604,8 @@ mod tests {
     };
     use crate::{
         build_attention_only_graph_of_experts_model,
-        goe_over_attention_only_variant_with_controller,
-        phase1_hybrid_attention_baseline_matrix, GraphOfExpertsControllerSpec,
+        goe_over_attention_only_variant_with_controller, phase1_hybrid_attention_baseline_matrix,
+        GraphOfExpertsControllerSpec,
     };
 
     type TestBackend = Candle<f32, i64>;
@@ -617,7 +616,10 @@ mod tests {
         let variant: AttentionOnlyScaleProxyVariantSpec =
             scale_proxy_one_shot_over_attention_only_variant();
         assert_eq!(variant.base_variant, matrix.attention_only);
-        assert_eq!(variant.expert_layer_index, DEFAULT_SCALE_PROXY_EXPERT_LAYER_INDEX);
+        assert_eq!(
+            variant.expert_layer_index,
+            DEFAULT_SCALE_PROXY_EXPERT_LAYER_INDEX
+        );
     }
 
     #[test]
@@ -627,7 +629,10 @@ mod tests {
         let model =
             build_attention_only_scale_proxy_model::<TestBackend>(257, &variant, &device).unwrap();
         let input = Tensor::<TestBackend, 2, Int>::zeros([2, 8], &device);
-        assert_eq!(model.forward_logits(input.clone()).unwrap().dims(), [2, 8, 257]);
+        assert_eq!(
+            model.forward_logits(input.clone()).unwrap().dims(),
+            [2, 8, 257]
+        );
         let probe = model.routing_probe(input).unwrap();
         assert_eq!(probe.initial_weights.dims(), [2, 8, 2]);
         assert_eq!(probe.round_weights.len(), 1);
@@ -638,12 +643,14 @@ mod tests {
         let device = Default::default();
         let variant: AttentionOnlyRecurrentScaleProxyVariantSpec =
             scale_proxy_recurrent_over_attention_only_variant();
-        let model = build_attention_only_recurrent_scale_proxy_model::<TestBackend>(
-            257, &variant, &device,
-        )
-        .unwrap();
+        let model =
+            build_attention_only_recurrent_scale_proxy_model::<TestBackend>(257, &variant, &device)
+                .unwrap();
         let input = Tensor::<TestBackend, 2, Int>::zeros([2, 8], &device);
-        assert_eq!(model.forward_logits(input.clone()).unwrap().dims(), [2, 8, 257]);
+        assert_eq!(
+            model.forward_logits(input.clone()).unwrap().dims(),
+            [2, 8, 257]
+        );
         let probe = model.routing_probe(input).unwrap();
         assert_eq!(probe.final_weights.dims(), [2, 8, 2]);
         assert_eq!(probe.round_weights.len(), variant.router.round_count);
@@ -652,13 +659,12 @@ mod tests {
     #[test]
     fn scale_proxy_model_uses_fewer_params_than_whole_backbone_dreegmor() {
         let device = Default::default();
-        let scale_proxy =
-            build_attention_only_scale_proxy_model::<TestBackend>(
-                257,
-                &scale_proxy_one_shot_over_attention_only_variant(),
-                &device,
-            )
-            .unwrap();
+        let scale_proxy = build_attention_only_scale_proxy_model::<TestBackend>(
+            257,
+            &scale_proxy_one_shot_over_attention_only_variant(),
+            &device,
+        )
+        .unwrap();
         let whole_backbone = build_attention_only_graph_of_experts_model::<TestBackend>(
             257,
             &goe_over_attention_only_variant_with_controller(

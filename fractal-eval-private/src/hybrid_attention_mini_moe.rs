@@ -1,8 +1,4 @@
-use std::{
-    fs,
-    path::PathBuf,
-    time::Instant,
-};
+use std::{fs, path::PathBuf, time::Instant};
 
 use burn::{
     nn::loss::CrossEntropyLossConfig,
@@ -29,9 +25,8 @@ use crate::{
     ByteLevelSmokeCorpusSource, ByteLevelVocabularyContract, V2SmokeCorpusStats,
     V2SmokeEvalMetrics, V2SmokeTrainModel, V2SmokeTrainStepReport, BYTE_LEVEL_PAD_TOKEN,
     BYTE_LEVEL_VOCAB_SIZE, DEFAULT_V3A_SMOKE_BATCH_SIZE, DEFAULT_V3A_SMOKE_EVAL_BATCHES,
-    DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY, DEFAULT_V3A_SMOKE_LEARNING_RATE,
-    DEFAULT_V3A_SMOKE_SEED, DEFAULT_V3A_SMOKE_SEQ_LEN, DEFAULT_V3A_SMOKE_TRAIN_STEPS,
-    DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
+    DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY, DEFAULT_V3A_SMOKE_LEARNING_RATE, DEFAULT_V3A_SMOKE_SEED,
+    DEFAULT_V3A_SMOKE_SEQ_LEN, DEFAULT_V3A_SMOKE_TRAIN_STEPS, DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

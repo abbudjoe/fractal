@@ -17,9 +17,8 @@ use fractal_eval_private::{
     HybridAttentionExecutionBackend, HybridAttentionSmokeTrainConfig,
     RecurrentScaleProxySmokeTrainConfig, ScaleProxyRoutingSummary, ScaleProxySmokeTrainConfig,
     DEFAULT_V3A_SMOKE_BATCH_SIZE, DEFAULT_V3A_SMOKE_EVAL_BATCHES,
-    DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY, DEFAULT_V3A_SMOKE_LEARNING_RATE,
-    DEFAULT_V3A_SMOKE_SEED, DEFAULT_V3A_SMOKE_SEQ_LEN, DEFAULT_V3A_SMOKE_TRAIN_STEPS,
-    DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
+    DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY, DEFAULT_V3A_SMOKE_LEARNING_RATE, DEFAULT_V3A_SMOKE_SEED,
+    DEFAULT_V3A_SMOKE_SEQ_LEN, DEFAULT_V3A_SMOKE_TRAIN_STEPS, DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
 };
 use serde::Serialize;
 
@@ -260,7 +259,9 @@ fn resolve_corpus_source(
         default_v3a_fineweb_stage0_canary_corpus_source(repo_root)
             .map_err(|error| format!("failed to resolve default v3a FineWeb smoke corpus: {error}"))
     } else {
-        Ok(ByteLevelSmokeCorpusSource::raw_files(args.corpus_paths.clone()))
+        Ok(ByteLevelSmokeCorpusSource::raw_files(
+            args.corpus_paths.clone(),
+        ))
     }
 }
 

@@ -127,6 +127,90 @@ class JaxTpuContractTests(unittest.TestCase):
                     "selected-mlp-sidecar-control",
                 )
 
+    def test_path1_scale_leader_candidates_render_explicit_contracts(self) -> None:
+        cases = {
+            "causal-topk-route50-layer1": (
+                "fractal_path1_route_fraction=0.5",
+                "fractal_path1_route_layers=1",
+                "selected-layer-causal-prefix-topk-routing",
+            ),
+            "mod-train-topc-route50-layer1": (
+                "fractal_path1_route_fraction=0.5",
+                "fractal_path1_route_layers=1",
+                "selected-layer-mod-topc-routing",
+            ),
+            "fixed-looped-lm": (
+                "fractal_path1_loop_count=4",
+                "fractal_path1_shared_layers=2",
+                "decoder-stack-shared-block-loop",
+            ),
+            "input-injected-looped-lm": (
+                "fractal_path1_loop_count=4",
+                "fractal_path1_shared_layers=2",
+                "decoder-stack-shared-block-input-injection",
+            ),
+            "universal-transformer-act": (
+                "fractal_path1_loop_count=4",
+                "fractal_path1_act_threshold=0.99",
+                "decoder-stack-universal-transformer-act",
+            ),
+            "mor-expert-choice": (
+                "fractal_path1_route_fraction=0.25",
+                "fractal_path1_loop_count=3",
+                "shared-recursive-stack-expert-choice-routing",
+            ),
+            "d3-route25-accel": (
+                "fractal_path1_route_fraction=0.25",
+                "fractal_path1_accel_threshold=0.6",
+                "middle-loop-token-selective-recurrent-depth",
+            ),
+        }
+        for slug, expected in cases.items():
+            with self.subTest(slug=slug):
+                spec = JaxTpuBenchmarkSpec(
+                    run_name=f"{slug}-scout",
+                    base_output_directory="gs://fractal-maxtext-runs",
+                    candidate=get_candidate(slug),
+                    shape=JaxTpuModelShape(vocab_size=32_000, sequence_length=256, d_model=128, num_layers=8, num_heads=4),
+                )
+
+                rendered = render_shell_command(build_maxtext_command(spec, allow_patched_maxtext=True))
+
+                self.assertIn(f"fractal_candidate={slug}", rendered)
+                self.assertIn("scan_layers=false", rendered)
+                self.assertIn("fractal_path1_diagnostics=false", rendered)
+                for text in expected[:-1]:
+                    self.assertIn(text, rendered)
+                self.assertEqual(spec.candidate.kernel_contract.fusion_boundary, expected[-1])
+
+    def test_path1_scale_leader_patch_is_explicit_about_reference_lowerings(self) -> None:
+        patch_text = Path("scripts/patch_maxtext_rgrp.py").read_text()
+        runner_text = Path("scripts/run_maxtext_path1_scale_leaders_tpu.sh").read_text()
+
+        self.assertIn("SUPPORTED_PATH1_SCALE_PROFILES", patch_text)
+        self.assertIn('"causal-topk-route50-layer1"', patch_text)
+        self.assertIn('"mod-train-topc-route50-layer1"', patch_text)
+        self.assertIn('"fixed-looped-lm"', patch_text)
+        self.assertIn('"input-injected-looped-lm"', patch_text)
+        self.assertIn('"universal-transformer-act"', patch_text)
+        self.assertIn('"mor-expert-choice"', patch_text)
+        self.assertIn('"d3-route25-accel"', patch_text)
+        self.assertIn("causal_prefix_topk_mask", patch_text)
+        self.assertIn("full_topc_indices", patch_text)
+        self.assertIn("route_selected_only_update", patch_text)
+        self.assertIn("compute_proxy_dense_block", patch_text)
+        self.assertIn("def _fractal_apply_path1_scale_profile(", patch_text)
+        self.assertIn("is_path1_scale_profile(cfg.fractal_candidate)", patch_text)
+        self.assertIn("collect_path1_diagnostics(intermediate_outputs)", patch_text)
+        self.assertIn("causal-topk-route50-layer1", runner_text)
+        self.assertIn("mod-train-topc-route50-layer1", runner_text)
+        self.assertIn("fixed-looped-lm", runner_text)
+        self.assertIn("input-injected-looped-lm", runner_text)
+        self.assertIn("universal-transformer-act", runner_text)
+        self.assertIn("mor-expert-choice", runner_text)
+        self.assertIn("d3-route25-accel", runner_text)
+        self.assertIn('"fractal_path1_diagnostics=${PATH1_DIAGNOSTICS}"', runner_text)
+
     def test_parcae_rgrp_control_candidate_matches_looped_scaffold_contract(self) -> None:
         spec = JaxTpuBenchmarkSpec(
             run_name="parcae-rgrp-scout",
@@ -149,6 +233,10 @@ class JaxTpuContractTests(unittest.TestCase):
         self.assertIn("fractal_parcae_mu_bwd=2", rendered)
         self.assertIn("fractal_parcae_discretization=stable-exp", rendered)
         self.assertIn("fractal_parcae_control_diagnostics=false", rendered)
+        self.assertIn("fractal_parcae_control_mode=gate-value", rendered)
+        self.assertIn("fractal_parcae_control_bottleneck_dim=0", rendered)
+        self.assertIn("fractal_parcae_control_gate_blend=0.0", rendered)
+        self.assertIn("fractal_parcae_control_value_scale=1.0", rendered)
         self.assertIn("fractal_rgrp_state_transform=block-diagonal-4-masked-dense", rendered)
         self.assertIn("fractal_rgrp_scan_unroll=3", rendered)
         self.assertTrue(spec.candidate.kernel_contract.carries_state_across_tokens)
@@ -170,15 +258,47 @@ class JaxTpuContractTests(unittest.TestCase):
         self.assertIn("fractal_candidate=parcae-rgrp-control-looped-attention", rendered)
         self.assertIn("fractal_parcae_control_diagnostics=true", rendered)
 
+    def test_parcae_rgrp_control_ablation_overrides_render_explicitly(self) -> None:
+        spec = JaxTpuBenchmarkSpec(
+            run_name="parcae-rgrp-thin-gate",
+            base_output_directory="gs://fractal-maxtext-runs",
+            candidate=get_candidate("parcae-rgrp-control-looped-attention"),
+            extra_overrides={
+                "fractal_parcae_control_mode": "gate-only",
+                "fractal_parcae_control_bottleneck_dim": 64,
+                "fractal_parcae_control_gate_blend": 0.5,
+                "fractal_parcae_control_value_scale": 0.5,
+            },
+        )
+
+        rendered = render_shell_command(build_maxtext_command(spec, allow_patched_maxtext=True))
+
+        self.assertIn("fractal_candidate=parcae-rgrp-control-looped-attention", rendered)
+        self.assertIn("fractal_parcae_control_mode=gate-only", rendered)
+        self.assertIn("fractal_parcae_control_bottleneck_dim=64", rendered)
+        self.assertIn("fractal_parcae_control_gate_blend=0.5", rendered)
+        self.assertIn("fractal_parcae_control_value_scale=0.5", rendered)
+
     def test_parcae_rgrp_control_diagnostics_patch_is_gated_and_scalar_only(self) -> None:
         patch_text = Path("scripts/patch_maxtext_rgrp.py").read_text()
         runner_text = Path("scripts/run_maxtext_parcae_proof_ladder_tpu.sh").read_text()
 
         self.assertIn("fractal_parcae_control_diagnostics: bool = Field(False", patch_text)
+        self.assertIn("fractal_parcae_control_mode: str = Field(\"gate-value\"", patch_text)
+        self.assertIn("fractal_parcae_control_bottleneck_dim: int = Field(0", patch_text)
+        self.assertIn("fractal_parcae_control_gate_blend: float = Field(0.0", patch_text)
+        self.assertIn("fractal_parcae_control_value_scale: float = Field(1.0", patch_text)
+        self.assertIn("SUPPORTED_PARCAE_CONTROL_MODES", patch_text)
         self.assertIn("PARCAE_CONTROL_DIAGNOSTIC_BASE_METRICS", patch_text)
         self.assertIn("collect_parcae_control_diagnostics(intermediate_outputs)", patch_text)
         self.assertIn("cfg.fractal_parcae_control_diagnostics", patch_text)
         self.assertIn('cfg.fractal_candidate in ("parcae-rgrp-control-looped-attention"', patch_text)
+        self.assertIn("seen = jnp.asarray(False, dtype=jnp.bool_)", patch_text)
+        self.assertIn("diagnostics_nan_or_inf_seen = jnp.asarray(False, dtype=jnp.bool_)", patch_text)
+        self.assertIn('self, "stability/nan_or_inf_seen", diagnostics_nan_or_inf_seen.astype(jnp.float32)', patch_text)
+        self.assertIn("fractal_parcae_rgrp_control_down_projection", patch_text)
+        self.assertIn('control_mode != "value-only"', patch_text)
+        self.assertIn('control_mode != "gate-only"', patch_text)
         self.assertIn("sow_parcae_control_diagnostic", patch_text)
         self.assertIn('"controller/gate_saturation_low_frac"', patch_text)
         self.assertIn('"controller/injection_delta_to_loop_input_ratio"', patch_text)
@@ -188,7 +308,23 @@ class JaxTpuContractTests(unittest.TestCase):
         self.assertIn('"stability/nan_or_inf_seen"', patch_text)
         self.assertIn('metric_name.startswith(("evaluation/controller/"', patch_text)
         self.assertIn('PARCAE_CONTROL_DIAGNOSTICS="${PARCAE_CONTROL_DIAGNOSTICS:-false}"', runner_text)
+        self.assertIn('PARCAE_CONTROL_MODE="${PARCAE_CONTROL_MODE:-gate-value}"', runner_text)
+        self.assertIn('PARCAE_CONTROL_BOTTLENECK_DIM="${PARCAE_CONTROL_BOTTLENECK_DIM:-0}"', runner_text)
+        self.assertIn('PARCAE_CONTROL_GATE_BLEND="${PARCAE_CONTROL_GATE_BLEND:-0.0}"', runner_text)
+        self.assertIn('PARCAE_CONTROL_VALUE_SCALE="${PARCAE_CONTROL_VALUE_SCALE:-1.0}"', runner_text)
         self.assertIn('"fractal_parcae_control_diagnostics=${PARCAE_CONTROL_DIAGNOSTICS}"', runner_text)
+        self.assertIn('"fractal_parcae_control_mode=${control_mode}"', runner_text)
+        self.assertIn('"fractal_parcae_control_bottleneck_dim=${control_bottleneck_dim}"', runner_text)
+        self.assertIn('"fractal_parcae_control_gate_blend=${control_gate_blend}"', runner_text)
+        self.assertIn('"fractal_parcae_control_value_scale=${control_value_scale}"', runner_text)
+        self.assertIn("parcae-rgrp-control-thin", runner_text)
+        self.assertIn("parcae-rgrp-control-vscale0p5", runner_text)
+        self.assertIn("parcae-rgrp-control-thin-vscale0p5", runner_text)
+        self.assertIn("parcae-rgrp-control-thin-gate", runner_text)
+        self.assertIn("parcae-rgrp-control-quarter", runner_text)
+        self.assertIn("parcae-rgrp-control-thin-value", runner_text)
+        self.assertIn("parcae-rgrp-control-thin-gate-baseblend", runner_text)
+        self.assertIn("parcae-rgrp-control-thin-baseblend", runner_text)
 
     def test_parcae_controls_keep_same_looped_scaffold_without_rgrp_state(self) -> None:
         for slug in ("parcae-looped-attention", "parcae-bx-looped-attention"):

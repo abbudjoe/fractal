@@ -3,8 +3,8 @@ pub mod config;
 pub mod goe;
 pub mod goe_recurrent;
 pub mod mamba3_baseline;
-pub mod model;
 pub mod mini_moe;
+pub mod model;
 pub mod recurrent_router;
 pub mod scale_proxy;
 
@@ -41,11 +41,11 @@ pub use mamba3_baseline::{
     RustMamba3DerivedShape, RustMamba3Mixer, RustMamba3MixerBlock,
     RustMamba3ReferenceHybridAttentionModel, RustMamba3RopeFraction,
 };
+pub use mini_moe::*;
 pub use model::{
     build_attention_only_hybrid_attention_model, build_primitive_hybrid_attention_model,
     AttentionOnlyHybridAttentionModel, HybridAttentionModelShape, PrimitiveHybridAttentionModel,
 };
-pub use mini_moe::*;
 pub use recurrent_router::{
     minimal_recurrent_router_experiment_matrix, RecurrentRouterExperimentVariantKind,
     RecurrentRouterExperimentVariantSpec, RecurrentRouterFeedbackMode,
@@ -59,7 +59,6 @@ pub use scale_proxy::{
     scale_proxy_recurrent_over_attention_only_variant,
     scale_proxy_recurrent_over_attention_only_variant_with_router,
     AttentionOnlyRecurrentScaleProxyModel, AttentionOnlyRecurrentScaleProxyVariantSpec,
-    AttentionOnlyScaleProxyModel, AttentionOnlyScaleProxyVariantSpec,
-    ScaleProxyRoutingProbe, DEFAULT_SCALE_PROXY_EXPERT_LAYER_INDEX,
-    SCALE_PROXY_CHANNEL_COUNT,
+    AttentionOnlyScaleProxyModel, AttentionOnlyScaleProxyVariantSpec, ScaleProxyRoutingProbe,
+    DEFAULT_SCALE_PROXY_EXPERT_LAYER_INDEX, SCALE_PROXY_CHANNEL_COUNT,
 };

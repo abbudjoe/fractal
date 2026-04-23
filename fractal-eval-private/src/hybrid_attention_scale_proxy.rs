@@ -33,10 +33,9 @@ use crate::{
     v2_training::{evaluate_model, load_byte_level_smoke_batches_from_source, next_token_loss},
     ByteLevelSmokeCorpusSource, ByteLevelVocabularyContract, V2SmokeCorpusStats,
     V2SmokeEvalMetrics, V2SmokeTrainModel, V2SmokeTrainStepReport, BYTE_LEVEL_PAD_TOKEN,
-    BYTE_LEVEL_VOCAB_SIZE, DEFAULT_V3A_SMOKE_BATCH_SIZE,
-    DEFAULT_V3A_SMOKE_EVAL_BATCHES, DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY,
-    DEFAULT_V3A_SMOKE_LEARNING_RATE, DEFAULT_V3A_SMOKE_SEQ_LEN, DEFAULT_V3A_SMOKE_TRAIN_STEPS,
-    DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
+    BYTE_LEVEL_VOCAB_SIZE, DEFAULT_V3A_SMOKE_BATCH_SIZE, DEFAULT_V3A_SMOKE_EVAL_BATCHES,
+    DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY, DEFAULT_V3A_SMOKE_LEARNING_RATE,
+    DEFAULT_V3A_SMOKE_SEQ_LEN, DEFAULT_V3A_SMOKE_TRAIN_STEPS, DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
 };
 
 const SCALE_PROXY_ACTIVE_CHANNEL_MEAN_WEIGHT_FLOOR: f64 = 0.10;
@@ -335,8 +334,11 @@ where
     config.validate()?;
     let model_label = "dreegmor_scale_proxy_attention_only_one_shot";
     let note = attention_only_scale_proxy_note(&config.variant);
-    let model =
-        build_attention_only_scale_proxy_model::<B>(config.vocabulary.vocab_size, &config.variant, device)?;
+    let model = build_attention_only_scale_proxy_model::<B>(
+        config.vocabulary.vocab_size,
+        &config.variant,
+        device,
+    )?;
     let artifacts = train_scale_proxy_model(
         model,
         &config.corpus_source,
@@ -564,10 +566,9 @@ where
             }
             route_entropy_bits_sum += route_entropy_bits(final_pair);
             winner_margin_sum += f64::from((final_pair[0] - final_pair[1]).abs());
-            controller_adjustment_l1_sum +=
-                (f64::from((initial_pair[0] - final_pair[0]).abs())
-                    + f64::from((initial_pair[1] - final_pair[1]).abs()))
-                    / SCALE_PROXY_CHANNEL_COUNT as f64;
+            controller_adjustment_l1_sum += (f64::from((initial_pair[0] - final_pair[0]).abs())
+                + f64::from((initial_pair[1] - final_pair[1]).abs()))
+                / SCALE_PROXY_CHANNEL_COUNT as f64;
             sampled_tokens += 1;
         }
     }

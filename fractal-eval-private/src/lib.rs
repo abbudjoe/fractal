@@ -32,7 +32,9 @@ pub use hybrid_attention_goe::{
     RecurrentGraphOfExpertsSmokeTrainConfig, RecurrentGraphOfExpertsSmokeTrainReport,
     DEFAULT_GOE_RESULTS_LEDGER_PATH,
 };
-pub use hybrid_attention_mini_moe::{run_mini_moe_smoke_train, MiniMoeSmokeTrainConfig, MiniMoeSmokeTrainReport};
+pub use hybrid_attention_mini_moe::{
+    run_mini_moe_smoke_train, MiniMoeSmokeTrainConfig, MiniMoeSmokeTrainReport,
+};
 pub use hybrid_attention_scale_proxy::{
     run_attention_only_recurrent_scale_proxy_smoke_train,
     run_attention_only_scale_proxy_smoke_train, RecurrentScaleProxySmokeTrainConfig,

@@ -32,6 +32,11 @@ MAX_LOOP_COUNT="${MAX_LOOP_COUNT:-0}"
 PERSEQ_MAX_LOOP_COUNT="${PERSEQ_MAX_LOOP_COUNT:-4}"
 PARCAE_DISCRETIZATION="${PARCAE_DISCRETIZATION:-stable-exp}"
 PARCAE_CONTROL_DIAGNOSTICS="${PARCAE_CONTROL_DIAGNOSTICS:-false}"
+PARCAE_CONTROL_MODE="${PARCAE_CONTROL_MODE:-gate-value}"
+PARCAE_CONTROL_BOTTLENECK_DIM="${PARCAE_CONTROL_BOTTLENECK_DIM:-0}"
+PARCAE_CONTROL_GATE_BLEND="${PARCAE_CONTROL_GATE_BLEND:-0.0}"
+PARCAE_CONTROL_BASE_BLEND="${PARCAE_CONTROL_BASE_BLEND:-0.5}"
+PARCAE_CONTROL_VALUE_SCALE="${PARCAE_CONTROL_VALUE_SCALE:-1.0}"
 
 BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://fractal-maxtext-runs-81f2add4}"
 HF_PATH="${HF_PATH:-Salesforce/wikitext}"
@@ -126,6 +131,10 @@ run_parcae() {
   local candidate
   local loop_policy="${LOOP_POLICY}"
   local max_loop_count="${MAX_LOOP_COUNT}"
+  local control_mode="${PARCAE_CONTROL_MODE}"
+  local control_bottleneck_dim="${PARCAE_CONTROL_BOTTLENECK_DIM}"
+  local control_gate_blend="${PARCAE_CONTROL_GATE_BLEND}"
+  local control_value_scale="${PARCAE_CONTROL_VALUE_SCALE}"
   case "${lane}" in
     parcae-looped)
       candidate="parcae-looped-attention"
@@ -145,6 +154,44 @@ run_parcae() {
       candidate="parcae-rgrp-control-looped-attention"
       loop_policy="per-sequence"
       max_loop_count="${PERSEQ_MAX_LOOP_COUNT}"
+      ;;
+    parcae-rgrp-control-thin|parcae-p20-control-thin)
+      candidate="parcae-rgrp-control-looped-attention"
+      control_bottleneck_dim="${PARCAE_CONTROL_THIN_DIM:-$((D_MODEL / 2))}"
+      ;;
+    parcae-rgrp-control-vscale0p5|parcae-p20-control-vscale0p5)
+      candidate="parcae-rgrp-control-looped-attention"
+      control_value_scale=0.5
+      ;;
+    parcae-rgrp-control-thin-vscale0p5|parcae-p20-control-thin-vscale0p5)
+      candidate="parcae-rgrp-control-looped-attention"
+      control_bottleneck_dim="${PARCAE_CONTROL_THIN_DIM:-$((D_MODEL / 2))}"
+      control_value_scale=0.5
+      ;;
+    parcae-rgrp-control-thin-gate|parcae-p20-control-thin-gate)
+      candidate="parcae-rgrp-control-looped-attention"
+      control_mode="gate-only"
+      control_bottleneck_dim="${PARCAE_CONTROL_THIN_DIM:-$((D_MODEL / 2))}"
+      ;;
+    parcae-rgrp-control-quarter|parcae-p20-control-quarter)
+      candidate="parcae-rgrp-control-looped-attention"
+      control_bottleneck_dim="${PARCAE_CONTROL_QUARTER_DIM:-$((D_MODEL / 4))}"
+      ;;
+    parcae-rgrp-control-thin-value|parcae-p20-control-thin-value)
+      candidate="parcae-rgrp-control-looped-attention"
+      control_mode="value-only"
+      control_bottleneck_dim="${PARCAE_CONTROL_THIN_DIM:-$((D_MODEL / 2))}"
+      ;;
+    parcae-rgrp-control-thin-gate-baseblend|parcae-p20-control-thin-gate-baseblend)
+      candidate="parcae-rgrp-control-looped-attention"
+      control_mode="gate-only"
+      control_bottleneck_dim="${PARCAE_CONTROL_THIN_DIM:-$((D_MODEL / 2))}"
+      control_gate_blend="${PARCAE_CONTROL_BASE_BLEND}"
+      ;;
+    parcae-rgrp-control-thin-baseblend|parcae-p20-control-thin-baseblend)
+      candidate="parcae-rgrp-control-looped-attention"
+      control_bottleneck_dim="${PARCAE_CONTROL_THIN_DIM:-$((D_MODEL / 2))}"
+      control_gate_blend="${PARCAE_CONTROL_BASE_BLEND}"
       ;;
     *)
       echo "unknown Parcae lane: ${lane}" >&2
@@ -168,6 +215,10 @@ run_parcae() {
     "fractal_parcae_max_loop_count=${max_loop_count}" \
     "fractal_parcae_discretization=${PARCAE_DISCRETIZATION}" \
     "fractal_parcae_control_diagnostics=${PARCAE_CONTROL_DIAGNOSTICS}" \
+    "fractal_parcae_control_mode=${control_mode}" \
+    "fractal_parcae_control_bottleneck_dim=${control_bottleneck_dim}" \
+    "fractal_parcae_control_gate_blend=${control_gate_blend}" \
+    "fractal_parcae_control_value_scale=${control_value_scale}" \
     fractal_rgrp_state_transform=block-diagonal-4-masked-dense \
     fractal_rgrp_scan_unroll=3 \
     fractal_rgrp_projection_mode=sequence \
@@ -181,7 +232,7 @@ for seed in ${SEEDS}; do
       attention)
         run_attention "${seed}"
         ;;
-      parcae-looped|parcae-bx|parcae-bx-perseq|parcae-rgrp-control|parcae-rgrp-control-perseq|parcae-p20-control|parcae-p20-control-perseq)
+      parcae-looped|parcae-bx|parcae-bx-perseq|parcae-rgrp-control|parcae-rgrp-control-perseq|parcae-p20-control|parcae-p20-control-perseq|parcae-rgrp-control-thin|parcae-p20-control-thin|parcae-rgrp-control-vscale0p5|parcae-p20-control-vscale0p5|parcae-rgrp-control-thin-vscale0p5|parcae-p20-control-thin-vscale0p5|parcae-rgrp-control-thin-gate|parcae-p20-control-thin-gate|parcae-rgrp-control-quarter|parcae-p20-control-quarter|parcae-rgrp-control-thin-value|parcae-p20-control-thin-value|parcae-rgrp-control-thin-gate-baseblend|parcae-p20-control-thin-gate-baseblend|parcae-rgrp-control-thin-baseblend|parcae-p20-control-thin-baseblend)
         run_parcae "${lane}" "${seed}"
         ;;
       *)

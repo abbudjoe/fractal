@@ -11,8 +11,8 @@ use burn::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::mamba3_baseline::{SimpleRmsNorm, DEFAULT_RUST_MAMBA3_NORM_EPS};
 use super::common::local_causal_mask;
+use super::mamba3_baseline::{SimpleRmsNorm, DEFAULT_RUST_MAMBA3_NORM_EPS};
 
 use crate::{
     error::FractalError,
@@ -1588,14 +1588,14 @@ mod tests {
     use burn::backend::Candle;
     use burn::tensor::{Int, Tensor};
 
+    use super::super::common::local_causal_mask;
     use super::{
         build_attention_only_hybrid_attention_model, build_primitive_hybrid_attention_model,
-        build_reference_ssm_hybrid_attention_model, rotate_state_pairs,
-        zero_flat_state, P20RotaryStateOutputSequenceMixer, P21WideLatentSequenceMixer,
+        build_reference_ssm_hybrid_attention_model, rotate_state_pairs, zero_flat_state,
+        P20RotaryStateOutputSequenceMixer, P21WideLatentSequenceMixer,
         P22WideLatentReadoutSequenceMixer, P23RotaryCarryBlendReadoutSequenceMixer,
         P2RotaryReadoutSequenceMixer,
     };
-    use super::super::common::local_causal_mask;
     use crate::{
         phase1_hybrid_attention_baseline_matrix, phase1_p20_candidate_variant,
         phase1_p21_candidate_variant, phase1_p22_candidate_variant, phase1_p23_candidate_variant,

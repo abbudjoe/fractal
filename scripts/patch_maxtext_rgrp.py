@@ -50,7 +50,18 @@ SUPPORTED_PARCAE_PROFILES = (
 SUPPORTED_PARCAE_LOOP_POLICIES = ("fixed", "per-sequence")
 SUPPORTED_PARCAE_DEPTH_DISTRIBUTIONS = ("poisson",)
 SUPPORTED_PARCAE_DISCRETIZATIONS = ("stable-exp", "zoh")
+SUPPORTED_PARCAE_CONTROL_MODES = ("gate-value", "gate-only", "value-only")
+SUPPORTED_PATH1_SCALE_PROFILES = (
+    "causal-topk-route50-layer1",
+    "mod-train-topc-route50-layer1",
+    "fixed-looped-lm",
+    "input-injected-looped-lm",
+    "universal-transformer-act",
+    "mor-expert-choice",
+    "d3-route25-accel",
+)
 PARCAE_CONTROL_DIAGNOSTIC_INTERMEDIATE_PREFIX = "fractal_parcae_control_diagnostics/"
+PATH1_DIAGNOSTIC_INTERMEDIATE_PREFIX = "fractal_path1_diagnostics/"
 PARCAE_CONTROL_DIAGNOSTIC_BASE_METRICS = (
     "controller/control_norm_mean",
     "controller/control_norm_rms",
@@ -91,10 +102,10 @@ def _safe_ratio(numerator: jax.Array, denominator: jax.Array) -> jax.Array:
 
 
 def _nan_or_inf_seen(*values: jax.Array) -> jax.Array:
-  seen = jnp.asarray(False)
+  seen = jnp.asarray(False, dtype=jnp.bool_)
   for value in values:
     seen = seen | jnp.any(~jnp.isfinite(_as_f32(value)))
-  return seen.astype(jnp.float32)
+  return seen
 
 
 def sow_parcae_control_diagnostic(module: nn.Module, metric_name: str, value: jax.Array) -> None:
@@ -132,6 +143,87 @@ def collect_parcae_control_diagnostics(intermediate_outputs: dict[str, Any]) -> 
 
 def is_parcae_profile(candidate: str) -> bool:
   return candidate in SUPPORTED_PARCAE_PROFILES
+
+
+def is_path1_scale_profile(candidate: str) -> bool:
+  return candidate in SUPPORTED_PATH1_SCALE_PROFILES
+
+
+def sow_path1_diagnostic(module: nn.Module, metric_name: str, value: jax.Array) -> None:
+  module.sow(
+      "intermediates",
+      PATH1_DIAGNOSTIC_INTERMEDIATE_PREFIX + metric_name,
+      jnp.asarray(value, dtype=jnp.float32),
+  )
+
+
+def collect_path1_diagnostics(intermediate_outputs: dict[str, Any]) -> dict[str, jax.Array]:
+  grouped: dict[str, list[jax.Array]] = {}
+  for path, value in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
+    metric_name = None
+    for path_part in path:
+      key = getattr(path_part, "key", None)
+      if isinstance(key, str) and key.startswith(PATH1_DIAGNOSTIC_INTERMEDIATE_PREFIX):
+        metric_name = key.removeprefix(PATH1_DIAGNOSTIC_INTERMEDIATE_PREFIX)
+        break
+    if metric_name is None:
+      continue
+    grouped.setdefault(metric_name, []).append(jnp.ravel(jnp.asarray(value, dtype=jnp.float32)))
+  return {
+      metric_name: jnp.mean(jnp.concatenate(values))
+      for metric_name, values in grouped.items()
+      if values
+  }
+
+
+def _validate_route_fraction(route_fraction: float) -> None:
+  if route_fraction <= 0.0 or route_fraction > 1.0:
+    raise ValueError(f"fractal_path1_route_fraction must be in (0, 1], got {route_fraction}")
+
+
+def topc_capacity(seq_len: int, route_fraction: float) -> int:
+  _validate_route_fraction(route_fraction)
+  return max(1, min(seq_len, int(seq_len * route_fraction + 0.999999)))
+
+
+def full_topc_indices(router_scores: jax.Array, route_fraction: float) -> jax.Array:
+  if router_scores.ndim != 2:
+    raise ValueError(f"router_scores must have shape [batch, seq], got {router_scores.shape}")
+  capacity = topc_capacity(int(router_scores.shape[1]), route_fraction)
+  _, indices = jax.lax.top_k(router_scores.astype(jnp.float32), capacity)
+  return jnp.sort(indices, axis=-1)
+
+
+def indices_to_mask(indices: jax.Array, seq_len: int) -> jax.Array:
+  token_positions = jnp.arange(seq_len, dtype=indices.dtype)
+  return jnp.any(indices[..., None] == token_positions.reshape(1, 1, seq_len), axis=1)
+
+
+def full_topc_mask(router_scores: jax.Array, route_fraction: float) -> jax.Array:
+  return indices_to_mask(full_topc_indices(router_scores, route_fraction), int(router_scores.shape[1]))
+
+
+def causal_prefix_topk_mask(router_scores: jax.Array, route_fraction: float) -> jax.Array:
+  """Prefix-top-k mask used by the decode-safe Path1 MoD approximation."""
+
+  if router_scores.ndim != 2:
+    raise ValueError(f"router_scores must have shape [batch, seq], got {router_scores.shape}")
+  _validate_route_fraction(route_fraction)
+  seq_len = int(router_scores.shape[1])
+  positions = jnp.arange(seq_len, dtype=jnp.int32)
+  current = router_scores[:, :, None].astype(jnp.float32)
+  prefix = router_scores[:, None, :].astype(jnp.float32)
+  query_pos = positions.reshape(1, seq_len, 1)
+  key_pos = positions.reshape(1, 1, seq_len)
+  in_prefix = key_pos <= query_pos
+  better = prefix > current
+  equal_earlier = (prefix == current) & (key_pos < query_pos)
+  rank = jnp.sum((in_prefix & (better | equal_earlier)).astype(jnp.int32), axis=-1)
+  capacity = jnp.maximum(
+      1,
+      jnp.ceil((positions + 1).astype(jnp.float32) * jnp.asarray(route_fraction, dtype=jnp.float32)).astype(jnp.int32),
+  )
+  return rank < capacity.reshape(1, seq_len)
 
 
 def middle_loop_bounds(total_layers: int) -> tuple[int, int]:
@@ -814,6 +906,18 @@ def patch_types(package_dir: Path) -> None:
         '  fractal_parcae_discretization: str = Field("stable-exp", description="Parcae stable discretization: stable-exp or zoh.")\n',
         '  fractal_parcae_dt_raw_init: float = Field(0.54132485, description="Initial raw step size for ZOH Parcae discretization; softplus(raw)=1.0.")\n',
         '  fractal_parcae_control_diagnostics: bool = Field(False, description="Emit optional scalar diagnostics for the Parcae RGRP-control loop injection path.")\n',
+        '  fractal_parcae_control_mode: str = Field("gate-value", description="Parcae RGRP-control mode: gate-value, gate-only, or value-only.")\n',
+        '  fractal_parcae_control_bottleneck_dim: int = Field(0, description="Optional Parcae RGRP-control bottleneck width. 0 keeps full hidden width.")\n',
+        '  fractal_parcae_control_gate_blend: float = Field(0.0, description="Blend coefficient from controller gate toward native Parcae base gate; 0 uses controller gate only.")\n',
+        '  fractal_parcae_control_value_scale: float = Field(1.0, description="Scale applied to the Parcae RGRP-control value projection before loop injection.")\n',
+        '  fractal_path1_route_fraction: float = Field(0.5, description="Path1 routed-token capacity fraction for TPU scale-leader ports.")\n',
+        '  fractal_path1_route_layers: str | int = Field("1", description="Comma-separated zero-indexed decoder layers for Path1 routed-token ports.")\n',
+        '  fractal_path1_loop_count: int = Field(4, description="Number of shared-block recurrent passes for Path1 looped ports.")\n',
+        '  fractal_path1_shared_layers: int = Field(2, description="Number of shared decoder blocks inside Path1 looped ports.")\n',
+        '  fractal_path1_accel_threshold: float = Field(0.6, description="Normalized acceleration threshold for Path1 recurrent-depth early exit ports.")\n',
+        '  fractal_path1_min_steps: int = Field(2, description="Minimum recurrent steps before Path1 acceleration exit can halt.")\n',
+        '  fractal_path1_act_threshold: float = Field(0.99, description="Universal Transformer ACT halt probability threshold for Path1 TPU ports.")\n',
+        '  fractal_path1_diagnostics: bool = Field(False, description="Emit optional scalar diagnostics for Path1 TPU scale-leader ports.")\n',
     ]
     for field in reversed(fields):
         name = field.strip().split(":", 1)[0]
@@ -980,6 +1084,311 @@ def patch_decoders(package_dir: Path) -> None:
             "                attention_metadata=attention_metadata,\n                layer_idx=lyr,\n                **layer_call_kwargs,\n",
             path=decoders_path,
         )
+    path1_method = '''  def _fractal_apply_path1_scale_profile(
+      self,
+      y,
+      RemattedBlockLayer,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk,
+      slot,
+      page_state,
+      attention_metadata,
+  ):
+    """Apply bounded TPU ports of the surviving Path1 scale-leader families.
+
+    These are explicit reference lowerings. Routed full-sequence top-C uses a
+    selected-only gather/scatter block. Causal prefix top-k preserves the Path1
+    selected-output semantics but is a compute proxy: the dense block is still
+    evaluated before skipped-token identity scatter.
+    """
+
+    cfg = self.config
+    if cfg.scan_layers:
+      raise ValueError("Path1 TPU scale profiles require scan_layers=false so layer identities are explicit.")
+    if cfg.decoder_block != DecoderBlockType.DEFAULT:
+      raise ValueError("Path1 TPU scale profiles currently support decoder_block=default only.")
+    if cfg.using_pipeline_parallelism:
+      raise ValueError("Path1 TPU scale profiles currently do not support pipeline parallelism.")
+    if previous_chunk is not None or page_state is not None or slot is not None:
+      raise ValueError("Path1 TPU scale profiles currently support training/prefill only, not paged decode.")
+
+    width = y.shape[-1]
+    route_fraction = float(cfg.fractal_path1_route_fraction)
+    diagnostics_enabled = bool(cfg.fractal_path1_diagnostics)
+    layer_modules = [
+        RemattedBlockLayer(
+            config=cfg,
+            mesh=self.mesh,
+            name=f"layers_{lyr}",
+            quant=self.quant,
+            model_mode=self.model_mode,
+        )
+        for lyr in range(cfg.num_decoder_layers)
+    ]
+
+    def apply_layer(layer_input, lyr: int, segment_ids=decoder_segment_ids, positions=decoder_positions):
+      layer_output, _ = layer_modules[lyr](
+          layer_input,
+          segment_ids,
+          positions,
+          deterministic,
+          model_mode,
+          previous_chunk=None,
+          page_state=None,
+          slot=None,
+          kv_cache=None,
+          attention_metadata=attention_metadata,
+          layer_idx=lyr,
+      )
+      return layer_output
+
+    def router_scores(hidden, name_suffix: str):
+      router_input = rms_norm(
+          num_features=width,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          name=f"fractal_path1_router_norm_{name_suffix}",
+          epsilon=cfg.normalization_layer_epsilon,
+          kernel_axes=("norm",),
+      )(hidden)
+      return nn.Dense(
+          1,
+          use_bias=True,
+          dtype=cfg.dtype,
+          param_dtype=cfg.weight_dtype,
+          precision=cfg.matmul_precision,
+          kernel_init=nn.initializers.normal(stddev=0.02),
+          bias_init=nn.initializers.zeros,
+          name=f"fractal_path1_router_{name_suffix}",
+      )(router_input).squeeze(-1)
+
+    def route_dense_update(hidden, lyr: int):
+      block_out = apply_layer(hidden, lyr)
+      scores = router_scores(hidden, f"layer_{lyr}")
+      selected_mask = fractal_rgrp.causal_prefix_topk_mask(scores, route_fraction)
+      gate = jax.nn.sigmoid(scores).astype(hidden.dtype)
+      mixed = hidden + gate[..., None] * (block_out - hidden)
+      out = jnp.where(selected_mask[..., None], mixed, hidden)
+      if diagnostics_enabled:
+        fractal_rgrp.sow_path1_diagnostic(self, "routing/selected_fraction", jnp.mean(selected_mask.astype(jnp.float32)))
+        fractal_rgrp.sow_path1_diagnostic(self, "routing/gate_mean", jnp.mean(gate.astype(jnp.float32)))
+        fractal_rgrp.sow_path1_diagnostic(self, "routing/compute_proxy_dense_block", jnp.asarray(1.0, dtype=jnp.float32))
+      return out
+
+    def route_selected_only_update(hidden, lyr: int):
+      scores = router_scores(hidden, f"layer_{lyr}")
+      selected_indices = fractal_rgrp.full_topc_indices(scores, route_fraction)
+      gather_hidden = jnp.take_along_axis(hidden, selected_indices[..., None], axis=1)
+      selected_positions = jnp.take_along_axis(decoder_positions, selected_indices, axis=1)
+      selected_segments = (
+          None
+          if decoder_segment_ids is None
+          else jnp.take_along_axis(decoder_segment_ids, selected_indices, axis=1)
+      )
+      selected_out = apply_layer(gather_hidden, lyr, segment_ids=selected_segments, positions=selected_positions)
+      selected_scores = jnp.take_along_axis(scores, selected_indices, axis=1)
+      selected_gate = jax.nn.sigmoid(selected_scores).astype(hidden.dtype)
+      gated = gather_hidden + selected_gate[..., None] * (selected_out - gather_hidden)
+      batch_index = jnp.arange(hidden.shape[0], dtype=selected_indices.dtype)[:, None]
+      out = hidden.at[batch_index, selected_indices].set(gated)
+      if diagnostics_enabled:
+        selected_mask = fractal_rgrp.indices_to_mask(selected_indices, hidden.shape[1])
+        fractal_rgrp.sow_path1_diagnostic(self, "routing/selected_fraction", jnp.mean(selected_mask.astype(jnp.float32)))
+        fractal_rgrp.sow_path1_diagnostic(self, "routing/gate_mean", jnp.mean(selected_gate.astype(jnp.float32)))
+        fractal_rgrp.sow_path1_diagnostic(self, "routing/compute_proxy_dense_block", jnp.asarray(0.0, dtype=jnp.float32))
+      return out
+
+    if cfg.fractal_candidate in ("causal-topk-route50-layer1", "mod-train-topc-route50-layer1"):
+      for lyr in range(cfg.num_decoder_layers):
+        if fractal_rgrp.layer_enabled(cfg.fractal_path1_route_layers, lyr):
+          if cfg.fractal_candidate == "causal-topk-route50-layer1":
+            y = route_dense_update(y, lyr)
+          else:
+            y = route_selected_only_update(y, lyr)
+        else:
+          y = apply_layer(y, lyr)
+      return y
+
+    if cfg.fractal_candidate == "d3-route25-accel":
+      start, end = fractal_rgrp.middle_loop_bounds(cfg.num_decoder_layers)
+      for lyr in range(start):
+        y = apply_layer(y, lyr)
+      state = y
+      previous_delta = jnp.zeros_like(state)
+      active = jnp.asarray(True)
+      steps_used = jnp.asarray(0.0, dtype=jnp.float32)
+      threshold = jnp.asarray(float(cfg.fractal_path1_accel_threshold), dtype=jnp.float32)
+      min_steps = int(cfg.fractal_path1_min_steps)
+      loop_count = int(cfg.fractal_path1_loop_count)
+      for loop_idx in range(loop_count):
+        candidate = state
+        for lyr in range(start, end):
+          block_out = apply_layer(candidate, lyr)
+          scores = router_scores(candidate, f"d3_{loop_idx}_{lyr}")
+          selected_mask = fractal_rgrp.causal_prefix_topk_mask(scores, route_fraction)
+          gate = jax.nn.sigmoid(scores).astype(candidate.dtype)
+          mixed = candidate + gate[..., None] * (block_out - candidate)
+          candidate = jnp.where(selected_mask[..., None], mixed, candidate)
+          if diagnostics_enabled:
+            fractal_rgrp.sow_path1_diagnostic(self, f"routing/d3_selected_fraction_step_{loop_idx}", jnp.mean(selected_mask.astype(jnp.float32)))
+        delta = candidate - state
+        accel = delta - previous_delta
+        accel_norm = fractal_rgrp._global_l2_norm(accel)
+        denom = fractal_rgrp._global_l2_norm(delta) + fractal_rgrp._global_l2_norm(previous_delta) + jnp.asarray(1.0e-6, dtype=jnp.float32)
+        normalized_accel = accel_norm / denom
+        can_halt = loop_idx + 1 >= min_steps
+        halt_now = active & can_halt & (normalized_accel < threshold)
+        state = jnp.where(active, candidate, state)
+        steps_used = steps_used + active.astype(jnp.float32)
+        active = active & ~halt_now
+        previous_delta = delta
+        if diagnostics_enabled:
+          fractal_rgrp.sow_path1_diagnostic(self, f"loop/acceleration_norm_step_{loop_idx}", normalized_accel)
+          fractal_rgrp.sow_path1_diagnostic(self, f"loop/state_norm_step_{loop_idx}", fractal_rgrp._mean_l2_norm(state))
+      if diagnostics_enabled:
+        fractal_rgrp.sow_path1_diagnostic(self, "loop/steps_used_mean", steps_used)
+        fractal_rgrp.sow_path1_diagnostic(self, "loop/early_exit_fraction", (steps_used < loop_count).astype(jnp.float32))
+      y = state
+      for lyr in range(end, cfg.num_decoder_layers):
+        y = apply_layer(y, lyr)
+      return y
+
+    if cfg.fractal_candidate in ("fixed-looped-lm", "input-injected-looped-lm", "universal-transformer-act", "mor-expert-choice"):
+      shared_layers = int(cfg.fractal_path1_shared_layers)
+      loop_count = int(cfg.fractal_path1_loop_count)
+      if shared_layers <= 0:
+        raise ValueError(f"fractal_path1_shared_layers must be positive, got {shared_layers}")
+      if loop_count <= 0:
+        raise ValueError(f"fractal_path1_loop_count must be positive, got {loop_count}")
+      shared_modules = [
+          RemattedBlockLayer(
+              config=cfg,
+              mesh=self.mesh,
+              name=f"fractal_path1_shared_layers_{shared_idx}",
+              quant=self.quant,
+              model_mode=self.model_mode,
+          )
+          for shared_idx in range(shared_layers)
+      ]
+
+      def apply_shared(layer_input, shared_idx: int, segment_ids=decoder_segment_ids, positions=decoder_positions):
+        layer_output, _ = shared_modules[shared_idx](
+            layer_input,
+            segment_ids,
+            positions,
+            deterministic,
+            model_mode,
+            previous_chunk=None,
+            page_state=None,
+            slot=None,
+            kv_cache=None,
+            attention_metadata=attention_metadata,
+            layer_idx=shared_idx,
+        )
+        return layer_output
+
+      def run_shared_stack(layer_input, segment_ids=decoder_segment_ids, positions=decoder_positions):
+        h = layer_input
+        for shared_idx in range(shared_layers):
+          h = apply_shared(h, shared_idx, segment_ids=segment_ids, positions=positions)
+        return h
+
+      if cfg.fractal_candidate in ("fixed-looped-lm", "input-injected-looped-lm"):
+        prompt = y
+        state = jnp.zeros_like(prompt) if cfg.fractal_candidate == "input-injected-looped-lm" else prompt
+        for loop_idx in range(loop_count):
+          loop_input = state + prompt if cfg.fractal_candidate == "input-injected-looped-lm" else state
+          state = run_shared_stack(loop_input)
+          if diagnostics_enabled:
+            fractal_rgrp.sow_path1_diagnostic(self, f"looped/state_norm_step_{loop_idx}", fractal_rgrp._mean_l2_norm(state))
+        return state
+
+      if cfg.fractal_candidate == "universal-transformer-act":
+        threshold = jnp.asarray(float(cfg.fractal_path1_act_threshold), dtype=jnp.float32)
+        state = y
+        weighted = jnp.zeros_like(y)
+        halting = jnp.zeros(y.shape[:2], dtype=jnp.float32)
+        updates = jnp.zeros(y.shape[:2], dtype=jnp.float32)
+        time_embedding = self.param(
+            "fractal_path1_ut_time_embedding",
+            nn.initializers.normal(stddev=0.02),
+            (loop_count, width),
+            cfg.weight_dtype,
+        )
+        halt_norm = rms_norm(
+            num_features=width,
+            dtype=cfg.dtype,
+            weight_dtype=cfg.weight_dtype,
+            name="fractal_path1_ut_halt_norm",
+            epsilon=cfg.normalization_layer_epsilon,
+            kernel_axes=("norm",),
+        )
+        halt_projection = nn.Dense(
+            1,
+            use_bias=True,
+            dtype=cfg.dtype,
+            param_dtype=cfg.weight_dtype,
+            precision=cfg.matmul_precision,
+            kernel_init=nn.initializers.normal(stddev=0.02),
+            bias_init=nn.initializers.zeros,
+            name="fractal_path1_ut_halt",
+        )
+        for loop_idx in range(loop_count):
+          step_input = state + time_embedding[loop_idx].astype(cfg.dtype).reshape(1, 1, -1)
+          next_state = run_shared_stack(step_input)
+          gate_logits = halt_projection(halt_norm(next_state)).squeeze(-1)
+          p = jax.nn.sigmoid(gate_logits).astype(jnp.float32)
+          still_running = halting < threshold
+          new_halted = still_running & ((halting + p) > threshold)
+          continue_running = still_running & ~new_halted
+          remainder = jnp.maximum(threshold - halting, 0.0)
+          update_weight = jnp.where(new_halted, remainder, jnp.where(continue_running, p, 0.0))
+          if loop_idx == loop_count - 1:
+            update_weight = jnp.where(still_running, 1.0 - halting, update_weight)
+          weighted = weighted + update_weight[..., None].astype(next_state.dtype) * next_state
+          halting = halting + update_weight
+          updates = updates + still_running.astype(jnp.float32)
+          state = next_state
+        if diagnostics_enabled:
+          fractal_rgrp.sow_path1_diagnostic(self, "act/updates_mean", jnp.mean(updates))
+          fractal_rgrp.sow_path1_diagnostic(self, "act/halting_mean", jnp.mean(halting))
+        return weighted
+
+      # MoR expert-choice reference: a shared stack recurs over full-sequence
+      # top-C active tokens, scattering router-weighted updates back into the
+      # full sequence. This preserves the active-token shrinkage semantics but
+      # does not add the paper's router auxiliary loss in this MaxText path.
+      state = y
+      active_mask = jnp.ones(y.shape[:2], dtype=jnp.bool_)
+      for loop_idx in range(loop_count):
+        scores = router_scores(state, f"mor_{loop_idx}")
+        masked_scores = jnp.where(active_mask, scores, jnp.full_like(scores, -1.0e30))
+        selected_indices = fractal_rgrp.full_topc_indices(masked_scores, route_fraction)
+        gather_state = jnp.take_along_axis(state, selected_indices[..., None], axis=1)
+        selected_positions = jnp.take_along_axis(decoder_positions, selected_indices, axis=1)
+        selected_segments = (
+            None
+            if decoder_segment_ids is None
+            else jnp.take_along_axis(decoder_segment_ids, selected_indices, axis=1)
+        )
+        selected_out = run_shared_stack(gather_state, segment_ids=selected_segments, positions=selected_positions)
+        selected_scores = jnp.take_along_axis(scores, selected_indices, axis=1)
+        selected_gate = jax.nn.sigmoid(selected_scores).astype(state.dtype)
+        gated = gather_state + selected_gate[..., None] * (selected_out - gather_state)
+        batch_index = jnp.arange(state.shape[0], dtype=selected_indices.dtype)[:, None]
+        state = state.at[batch_index, selected_indices].set(gated)
+        active_mask = fractal_rgrp.indices_to_mask(selected_indices, state.shape[1])
+        if diagnostics_enabled:
+          fractal_rgrp.sow_path1_diagnostic(self, f"mor/active_fraction_step_{loop_idx}", jnp.mean(active_mask.astype(jnp.float32)))
+          fractal_rgrp.sow_path1_diagnostic(self, f"mor/gate_mean_step_{loop_idx}", jnp.mean(selected_gate.astype(jnp.float32)))
+      return state
+
+    raise ValueError(f"unsupported Path1 TPU scale profile: {cfg.fractal_candidate!r}")
+
+'''
     parcae_method = '''  def _fractal_apply_parcae_loop(
       self,
       y,
@@ -1089,7 +1498,11 @@ def patch_decoders(package_dir: Path) -> None:
         cfg.fractal_parcae_control_diagnostics
         and cfg.fractal_candidate in ("parcae-rgrp-control-looped-attention", "parcae-p20-control-looped-attention")
     )
-    diagnostics_nan_or_inf_seen = jnp.asarray(False)
+    diagnostics_nan_or_inf_seen = jnp.asarray(False, dtype=jnp.bool_)
+    control_mode = cfg.fractal_parcae_control_mode
+    control_gate_blend = cfg.fractal_parcae_control_gate_blend
+    control_bottleneck_dim = cfg.fractal_parcae_control_bottleneck_dim
+    control_value_scale = cfg.fractal_parcae_control_value_scale
 
     if cfg.fractal_candidate == "parcae-looped-attention":
       injection_logit = self.param(
@@ -1123,8 +1536,41 @@ def patch_decoders(package_dir: Path) -> None:
           )(loop_input)
       )
     elif cfg.fractal_candidate in ("parcae-rgrp-control-looped-attention", "parcae-p20-control-looped-attention"):
+      if control_mode not in fractal_rgrp.SUPPORTED_PARCAE_CONTROL_MODES:
+        raise ValueError(
+            f"fractal_parcae_control_mode must be one of {fractal_rgrp.SUPPORTED_PARCAE_CONTROL_MODES}, "
+            f"got {control_mode!r}"
+        )
+      if control_bottleneck_dim < 0:
+        raise ValueError(f"fractal_parcae_control_bottleneck_dim must be non-negative, got {control_bottleneck_dim}")
+      if control_gate_blend < 0.0 or control_gate_blend > 1.0:
+        raise ValueError(f"fractal_parcae_control_gate_blend must be in [0, 1], got {control_gate_blend}")
+      if control_value_scale <= 0.0:
+        raise ValueError(f"fractal_parcae_control_value_scale must be greater than zero, got {control_value_scale}")
+      control_width = control_bottleneck_dim or width
+      if control_width <= 0:
+        raise ValueError(f"Parcae RGRP-control width must be positive, got {control_width}")
+      if control_width % 2 != 0:
+        raise ValueError(f"Parcae RGRP-control width must be even for rotary pairs, got {control_width}")
+      if control_width % fractal_rgrp._block_count(cfg.fractal_rgrp_state_transform) != 0:
+        raise ValueError(
+            "fractal_parcae_control_bottleneck_dim must be divisible by the RGRP block count "
+            f"for {cfg.fractal_rgrp_state_transform!r}; got {control_width}"
+        )
+      if control_width == width:
+        control_input = loop_input
+      else:
+        control_input = nn.Dense(
+            control_width,
+            use_bias=True,
+            dtype=cfg.dtype,
+            param_dtype=cfg.weight_dtype,
+            precision=cfg.matmul_precision,
+            kernel_init=nn.initializers.xavier_uniform(),
+            name="fractal_parcae_rgrp_control_down_projection",
+        )(loop_input)
       control = fractal_rgrp.rgrp_block(
-          d_model=width,
+          d_model=control_width,
           state_transform=cfg.fractal_rgrp_state_transform,
           scan_unroll=cfg.fractal_rgrp_scan_unroll,
           projection_mode=cfg.fractal_rgrp_projection_mode,
@@ -1134,36 +1580,60 @@ def patch_decoders(package_dir: Path) -> None:
           weight_dtype=cfg.weight_dtype,
           matmul_precision=cfg.matmul_precision,
           name="fractal_parcae_rgrp_control",
-      )(loop_input)
+      )(control_input)
       control = rms_norm(
-          num_features=width,
+          num_features=control_width,
           dtype=cfg.dtype,
           weight_dtype=cfg.weight_dtype,
           name="fractal_parcae_rgrp_control_norm",
           epsilon=cfg.normalization_layer_epsilon,
           kernel_axes=("norm",),
       )(control)
-      control_gate = nn.Dense(
-          width,
-          use_bias=True,
-          dtype=cfg.dtype,
-          param_dtype=cfg.weight_dtype,
-          precision=cfg.matmul_precision,
-          kernel_init=nn.initializers.normal(stddev=1.0e-3),
-          bias_init=nn.initializers.constant(-2.1972246),
-          name="fractal_parcae_rgrp_gate_projection",
-      )(control)
-      control_value = nn.Dense(
-          width,
-          use_bias=False,
-          dtype=cfg.dtype,
-          param_dtype=cfg.weight_dtype,
-          precision=cfg.matmul_precision,
-          kernel_init=nn.initializers.normal(stddev=1.0e-3),
-          name="fractal_parcae_rgrp_value_projection",
-      )(control)
-      injection_gate = jax.nn.sigmoid(control_gate)
-      injection_value = loop_input + control_value
+      base_gate = None
+      if control_mode == "value-only" or control_gate_blend > 0.0:
+        base_gate_logit = self.param(
+            "fractal_parcae_rgrp_base_injection_logit",
+            nn.initializers.constant(-2.1972246),
+            (width,),
+            cfg.weight_dtype,
+        )
+        base_gate = jax.nn.sigmoid(base_gate_logit.astype(cfg.dtype)).reshape(1, 1, -1)
+      control_gate = None
+      if control_mode != "value-only":
+        control_gate = jax.nn.sigmoid(
+            nn.Dense(
+                width,
+                use_bias=True,
+                dtype=cfg.dtype,
+                param_dtype=cfg.weight_dtype,
+                precision=cfg.matmul_precision,
+                kernel_init=nn.initializers.normal(stddev=1.0e-3),
+                bias_init=nn.initializers.constant(-2.1972246),
+                name="fractal_parcae_rgrp_gate_projection",
+            )(control)
+        )
+        if base_gate is not None and control_gate_blend > 0.0:
+          blend = jnp.asarray(control_gate_blend, dtype=cfg.dtype)
+          injection_gate = (1.0 - blend) * control_gate + blend * base_gate
+        else:
+          injection_gate = control_gate
+      else:
+        injection_gate = base_gate
+      control_value = None
+      if control_mode != "gate-only":
+        control_value = nn.Dense(
+            width,
+            use_bias=False,
+            dtype=cfg.dtype,
+            param_dtype=cfg.weight_dtype,
+            precision=cfg.matmul_precision,
+            kernel_init=nn.initializers.normal(stddev=1.0e-3),
+            name="fractal_parcae_rgrp_value_projection",
+        )(control)
+        control_value = control_value * jnp.asarray(control_value_scale, dtype=control_value.dtype)
+        injection_value = loop_input + control_value
+      else:
+        injection_value = loop_input
       if diagnostics_enabled:
         loop_input_norm = fractal_rgrp._global_l2_norm(loop_input)
         fractal_rgrp.sow_parcae_control_diagnostic(
@@ -1182,17 +1652,23 @@ def patch_decoders(package_dir: Path) -> None:
         fractal_rgrp.sow_parcae_control_diagnostic(
             self, "controller/gate_saturation_high_frac", jnp.mean((injection_gate > 0.95).astype(jnp.float32))
         )
-        fractal_rgrp.sow_parcae_control_diagnostic(
-            self, "controller/value_norm_mean", fractal_rgrp._mean_l2_norm(control_value)
-        )
-        fractal_rgrp.sow_parcae_control_diagnostic(
-            self,
-            "controller/value_to_loop_input_norm_ratio",
-            fractal_rgrp._safe_ratio(fractal_rgrp._global_l2_norm(control_value), loop_input_norm),
-        )
-        diagnostics_nan_or_inf_seen = fractal_rgrp._nan_or_inf_seen(
-            loop_input, control, control_gate, control_value, injection_gate, injection_value
-        )
+        if control_value is not None:
+          fractal_rgrp.sow_parcae_control_diagnostic(
+              self, "controller/value_norm_mean", fractal_rgrp._mean_l2_norm(control_value)
+          )
+          fractal_rgrp.sow_parcae_control_diagnostic(
+              self,
+              "controller/value_to_loop_input_norm_ratio",
+              fractal_rgrp._safe_ratio(fractal_rgrp._global_l2_norm(control_value), loop_input_norm),
+          )
+        diagnostics_values = [loop_input, control_input, control, injection_gate, injection_value]
+        if control_gate is not None:
+          diagnostics_values.append(control_gate)
+        if control_value is not None:
+          diagnostics_values.append(control_value)
+        if base_gate is not None:
+          diagnostics_values.append(base_gate)
+        diagnostics_nan_or_inf_seen = fractal_rgrp._nan_or_inf_seen(*diagnostics_values)
     else:
       raise ValueError(f"unsupported Parcae profile: {cfg.fractal_candidate!r}")
 
@@ -1275,6 +1751,18 @@ def patch_decoders(package_dir: Path) -> None:
     return y
 
 '''
+    if "def _fractal_apply_path1_scale_profile(" not in text:
+        text = insert_after_once(
+            text,
+            "  def get_pipeline_stage_module(self, decoder_blocks):\n",
+            path1_method,
+            path=decoders_path,
+        )
+        text = text.replace(
+            "  def get_pipeline_stage_module(self, decoder_blocks):\n" + path1_method,
+            path1_method + "  def get_pipeline_stage_module(self, decoder_blocks):\n",
+            1,
+        )
     if "def _fractal_apply_parcae_loop(" not in text:
         text = insert_after_once(
             text,
@@ -1287,7 +1775,7 @@ def patch_decoders(package_dir: Path) -> None:
             parcae_method + "  def get_pipeline_stage_module(self, decoder_blocks):\n",
             1,
         )
-    if "is_parcae_profile(cfg.fractal_candidate)" not in text:
+    if "is_path1_scale_profile(cfg.fractal_candidate)" not in text:
         loop_marker = "        else:\n          for lyr in range(cfg.num_decoder_layers):\n"
         start = text.find(loop_marker)
         if start == -1:
@@ -1309,6 +1797,23 @@ def patch_decoders(package_dir: Path) -> None:
             "            if deepstack_visual_embeds is not None:\n"
             "              raise ValueError(\"Parcae looped scaffold currently does not support deepstack visual embeddings.\")\n"
             "            y = self._fractal_apply_parcae_loop(\n"
+            "                y,\n"
+            "                RemattedBlockLayers[0],\n"
+            "                decoder_segment_ids,\n"
+            "                decoder_positions,\n"
+            "                deterministic,\n"
+            "                model_mode,\n"
+            "                previous_chunk,\n"
+            "                slot,\n"
+            "                page_state,\n"
+            "                attention_metadata,\n"
+            "            )\n"
+            "          elif fractal_rgrp.is_path1_scale_profile(cfg.fractal_candidate):\n"
+            "            if kv_caches is not None:\n"
+            "              raise ValueError(\"Path1 TPU scale profiles currently do not support kv_caches.\")\n"
+            "            if deepstack_visual_embeds is not None:\n"
+            "              raise ValueError(\"Path1 TPU scale profiles currently do not support deepstack visual embeddings.\")\n"
+            "            y = self._fractal_apply_path1_scale_profile(\n"
             "                y,\n"
             "                RemattedBlockLayers[0],\n"
             "                decoder_segment_ids,\n"
@@ -1350,6 +1855,8 @@ def patch_train(package_dir: Path) -> None:
     scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
   if config.fractal_parcae_control_diagnostics:
     scalar_metrics.update(fractal_rgrp.collect_parcae_control_diagnostics(intermediate_outputs))
+  if config.fractal_path1_diagnostics:
+    scalar_metrics.update(fractal_rgrp.collect_path1_diagnostics(intermediate_outputs))
   metrics = {
 '''
     if "collect_parcae_control_diagnostics(intermediate_outputs)" not in text:
@@ -1364,6 +1871,11 @@ def patch_train(package_dir: Path) -> None:
     metrics["scalar"]["evaluation/dpo_reward_accuracy"] = aux["reward_accuracy"]
   if config.fractal_parcae_control_diagnostics:
     for metric_name, metric_value in fractal_rgrp.collect_parcae_control_diagnostics(
+        aux["intermediate_outputs"]
+    ).items():
+      metrics["scalar"][f"evaluation/{metric_name}"] = metric_value
+  if config.fractal_path1_diagnostics:
+    for metric_name, metric_value in fractal_rgrp.collect_path1_diagnostics(
         aux["intermediate_outputs"]
     ).items():
       metrics["scalar"][f"evaluation/{metric_name}"] = metric_value
@@ -1390,7 +1902,7 @@ def patch_metric_logger(package_dir: Path) -> None:
             metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0)
         )
       for metric_name, metric_value in metrics["scalar"].items():
-        if metric_name.startswith(("evaluation/controller/", "evaluation/loop/", "evaluation/stability/")):
+        if metric_name.startswith(("evaluation/controller/", "evaluation/loop/", "evaluation/stability/", "evaluation/routing/", "evaluation/looped/", "evaluation/act/", "evaluation/mor/")):
           self.cumulative_eval_metrics["scalar"][f"eval/{metric_name.removeprefix('evaluation/')}"] += float(metric_value)
 
     if eval_step_count:
@@ -1410,7 +1922,7 @@ def patch_metric_logger(package_dir: Path) -> None:
             self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] / eval_step_count
         )
       for metric_name in list(self.cumulative_eval_metrics["scalar"].keys()):
-        if metric_name.startswith(("eval/controller/", "eval/loop/", "eval/stability/")):
+        if metric_name.startswith(("eval/controller/", "eval/loop/", "eval/stability/", "eval/routing/", "eval/looped/", "eval/act/", "eval/mor/")):
           self.cumulative_eval_metrics["scalar"][metric_name] = (
               self.cumulative_eval_metrics["scalar"][metric_name] / eval_step_count
           )

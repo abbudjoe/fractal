@@ -13,12 +13,11 @@ use fractal_eval_private::{
     byte_level_smoke_corpus_stats_from_source, default_v3a_fineweb_stage0_canary_corpus_source,
     run_attention_only_goe_smoke_train, run_attention_only_hybrid_attention_smoke_train,
     run_attention_only_recurrent_goe_smoke_train, ByteLevelSmokeCorpusSource,
-    GraphOfExpertsRoutingSummary, GraphOfExpertsSmokeTrainConfig,
-    HybridAttentionExecutionBackend, HybridAttentionSmokeTrainConfig,
-    RecurrentGraphOfExpertsSmokeTrainConfig, DEFAULT_V3A_SMOKE_BATCH_SIZE,
-    DEFAULT_V3A_SMOKE_EVAL_BATCHES, DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY,
-    DEFAULT_V3A_SMOKE_LEARNING_RATE, DEFAULT_V3A_SMOKE_SEED, DEFAULT_V3A_SMOKE_SEQ_LEN,
-    DEFAULT_V3A_SMOKE_TRAIN_STEPS, DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
+    GraphOfExpertsRoutingSummary, GraphOfExpertsSmokeTrainConfig, HybridAttentionExecutionBackend,
+    HybridAttentionSmokeTrainConfig, RecurrentGraphOfExpertsSmokeTrainConfig,
+    DEFAULT_V3A_SMOKE_BATCH_SIZE, DEFAULT_V3A_SMOKE_EVAL_BATCHES,
+    DEFAULT_V3A_SMOKE_EVAL_HOLDOUT_EVERY, DEFAULT_V3A_SMOKE_LEARNING_RATE, DEFAULT_V3A_SMOKE_SEED,
+    DEFAULT_V3A_SMOKE_SEQ_LEN, DEFAULT_V3A_SMOKE_TRAIN_STEPS, DEFAULT_V3A_SMOKE_WINDOW_STRIDE,
 };
 use serde::Serialize;
 
@@ -838,8 +837,8 @@ mod tests {
 
     #[test]
     fn parses_metal_backend() {
-        let args = CliArgs::parse(["--backend".to_string(), "metal".to_string()].into_iter())
-            .unwrap();
+        let args =
+            CliArgs::parse(["--backend".to_string(), "metal".to_string()].into_iter()).unwrap();
         assert_eq!(args.backend, BackendSelection::Metal);
     }
 }

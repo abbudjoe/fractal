@@ -408,6 +408,173 @@ def candidate_registry() -> dict[str, JaxTpuCandidateSpec]:
                 ),
             )
         )
+    path1_common_overrides = {
+        "decoder_block": "default",
+        "scan_layers": False,
+        "fractal_path1_diagnostics": False,
+    }
+    causal_topk = JaxTpuCandidateSpec(
+        slug="causal-topk-route50-layer1",
+        label="Path1 causal prefix top-k routed block",
+        source_profile="python-path1-causal-topk-route50-layer1",
+        adapter_module="python.jax_tpu.adapters.rotary_gated_recurrent_state_update",
+        adapter_overrides={
+            **path1_common_overrides,
+            "fractal_candidate": "causal-topk-route50-layer1",
+            "fractal_path1_route_fraction": 0.5,
+            "fractal_path1_route_layers": "1",
+        },
+        requires_patched_maxtext=True,
+        kernel_contract=JaxTpuKernelContract(
+            architecture_family=JaxTpuArchitectureFamily.CUSTOM,
+            lowering="maxtext-full-block-selected-output-compute-proxy",
+            fusion_boundary="selected-layer-causal-prefix-topk-routing",
+            notes=(
+                "Matches the Path1 decode-safe prefix-top-k selected-output semantics.",
+                "This is not a sparse-compute lowering yet: the dense block is evaluated before skipped-token scatter.",
+            ),
+        ),
+    )
+    mod_train_topc = JaxTpuCandidateSpec(
+        slug="mod-train-topc-route50-layer1",
+        label="Paper MoD train-time full-sequence top-C routed block",
+        source_profile="python-path1-mod-train-topc-route50-layer1",
+        adapter_module="python.jax_tpu.adapters.rotary_gated_recurrent_state_update",
+        adapter_overrides={
+            **path1_common_overrides,
+            "fractal_candidate": "mod-train-topc-route50-layer1",
+            "fractal_path1_route_fraction": 0.5,
+            "fractal_path1_route_layers": "1",
+        },
+        requires_patched_maxtext=True,
+        kernel_contract=JaxTpuKernelContract(
+            architecture_family=JaxTpuArchitectureFamily.CUSTOM,
+            lowering="maxtext-selected-only-gather-scatter-reference",
+            fusion_boundary="selected-layer-mod-topc-routing",
+            notes=(
+                "Selected tokens are gathered, run through the transformer block in sorted token order, and scattered back.",
+                "Full-sequence top-C is the paper training primitive and is not autoregressive-decode safe.",
+            ),
+        ),
+    )
+    fixed_looped_lm = JaxTpuCandidateSpec(
+        slug="fixed-looped-lm",
+        label="Shared-block fixed looped transformer LM",
+        source_profile="python-path1-fixed-looped-lm",
+        adapter_module="python.jax_tpu.adapters.rotary_gated_recurrent_state_update",
+        adapter_overrides={
+            **path1_common_overrides,
+            "fractal_candidate": "fixed-looped-lm",
+            "fractal_path1_loop_count": 4,
+            "fractal_path1_shared_layers": 2,
+        },
+        requires_patched_maxtext=True,
+        kernel_contract=JaxTpuKernelContract(
+            architecture_family=JaxTpuArchitectureFamily.PARCAE_LOOPED_ATTENTION,
+            lowering="maxtext-shared-block-fixed-loop-reference",
+            recurrence_axis="decoder-layer-depth",
+            carries_state_across_tokens=False,
+            fusion_boundary="decoder-stack-shared-block-loop",
+            notes=("Embeds once, reuses the same small decoder block stack for a fixed number of recurrent depth steps.",),
+        ),
+    )
+    input_injected_looped_lm = JaxTpuCandidateSpec(
+        slug="input-injected-looped-lm",
+        label="Input-injected looped transformer LM",
+        source_profile="looped-transformer-2311-input-injected-reference",
+        adapter_module="python.jax_tpu.adapters.rotary_gated_recurrent_state_update",
+        adapter_overrides={
+            **path1_common_overrides,
+            "fractal_candidate": "input-injected-looped-lm",
+            "fractal_path1_loop_count": 4,
+            "fractal_path1_shared_layers": 2,
+        },
+        requires_patched_maxtext=True,
+        kernel_contract=JaxTpuKernelContract(
+            architecture_family=JaxTpuArchitectureFamily.PARCAE_LOOPED_ATTENTION,
+            lowering="maxtext-shared-block-input-injected-loop-reference",
+            recurrence_axis="decoder-layer-depth",
+            carries_state_across_tokens=False,
+            fusion_boundary="decoder-stack-shared-block-input-injection",
+            notes=("Uses Y_{t+1}=M(Y_t + prompt) with shared decoder block parameters.",),
+        ),
+    )
+    universal_transformer_act = JaxTpuCandidateSpec(
+        slug="universal-transformer-act",
+        label="Universal Transformer ACT reference",
+        source_profile="python-path1-universal-transformer-act",
+        adapter_module="python.jax_tpu.adapters.rotary_gated_recurrent_state_update",
+        adapter_overrides={
+            **path1_common_overrides,
+            "fractal_candidate": "universal-transformer-act",
+            "fractal_path1_loop_count": 4,
+            "fractal_path1_shared_layers": 1,
+            "fractal_path1_act_threshold": 0.99,
+        },
+        requires_patched_maxtext=True,
+        kernel_contract=JaxTpuKernelContract(
+            architecture_family=JaxTpuArchitectureFamily.PARCAE_LOOPED_ATTENTION,
+            lowering="maxtext-shared-block-act-state-interpolation-reference",
+            recurrence_axis="decoder-layer-depth",
+            carries_state_across_tokens=False,
+            fusion_boundary="decoder-stack-universal-transformer-act",
+            notes=(
+                "Reference recurrent block with per-token halt probabilities and weighted state interpolation.",
+                "The MaxText port does not yet add the paper's ACT ponder/loss term; use as an architecture smoke before promotion.",
+            ),
+        ),
+    )
+    mor_expert_choice = JaxTpuCandidateSpec(
+        slug="mor-expert-choice",
+        label="Mixture-of-Recursions expert-choice reference",
+        source_profile="python-path1-mor-expert-choice",
+        adapter_module="python.jax_tpu.adapters.rotary_gated_recurrent_state_update",
+        adapter_overrides={
+            **path1_common_overrides,
+            "fractal_candidate": "mor-expert-choice",
+            "fractal_path1_route_fraction": 0.25,
+            "fractal_path1_loop_count": 3,
+            "fractal_path1_shared_layers": 1,
+        },
+        requires_patched_maxtext=True,
+        kernel_contract=JaxTpuKernelContract(
+            architecture_family=JaxTpuArchitectureFamily.CUSTOM,
+            lowering="maxtext-recursive-selected-only-gather-scatter-reference",
+            recurrence_axis="decoder-layer-depth",
+            carries_state_across_tokens=False,
+            fusion_boundary="shared-recursive-stack-expert-choice-routing",
+            notes=(
+                "Maintains active-token shrinkage across recursive steps with selected-only shared-stack execution.",
+                "Router auxiliary losses and cache policy variants remain deferred.",
+            ),
+        ),
+    )
+    d3_route25_accel = JaxTpuCandidateSpec(
+        slug="d3-route25-accel",
+        label="Token-selective recurrent-depth acceleration reference",
+        source_profile="python-path1-d3-route25-accel",
+        adapter_module="python.jax_tpu.adapters.rotary_gated_recurrent_state_update",
+        adapter_overrides={
+            **path1_common_overrides,
+            "fractal_candidate": "d3-route25-accel",
+            "fractal_path1_route_fraction": 0.25,
+            "fractal_path1_loop_count": 3,
+            "fractal_path1_accel_threshold": 0.6,
+            "fractal_path1_min_steps": 2,
+        },
+        requires_patched_maxtext=True,
+        kernel_contract=JaxTpuKernelContract(
+            architecture_family=JaxTpuArchitectureFamily.PARCAE_LOOPED_ATTENTION,
+            lowering="maxtext-middle-loop-token-selective-accel-reference",
+            recurrence_axis="decoder-layer-depth",
+            carries_state_across_tokens=False,
+            fusion_boundary="middle-loop-token-selective-recurrent-depth",
+            notes=(
+                "Middle recurrent band with causal routed token updates and normalized acceleration halting.",
+                "Sparse compute is not yet fused; use diagnostics to validate selected fraction and steps used.",
+            ),
+        ),
+    )
     parcae_common_overrides = {
         "decoder_block": "default",
         "scan_layers": False,
@@ -420,6 +587,10 @@ def candidate_registry() -> dict[str, JaxTpuCandidateSpec]:
         "fractal_parcae_max_loop_count": 0,
         "fractal_parcae_discretization": "stable-exp",
         "fractal_parcae_control_diagnostics": False,
+        "fractal_parcae_control_mode": "gate-value",
+        "fractal_parcae_control_bottleneck_dim": 0,
+        "fractal_parcae_control_gate_blend": 0.0,
+        "fractal_parcae_control_value_scale": 1.0,
     }
     parcae_looped = JaxTpuCandidateSpec(
         slug="parcae-looped-attention",
@@ -499,6 +670,13 @@ def candidate_registry() -> dict[str, JaxTpuCandidateSpec]:
             p20,
             rgrp_mlp_sidecar,
             *control_candidates,
+            causal_topk,
+            mod_train_topc,
+            fixed_looped_lm,
+            input_injected_looped_lm,
+            universal_transformer_act,
+            mor_expert_choice,
+            d3_route25_accel,
             parcae_looped,
             parcae_bx,
             parcae_rgrp_control,

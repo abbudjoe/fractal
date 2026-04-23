@@ -1,6 +1,12 @@
 """Typed architecture and benchmark specs."""
 
-from .common import BenchmarkBudgetSpec, BenchmarkRunManifest, DeviceRuntimeSpec, JsonlCorpusSpec, SeedSpec
+from .common import (
+    BenchmarkBudgetSpec,
+    BenchmarkRunManifest,
+    DeviceRuntimeSpec,
+    JsonlCorpusSpec,
+    SeedSpec,
+)
 from .mini_moe import (
     MiniMoeArchitectureSpec,
     MiniMoeBackboneSpec,
@@ -20,9 +26,11 @@ from .mini_moe import (
     ResolvedMiniMoeLayout,
 )
 from .path1 import (
+    AttentionProfile,
     BYTE_LEVEL_PAD_TOKEN,
     BYTE_LEVEL_VOCAB_SIZE,
     DEFAULT_PATH1_MODEL_SHAPE,
+    FeedForwardProfile,
     HybridAttentionLayerRole,
     Path1BaselineMatrix,
     Path1ModelShape,
@@ -34,11 +42,19 @@ from .path1 import (
     PrimitiveReadoutMode,
     PrimitiveResidualMode,
     PrimitiveWrapperMode,
+    RecurrentHaltingProfile,
+    RecurrentTokenRoutingProfile,
     ReferenceSsmProfile,
+    TokenRoutingProfile,
     phase1_attention_only_variant,
     phase1_baseline_matrix,
     phase1_primitive_variant,
     phase1_reference_ssm_variant,
 )
 from .runtime import PrimitiveStateTransformMode
-from .runtime import RuntimeOptimizationProfile, RuntimeOptimizationScope, RuntimeOptimizationTarget, runtime_optimization_profile
+from .runtime import (
+    RuntimeOptimizationProfile,
+    RuntimeOptimizationScope,
+    RuntimeOptimizationTarget,
+    runtime_optimization_profile,
+)
