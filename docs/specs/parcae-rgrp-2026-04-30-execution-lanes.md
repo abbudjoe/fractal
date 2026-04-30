@@ -47,6 +47,38 @@ Starting candidates:
 | RGRP quality | proof challenger | wider outer shell, loop width held below full model width | Best 100M RGRP quality lane. |
 | RGRP efficient | Pareto challenger | `4,2,1,2,3`-style outer-shell allocation | Smaller/faster 100M lane. |
 
+### Active 300M Scout
+
+Submitted 2026-04-30:
+
+```text
+job: rgrp300q-gpt2medgeo-fit1024-s45-0430a
+instance: ml.g6e.24xlarge
+max_runtime_seconds: 7200
+token cache: fineweb-cc-main-2024-10-openllama-750m
+steps: 1024
+seq_len: 512
+batch_size: 32
+seed/data_seed: 45/45
+dtype: bf16
+attention kernel: flex-local
+position contract: learned positions, attention-only
+final norm: layernorm
+optimizer/lr: adam, 3e-4
+MTP: off
+```
+
+Lanes:
+
+| Lane | Shape | Expected role |
+|---|---|---|
+| GPT-2-medium-geometry attention | `24L d1024 h16` | Stress baseline, close to GPT-2 Medium geometry but larger than the 300M target in this harness. |
+| RGRP 5-band quality | `24L d1024 h16`, bands `6,3,6,3,6`, loop `384x2`, loop heads `6` | First scaled 5-band quality challenger. |
+
+This is a fit/speed scout, not the final 300M proof control. If it fits and
+the RGRP curve is live, follow with a trimmed GPT-2-medium-like attention
+control around `24L d960 h15` and distributed 7-band RGRP candidates.
+
 First non-mutating prep:
 
 1. Derive two 250M-300M candidate shapes before launch.
@@ -65,11 +97,16 @@ Goal:
 Test small, attributable DeepSeek-inspired additions at 100M before promotion.
 ```
 
-### Active MTP Scout
+### Deferred MTP Scout
 
-Submitted 2026-04-30 on SageMaker `ml.g6.2xlarge`, 1024 steps, bf16, seed/data
-seed 45, seq512, batch32, learned positions, attention-only position contract,
-final layernorm, local window 512, `adam`, lr `3e-4`.
+MTP is now deferred until the model is much larger, likely `>1B`, to avoid
+mixing a new training objective into the current 300M proof lane.
+
+Four 1024-step jobs were submitted on 2026-04-30 and failed immediately because
+the SageMaker token-cache entrypoint passed `--mtp-*` args into the Parcae
+promotion runner before that runner accepted them. The launcher contract was
+fixed in commit `97af085`, but the jobs should not be interpreted as model
+results and should not be relaunched at this scale.
 
 | Job | Shape | Lanes | MTP |
 |---|---|---|---|
@@ -125,4 +162,3 @@ First work item:
 Add a concrete loop/control packed-layout spec and parity fixture before the
 next native backward or fusion attempt.
 ```
-
