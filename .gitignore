@@ -6,6 +6,19 @@ artifacts/
 .modal-local-logs/
 __pycache__/
 *.py[cod]
+.env
+.env.*
+!.env.example
+*.nohup.log
+
+# Local cloud job downloads, monitor logs, and extracted SageMaker artifacts.
+# Keep curated scorecards in docs/specs or small committed experiment summaries.
+experiments/aws_sagemaker/
+
+# Local TPU launch/monitor workdirs. These contain guard scripts, pids, and
+# large remote logs; preserve distilled results in committed scorecards instead.
+experiments/jax_tpu/maxtext_quality/parcae_width256*/
+experiments/jax_tpu/maxtext_quality/parcae_width384*/
 
 # Local multi-GB dataset caches. Keep dataset docs separate from generated
 # cache directories so experiments stay reproducible without risking accidental
