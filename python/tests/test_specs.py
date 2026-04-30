@@ -144,6 +144,28 @@ class Path1SpecTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "ffn_backend"):
             DeviceRuntimeSpec(backend="cuda", dtype="bf16", ffn_backend="mystery").validate()
 
+    def test_runtime_spec_tracks_mtp_auxiliary_loss_contract(self) -> None:
+        DeviceRuntimeSpec(
+            backend="cuda",
+            dtype="bf16",
+            mtp_aux_weight=0.05,
+            mtp_max_horizon=3,
+        ).validate()
+        with self.assertRaisesRegex(ValidationError, "mtp_aux_weight"):
+            DeviceRuntimeSpec(backend="cuda", dtype="bf16", mtp_aux_weight=-0.1).validate()
+        with self.assertRaisesRegex(ValidationError, "mtp_max_horizon"):
+            DeviceRuntimeSpec(backend="cuda", dtype="bf16", mtp_aux_weight=0.05, mtp_max_horizon=0).validate()
+        with self.assertRaisesRegex(ValidationError, "mtp_max_horizon"):
+            DeviceRuntimeSpec(backend="cuda", dtype="bf16", mtp_max_horizon=3).validate()
+        with self.assertRaisesRegex(ValidationError, "head_loss_backend=dense"):
+            DeviceRuntimeSpec(
+                backend="cuda",
+                dtype="bf16",
+                head_loss_backend="compiled",
+                mtp_aux_weight=0.05,
+                mtp_max_horizon=3,
+            ).validate()
+
     def test_runtime_spec_accepts_mps_fp32_only(self) -> None:
         DeviceRuntimeSpec(backend="mps", dtype="fp32").validate()
         with self.assertRaises(ValidationError):

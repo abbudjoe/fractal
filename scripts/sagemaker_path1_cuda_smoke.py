@@ -150,6 +150,10 @@ def _lane_command(lane: str, *, output_dir: Path, ledger_path: Path) -> list[str
         _env("FRACTAL_SMOKE_HEAD_LOSS_BACKEND", "dense"),
         "--ffn-backend",
         _env("FRACTAL_SMOKE_FFN_BACKEND", "dense"),
+        "--mtp-aux-weight",
+        _env("FRACTAL_SMOKE_MTP_AUX_WEIGHT", "0.0"),
+        "--mtp-max-horizon",
+        _env("FRACTAL_SMOKE_MTP_MAX_HORIZON", "1"),
         "--jsonl-train-path",
         str(CORPUS_DIR / "train.jsonl"),
         "--jsonl-eval-path",
@@ -1217,6 +1221,10 @@ def main() -> int:
         _env("FRACTAL_SCOUT_HEAD_LOSS_BACKEND", "dense"),
         "--ffn-backend",
         _env("FRACTAL_SCOUT_FFN_BACKEND", "dense"),
+        "--mtp-aux-weight",
+        _env("FRACTAL_SCOUT_MTP_AUX_WEIGHT", "0.0"),
+        "--mtp-max-horizon",
+        _env("FRACTAL_SCOUT_MTP_MAX_HORIZON", "1"),
         "--token-cache-repo-id",
         _env("FRACTAL_SCOUT_TOKEN_CACHE_REPO_ID", "joebud/fractal-fineweb-openllama-tokens"),
         "--token-cache-artifact",
@@ -1760,6 +1768,8 @@ def _training_request(
             "FRACTAL_SCOUT_PRIMITIVE_RUNTIME_BACKEND": args.primitive_runtime_backend,
             "FRACTAL_SCOUT_HEAD_LOSS_BACKEND": args.head_loss_backend,
             "FRACTAL_SCOUT_FFN_BACKEND": args.ffn_backend,
+            "FRACTAL_SCOUT_MTP_AUX_WEIGHT": str(args.mtp_aux_weight),
+            "FRACTAL_SCOUT_MTP_MAX_HORIZON": str(args.mtp_max_horizon),
             "FRACTAL_SCOUT_SEED": str(args.seed),
             "FRACTAL_SCOUT_DATA_SEED": str(args.data_seed),
             "FRACTAL_SCOUT_TOKEN_CACHE_REPO_ID": args.token_cache_repo_id,
@@ -1855,6 +1865,8 @@ def _training_request(
                 "FRACTAL_SMOKE_PRIMITIVE_RUNTIME_BACKEND": args.primitive_runtime_backend,
                 "FRACTAL_SMOKE_HEAD_LOSS_BACKEND": args.head_loss_backend,
                 "FRACTAL_SMOKE_FFN_BACKEND": args.ffn_backend,
+                "FRACTAL_SMOKE_MTP_AUX_WEIGHT": str(args.mtp_aux_weight),
+                "FRACTAL_SMOKE_MTP_MAX_HORIZON": str(args.mtp_max_horizon),
                 "FRACTAL_SMOKE_SEED": str(args.seed),
                 "FRACTAL_SMOKE_DATA_SEED": str(args.data_seed),
             }
@@ -2120,6 +2132,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--primitive-runtime-backend", choices=["torch", "triton"], default="torch")
     parser.add_argument("--head-loss-backend", choices=["dense", "compiled", "streaming-kernel"], default="dense")
     parser.add_argument("--ffn-backend", choices=["dense", "compiled", "manual-autograd", "triton-gelu", "recompute"], default="dense")
+    parser.add_argument("--mtp-aux-weight", type=float, default=0.0)
+    parser.add_argument("--mtp-max-horizon", type=int, default=1)
     parser.add_argument("--compile-mode", choices=["default", "reduce-overhead", "max-autotune"])
     parser.add_argument("--profile-path1", action="store_true", help="Run the token-cache Path 1 profiler instead of training.")
     parser.add_argument("--profile-row-limit", type=int, default=40)

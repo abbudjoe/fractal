@@ -141,6 +141,8 @@ class DeviceRuntimeSpec:
     primitive_runtime_backend: str | None = "torch"
     head_loss_backend: str = "dense"
     ffn_backend: str = "dense"
+    mtp_aux_weight: float = 0.0
+    mtp_max_horizon: int = 1
 
     def validate(self) -> None:
         if self.backend not in {"cpu", "cuda", "mps"}:
@@ -186,6 +188,16 @@ class DeviceRuntimeSpec:
             raise ValidationError("runtime.ffn_backend=manual-autograd requires backend=cuda")
         if self.ffn_backend == "triton-gelu" and self.backend != "cuda":
             raise ValidationError("runtime.ffn_backend=triton-gelu requires backend=cuda")
+        if self.mtp_aux_weight < 0.0:
+            raise ValidationError("runtime.mtp_aux_weight must be non-negative")
+        if self.mtp_max_horizon < 1:
+            raise ValidationError("runtime.mtp_max_horizon must be at least 1")
+        if self.mtp_aux_weight == 0.0 and self.mtp_max_horizon != 1:
+            raise ValidationError(
+                "runtime.mtp_max_horizon must be 1 when runtime.mtp_aux_weight is 0"
+            )
+        if self.mtp_aux_weight > 0.0 and self.head_loss_backend != "dense":
+            raise ValidationError("runtime.mtp_aux_weight requires head_loss_backend=dense")
         if self.env_kind == "primitive-triton" and self.compile_mode is not None:
             raise ValidationError(
                 "runtime.compile_mode is not supported with env_kind=primitive-triton"

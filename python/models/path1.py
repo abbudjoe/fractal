@@ -556,6 +556,8 @@ class Path1HybridLanguageModel(nn.Module):
             self.final_norm = nn.Identity()
         self.output = nn.Linear(variant.shape.d_model, variant.shape.vocab_size, bias=False)
         self._head_loss_backend = "dense"
+        self._mtp_aux_weight = 0.0
+        self._mtp_max_horizon = 1
         self.variant_runtime_ffn_backend = "dense"
         self.parcae_runtime_diagnostics = True
         self._compiled_head_loss_impl = None
@@ -699,6 +701,46 @@ class Path1HybridLanguageModel(nn.Module):
             ignore_index=pad_token,
         )
 
+    def _cross_entropy_for_aligned_hidden(
+        self,
+        hidden: torch.Tensor,
+        target_ids: torch.Tensor,
+        *,
+        pad_token: int,
+    ) -> torch.Tensor:
+        logits = self.output(hidden)
+        return F.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]),
+            target_ids.reshape(-1),
+            ignore_index=pad_token,
+        )
+
+    def _mtp_auxiliary_loss(
+        self,
+        normalized_hidden: torch.Tensor,
+        target_ids: torch.Tensor,
+        *,
+        pad_token: int,
+    ) -> torch.Tensor:
+        aux_losses: list[torch.Tensor] = []
+        sequence_length = normalized_hidden.shape[1]
+        for horizon in range(2, self._mtp_max_horizon + 1):
+            usable_length = sequence_length - horizon + 1
+            if usable_length <= 0:
+                continue
+            aux_hidden = normalized_hidden[:, :usable_length]
+            aux_targets = target_ids[:, horizon - 1 :]
+            aux_losses.append(
+                self._cross_entropy_for_aligned_hidden(
+                    aux_hidden,
+                    aux_targets,
+                    pad_token=pad_token,
+                )
+            )
+        if not aux_losses:
+            return normalized_hidden.new_zeros(())
+        return torch.stack(aux_losses).mean()
+
     def loss_from_hidden(
         self,
         hidden: torch.Tensor,
@@ -706,7 +748,13 @@ class Path1HybridLanguageModel(nn.Module):
         *,
         pad_token: int,
     ) -> torch.Tensor:
+        mtp_enabled = self.training and self._mtp_aux_weight > 0.0 and self._mtp_max_horizon > 1
         if self._head_loss_backend == "compiled":
+            if mtp_enabled:
+                raise RuntimeError(
+                    "MTP auxiliary loss currently requires head_loss_backend=dense "
+                    "so future-token losses remain explicit and auditable"
+                )
             compiled_loss = self._compiled_head_loss_impl
             if compiled_loss is None:
                 if not hasattr(torch, "compile"):
@@ -728,10 +776,18 @@ class Path1HybridLanguageModel(nn.Module):
             with timed_region("path1.lm_head.output_projection"):
                 logits = self.output(hidden)
             with timed_region("path1.lm_head.cross_entropy"):
-                return F.cross_entropy(
+                main_loss = F.cross_entropy(
                     logits.reshape(-1, logits.shape[-1]),
                     target_ids.reshape(-1),
                     ignore_index=pad_token,
+                )
+            if not mtp_enabled:
+                return main_loss
+            with timed_region("path1.lm_head.mtp_auxiliary"):
+                return main_loss + self._mtp_aux_weight * self._mtp_auxiliary_loss(
+                    hidden,
+                    target_ids,
+                    pad_token=pad_token,
                 )
 
     def forward_loss(
@@ -1367,6 +1423,8 @@ class Path1HybridLanguageModel(nn.Module):
         diagnostics["max_position_embeddings"] = self.variant.max_position_embeddings
         diagnostics["head_loss_backend"] = self._head_loss_backend
         diagnostics["ffn_backend"] = self.variant_runtime_ffn_backend
+        diagnostics["mtp_aux_weight"] = self._mtp_aux_weight
+        diagnostics["mtp_max_horizon"] = self._mtp_max_horizon
         diagnostics["parcae_control_position_kind"] = self.variant.parcae_control_position_kind
         diagnostics["parcae_control_position_scale_init"] = self.variant.parcae_control_position_scale_init
         diagnostics["parcae_control_stride"] = self.variant.parcae_control_stride
@@ -1526,12 +1584,24 @@ class Path1HybridLanguageModel(nn.Module):
         head_loss_backend: str = "dense",
         ffn_backend: str = "dense",
         parcae_runtime_diagnostics: bool | None = None,
+        mtp_aux_weight: float = 0.0,
+        mtp_max_horizon: int = 1,
     ) -> None:
         if head_loss_backend not in HEAD_LOSS_BACKENDS:
             raise ValueError(f"unsupported head_loss_backend: {head_loss_backend}")
         if ffn_backend not in FFN_BACKENDS:
             raise ValueError(f"unsupported ffn_backend: {ffn_backend}")
+        if mtp_aux_weight < 0.0:
+            raise ValueError(f"mtp_aux_weight must be non-negative, got {mtp_aux_weight}")
+        if mtp_max_horizon < 1:
+            raise ValueError(f"mtp_max_horizon must be at least 1, got {mtp_max_horizon}")
+        if mtp_aux_weight == 0.0 and mtp_max_horizon != 1:
+            raise ValueError("mtp_max_horizon must be 1 when mtp_aux_weight is 0")
+        if mtp_aux_weight > 0.0 and head_loss_backend != "dense":
+            raise ValueError("MTP auxiliary loss currently requires head_loss_backend=dense")
         self.variant_runtime_ffn_backend = ffn_backend
+        self._mtp_aux_weight = float(mtp_aux_weight)
+        self._mtp_max_horizon = int(mtp_max_horizon)
         self.parcae_runtime_diagnostics = (
             ffn_backend != "compiled"
             if parcae_runtime_diagnostics is None

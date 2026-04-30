@@ -110,6 +110,51 @@ class Path1ModelTests(unittest.TestCase):
 
         self.assertTrue(torch.allclose(actual, expected, atol=1.0e-6, rtol=1.0e-6))
 
+    def test_path1_mtp_auxiliary_loss_is_training_only(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=2, ffn_multiplier=2)
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        model.configure_runtime_policy(
+            compile_mode=None,
+            primitive_runtime_backend="torch",
+            head_loss_backend="dense",
+            mtp_aux_weight=0.25,
+            mtp_max_horizon=3,
+        )
+        input_ids = torch.randint(low=1, high=257, size=(2, 8), dtype=torch.long)
+        target_ids = torch.randint(low=1, high=257, size=(2, 8), dtype=torch.long)
+
+        model.eval()
+        eval_loss = model.forward_loss(input_ids, target_ids, pad_token=0)
+        hidden = model.forward_hidden(input_ids)
+        expected_eval_loss = model._head_loss_impl(hidden, target_ids, 0)
+
+        model.train()
+        train_loss = model.forward_loss(input_ids, target_ids, pad_token=0)
+
+        self.assertTrue(torch.allclose(eval_loss, expected_eval_loss, atol=1.0e-6, rtol=1.0e-6))
+        self.assertGreater(float(train_loss.detach().item()), float(eval_loss.detach().item()))
+        self.assertEqual(model.diagnostic_payload()["mtp_aux_weight"], 0.25)
+        self.assertEqual(model.diagnostic_payload()["mtp_max_horizon"], 3)
+
+    def test_path1_runtime_policy_configures_mtp_auxiliary_loss(self) -> None:
+        model = build_path1_model(phase1_attention_only_variant(), dtype_mode="fp32")
+
+        apply_runtime_policy(
+            model,
+            DeviceRuntimeSpec(
+                backend="cpu",
+                dtype="fp32",
+                primitive_runtime_backend="torch",
+                mtp_aux_weight=0.05,
+                mtp_max_horizon=3,
+            ),
+        )
+
+        self.assertEqual(model.diagnostic_payload()["mtp_aux_weight"], 0.05)
+        self.assertEqual(model.diagnostic_payload()["mtp_max_horizon"], 3)
+
     def test_path1_runtime_policy_configures_head_loss_backend_without_model_compile(self) -> None:
         model = build_path1_model(phase1_attention_only_variant(), dtype_mode="fp32")
 

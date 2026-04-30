@@ -274,6 +274,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--mtp-aux-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional DeepSeek-inspired multi-token-prediction auxiliary training loss. "
+            "0 disables it; when enabled, eval/final loss remains next-token CE only."
+        ),
+    )
+    parser.add_argument(
+        "--mtp-max-horizon",
+        type=int,
+        default=1,
+        help=(
+            "Maximum prediction horizon for --mtp-aux-weight. 1 means next-token only; "
+            "values above 1 add future-token auxiliary heads using the shared LM head."
+        ),
+    )
+    parser.add_argument(
         "--parcae-recurrent-compile-mode",
         default="reduce-overhead",
         choices=["default", "reduce-overhead", "max-autotune"],
@@ -738,6 +756,8 @@ def build_request_from_args(
             primitive_runtime_backend=args.primitive_runtime_backend,
             head_loss_backend=args.head_loss_backend,
             ffn_backend=args.ffn_backend,
+            mtp_aux_weight=args.mtp_aux_weight,
+            mtp_max_horizon=args.mtp_max_horizon,
         ),
     )
     return Path1RunnerRequest(

@@ -16,15 +16,21 @@ def apply_runtime_policy(model: nn.Module, runtime_spec: DeviceRuntimeSpec) -> n
         and primitive_runtime_backend in {None, "torch"}
         and runtime_spec.head_loss_backend == "dense"
         and runtime_spec.ffn_backend == "dense"
+        and runtime_spec.mtp_aux_weight == 0.0
     ):
         return model
     if compile_mode is None:
         compile_mode = None
     configure = getattr(model, "configure_runtime_policy", None)
     if not callable(configure):
-        if runtime_spec.head_loss_backend != "dense" or runtime_spec.ffn_backend != "dense":
+        if (
+            runtime_spec.head_loss_backend != "dense"
+            or runtime_spec.ffn_backend != "dense"
+            or runtime_spec.mtp_aux_weight != 0.0
+        ):
             raise ValidationError(
-                "non-default head_loss_backend or ffn_backend requires model.configure_runtime_policy"
+                "non-default head_loss_backend, ffn_backend, or mtp_aux_weight "
+                "requires model.configure_runtime_policy"
             )
         return model
     available = inspect.signature(configure).parameters
@@ -32,6 +38,8 @@ def apply_runtime_policy(model: nn.Module, runtime_spec: DeviceRuntimeSpec) -> n
         raise ValidationError("requested head_loss_backend requires configure_runtime_policy(head_loss_backend=...)")
     if runtime_spec.ffn_backend != "dense" and "ffn_backend" not in available:
         raise ValidationError("requested ffn_backend requires configure_runtime_policy(ffn_backend=...)")
+    if runtime_spec.mtp_aux_weight != 0.0 and "mtp_aux_weight" not in available:
+        raise ValidationError("requested mtp_aux_weight requires configure_runtime_policy(mtp_aux_weight=...)")
     kwargs: dict[str, object] = {
         "compile_mode": compile_mode,
         "primitive_runtime_backend": primitive_runtime_backend,
@@ -40,5 +48,9 @@ def apply_runtime_policy(model: nn.Module, runtime_spec: DeviceRuntimeSpec) -> n
         kwargs["head_loss_backend"] = runtime_spec.head_loss_backend
     if "ffn_backend" in available:
         kwargs["ffn_backend"] = runtime_spec.ffn_backend
+    if "mtp_aux_weight" in available:
+        kwargs["mtp_aux_weight"] = runtime_spec.mtp_aux_weight
+    if "mtp_max_horizon" in available:
+        kwargs["mtp_max_horizon"] = runtime_spec.mtp_max_horizon
     configure(**kwargs)
     return model

@@ -284,6 +284,10 @@ def test_training_request_wires_token_cache_scout_contract(monkeypatch):
             "muon-reference",
             "--muon-ns-steps",
             "2",
+            "--mtp-aux-weight",
+            "0.05",
+            "--mtp-max-horizon",
+            "3",
         ]
     )
 
@@ -325,6 +329,8 @@ def test_training_request_wires_token_cache_scout_contract(monkeypatch):
     assert request["Environment"]["FRACTAL_SCOUT_NSYS_STATS"] == "true"
     assert request["Environment"]["FRACTAL_SCOUT_OPTIMIZER_PROFILE"] == "muon-reference"
     assert request["Environment"]["FRACTAL_SCOUT_MUON_NS_STEPS"] == "2"
+    assert request["Environment"]["FRACTAL_SCOUT_MTP_AUX_WEIGHT"] == "0.05"
+    assert request["Environment"]["FRACTAL_SCOUT_MTP_MAX_HORIZON"] == "3"
     assert request["Environment"]["FRACTAL_SCOUT_INSTALL_FLASH_ATTN"] == "true"
     assert request["Environment"]["FRACTAL_SCOUT_FLASH_ATTN_VERSION"] == "2.8.3"
     assert request["Environment"]["FRACTAL_SCOUT_POSITION_ENCODING_KIND"] == "learned"
@@ -562,6 +568,15 @@ def test_token_cache_timing_entrypoint_preserves_parcae_loop_update_backend():
 
     assert '"--parcae-loop-update-backend",' in module.TOKEN_CACHE_ENTRYPOINT
     assert '_env("FRACTAL_SCOUT_PARCAE_LOOP_UPDATE_BACKEND", "eager")' in module.TOKEN_CACHE_ENTRYPOINT
+
+
+def test_token_cache_entrypoint_wires_mtp_training_knobs():
+    module = _load_module()
+
+    assert '"--mtp-aux-weight",' in module.TOKEN_CACHE_ENTRYPOINT
+    assert '_env("FRACTAL_SCOUT_MTP_AUX_WEIGHT", "0.0")' in module.TOKEN_CACHE_ENTRYPOINT
+    assert '"--mtp-max-horizon",' in module.TOKEN_CACHE_ENTRYPOINT
+    assert '_env("FRACTAL_SCOUT_MTP_MAX_HORIZON", "1")' in module.TOKEN_CACHE_ENTRYPOINT
 
 
 def test_token_cache_entrypoint_forces_attention_only_primitive_backend_to_torch():

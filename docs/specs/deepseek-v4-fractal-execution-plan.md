@@ -74,6 +74,52 @@ RGRP runs report comparable timing buckets
 loss/speed/memory comparisons are matched by shape, data, seed, and runtime knobs
 ```
 
+## Phase 0.5: Multi-Token Prediction Auxiliary Loss
+
+Current-scale relevance: high.
+
+This is the first DeepSeek-inspired ablation to run because it improves the
+training signal without changing the model's inference graph, attention pattern,
+or RGRP loop topology.
+
+Contract:
+
+```text
+main loss: next-token cross-entropy
+training-only auxiliary: shared LM head predicts future offsets 2..H
+reported eval/final loss: next-token cross-entropy only
+```
+
+Implementation knobs:
+
+| Knob | Default | First ablation |
+|---|---:|---:|
+| `runtime.mtp_aux_weight` / `--mtp-aux-weight` | 0.0 | 0.05 |
+| `runtime.mtp_max_horizon` / `--mtp-max-horizon` | 1 | 3 |
+| Head | shared LM head | shared LM head |
+| Eval behavior | next-token CE only | next-token CE only |
+
+Controls:
+
+1. Current attention-only 100M control with MTP off.
+2. Current RGRP quality lane with MTP off.
+3. Current RGRP efficient lane with MTP off.
+4. The same lanes with MTP on, starting at 1024 or 2048 steps before promotion.
+
+Success gate:
+
+```text
+MTP-on improves final next-token eval loss or early loss slope without a material
+speed/memory penalty, and the gain is not limited to one seed or one schedule.
+```
+
+Stop condition:
+
+```text
+MTP-on only lowers the training objective while final next-token eval loss is
+flat/worse, or it changes timing enough to contaminate proof-lane comparisons.
+```
+
 ## Phase 1: HCA-Lite Compressed Memory
 
 Current-scale relevance: high.
