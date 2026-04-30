@@ -54,6 +54,7 @@ HF_ENV_FILENAME = "hf.env"
 MAMBA_WHEELHOUSE_CHANNEL_NAME = "mamba_wheelhouse"
 SENSITIVE_ENV_KEYS = {"HF_TOKEN"}
 MATRIX_META_KEYS = {"slug", "name", "description"}
+RUN_MATRIX_FILENAME = "run_matrix.json"
 
 
 ENTRYPOINT = r'''#!/usr/bin/env python3
@@ -1293,8 +1294,11 @@ def main() -> int:
         command.extend(["--muon-adjust-lr-fn", muon_adjust_lr_fn])
     if _env("FRACTAL_SCOUT_PARCAE_FUSE_FIRST_STATE_MIX", "false").lower() in {"1", "true", "yes"}:
         command.append("--parcae-fuse-first-state-mix")
+    run_matrix_path = os.environ.get("FRACTAL_SCOUT_RUN_MATRIX_PATH", "").strip()
     run_matrix_json = os.environ.get("FRACTAL_SCOUT_RUN_MATRIX_JSON", "").strip()
-    if run_matrix_json:
+    if run_matrix_path:
+        command.extend(["--run-matrix-path", run_matrix_path])
+    elif run_matrix_json:
         command.extend(["--run-matrix-json", run_matrix_json])
     if _env("FRACTAL_SCOUT_FORCE_DOWNLOAD", "false").lower() in {"1", "true", "yes"}:
         command.append("--force-download")
@@ -1525,7 +1529,13 @@ def _copy_tree(src: Path, dst: Path) -> None:
     )
 
 
-def _stage_source_bundle(repo_root: Path, bundle_path: Path, *, runner: str = "smoke") -> None:
+def _stage_source_bundle(
+    repo_root: Path,
+    bundle_path: Path,
+    *,
+    runner: str = "smoke",
+    run_matrix_json: str | None = None,
+) -> None:
     with tempfile.TemporaryDirectory(prefix="fractal-sagemaker-src-") as tmp:
         stage = Path(tmp) / "source"
         stage.mkdir()
@@ -1565,6 +1575,8 @@ def _stage_source_bundle(repo_root: Path, bundle_path: Path, *, runner: str = "s
             encoding="utf-8",
         )
         entrypoint.chmod(0o755)
+        if run_matrix_json:
+            (stage / RUN_MATRIX_FILENAME).write_text(run_matrix_json, encoding="utf-8")
 
         with tarfile.open(bundle_path, "w:gz") as tar:
             for path in sorted(stage.rglob("*")):
@@ -1806,7 +1818,10 @@ def _training_request(
             "FRACTAL_SCOUT_FFN_BACKEND": args.ffn_backend,
             "FRACTAL_SCOUT_MTP_AUX_WEIGHT": str(args.mtp_aux_weight),
             "FRACTAL_SCOUT_MTP_MAX_HORIZON": str(args.mtp_max_horizon),
-            "FRACTAL_SCOUT_RUN_MATRIX_JSON": args.run_matrix_json or "",
+            "FRACTAL_SCOUT_RUN_MATRIX_JSON": "",
+            "FRACTAL_SCOUT_RUN_MATRIX_PATH": (
+                f"/opt/ml/code/{RUN_MATRIX_FILENAME}" if args.run_matrix_json else ""
+            ),
             "FRACTAL_SCOUT_SEED": str(args.seed),
             "FRACTAL_SCOUT_DATA_SEED": str(args.data_seed),
             "FRACTAL_SCOUT_TOKEN_CACHE_REPO_ID": args.token_cache_repo_id,
@@ -2309,7 +2324,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     with tempfile.TemporaryDirectory(prefix="fractal-sagemaker-bundle-") as tmp:
         bundle_path = Path(tmp) / "source.tar.gz"
-        _stage_source_bundle(REPO_ROOT, bundle_path, runner=args.runner)
+        _stage_source_bundle(
+            REPO_ROOT,
+            bundle_path,
+            runner=args.runner,
+            run_matrix_json=args.run_matrix_json if args.runner == "token-cache" else None,
+        )
         hf_env_s3_prefix = None
         hf_env_path = None
         if args.runner == "token-cache" and not args.token_cache_s3_uri:

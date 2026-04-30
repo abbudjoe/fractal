@@ -584,6 +584,8 @@ def test_token_cache_entrypoint_wires_run_matrix_json():
     module = _load_module()
 
     assert "FRACTAL_SCOUT_RUN_MATRIX_JSON" in module.TOKEN_CACHE_ENTRYPOINT
+    assert "FRACTAL_SCOUT_RUN_MATRIX_PATH" in module.TOKEN_CACHE_ENTRYPOINT
+    assert '"--run-matrix-path"' in module.TOKEN_CACHE_ENTRYPOINT
     assert '"--run-matrix-json"' in module.TOKEN_CACHE_ENTRYPOINT
 
 
@@ -618,7 +620,8 @@ def test_training_request_wires_run_matrix_json(monkeypatch):
         output_s3_path="s3://example-bucket/fractal/test/output",
     )
 
-    assert request["Environment"]["FRACTAL_SCOUT_RUN_MATRIX_JSON"] == matrix
+    assert request["Environment"]["FRACTAL_SCOUT_RUN_MATRIX_JSON"] == ""
+    assert request["Environment"]["FRACTAL_SCOUT_RUN_MATRIX_PATH"] == "/opt/ml/code/run_matrix.json"
 
 
 def test_token_cache_entrypoint_forces_attention_only_primitive_backend_to_torch():
@@ -716,6 +719,20 @@ def test_promotion_runner_run_matrix_overrides_shape_and_aliases():
     assert run_args.head_count == 16
     assert run_args.parcae_loop_d_model == 384
     assert run_args.parcae_loop_head_count == 6
+
+
+def test_stage_source_bundle_can_include_run_matrix_file(tmp_path):
+    module = _load_module()
+    bundle = tmp_path / "source.tar.gz"
+
+    module._stage_source_bundle(REPO_ROOT, bundle, runner="token-cache", run_matrix_json='[{"slug":"a"}]')
+
+    import tarfile
+
+    with tarfile.open(bundle, "r:gz") as tar:
+        entrypoint = tar.extractfile("run_matrix.json")
+        assert entrypoint is not None
+        assert entrypoint.read().decode("utf-8") == '[{"slug":"a"}]'
 
 
 def test_training_request_wires_token_cache_nsys_contract(monkeypatch):

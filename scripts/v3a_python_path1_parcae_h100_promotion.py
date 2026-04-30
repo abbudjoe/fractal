@@ -126,6 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
             "plus a slug/name for output isolation."
         ),
     )
+    parser.add_argument("--run-matrix-path", type=Path, help="Path to a JSON run matrix file.")
     parser.add_argument(
         "--lanes",
         default="attention-only,parcae-looped-attention,parcae-bx-looped-attention,parcae-p20-control-looped-attention",
@@ -301,6 +302,7 @@ def _args_for_matrix_spec(args: argparse.Namespace, spec: dict[str, Any], *, ind
     slug = _safe_slug(spec.get("slug", spec.get("name")), index=index)
     run_args = argparse.Namespace(**vars(args))
     run_args.run_matrix_json = None
+    run_args.run_matrix_path = None
     for key, value in spec.items():
         if key in MATRIX_META_KEYS:
             continue
@@ -786,8 +788,14 @@ def main() -> int:
     manifest_path = hydrate_token_cache(args)
     stats = _load_manifest_stats(manifest_path)
 
-    if args.run_matrix_json:
-        specs = _load_run_matrix(args.run_matrix_json)
+    run_matrix_json = args.run_matrix_json
+    if args.run_matrix_path is not None:
+        if run_matrix_json:
+            raise SystemExit("--run-matrix-json and --run-matrix-path are mutually exclusive")
+        run_matrix_json = args.run_matrix_path.read_text(encoding="utf-8")
+
+    if run_matrix_json:
+        specs = _load_run_matrix(run_matrix_json)
         all_rows: list[dict[str, Any]] = []
         for index, spec in enumerate(specs, start=1):
             slug, run_args = _args_for_matrix_spec(args, spec, index=index)
