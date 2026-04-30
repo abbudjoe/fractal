@@ -134,6 +134,21 @@ def build_parser() -> argparse.ArgumentParser:
         default="dense",
         help="Transformer FFN runtime backend forwarded to the Path 1 runner.",
     )
+    parser.add_argument(
+        "--mtp-aux-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional multi-token-prediction auxiliary training loss forwarded to "
+            "the Path 1 runner. Defaults off."
+        ),
+    )
+    parser.add_argument(
+        "--mtp-max-horizon",
+        type=int,
+        default=1,
+        help="Maximum MTP auxiliary prediction horizon. 1 disables future-token auxiliary loss.",
+    )
     parser.add_argument("--compile-mode", choices=["default", "reduce-overhead", "max-autotune"])
     parser.add_argument("--force-download", action="store_true")
     return parser
@@ -332,6 +347,10 @@ def run_lane(args: argparse.Namespace, *, lane: str, manifest_path: Path, output
         args.head_loss_backend,
         "--ffn-backend",
         args.ffn_backend,
+        "--mtp-aux-weight",
+        str(args.mtp_aux_weight),
+        "--mtp-max-horizon",
+        str(args.mtp_max_horizon),
         "--corpus-format",
         "token-ids",
         "--tokenized-manifest-path",
@@ -502,6 +521,8 @@ def write_summary(args: argparse.Namespace, *, output_dir: Path, manifest_path: 
         "primitive_runtime_backend": args.primitive_runtime_backend,
         "head_loss_backend": args.head_loss_backend,
         "ffn_backend": args.ffn_backend,
+        "mtp_aux_weight": args.mtp_aux_weight,
+        "mtp_max_horizon": args.mtp_max_horizon,
         "muon_weight_decay": args.muon_weight_decay,
         "muon_momentum": args.muon_momentum,
         "muon_ns_steps": args.muon_ns_steps,
@@ -564,6 +585,8 @@ def write_summary(args: argparse.Namespace, *, output_dir: Path, manifest_path: 
         f"- primitive_runtime_backend: `{args.primitive_runtime_backend}`",
         f"- head_loss_backend: `{args.head_loss_backend}`",
         f"- ffn_backend: `{args.ffn_backend}`",
+        f"- mtp_aux_weight: `{args.mtp_aux_weight}`",
+        f"- mtp_max_horizon: `{args.mtp_max_horizon}`",
         f"- parcae_loop_count: `{args.parcae_loop_count}`",
         f"- parcae_hourglass_pass_count: `{args.parcae_hourglass_pass_count}`",
         f"- parcae_hourglass_band_schedule: `{args.parcae_hourglass_band_schedule}`",

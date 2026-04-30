@@ -626,6 +626,23 @@ def test_promotion_runner_classifies_parcae_scaffold_lanes():
     assert module._lane_uses_parcae_scaffold("parcae-hourglass-p20-control-looped-attention")
 
 
+def test_promotion_runner_accepts_mtp_forwarding_args():
+    module = _load_promotion_module()
+    args = module.build_parser().parse_args(
+        [
+            "--run-label",
+            "test",
+            "--mtp-aux-weight",
+            "0.05",
+            "--mtp-max-horizon",
+            "3",
+        ]
+    )
+
+    assert args.mtp_aux_weight == 0.05
+    assert args.mtp_max_horizon == 3
+
+
 def test_training_request_wires_token_cache_nsys_contract(monkeypatch):
     module = _load_module()
     monkeypatch.setenv("FRACTAL_SAGEMAKER_ROLE_ARN", "arn:aws:iam::123456789012:role/test-sagemaker-role")
