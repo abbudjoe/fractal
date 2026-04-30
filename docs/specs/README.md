@@ -25,8 +25,13 @@ This folder contains the updated planning documents with **Causal Memory Auditor
 - [`p20-gdn-role-candidate.md`](./p20-gdn-role-candidate.md) — first Fractal-native `P20` redesign for the Gated-DeltaNet recurrent-block role, including update/ramp/optimizer contracts and local smoke results
 - [`p20-gdn-head2head-scorecard.md`](./p20-gdn-head2head-scorecard.md) — H100 Path 1 head-to-head for `A`, native Mamba3, Fractal-native GDN, frozen `P20` Triton, and `P20-GDN-role`
 - [`parcae-rgrp-next-rungs.md`](./parcae-rgrp-next-rungs.md) — next-step sequencing note for the Parcae/RGRP lane: split position contract first, bounded recurrent depth second, cache-transfer/prefix-compression later
+- [`parcae-rgrp-100m-bf16-freeze.md`](./parcae-rgrp-100m-bf16-freeze.md) — historical 100M bf16 seed-44 freeze and fp32 artifact invalidation note
+- [`parcae-rgrp-100m-schedule-scorecard.md`](./parcae-rgrp-100m-schedule-scorecard.md) — current 100M corrected seed-45 attention/RGRP/Mamba head-to-head and bounded RGRP schedule scout scorecard
 - [`parcae-rgrp-native-kernel-superspec.md`](./parcae-rgrp-native-kernel-superspec.md) — dependency-aware native-kernel superspec for the Parcae/RGRP lane, mapping PyTorch-owned contracts to native CUDA/Triton/CUTLASS replacement gates
+- [`parcae-rgrp-native-loop-region-contract.md`](./parcae-rgrp-native-loop-region-contract.md) — explicit loop-region native-kernel boundary contract for RGRP recurrent execution
 - [`parcae-rgrp-pytorch-primitive-teardown.md`](./parcae-rgrp-pytorch-primitive-teardown.md) — source-pinned teardown of PyTorch primitive contracts that Parcae/RGRP native CUDA/Triton/CUTLASS replacements must preserve
+- [`gpt2-attention-control-sanity.md`](./gpt2-attention-control-sanity.md) — sanity note comparing the repo’s attention control against GPT-2-style expectations
+- [`deepseek-v4-fractal-execution-plan.md`](./deepseek-v4-fractal-execution-plan.md) — staged extraction plan for DeepSeek-V4/Recurrent-Transformer-inspired ideas, separated from the main RGRP proof lane
 - [`math-proof-program.md`](./math-proof-program.md) — shared notation and theorem-outline program for standard decoder LLMs, modern hybrid variants, `A + P2`, and the proposed Graph-of-Experts line
 - [`math/README.md`](./math/README.md) — split proof notes, theorem audit, and LaTeX source for the repo’s current math-proof program
 - [`native-internal-search-sketch.md`](./native-internal-search-sketch.md) — sketch note for a native internal-search runtime direction
