@@ -51,6 +51,7 @@ LANE_ALIASES = {
 DEFAULT_TOKEN_CACHE_ARTIFACT = "fineweb-cc-main-2024-10-openllama-tokens-250m-v1.tar.zst"
 HF_ENV_CHANNEL_NAME = "hf_env"
 HF_ENV_FILENAME = "hf.env"
+MAMBA_WHEELHOUSE_CHANNEL_NAME = "mamba_wheelhouse"
 SENSITIVE_ENV_KEYS = {"HF_TOKEN"}
 
 
@@ -356,6 +357,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 
@@ -459,6 +461,8 @@ def _pip_install_if_needed(*, include_hf: bool, include_transformers: bool, incl
     if missing:
         subprocess.run([sys.executable, "-m", "pip", "install", *missing], check=True)
     if include_mamba_kernels:
+        if _install_mamba_kernels_from_wheelhouse():
+            return
         kernel_specs = [
             "kernels>=0.13.0",
             "causal-conv1d>=1.5.3.post1",
@@ -467,6 +471,68 @@ def _pip_install_if_needed(*, include_hf: bool, include_transformers: bool, incl
         command = [sys.executable, "-m", "pip", "install", "--no-build-isolation", *kernel_specs]
         print("+ " + " ".join(command), flush=True)
         subprocess.run(command, check=True)
+
+
+def _install_mamba_kernels_from_wheelhouse() -> bool:
+    channel = _env("FRACTAL_SCOUT_MAMBA_WHEELHOUSE_DIR", "")
+    if not channel:
+        return False
+    wheelhouse_channel = Path(channel)
+    if not wheelhouse_channel.exists():
+        raise SystemExit(f"Mamba wheelhouse channel does not exist: {wheelhouse_channel}")
+
+    extracted_root = ROOT / ".mamba-wheelhouse-runtime"
+    if extracted_root.exists():
+        shutil.rmtree(extracted_root)
+    extracted_root.mkdir(parents=True, exist_ok=True)
+
+    archives = sorted(wheelhouse_channel.rglob("*.tar.gz"))
+    if archives:
+        with tarfile.open(archives[0], "r:gz") as tar:
+            tar.extractall(extracted_root)
+    else:
+        extracted_root = wheelhouse_channel
+
+    manifests = sorted(extracted_root.rglob("manifest.json"))
+    if not manifests:
+        raise SystemExit(f"Mamba wheelhouse manifest.json not found under {extracted_root}")
+    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    wheel_dir = manifests[0].parent / "wheels"
+    if not wheel_dir.exists():
+        raise SystemExit(f"Mamba wheelhouse wheels directory not found: {wheel_dir}")
+
+    wheel_names = sorted(path.name for path in wheel_dir.glob("*.whl"))
+    forbidden_prefixes = tuple(manifest.get("forbidden_wheel_prefixes") or ("torch-", "triton-", "nvidia_", "cuda_"))
+    forbidden_wheels = [
+        name
+        for name in wheel_names
+        if any(name.lower().startswith(prefix) for prefix in forbidden_prefixes)
+    ]
+    if forbidden_wheels:
+        raise SystemExit(
+            "Mamba wheelhouse dependency leak: refusing vendored torch/CUDA stack wheels: "
+            + ", ".join(forbidden_wheels)
+        )
+
+    native_specs = manifest.get("native_package_specs") or [
+        "kernels==0.13.0",
+        "causal-conv1d==1.6.1",
+        "mamba-ssm==2.3.1",
+    ]
+    command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--no-index",
+        "--no-deps",
+        "--find-links",
+        str(wheel_dir),
+        *native_specs,
+    ]
+    print("+ " + " ".join(command), flush=True)
+    subprocess.run(command, check=True)
+    return True
 
 
 def _install_flash_attn_if_requested() -> None:
@@ -1413,6 +1479,13 @@ def _default_training_image(region: str) -> str:
     )
 
 
+def _s3_file_or_prefix_channel_uri(uri: str) -> str:
+    stripped = uri.rstrip("/")
+    if stripped.endswith((".tar.gz", ".tar", ".tgz", ".zst")):
+        return stripped
+    return stripped + "/"
+
+
 def _run_aws(
     args: argparse.Namespace,
     aws_args: Sequence[str],
@@ -1715,6 +1788,10 @@ def _training_request(
             scout_env["FRACTAL_SCOUT_FORCE_DOWNLOAD"] = "false"
         elif args.token_cache_dir:
             scout_env["FRACTAL_SCOUT_TOKEN_CACHE_DIR"] = args.token_cache_dir
+        if args.mamba_wheelhouse_s3_uri:
+            scout_env["FRACTAL_SCOUT_MAMBA_WHEELHOUSE_DIR"] = (
+                f"/opt/ml/input/data/{MAMBA_WHEELHOUSE_CHANNEL_NAME}"
+            )
         env.update(scout_env)
     elif args.runner == "smoke":
         env.update(
@@ -1811,6 +1888,22 @@ def _training_request(
                 "InputMode": args.token_cache_input_mode,
                 "CompressionType": "None",
                 "ContentType": "application/x-fractal-token-cache",
+            }
+        )
+    if args.runner == "token-cache" and args.mamba_wheelhouse_s3_uri:
+        input_data_config.append(
+            {
+                "ChannelName": MAMBA_WHEELHOUSE_CHANNEL_NAME,
+                "DataSource": {
+                    "S3DataSource": {
+                        "S3DataType": "S3Prefix",
+                        "S3Uri": _s3_file_or_prefix_channel_uri(args.mamba_wheelhouse_s3_uri),
+                        "S3DataDistributionType": "FullyReplicated",
+                    }
+                },
+                "InputMode": "File",
+                "CompressionType": "None",
+                "ContentType": "application/x-tar",
             }
         )
     if args.runner == "token-cache" and hf_env_s3_prefix:
@@ -2101,6 +2194,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mamba-wheelhouse-mamba-ssm-version", default="2.3.1")
     parser.add_argument("--mamba-wheelhouse-transformers-version", default="5.7.0")
     parser.add_argument("--mamba-wheelhouse-sentencepiece-version", default="0.2.1")
+    parser.add_argument(
+        "--mamba-wheelhouse-s3-uri",
+        help=(
+            "S3 URI for a completed mamba-wheelhouse model.tar.gz artifact or prefix. "
+            "When set with --runner token-cache and an official Mamba lane, the job installs "
+            "the native Mamba wheels from this input channel instead of rebuilding them."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--data-seed", type=int, default=42)
     parser.add_argument("--dry-run", action="store_true")

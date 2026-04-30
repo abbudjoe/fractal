@@ -371,6 +371,46 @@ def test_training_request_wires_external_lm_lanes(monkeypatch):
     assert request["Environment"]["FRACTAL_SCOUT_DTYPE"] == "bf16"
 
 
+def test_training_request_wires_token_cache_mamba_wheelhouse_channel(monkeypatch):
+    module = _load_module()
+    monkeypatch.setenv("FRACTAL_SAGEMAKER_ROLE_ARN", "arn:aws:iam::123456789012:role/test-sagemaker-role")
+    wheelhouse_uri = (
+        "s3://example-bucket/fractal/mamba-wheelhouse/job/output/job/output/model.tar.gz"
+    )
+    args = module.build_parser().parse_args(
+        [
+            "--runner",
+            "token-cache",
+            "--bucket",
+            "example-bucket",
+            "--job-name",
+            "fractal-mamba-wheelhouse-consumer-job",
+            "--region",
+            "us-east-1",
+            "--token-cache-s3-uri",
+            "s3://example-bucket/fractal/token-caches/fineweb-750m",
+            "--mamba-wheelhouse-s3-uri",
+            wheelhouse_uri,
+            "--lanes",
+            "mamba-official",
+        ]
+    )
+
+    request = module._training_request(
+        args,
+        source_s3_prefix="s3://example-bucket/fractal/test/source/",
+        output_s3_path="s3://example-bucket/fractal/test/output",
+    )
+
+    assert request["Environment"]["FRACTAL_SCOUT_LANES"] == "official-mamba-130m"
+    assert request["Environment"]["FRACTAL_SCOUT_MAMBA_WHEELHOUSE_DIR"] == (
+        "/opt/ml/input/data/mamba_wheelhouse"
+    )
+    channels = {channel["ChannelName"]: channel for channel in request["InputDataConfig"]}
+    assert channels["mamba_wheelhouse"]["InputMode"] == "File"
+    assert channels["mamba_wheelhouse"]["DataSource"]["S3DataSource"]["S3Uri"] == wheelhouse_uri
+
+
 def test_training_request_wires_mamba_wheelhouse_contract(monkeypatch):
     module = _load_module()
     monkeypatch.setenv("FRACTAL_SAGEMAKER_ROLE_ARN", "arn:aws:iam::123456789012:role/test-sagemaker-role")
@@ -539,6 +579,10 @@ def test_token_cache_entrypoint_contains_external_lm_lane_contract():
     assert "v3a_external_lm_baseline.py" in module.TOKEN_CACHE_ENTRYPOINT
     assert "include_transformers=has_external_lanes" in module.TOKEN_CACHE_ENTRYPOINT
     assert "include_mamba_kernels=has_external_mamba_lane" in module.TOKEN_CACHE_ENTRYPOINT
+    assert "FRACTAL_SCOUT_MAMBA_WHEELHOUSE_DIR" in module.TOKEN_CACHE_ENTRYPOINT
+    assert "Mamba wheelhouse dependency leak" in module.TOKEN_CACHE_ENTRYPOINT
+    assert '"--no-index"' in module.TOKEN_CACHE_ENTRYPOINT
+    assert '"--no-deps"' in module.TOKEN_CACHE_ENTRYPOINT
     assert "mamba-ssm>=2.2.6.post3" in module.TOKEN_CACHE_ENTRYPOINT
     assert "_external_lm_lane_command" in module.TOKEN_CACHE_ENTRYPOINT
 
