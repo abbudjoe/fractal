@@ -27,6 +27,7 @@ This folder contains the updated planning documents with **Causal Memory Auditor
 - [`parcae-rgrp-next-rungs.md`](./parcae-rgrp-next-rungs.md) — next-step sequencing note for the Parcae/RGRP lane: split position contract first, bounded recurrent depth second, cache-transfer/prefix-compression later
 - [`parcae-rgrp-100m-bf16-freeze.md`](./parcae-rgrp-100m-bf16-freeze.md) — historical 100M bf16 seed-44 freeze and fp32 artifact invalidation note
 - [`parcae-rgrp-100m-schedule-scorecard.md`](./parcae-rgrp-100m-schedule-scorecard.md) — current 100M corrected seed-45 attention/RGRP/Mamba head-to-head and bounded RGRP schedule scout scorecard
+- [`parcae-rgrp-2026-04-30-execution-lanes.md`](./parcae-rgrp-2026-04-30-execution-lanes.md) — active split between main proof scaling, DeepSeek-inspired ablations, and native kernel work, including the launched MTP scout jobs
 - [`parcae-rgrp-native-kernel-superspec.md`](./parcae-rgrp-native-kernel-superspec.md) — dependency-aware native-kernel superspec for the Parcae/RGRP lane, mapping PyTorch-owned contracts to native CUDA/Triton/CUTLASS replacement gates
 - [`parcae-rgrp-native-loop-region-contract.md`](./parcae-rgrp-native-loop-region-contract.md) — explicit loop-region native-kernel boundary contract for RGRP recurrent execution
 - [`parcae-rgrp-pytorch-primitive-teardown.md`](./parcae-rgrp-pytorch-primitive-teardown.md) — source-pinned teardown of PyTorch primitive contracts that Parcae/RGRP native CUDA/Triton/CUTLASS replacements must preserve
