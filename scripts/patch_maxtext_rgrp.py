@@ -94,7 +94,7 @@ def _nan_or_inf_seen(*values: jax.Array) -> jax.Array:
   seen = jnp.asarray(False)
   for value in values:
     seen = seen | jnp.any(~jnp.isfinite(_as_f32(value)))
-  return seen.astype(jnp.float32)
+  return seen
 
 
 def sow_parcae_control_diagnostic(module: nn.Module, metric_name: str, value: jax.Array) -> None:
@@ -1375,6 +1375,59 @@ def patch_train(package_dir: Path) -> None:
     train_path.write_text(text)
 
 
+def patch_hf_data_processing(package_dir: Path) -> None:
+    """Make MaxText's HF pipeline honor the Grain worker-count config knobs.
+
+    Current MaxText exposes ``grain_worker_count`` and
+    ``grain_worker_count_eval`` in the global config, but the Hugging Face
+    preprocessing path keeps using the helper default of one worker. For these
+    long single-host TPU comparison runs that hidden default means the HF/parquet
+    path always uses a Grain subprocess and shared-memory queue. If that queue
+    fails, MaxText logs ``Training stopped`` and exits cleanly unless the caller
+    checks the log. Wiring the knob lets Fractal runs choose deterministic,
+    in-process HF loading with ``grain_worker_count=0``.
+    """
+
+    hf_path = package_dir / "input_pipeline" / "hf_data_processing.py"
+    text = hf_path.read_text()
+
+    def add_worker_count_keyword(source: str, *, call_start: str, keyword: str) -> str:
+        start = source.find(call_start)
+        if start == -1:
+            raise RuntimeError(f"could not find {call_start.strip()} in {hf_path}")
+        end = source.find("    )\n", start)
+        if end == -1:
+            raise RuntimeError(f"could not find end of {call_start.strip()} in {hf_path}")
+        block = source[start:end]
+        if "grain_worker_count=" in block:
+            return source
+        anchors = (
+            "        formatting_func_kwargs=config.formatting_func_kwargs,\n",
+            "        chat_template=config.chat_template,\n",
+            "        num_epoch=config.num_epoch,\n",
+            "        max_segments_per_seq=config.max_segments_per_seq,\n",
+        )
+        for anchor in anchors:
+            anchor_index = block.rfind(anchor)
+            if anchor_index != -1:
+                insert_at = start + anchor_index + len(anchor)
+                return source[:insert_at] + f"        grain_worker_count={keyword},\n" + source[insert_at:]
+        raise RuntimeError(f"could not find stable insertion anchor for {call_start.strip()} in {hf_path}")
+
+    text = add_worker_count_keyword(
+        text,
+        call_start="    train_iter = preprocessing_pipeline(\n",
+        keyword="config.grain_worker_count",
+    )
+    text = add_worker_count_keyword(
+        text,
+        call_start="    eval_iter = preprocessing_pipeline(\n",
+        keyword="config.grain_worker_count_eval",
+    )
+
+    hf_path.write_text(text)
+
+
 def patch_metric_logger(package_dir: Path) -> None:
     logger_path = package_dir / "common" / "metric_logger.py"
     text = logger_path.read_text()
@@ -1433,6 +1486,7 @@ def patch_maxtext(path: Path) -> None:
     patch_types(package_dir)
     patch_decoders(package_dir)
     patch_train(package_dir)
+    patch_hf_data_processing(package_dir)
     patch_metric_logger(package_dir)
 
 

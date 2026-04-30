@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,8 +30,8 @@ class TokenBatch:
 @dataclass(frozen=True)
 class ByteCorpusBundle:
     corpus_stats: dict[str, object]
-    train_batches: list[TokenBatch]
-    eval_batches: list[TokenBatch]
+    train_batches: Sequence[TokenBatch]
+    eval_batches: Sequence[TokenBatch]
 
 
 def load_jsonl_text_documents(path: Path, text_field: str) -> list[bytes]:

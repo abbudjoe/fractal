@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from python.specs.common import DeviceRuntimeSpec, ValidationError
+from python.specs.common import BenchmarkBudgetSpec, DeviceRuntimeSpec, ValidationError
 from python.specs.mini_moe import (
     MiniMoeArchitectureSpec,
     MiniMoeBackboneSpec,
@@ -17,6 +17,7 @@ from python.specs.mini_moe import (
     OneShotRouterSpec,
 )
 from python.specs.path1 import (
+    AttentionKernelProfile,
     FeedForwardProfile,
     HybridAttentionLayerRole,
     Path1ScaffoldProfile,
@@ -30,6 +31,7 @@ from python.specs.path1 import (
     ReferenceSsmProfile,
     layer_schedule_signature,
     parse_layer_index_spec,
+    parse_int_tuple_spec,
     parse_layer_schedule_spec,
     parse_reference_ssm_profile_schedule_spec,
     phase1_attention_only_variant,
@@ -43,6 +45,56 @@ from python.specs.runtime import RuntimeOptimizationTarget, runtime_optimization
 
 
 class Path1SpecTests(unittest.TestCase):
+    def test_budget_spec_accepts_sparse_train_loss_recording(self) -> None:
+        BenchmarkBudgetSpec(train_loss_record_interval=128).validate()
+        with self.assertRaises(ValidationError):
+            BenchmarkBudgetSpec(train_loss_record_interval=0).validate()
+
+    def test_budget_spec_accepts_muon_reference_optimizer_profile(self) -> None:
+        BenchmarkBudgetSpec(optimizer_profile="adam-fused").validate()
+        BenchmarkBudgetSpec(optimizer_profile="adam-triton-2d").validate()
+        BenchmarkBudgetSpec(
+            optimizer_profile="muon-reference",
+            muon_weight_decay=0.01,
+            muon_momentum=0.9,
+            muon_ns_steps=4,
+            muon_adjust_lr_fn="match_rms_adamw",
+        ).validate()
+        with self.assertRaises(ValidationError):
+            BenchmarkBudgetSpec(optimizer_profile="mystery").validate()
+        with self.assertRaises(ValidationError):
+            BenchmarkBudgetSpec(muon_ns_steps=0).validate()
+        with self.assertRaises(ValidationError):
+            BenchmarkBudgetSpec(muon_adjust_lr_fn="mystery").validate()
+
+    def test_path1_shape_accepts_explicit_attention_kernel(self) -> None:
+        shape = Path1ModelShape(attention_kernel=AttentionKernelProfile.FLEX_LOCAL)
+
+        shape.validate()
+
+        self.assertEqual(shape.attention_kernel, AttentionKernelProfile.FLEX_LOCAL)
+
+    def test_path1_shape_rejects_flex_local_non_power_of_two_head_dim(self) -> None:
+        shape = Path1ModelShape(
+            d_model=480,
+            head_count=10,
+            attention_kernel=AttentionKernelProfile.FLEX_LOCAL,
+        )
+
+        with self.assertRaisesRegex(ValidationError, "power-of-two head_dim"):
+            shape.validate()
+
+    def test_path1_shape_allows_flash_local_non_power_of_two_head_dim(self) -> None:
+        shape = Path1ModelShape(
+            d_model=480,
+            head_count=10,
+            attention_kernel=AttentionKernelProfile.FLASH_LOCAL,
+        )
+
+        shape.validate()
+
+        self.assertEqual(shape.attention_kernel, AttentionKernelProfile.FLASH_LOCAL)
+
     def test_runtime_spec_accepts_compile_modes(self) -> None:
         DeviceRuntimeSpec(backend="cuda", dtype="bf16", compile_mode="reduce-overhead").validate()
         with self.assertRaises(ValidationError):
@@ -75,6 +127,22 @@ class Path1SpecTests(unittest.TestCase):
             env_kind="primitive-triton",
             primitive_runtime_backend="triton",
         ).validate()
+
+    def test_runtime_spec_tracks_native_kernel_backend_contracts(self) -> None:
+        DeviceRuntimeSpec(backend="cuda", dtype="bf16", head_loss_backend="streaming-kernel").validate()
+        DeviceRuntimeSpec(backend="cuda", dtype="bf16", ffn_backend="manual-autograd").validate()
+        DeviceRuntimeSpec(backend="cuda", dtype="bf16", ffn_backend="triton-gelu").validate()
+        DeviceRuntimeSpec(backend="cuda", dtype="bf16", ffn_backend="recompute").validate()
+        with self.assertRaisesRegex(ValidationError, "streaming-kernel"):
+            DeviceRuntimeSpec(backend="cpu", dtype="fp32", head_loss_backend="streaming-kernel").validate()
+        with self.assertRaisesRegex(ValidationError, "ffn_backend=manual-autograd"):
+            DeviceRuntimeSpec(backend="mps", dtype="fp32", ffn_backend="manual-autograd").validate()
+        with self.assertRaisesRegex(ValidationError, "ffn_backend=triton-gelu"):
+            DeviceRuntimeSpec(backend="cpu", dtype="fp32", ffn_backend="triton-gelu").validate()
+        with self.assertRaisesRegex(ValidationError, "head_loss_backend"):
+            DeviceRuntimeSpec(backend="cuda", dtype="bf16", head_loss_backend="mystery").validate()
+        with self.assertRaisesRegex(ValidationError, "ffn_backend"):
+            DeviceRuntimeSpec(backend="cuda", dtype="bf16", ffn_backend="mystery").validate()
 
     def test_runtime_spec_accepts_mps_fp32_only(self) -> None:
         DeviceRuntimeSpec(backend="mps", dtype="fp32").validate()
@@ -150,6 +218,215 @@ class Path1SpecTests(unittest.TestCase):
         self.assertEqual(variant.parcae_loop_count, 3)
         self.assertEqual(variant.label, "attention-only-parcae-looped-attention-loops3")
 
+    def test_attention_only_parcae_scaffold_tracks_cuda_parity_knobs(self) -> None:
+        variant = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_backward_steps=1,
+            parcae_prelude_norm_kind="rmsnorm",
+            parcae_discretization="stable-exp",
+            parcae_control_stride=4,
+            parcae_recurrent_compile_mode="max-autotune",
+            parcae_loop_update_backend="compiled",
+        )
+
+        variant.validate()
+
+        self.assertEqual(variant.parcae_backward_steps, 1)
+        self.assertEqual(variant.parcae_prelude_norm_kind, "rmsnorm")
+        self.assertEqual(variant.parcae_discretization, "stable-exp")
+        self.assertEqual(variant.parcae_control_stride, 4)
+        self.assertEqual(variant.parcae_recurrent_compile_mode, "max-autotune")
+        self.assertEqual(variant.parcae_loop_update_backend, "compiled")
+        self.assertEqual(
+            variant.label,
+            "attention-only-parcae-p20-control-looped-attention-loops2-bwd1-prenorm-rmsnorm-ctrlstride4-rcompile-max-autotune-loopupdate-compiled",
+        )
+
+        manual_variant = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_update_backend="manual-autograd",
+        )
+
+        manual_variant.validate()
+        self.assertEqual(manual_variant.parcae_loop_update_backend, "manual-autograd")
+        self.assertIn("loopupdate-manual-autograd", manual_variant.label)
+
+        lean_variant = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_update_backend="lean-eager",
+        )
+
+        lean_variant.validate()
+        self.assertEqual(lean_variant.parcae_loop_update_backend, "lean-eager")
+        self.assertIn("loopupdate-lean-eager", lean_variant.label)
+
+        triton_variant = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_update_backend="triton-glue",
+        )
+
+        triton_variant.validate()
+        self.assertEqual(triton_variant.parcae_loop_update_backend, "triton-glue")
+        self.assertIn("loopupdate-triton-glue", triton_variant.label)
+
+        triton_forward_variant = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_update_backend="triton-loop-forward",
+        )
+
+        triton_forward_variant.validate()
+        self.assertEqual(triton_forward_variant.parcae_loop_update_backend, "triton-loop-forward")
+        self.assertIn("loopupdate-triton-loop-forward", triton_forward_variant.label)
+
+    def test_standard_attention_ignores_parcae_runtime_knobs(self) -> None:
+        variant = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.STANDARD,
+            parcae_loop_count=7,
+            parcae_backward_steps=1,
+            parcae_prelude_norm_kind="rmsnorm",
+            parcae_discretization="zoh",
+            parcae_loop_d_model=64,
+            parcae_loop_head_count=4,
+            parcae_loop_ffn_multiplier=2,
+            parcae_loop_layer_count=2,
+            parcae_hourglass_band_schedule=(2, 1, 2),
+            parcae_control_position_kind="learned",
+            parcae_control_stride=4,
+            parcae_control_state_transform="trainable-block-diagonal-8",
+            parcae_recurrent_compile_mode="max-autotune",
+            parcae_loop_update_backend="triton-loop-forward",
+            parcae_scaffold_backend="compiled",
+            parcae_band_block_contract="compiled-direct",
+            parcae_band_prepare_backend="compiled",
+            parcae_output_mix_backend="triton",
+            parcae_fuse_first_state_mix=True,
+            attention_position_contract="attention-only",
+        )
+
+        variant.validate()
+
+        self.assertEqual(variant.label, "attention-only-attnpos-attention-only")
+        self.assertEqual(variant.scaffold_profile, Path1ScaffoldProfile.STANDARD)
+        self.assertEqual(variant.parcae_loop_update_backend, "eager")
+        self.assertEqual(variant.parcae_band_prepare_backend, "standard")
+        self.assertEqual(variant.parcae_loop_d_model, None)
+        self.assertFalse(variant.parcae_fuse_first_state_mix)
+
+    def test_attention_only_parcae_rejects_retired_tiny_native_backward_backends(self) -> None:
+        for backend in (
+            "triton-loop-forward-native-bwd",
+            "triton-loop-forward-frozen-control-bwd",
+        ):
+            with self.subTest(backend=backend):
+                variant = phase1_attention_only_variant(
+                    scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+                    parcae_loop_update_backend=backend,
+                )
+
+                with self.assertRaisesRegex(ValidationError, "parcae_loop_update_backend"):
+                    variant.validate()
+
+    def test_attention_only_attention_position_contract_tracks_label(self) -> None:
+        variant = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_loop_d_model=32,
+            parcae_loop_head_count=4,
+            parcae_loop_ffn_multiplier=2,
+            position_encoding_kind="learned",
+            attention_position_contract="attention-only",
+            parcae_control_position_kind="learned",
+        )
+
+        variant.validate()
+
+        self.assertEqual(variant.attention_position_contract, "attention-only")
+        self.assertIn("attnpos-attention-only", variant.label)
+
+    def test_parcae_hourglass_pass_count_requires_hourglass_scaffold(self) -> None:
+        variant = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_hourglass_pass_count=2,
+            parcae_loop_d_model=32,
+            parcae_loop_head_count=4,
+            parcae_loop_ffn_multiplier=2,
+        )
+
+        variant.validate()
+
+        self.assertEqual(variant.parcae_hourglass_pass_count, 2)
+        self.assertIn("passes2", variant.label)
+
+        invalid = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_hourglass_pass_count=2,
+        )
+        with self.assertRaisesRegex(ValidationError, "hourglass pass count"):
+            invalid.validate()
+
+    def test_parcae_hourglass_band_schedule_requires_hourglass_scaffold(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(total_layers=12),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_hourglass_band_schedule=(3, 2, 3, 2, 2),
+            parcae_loop_d_model=32,
+            parcae_loop_head_count=4,
+            parcae_loop_ffn_multiplier=2,
+        )
+
+        variant.validate()
+
+        self.assertEqual(variant.parcae_hourglass_band_schedule, (3, 2, 3, 2, 2))
+        self.assertIn("bands3x2x3x2x2", variant.label)
+
+        invalid_sum = phase1_attention_only_variant(
+            shape=Path1ModelShape(total_layers=12),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_hourglass_band_schedule=(3, 2, 3, 2, 1),
+        )
+        with self.assertRaisesRegex(ValidationError, "band_schedule must sum"):
+            invalid_sum.validate()
+
+        invalid_scaffold = phase1_attention_only_variant(
+            shape=Path1ModelShape(total_layers=12),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_hourglass_band_schedule=(3, 2, 3, 2, 2),
+        )
+        with self.assertRaisesRegex(ValidationError, "hourglass band schedule"):
+            invalid_scaffold.validate()
+
+    def test_parse_int_tuple_spec_preserves_order(self) -> None:
+        self.assertEqual(
+            parse_int_tuple_spec("3, 2 3,2,2", name="band schedule"),
+            (3, 2, 3, 2, 2),
+        )
+        with self.assertRaisesRegex(ValidationError, "positive integers"):
+            parse_int_tuple_spec("3,0,2", name="band schedule")
+
+    def test_parcae_loop_layer_count_requires_hourglass_scaffold(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(total_layers=8),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_d_model=64,
+            parcae_loop_head_count=4,
+            parcae_loop_layer_count=1,
+        )
+
+        variant.validate()
+
+        self.assertEqual(variant.parcae_loop_layer_count, 1)
+        self.assertIn("looplayers1", variant.label)
+
+        non_hourglass = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_layer_count=1,
+        )
+        with self.assertRaises(ValidationError):
+            non_hourglass.validate()
+
     def test_attention_only_parcae_bx_and_p20_control_scaffolds_validate(self) -> None:
         bx = phase1_attention_only_variant(
             scaffold_profile=Path1ScaffoldProfile.PARCAE_BX_LOOPED_ATTENTION,
@@ -165,6 +442,77 @@ class Path1SpecTests(unittest.TestCase):
 
         self.assertEqual(bx.label, "attention-only-parcae-bx-looped-attention-loops2")
         self.assertEqual(p20.label, "attention-only-parcae-p20-control-looped-attention-loops2")
+
+    def test_parcae_control_position_requires_p20_control_scaffold(self) -> None:
+        p20 = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_control_position_kind="learned",
+        )
+        p20.validate()
+
+        self.assertEqual(p20.parcae_control_position_kind, "learned")
+        self.assertIn("ctrlpos-learned", p20.label)
+
+        bx = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_BX_LOOPED_ATTENTION,
+            parcae_control_position_kind="learned",
+        )
+        with self.assertRaises(ValidationError):
+            bx.validate()
+
+    def test_parcae_control_stride_requires_p20_control_scaffold(self) -> None:
+        p20 = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_control_stride=4,
+        )
+        p20.validate()
+
+        self.assertEqual(p20.parcae_control_stride, 4)
+        self.assertIn("ctrlstride4", p20.label)
+
+        bx = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_BX_LOOPED_ATTENTION,
+            parcae_control_stride=4,
+        )
+        with self.assertRaises(ValidationError):
+            bx.validate()
+
+    def test_parcae_control_state_transform_requires_p20_control_scaffold(self) -> None:
+        p20 = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_control_state_transform="frozen-identity",
+        )
+        p20.validate()
+
+        self.assertIn("ctrlx-frozen-identity", p20.label)
+
+        bx = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_BX_LOOPED_ATTENTION,
+            parcae_control_state_transform="frozen-identity",
+        )
+        with self.assertRaises(ValidationError):
+            bx.validate()
+
+    def test_parcae_control_state_transform_accepts_block_diagonal_8_profile(self) -> None:
+        p20 = phase1_attention_only_variant(
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_control_state_transform="trainable-block-diagonal-8",
+        )
+        p20.validate()
+
+        self.assertIn("ctrlx-trainable-block-diagonal-8", p20.label)
+
+    def test_attention_position_contract_rejects_unknown_value(self) -> None:
+        variant = phase1_attention_only_variant(attention_position_contract="mystery-contract")
+        with self.assertRaises(ValidationError):
+            variant.validate()
+
+    def test_attention_variant_accepts_layernorm_final_norm(self) -> None:
+        variant = phase1_attention_only_variant(final_norm_kind="layernorm")
+
+        variant.validate()
+
+        self.assertEqual(variant.final_norm_kind, "layernorm")
 
     def test_gated_deltanet_reference_variant_tracks_profile(self) -> None:
         variant = phase1_reference_ssm_variant(profile=ReferenceSsmProfile.GATED_DELTANET_TORCH)

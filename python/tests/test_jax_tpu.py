@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import importlib.util
+import tempfile
 import unittest
 
 from python.jax_tpu import (
@@ -180,6 +182,8 @@ class JaxTpuContractTests(unittest.TestCase):
         self.assertIn("cfg.fractal_parcae_control_diagnostics", patch_text)
         self.assertIn('cfg.fractal_candidate in ("parcae-rgrp-control-looped-attention"', patch_text)
         self.assertIn("sow_parcae_control_diagnostic", patch_text)
+        self.assertIn("def _nan_or_inf_seen(*values: jax.Array) -> jax.Array:", patch_text)
+        self.assertIn("return seen", patch_text)
         self.assertIn('"controller/gate_saturation_low_frac"', patch_text)
         self.assertIn('"controller/injection_delta_to_loop_input_ratio"', patch_text)
         self.assertIn('f"loop/state_norm_step_{loop_idx}"', patch_text)
@@ -189,6 +193,91 @@ class JaxTpuContractTests(unittest.TestCase):
         self.assertIn('metric_name.startswith(("evaluation/controller/"', patch_text)
         self.assertIn('PARCAE_CONTROL_DIAGNOSTICS="${PARCAE_CONTROL_DIAGNOSTICS:-false}"', runner_text)
         self.assertIn('"fractal_parcae_control_diagnostics=${PARCAE_CONTROL_DIAGNOSTICS}"', runner_text)
+
+    def test_parcae_runner_rejects_silent_maxtext_data_loader_stops(self) -> None:
+        runner_text = Path("scripts/run_maxtext_parcae_proof_ladder_tpu.sh").read_text()
+
+        self.assertIn('GRAIN_WORKER_COUNT="${GRAIN_WORKER_COUNT:-0}"', runner_text)
+        self.assertIn('GRAIN_WORKER_COUNT_EVAL="${GRAIN_WORKER_COUNT_EVAL:-0}"', runner_text)
+        self.assertIn('"grain_worker_count=${GRAIN_WORKER_COUNT}"', runner_text)
+        self.assertIn('"grain_worker_count_eval=${GRAIN_WORKER_COUNT_EVAL}"', runner_text)
+        self.assertIn('REQUIRE_FINAL_EVAL="${REQUIRE_FINAL_EVAL:-auto}"', runner_text)
+        self.assertIn("validate_lane_log", runner_text)
+        self.assertIn('"Training stopped:" in text', runner_text)
+        self.assertIn('"load_next_batch() failed"', runner_text)
+        self.assertIn("last completed step", runner_text)
+        self.assertIn("last eval step", runner_text)
+
+    def test_patch_wires_hf_pipeline_worker_knobs(self) -> None:
+        patch_text = Path("scripts/patch_maxtext_rgrp.py").read_text()
+
+        self.assertIn("def patch_hf_data_processing", patch_text)
+        self.assertIn("def add_worker_count_keyword", patch_text)
+        self.assertIn("grain_worker_count={keyword}", patch_text)
+        self.assertIn('keyword="config.grain_worker_count"', patch_text)
+        self.assertIn('keyword="config.grain_worker_count_eval"', patch_text)
+        self.assertIn("patch_hf_data_processing(package_dir)", patch_text)
+
+    def test_hf_pipeline_worker_patch_handles_current_formatting_func_kwargs(self) -> None:
+        module_path = Path("scripts/patch_maxtext_rgrp.py")
+        spec = importlib.util.spec_from_file_location("patch_maxtext_rgrp_for_test", module_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        patcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(patcher)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package_dir = Path(temp_dir)
+            input_pipeline_dir = package_dir / "input_pipeline"
+            input_pipeline_dir.mkdir()
+            hf_path = input_pipeline_dir / "hf_data_processing.py"
+            hf_path.write_text(
+                '''def make_hf_train_iterator(config):
+  train_iter = None
+  if config.use_sft:
+    pass
+  else:
+    train_iter = preprocessing_pipeline(
+        chat_template_path=config.chat_template_path,
+        max_segments_per_seq=config.max_segments_per_seq,
+        num_epoch=config.num_epoch,
+        chat_template=config.chat_template,
+        formatting_func_path=config.formatting_func_path,
+        formatting_func_kwargs=config.formatting_func_kwargs,
+    )
+  return train_iter
+
+def make_hf_eval_iterator(config):
+  eval_iter = None
+  if config.use_sft:
+    pass
+  else:
+    eval_iter = preprocessing_pipeline(
+        chat_template_path=config.chat_template_path,
+        max_segments_per_seq=config.max_segments_per_seq,
+        chat_template=config.chat_template,
+        formatting_func_path=config.formatting_func_path,
+        formatting_func_kwargs=config.formatting_func_kwargs,
+    )
+  return eval_iter
+''',
+                encoding="utf-8",
+            )
+
+            patcher.patch_hf_data_processing(package_dir)
+            patcher.patch_hf_data_processing(package_dir)
+
+            patched = hf_path.read_text(encoding="utf-8")
+            self.assertEqual(patched.count("grain_worker_count=config.grain_worker_count,"), 1)
+            self.assertEqual(patched.count("grain_worker_count=config.grain_worker_count_eval,"), 1)
+            self.assertIn(
+                "formatting_func_kwargs=config.formatting_func_kwargs,\n        grain_worker_count=config.grain_worker_count,",
+                patched,
+            )
+            self.assertIn(
+                "formatting_func_kwargs=config.formatting_func_kwargs,\n        grain_worker_count=config.grain_worker_count_eval,",
+                patched,
+            )
 
     def test_parcae_controls_keep_same_looped_scaffold_without_rgrp_state(self) -> None:
         for slug in ("parcae-looped-attention", "parcae-bx-looped-attention"):

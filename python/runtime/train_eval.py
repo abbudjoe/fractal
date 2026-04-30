@@ -4,6 +4,7 @@ import math
 import resource
 import sys
 import time
+from collections.abc import Sequence
 from typing import Protocol
 
 import torch
@@ -11,11 +12,44 @@ import torch.nn.functional as F
 
 from python.data.byte_corpus import TokenBatch
 from python.reporting.schema import BenchmarkReport, EvalSummary, RuntimeSummary, TrainStepRecord
+from python.runtime.cuda_timing import timed_region
 
 
 class LanguageModelProtocol(Protocol):
     def forward_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
         ...
+
+
+def language_model_cross_entropy(
+    model: LanguageModelProtocol,
+    input_ids: torch.Tensor,
+    target_ids: torch.Tensor,
+    *,
+    pad_token: int,
+    loss_region_name: str | None = None,
+) -> torch.Tensor:
+    forward_hidden = getattr(model, "forward_hidden", None)
+    loss_from_hidden = getattr(model, "loss_from_hidden", None)
+    if callable(forward_hidden) and callable(loss_from_hidden):
+        hidden = forward_hidden(input_ids)
+        if loss_region_name is None:
+            return loss_from_hidden(hidden, target_ids, pad_token=pad_token)
+        with timed_region(loss_region_name):
+            return loss_from_hidden(hidden, target_ids, pad_token=pad_token)
+
+    logits = model.forward_logits(input_ids)
+    if loss_region_name is None:
+        return F.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]),
+            target_ids.reshape(-1),
+            ignore_index=pad_token,
+        )
+    with timed_region(loss_region_name):
+        return F.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]),
+            target_ids.reshape(-1),
+            ignore_index=pad_token,
+        )
 
 
 def perplexity_from_loss(loss: float) -> float:
@@ -47,9 +81,18 @@ def cuda_memory_stats(device: torch.device) -> tuple[int, int]:
     return torch.cuda.memory_allocated(device), torch.cuda.max_memory_allocated(device)
 
 
+def mark_compiler_step_boundary(device_type: str) -> None:
+    if device_type != "cuda":
+        return
+    compiler = getattr(torch, "compiler", None)
+    mark_step_begin = getattr(compiler, "cudagraph_mark_step_begin", None) if compiler is not None else None
+    if callable(mark_step_begin):
+        mark_step_begin()
+
+
 def evaluate_model(
     model: LanguageModelProtocol,
-    batches: list[TokenBatch],
+    batches: Sequence[TokenBatch],
     eval_batches: int,
     autocast_dtype: torch.dtype | None,
     *,
@@ -64,12 +107,13 @@ def evaluate_model(
     with torch.no_grad():
         for batch in selected:
             batch_on_device = materialize_batch(batch, device)
+            mark_compiler_step_boundary(device_type)
             with torch.autocast(device_type=device_type, dtype=autocast_dtype, enabled=autocast_dtype is not None):
-                logits = model.forward_logits(batch_on_device.input_ids)
-                loss = F.cross_entropy(
-                    logits.reshape(-1, logits.shape[-1]),
-                    batch_on_device.target_ids.reshape(-1),
-                    ignore_index=pad_token,
+                loss = language_model_cross_entropy(
+                    model,
+                    batch_on_device.input_ids,
+                    batch_on_device.target_ids,
+                    pad_token=pad_token,
                 )
             total_loss += float(loss.detach().float().item())
             total_batches += 1
@@ -84,8 +128,8 @@ def evaluate_model(
 def warmup_model(
     model: LanguageModelProtocol,
     optimizer: torch.optim.Optimizer,
-    train_batches: list[TokenBatch],
-    eval_batches: list[TokenBatch],
+    train_batches: Sequence[TokenBatch],
+    eval_batches: Sequence[TokenBatch],
     warmup_eval_batches: int,
     warmup_train_steps: int,
     autocast_dtype: torch.dtype | None,
@@ -109,12 +153,13 @@ def warmup_model(
         for step in range(warmup_train_steps):
             batch = materialize_batch(train_batches[step % len(train_batches)], device)
             optimizer.zero_grad(set_to_none=True)
+            mark_compiler_step_boundary(device_type)
             with torch.autocast(device_type=device_type, dtype=autocast_dtype, enabled=autocast_dtype is not None):
-                logits = model.forward_logits(batch.input_ids)
-                loss = F.cross_entropy(
-                    logits.reshape(-1, logits.shape[-1]),
-                    batch.target_ids.reshape(-1),
-                    ignore_index=pad_token,
+                loss = language_model_cross_entropy(
+                    model,
+                    batch.input_ids,
+                    batch.target_ids,
+                    pad_token=pad_token,
                 )
             loss.backward()
         optimizer.zero_grad(set_to_none=True)
@@ -124,8 +169,8 @@ def run_training_benchmark(
     *,
     model: LanguageModelProtocol,
     optimizer: torch.optim.Optimizer,
-    train_batches: list[TokenBatch],
-    eval_batches: list[TokenBatch],
+    train_batches: Sequence[TokenBatch],
+    eval_batches: Sequence[TokenBatch],
     train_steps: int,
     eval_batch_count: int,
     autocast_dtype: torch.dtype | None,
@@ -136,7 +181,12 @@ def run_training_benchmark(
     note: str,
     config_payload: dict[str, object],
     corpus_payload: dict[str, object],
+    train_loss_record_interval: int = 1,
 ) -> BenchmarkReport:
+    if train_loss_record_interval <= 0:
+        raise ValueError(
+            f"train_loss_record_interval must be positive, got {train_loss_record_interval}"
+        )
     device_type = device.type
     baseline_process_memory = process_peak_rss_bytes()
     baseline_cuda_used = 0
@@ -169,26 +219,33 @@ def run_training_benchmark(
     for step in range(train_steps):
         batch = materialize_batch(train_batches[step % len(train_batches)], device)
         optimizer.zero_grad(set_to_none=True)
+        mark_compiler_step_boundary(device_type)
         with torch.autocast(device_type=device_type, dtype=autocast_dtype, enabled=autocast_dtype is not None):
-            logits = model.forward_logits(batch.input_ids)
-            loss = F.cross_entropy(
-                logits.reshape(-1, logits.shape[-1]),
-                batch.target_ids.reshape(-1),
-                ignore_index=pad_token,
+            loss = language_model_cross_entropy(
+                model,
+                batch.input_ids,
+                batch.target_ids,
+                pad_token=pad_token,
             )
         loss.backward()
         optimizer.step()
-        train_loss = float(loss.detach().float().item())
         seen_tokens += batch.token_count
-        train_step_reports.append(
-            TrainStepRecord(
-                step=step + 1,
-                learning_rate=optimizer.param_groups[0]["lr"],
-                train_loss=train_loss,
-                train_perplexity=perplexity_from_loss(train_loss),
-                seen_tokens=seen_tokens,
-            )
+        should_record_loss = (
+            step == 0
+            or step == train_steps - 1
+            or (step + 1) % train_loss_record_interval == 0
         )
+        if should_record_loss:
+            train_loss = float(loss.detach().float().item())
+            train_step_reports.append(
+                TrainStepRecord(
+                    step=step + 1,
+                    learning_rate=optimizer.param_groups[0]["lr"],
+                    train_loss=train_loss,
+                    train_perplexity=perplexity_from_loss(train_loss),
+                    seen_tokens=seen_tokens,
+                )
+            )
         peak_process_memory = max(peak_process_memory, process_peak_rss_bytes())
     if device_type == "cuda":
         torch.cuda.synchronize(device)

@@ -94,6 +94,7 @@ def run_promotion(
     head_count: int,
     total_layers: int,
     local_window: int,
+    attention_kernel: str,
     ffn_multiplier: int,
     lanes: str,
     dtype: str,
@@ -169,6 +170,7 @@ def run_promotion(
     ):
         if value > 0:
             command.extend([cli_name, str(value)])
+    command.extend(["--attention-kernel", attention_kernel])
     if force_download:
         command.append("--force-download")
     _run(command, cwd=REMOTE_REPO_ROOT, env=env)
@@ -197,6 +199,7 @@ def main(
     head_count: int = 0,
     total_layers: int = 0,
     local_window: int = 0,
+    attention_kernel: str = "sdpa",
     ffn_multiplier: int = 0,
     lanes: str = DEFAULT_LANES,
     dtype: str = "bf16",
@@ -224,6 +227,7 @@ def main(
         head_count=head_count,
         total_layers=total_layers,
         local_window=local_window,
+        attention_kernel=attention_kernel,
         ffn_multiplier=ffn_multiplier,
         lanes=lanes,
         dtype=dtype,

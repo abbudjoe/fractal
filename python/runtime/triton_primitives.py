@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 
 import torch
 import torch.nn.functional as F
+
+from python.runtime.cuda_timing import timed_region
 
 try:  # pragma: no cover - import availability depends on runtime environment
     import triton
@@ -31,7 +34,284 @@ def _next_power_of_two(value: int) -> int:
     return power
 
 
+def _p20_atomic_transform_grad_enabled(block_pair_width: int) -> bool:
+    raw = os.environ.get("FRACTAL_P20_TRITON_ATOMIC_TRANSFORM_GRAD", "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    # The non-atomic path materializes one transform-gradient workspace per
+    # batch item, then reduces it. Once rotary pair tiles widen past 32, that
+    # workspace path falls off a severe backward-kernel cliff on L4/H100-class
+    # CUDA runs. Default the wider-tile contract to in-kernel accumulation while
+    # leaving the 256-wide fast lane unchanged.
+    return block_pair_width > 32
+
+
+def _sum_to_broadcast_owner(gradient: torch.Tensor, target_shape: torch.Size | tuple[int, ...]) -> torch.Tensor:
+    """Reduce an expanded gradient back to its broadcast owner shape.
+
+    This is the explicit contract hidden behind Tensor.sum_to_size in the loop
+    glue backward path. Keeping it in one helper lets native reductions replace
+    this boundary later without rediscovering each broadcast rule.
+    """
+
+    shape = torch.Size(target_shape)
+    if gradient.shape == shape:
+        return gradient
+    native_reduce_disabled = os.environ.get("FRACTAL_NATIVE_BROADCAST_OWNER_REDUCE", "").strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    if not native_reduce_disabled and _triton_width_owner_reduce_supported(gradient, shape):
+        return _triton_sum_to_width_owner(gradient, shape)
+    if len(shape) > gradient.ndim:
+        raise RuntimeError(
+            "cannot reduce gradient to a higher-rank broadcast owner: "
+            f"gradient_shape={tuple(gradient.shape)} target_shape={tuple(shape)}"
+        )
+    leading_dims = gradient.ndim - len(shape)
+    reduction_dims: list[int] = list(range(leading_dims))
+    for shape_index, target_size in enumerate(shape):
+        grad_dim = leading_dims + shape_index
+        grad_size = gradient.shape[grad_dim]
+        if target_size == 1 and grad_size != 1:
+            reduction_dims.append(grad_dim)
+        elif target_size != grad_size:
+            raise RuntimeError(
+                "gradient shape is not broadcast-compatible with target shape: "
+                f"gradient_shape={tuple(gradient.shape)} target_shape={tuple(shape)}"
+            )
+    if reduction_dims:
+        gradient = gradient.sum(dim=tuple(reduction_dims), keepdim=True)
+    return gradient.reshape(shape)
+
+
+def _triton_width_owner_reduce_supported(
+    gradient: torch.Tensor,
+    shape: torch.Size,
+) -> bool:
+    if not triton_runtime_available() or gradient.device.type != "cuda" or gradient.ndim < 2:
+        return False
+    if len(shape) == 1:
+        return shape[0] == gradient.shape[-1]
+    if len(shape) != gradient.ndim:
+        return False
+    if shape[-1] != gradient.shape[-1]:
+        return False
+    return all(size == 1 for size in shape[:-1])
+
+
+def _fallback_sum_to_size(gradient: torch.Tensor, shape: torch.Size) -> torch.Tensor:
+    try:
+        return gradient.sum_to_size(shape)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "gradient shape is not broadcast-compatible with target shape: "
+            f"gradient_shape={tuple(gradient.shape)} target_shape={tuple(shape)}"
+        ) from exc
+
+
+def _triton_sum_to_width_owner(gradient: torch.Tensor, shape: torch.Size) -> torch.Tensor:
+    ensure_triton_runtime_available()
+    if gradient.numel() == 0:
+        return torch.zeros(shape, device=gradient.device, dtype=gradient.dtype)
+    contiguous = gradient.contiguous()
+    width = int(contiguous.shape[-1])
+    rows = int(contiguous.numel() // width)
+    block_rows = 256
+    block_d = min(64, _next_power_of_two(width))
+    row_blocks = triton.cdiv(rows, block_rows)
+    partial = torch.empty((row_blocks, width), device=contiguous.device, dtype=torch.float32)
+    output = torch.empty((width,), device=contiguous.device, dtype=contiguous.dtype)
+    _sum_to_width_owner_partial_kernel[(row_blocks, triton.cdiv(width, block_d))](
+        contiguous,
+        partial,
+        rows,
+        width,
+        BLOCK_ROWS=block_rows,
+        BLOCK_D=block_d,
+    )
+    chunk_block = _next_power_of_two(row_blocks)
+    _sum_to_width_owner_finish_kernel[(triton.cdiv(width, block_d),)](
+        partial,
+        output,
+        row_blocks,
+        width,
+        BLOCK_CHUNKS=chunk_block,
+        BLOCK_D=block_d,
+    )
+    return output.reshape(shape)
+
+
 if triton_runtime_available():  # pragma: no branch
+
+    @triton.jit
+    def _sum_to_width_owner_partial_kernel(
+        gradient_ptr,
+        partial_ptr,
+        rows,
+        width,
+        BLOCK_ROWS: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+    ):
+        row_block = tl.program_id(0)
+        width_block = tl.program_id(1)
+        row_offsets = row_block * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
+        width_offsets = width_block * BLOCK_D + tl.arange(0, BLOCK_D)
+        offsets = row_offsets[:, None] * width + width_offsets[None, :]
+        mask = (row_offsets[:, None] < rows) & (width_offsets[None, :] < width)
+        values = tl.load(gradient_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        reduced = tl.sum(values, axis=0)
+        tl.store(
+            partial_ptr + row_block * width + width_offsets,
+            reduced,
+            mask=width_offsets < width,
+        )
+
+
+    @triton.jit
+    def _sum_to_width_owner_finish_kernel(
+        partial_ptr,
+        output_ptr,
+        row_blocks,
+        width,
+        BLOCK_CHUNKS: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+    ):
+        width_block = tl.program_id(0)
+        chunk_offsets = tl.arange(0, BLOCK_CHUNKS)
+        width_offsets = width_block * BLOCK_D + tl.arange(0, BLOCK_D)
+        offsets = chunk_offsets[:, None] * width + width_offsets[None, :]
+        mask = (chunk_offsets[:, None] < row_blocks) & (width_offsets[None, :] < width)
+        values = tl.load(partial_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        reduced = tl.sum(values, axis=0)
+        tl.store(output_ptr + width_offsets, reduced, mask=width_offsets < width)
+
+    @triton.jit
+    def _parcae_state_mix_forward_kernel(
+        state_ptr,
+        decay_ptr,
+        injection_ptr,
+        output_ptr,
+        n_elements,
+        width,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        program_id = tl.program_id(0)
+        offsets = program_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        width_offsets = offsets % width
+        state = tl.load(state_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        decay = tl.load(decay_ptr + width_offsets, mask=mask, other=0.0).to(tl.float32)
+        injection = tl.load(injection_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        output = decay * state + injection
+        tl.store(output_ptr + offsets, output, mask=mask)
+
+
+    @triton.jit
+    def _parcae_residual_mix_forward_kernel(
+        mixed_ptr,
+        block_out_ptr,
+        nonlinear_ptr,
+        output_ptr,
+        n_elements,
+        width,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        program_id = tl.program_id(0)
+        offsets = program_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        width_offsets = offsets % width
+        mixed = tl.load(mixed_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        block_out = tl.load(block_out_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        nonlinear = tl.load(nonlinear_ptr + width_offsets, mask=mask, other=0.0).to(tl.float32)
+        output = mixed + nonlinear * (block_out - mixed)
+        tl.store(output_ptr + offsets, output, mask=mask)
+
+
+    @triton.jit
+    def _parcae_loop_update_forward_kernel(
+        state_ptr,
+        decay_ptr,
+        injection_ptr,
+        block_out_ptr,
+        nonlinear_ptr,
+        output_ptr,
+        n_elements,
+        width,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        program_id = tl.program_id(0)
+        offsets = program_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        width_offsets = offsets % width
+        state = tl.load(state_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        decay = tl.load(decay_ptr + width_offsets, mask=mask, other=0.0).to(tl.float32)
+        injection = tl.load(injection_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        block_out = tl.load(block_out_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        nonlinear = tl.load(nonlinear_ptr + width_offsets, mask=mask, other=0.0).to(tl.float32)
+        mixed = decay * state + injection
+        output = mixed + nonlinear * (block_out - mixed)
+        tl.store(output_ptr + offsets, output, mask=mask)
+
+
+    @triton.jit
+    def _parcae_output_mix_forward_kernel(
+        anchor_ptr,
+        delta_ptr,
+        gate_ptr,
+        output_ptr,
+        n_elements,
+        width,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        program_id = tl.program_id(0)
+        offsets = program_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        width_offsets = offsets % width
+        anchor = tl.load(anchor_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        delta = tl.load(delta_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        gate = tl.load(gate_ptr + width_offsets, mask=mask, other=0.0).to(tl.float32)
+        output = anchor + gate * delta
+        tl.store(output_ptr + offsets, output, mask=mask)
+
+
+    @triton.jit
+    def _gelu_forward_kernel(
+        input_ptr,
+        output_ptr,
+        n_elements,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        program_id = tl.program_id(0)
+        offsets = program_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        x = tl.load(input_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        y = 0.5 * x * (1.0 + tl.erf(x * 0.7071067811865476))
+        tl.store(output_ptr + offsets, y, mask=mask)
+
+
+    @triton.jit
+    def _gelu_backward_kernel(
+        grad_output_ptr,
+        input_ptr,
+        grad_input_ptr,
+        n_elements,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        program_id = tl.program_id(0)
+        offsets = program_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        grad_output = tl.load(grad_output_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        x = tl.load(input_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        cdf = 0.5 * (1.0 + tl.erf(x * 0.7071067811865476))
+        pdf = 0.3989422804014327 * tl.exp(-0.5 * x * x)
+        grad_input = grad_output * (cdf + x * pdf)
+        tl.store(grad_input_ptr + offsets, grad_input, mask=mask)
+
 
     @triton.jit
     def _p20_forward_kernel(
@@ -229,6 +509,240 @@ class _P20FusedUpdateReadout(torch.autograd.Function):
             grad_candidate,
             grad_output_gate,
         )
+
+
+class _ParcaeTritonStateMix(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, state: torch.Tensor, decay: torch.Tensor, injection: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        ensure_triton_runtime_available()
+        if state.device.type != "cuda":
+            raise RuntimeError("Parcae Triton state mix requires CUDA tensors")
+        if state.shape != injection.shape:
+            raise RuntimeError("Parcae Triton state mix requires state and injection shapes to match")
+        if decay.shape[-1] != state.shape[-1]:
+            raise RuntimeError("Parcae Triton state mix requires decay width to match state width")
+        state_contiguous = state.contiguous()
+        injection_contiguous = injection.contiguous()
+        decay_contiguous = decay.reshape(-1, decay.shape[-1]).contiguous()
+        output = torch.empty_like(state_contiguous)
+        n_elements = output.numel()
+        width = output.shape[-1]
+        block_size = 256
+        grid = (triton.cdiv(n_elements, block_size),)
+        _parcae_state_mix_forward_kernel[grid](
+            state_contiguous,
+            decay_contiguous,
+            injection_contiguous,
+            output,
+            n_elements,
+            width,
+            BLOCK_SIZE=block_size,
+        )
+        ctx.decay_shape = decay.shape
+        ctx.injection_shape = injection.shape
+        ctx.save_for_backward(state_contiguous, decay_contiguous)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):  # type: ignore[override]
+        state, decay = ctx.saved_tensors
+        grad = grad_output.contiguous()
+        grad_state = grad * decay.view(*((1,) * (grad.ndim - 1)), decay.shape[-1])
+        grad_decay = _sum_to_broadcast_owner(grad * state, ctx.decay_shape)
+        grad_injection = _sum_to_broadcast_owner(grad, ctx.injection_shape)
+        return grad_state, grad_decay, grad_injection
+
+
+class _ParcaeTritonResidualMix(torch.autograd.Function):
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx,
+        mixed: torch.Tensor,
+        block_out: torch.Tensor,
+        nonlinear: torch.Tensor,
+    ) -> torch.Tensor:
+        ensure_triton_runtime_available()
+        if mixed.device.type != "cuda":
+            raise RuntimeError("Parcae Triton residual mix requires CUDA tensors")
+        if mixed.shape != block_out.shape:
+            raise RuntimeError("Parcae Triton residual mix requires mixed and block_out shapes to match")
+        if nonlinear.shape[-1] != mixed.shape[-1]:
+            raise RuntimeError("Parcae Triton residual mix requires nonlinear width to match mixed width")
+        mixed_contiguous = mixed.contiguous()
+        block_out_contiguous = block_out.contiguous()
+        nonlinear_contiguous = nonlinear.reshape(-1, nonlinear.shape[-1]).contiguous()
+        output = torch.empty_like(mixed_contiguous)
+        n_elements = output.numel()
+        width = output.shape[-1]
+        block_size = 256
+        grid = (triton.cdiv(n_elements, block_size),)
+        _parcae_residual_mix_forward_kernel[grid](
+            mixed_contiguous,
+            block_out_contiguous,
+            nonlinear_contiguous,
+            output,
+            n_elements,
+            width,
+            BLOCK_SIZE=block_size,
+        )
+        ctx.nonlinear_shape = nonlinear.shape
+        ctx.save_for_backward(mixed_contiguous, block_out_contiguous, nonlinear_contiguous)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):  # type: ignore[override]
+        mixed, block_out, nonlinear = ctx.saved_tensors
+        grad = grad_output.contiguous()
+        nonlinear_view = nonlinear.view(*((1,) * (grad.ndim - 1)), nonlinear.shape[-1])
+        grad_mixed = grad * (1.0 - nonlinear_view)
+        grad_block_out = grad * nonlinear_view
+        grad_nonlinear = _sum_to_broadcast_owner(grad * (block_out - mixed), ctx.nonlinear_shape)
+        return grad_mixed, grad_block_out, grad_nonlinear
+
+
+class _ParcaeTritonLoopUpdate(torch.autograd.Function):
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx,
+        state: torch.Tensor,
+        decay: torch.Tensor,
+        injection: torch.Tensor,
+        block_out: torch.Tensor,
+        nonlinear: torch.Tensor,
+    ) -> torch.Tensor:
+        ensure_triton_runtime_available()
+        if state.device.type != "cuda":
+            raise RuntimeError("Parcae Triton loop update requires CUDA tensors")
+        if state.shape != injection.shape or state.shape != block_out.shape:
+            raise RuntimeError("Parcae Triton loop update requires state, injection, and block_out shapes to match")
+        if decay.shape[-1] != state.shape[-1] or nonlinear.shape[-1] != state.shape[-1]:
+            raise RuntimeError("Parcae Triton loop update requires decay/nonlinear widths to match state width")
+        state_contiguous = state.contiguous()
+        injection_contiguous = injection.contiguous()
+        block_out_contiguous = block_out.contiguous()
+        decay_contiguous = decay.reshape(-1, decay.shape[-1]).contiguous()
+        nonlinear_contiguous = nonlinear.reshape(-1, nonlinear.shape[-1]).contiguous()
+        output = torch.empty_like(state_contiguous)
+        n_elements = output.numel()
+        width = output.shape[-1]
+        block_size = 256
+        grid = (triton.cdiv(n_elements, block_size),)
+        _parcae_loop_update_forward_kernel[grid](
+            state_contiguous,
+            decay_contiguous,
+            injection_contiguous,
+            block_out_contiguous,
+            nonlinear_contiguous,
+            output,
+            n_elements,
+            width,
+            BLOCK_SIZE=block_size,
+        )
+        ctx.decay_shape = decay.shape
+        ctx.injection_shape = injection.shape
+        ctx.nonlinear_shape = nonlinear.shape
+        ctx.save_for_backward(state_contiguous, decay_contiguous, injection_contiguous, block_out_contiguous, nonlinear_contiguous)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):  # type: ignore[override]
+        state, decay, injection, block_out, nonlinear = ctx.saved_tensors
+        grad = grad_output.contiguous()
+        decay_view = decay.view(*((1,) * (grad.ndim - 1)), decay.shape[-1])
+        nonlinear_view = nonlinear.view(*((1,) * (grad.ndim - 1)), nonlinear.shape[-1])
+        grad_mixed = grad * (1.0 - nonlinear_view)
+        grad_state = grad_mixed * decay_view
+        grad_decay = _sum_to_broadcast_owner(grad_mixed * state, ctx.decay_shape)
+        grad_injection = _sum_to_broadcast_owner(grad_mixed, ctx.injection_shape)
+        grad_block_out = grad * nonlinear_view
+        mixed = decay_view * state + injection
+        grad_nonlinear = _sum_to_broadcast_owner(grad * (block_out - mixed), ctx.nonlinear_shape)
+        return grad_state, grad_decay, grad_injection, grad_block_out, grad_nonlinear
+
+
+class _ParcaeTritonOutputMix(torch.autograd.Function):
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx,
+        anchor: torch.Tensor,
+        delta: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> torch.Tensor:
+        ensure_triton_runtime_available()
+        if anchor.device.type != "cuda":
+            raise RuntimeError("Parcae Triton output mix requires CUDA tensors")
+        if anchor.shape != delta.shape:
+            raise RuntimeError("Parcae Triton output mix requires anchor and delta shapes to match")
+        if gate.shape[-1] != anchor.shape[-1]:
+            raise RuntimeError("Parcae Triton output mix requires gate width to match anchor width")
+        anchor_contiguous = anchor.contiguous()
+        delta_contiguous = delta.contiguous()
+        gate_contiguous = gate.reshape(-1, gate.shape[-1]).contiguous()
+        output = torch.empty_like(anchor_contiguous)
+        n_elements = output.numel()
+        width = output.shape[-1]
+        block_size = 256
+        grid = (triton.cdiv(n_elements, block_size),)
+        _parcae_output_mix_forward_kernel[grid](
+            anchor_contiguous,
+            delta_contiguous,
+            gate_contiguous,
+            output,
+            n_elements,
+            width,
+            BLOCK_SIZE=block_size,
+        )
+        ctx.gate_shape = gate.shape
+        ctx.save_for_backward(delta_contiguous, gate_contiguous)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):  # type: ignore[override]
+        delta, gate = ctx.saved_tensors
+        grad = grad_output.contiguous()
+        gate_view = gate.view(*((1,) * (grad.ndim - 1)), gate.shape[-1])
+        grad_anchor = grad
+        grad_delta = grad * gate_view
+        grad_gate = _sum_to_broadcast_owner(grad * delta, ctx.gate_shape)
+        return grad_anchor, grad_delta, grad_gate
+
+
+class _TritonGelu(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, inputs: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        ensure_triton_runtime_available()
+        if inputs.device.type != "cuda":
+            raise RuntimeError("Triton GELU requires CUDA tensors")
+        contiguous = inputs.contiguous()
+        output = torch.empty_like(contiguous)
+        n_elements = output.numel()
+        block_size = 256
+        grid = (triton.cdiv(n_elements, block_size),)
+        _gelu_forward_kernel[grid](
+            contiguous,
+            output,
+            n_elements,
+            BLOCK_SIZE=block_size,
+        )
+        ctx.save_for_backward(contiguous)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):  # type: ignore[override]
+        (inputs,) = ctx.saved_tensors
+        grad_output_contiguous = grad_output.contiguous()
+        grad_input = torch.empty_like(inputs)
+        n_elements = grad_input.numel()
+        block_size = 256
+        grid = (triton.cdiv(n_elements, block_size),)
+        _gelu_backward_kernel[grid](
+            grad_output_contiguous,
+            inputs,
+            grad_input,
+            n_elements,
+            BLOCK_SIZE=block_size,
+        )
+        return grad_input
 
 
 if triton_runtime_available():  # pragma: no branch
@@ -634,6 +1148,7 @@ class _P20DenseSequenceScan(torch.autograd.Function):
         initial_state: torch.Tensor,
         transform_weight: torch.Tensor,
         transform_bias: torch.Tensor,
+        identity_transform: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         ensure_triton_runtime_available()
         tensors = (
@@ -865,6 +1380,7 @@ if triton_runtime_available():  # pragma: no branch
         pair_width,
         SEQ_LEN: tl.constexpr,
         BLOCK_PAIR_WIDTH: tl.constexpr,
+        IDENTITY_TRANSFORM: tl.constexpr,
     ):
         batch_index = tl.program_id(0)
         block_index = tl.program_id(1)
@@ -877,35 +1393,36 @@ if triton_runtime_available():  # pragma: no branch
         global_even_offsets = block_base + even_offsets
         global_odd_offsets = block_base + odd_offsets
 
-        bias_even = tl.load(transform_bias_ptr + global_even_offsets, mask=pair_mask, other=0.0).to(tl.float32)
-        bias_odd = tl.load(transform_bias_ptr + global_odd_offsets, mask=pair_mask, other=0.0).to(tl.float32)
-
-        weight_block_ptr = transform_weight_ptr + block_index * weight_block_stride
         matrix_mask = pair_mask[:, None] & pair_mask[None, :]
         row_even = even_offsets[:, None]
         row_odd = odd_offsets[:, None]
         col_even = even_offsets[None, :]
         col_odd = odd_offsets[None, :]
-        weight_even_even = tl.load(
-            weight_block_ptr + row_even * weight_row_stride + col_even * weight_col_stride,
-            mask=matrix_mask,
-            other=0.0,
-        ).to(tl.float32)
-        weight_even_odd = tl.load(
-            weight_block_ptr + row_even * weight_row_stride + col_odd * weight_col_stride,
-            mask=matrix_mask,
-            other=0.0,
-        ).to(tl.float32)
-        weight_odd_even = tl.load(
-            weight_block_ptr + row_odd * weight_row_stride + col_even * weight_col_stride,
-            mask=matrix_mask,
-            other=0.0,
-        ).to(tl.float32)
-        weight_odd_odd = tl.load(
-            weight_block_ptr + row_odd * weight_row_stride + col_odd * weight_col_stride,
-            mask=matrix_mask,
-            other=0.0,
-        ).to(tl.float32)
+        if not IDENTITY_TRANSFORM:
+            bias_even = tl.load(transform_bias_ptr + global_even_offsets, mask=pair_mask, other=0.0).to(tl.float32)
+            bias_odd = tl.load(transform_bias_ptr + global_odd_offsets, mask=pair_mask, other=0.0).to(tl.float32)
+
+            weight_block_ptr = transform_weight_ptr + block_index * weight_block_stride
+            weight_even_even = tl.load(
+                weight_block_ptr + row_even * weight_row_stride + col_even * weight_col_stride,
+                mask=matrix_mask,
+                other=0.0,
+            ).to(tl.float32)
+            weight_even_odd = tl.load(
+                weight_block_ptr + row_even * weight_row_stride + col_odd * weight_col_stride,
+                mask=matrix_mask,
+                other=0.0,
+            ).to(tl.float32)
+            weight_odd_even = tl.load(
+                weight_block_ptr + row_odd * weight_row_stride + col_even * weight_col_stride,
+                mask=matrix_mask,
+                other=0.0,
+            ).to(tl.float32)
+            weight_odd_odd = tl.load(
+                weight_block_ptr + row_odd * weight_row_stride + col_odd * weight_col_stride,
+                mask=matrix_mask,
+                other=0.0,
+            ).to(tl.float32)
 
         state_base = batch_index * state_batch_stride
         state_even = tl.load(initial_state_ptr + state_base + global_even_offsets, mask=pair_mask, other=0.0).to(
@@ -924,16 +1441,20 @@ if triton_runtime_available():  # pragma: no branch
         output_batch_base = batch_index * output_batch_stride
 
         for position in range(SEQ_LEN):
-            projected_even = (
-                tl.sum(weight_even_even * state_even[None, :], axis=1)
-                + tl.sum(weight_even_odd * state_odd[None, :], axis=1)
-                + bias_even
-            )
-            projected_odd = (
-                tl.sum(weight_odd_even * state_even[None, :], axis=1)
-                + tl.sum(weight_odd_odd * state_odd[None, :], axis=1)
-                + bias_odd
-            )
+            if IDENTITY_TRANSFORM:
+                projected_even = state_even
+                projected_odd = state_odd
+            else:
+                projected_even = (
+                    tl.sum(weight_even_even * state_even[None, :], axis=1)
+                    + tl.sum(weight_even_odd * state_odd[None, :], axis=1)
+                    + bias_even
+                )
+                projected_odd = (
+                    tl.sum(weight_odd_even * state_even[None, :], axis=1)
+                    + tl.sum(weight_odd_odd * state_odd[None, :], axis=1)
+                    + bias_odd
+                )
 
             pair_step_base = pair_batch_base + position * pair_seq_stride + block_index * pair_width
             cos = tl.load(angle_cos_ptr + pair_step_base + pair_offsets, mask=pair_mask, other=0.0).to(tl.float32)
@@ -1025,6 +1546,9 @@ if triton_runtime_available():  # pragma: no branch
         pair_width,
         SEQ_LEN: tl.constexpr,
         BLOCK_PAIR_WIDTH: tl.constexpr,
+        COMPUTE_TRANSFORM_GRAD: tl.constexpr,
+        ATOMIC_TRANSFORM_GRAD: tl.constexpr,
+        IDENTITY_TRANSFORM: tl.constexpr,
     ):
         batch_index = tl.program_id(0)
         block_index = tl.program_id(1)
@@ -1037,34 +1561,35 @@ if triton_runtime_available():  # pragma: no branch
         global_even_offsets = block_base + even_offsets
         global_odd_offsets = block_base + odd_offsets
 
-        weight_block_ptr = transform_weight_ptr + block_index * weight_block_stride
         matrix_mask = pair_mask[:, None] & pair_mask[None, :]
         row_even = even_offsets[:, None]
         row_odd = odd_offsets[:, None]
         col_even = even_offsets[None, :]
         col_odd = odd_offsets[None, :]
-        weight_even_even = tl.load(
-            weight_block_ptr + row_even * weight_row_stride + col_even * weight_col_stride,
-            mask=matrix_mask,
-            other=0.0,
-        ).to(tl.float32)
-        weight_even_odd = tl.load(
-            weight_block_ptr + row_even * weight_row_stride + col_odd * weight_col_stride,
-            mask=matrix_mask,
-            other=0.0,
-        ).to(tl.float32)
-        weight_odd_even = tl.load(
-            weight_block_ptr + row_odd * weight_row_stride + col_even * weight_col_stride,
-            mask=matrix_mask,
-            other=0.0,
-        ).to(tl.float32)
-        weight_odd_odd = tl.load(
-            weight_block_ptr + row_odd * weight_row_stride + col_odd * weight_col_stride,
-            mask=matrix_mask,
-            other=0.0,
-        ).to(tl.float32)
-        bias_even = tl.load(transform_bias_ptr + global_even_offsets, mask=pair_mask, other=0.0).to(tl.float32)
-        bias_odd = tl.load(transform_bias_ptr + global_odd_offsets, mask=pair_mask, other=0.0).to(tl.float32)
+        if not IDENTITY_TRANSFORM:
+            weight_block_ptr = transform_weight_ptr + block_index * weight_block_stride
+            weight_even_even = tl.load(
+                weight_block_ptr + row_even * weight_row_stride + col_even * weight_col_stride,
+                mask=matrix_mask,
+                other=0.0,
+            ).to(tl.float32)
+            weight_even_odd = tl.load(
+                weight_block_ptr + row_even * weight_row_stride + col_odd * weight_col_stride,
+                mask=matrix_mask,
+                other=0.0,
+            ).to(tl.float32)
+            weight_odd_even = tl.load(
+                weight_block_ptr + row_odd * weight_row_stride + col_even * weight_col_stride,
+                mask=matrix_mask,
+                other=0.0,
+            ).to(tl.float32)
+            weight_odd_odd = tl.load(
+                weight_block_ptr + row_odd * weight_row_stride + col_odd * weight_col_stride,
+                mask=matrix_mask,
+                other=0.0,
+            ).to(tl.float32)
+            bias_even = tl.load(transform_bias_ptr + global_even_offsets, mask=pair_mask, other=0.0).to(tl.float32)
+            bias_odd = tl.load(transform_bias_ptr + global_odd_offsets, mask=pair_mask, other=0.0).to(tl.float32)
 
         grad_state_even = tl.load(
             grad_final_state_ptr + batch_index * state_batch_stride + global_even_offsets,
@@ -1077,12 +1602,13 @@ if triton_runtime_available():  # pragma: no branch
             other=0.0,
         ).to(tl.float32)
 
-        grad_weight_even_even = tl.zeros((BLOCK_PAIR_WIDTH, BLOCK_PAIR_WIDTH), dtype=tl.float32)
-        grad_weight_even_odd = tl.zeros((BLOCK_PAIR_WIDTH, BLOCK_PAIR_WIDTH), dtype=tl.float32)
-        grad_weight_odd_even = tl.zeros((BLOCK_PAIR_WIDTH, BLOCK_PAIR_WIDTH), dtype=tl.float32)
-        grad_weight_odd_odd = tl.zeros((BLOCK_PAIR_WIDTH, BLOCK_PAIR_WIDTH), dtype=tl.float32)
-        grad_bias_even = tl.zeros((BLOCK_PAIR_WIDTH,), dtype=tl.float32)
-        grad_bias_odd = tl.zeros((BLOCK_PAIR_WIDTH,), dtype=tl.float32)
+        if COMPUTE_TRANSFORM_GRAD:
+            grad_weight_even_even = tl.zeros((BLOCK_PAIR_WIDTH, BLOCK_PAIR_WIDTH), dtype=tl.float32)
+            grad_weight_even_odd = tl.zeros((BLOCK_PAIR_WIDTH, BLOCK_PAIR_WIDTH), dtype=tl.float32)
+            grad_weight_odd_even = tl.zeros((BLOCK_PAIR_WIDTH, BLOCK_PAIR_WIDTH), dtype=tl.float32)
+            grad_weight_odd_odd = tl.zeros((BLOCK_PAIR_WIDTH, BLOCK_PAIR_WIDTH), dtype=tl.float32)
+            grad_bias_even = tl.zeros((BLOCK_PAIR_WIDTH,), dtype=tl.float32)
+            grad_bias_odd = tl.zeros((BLOCK_PAIR_WIDTH,), dtype=tl.float32)
 
         tensor_batch_base = batch_index * tensor_batch_stride
         pair_batch_base = batch_index * pair_batch_stride
@@ -1108,16 +1634,20 @@ if triton_runtime_available():  # pragma: no branch
                 other=0.0,
             ).to(tl.float32)
 
-            projected_even = (
-                tl.sum(weight_even_even * state_even[None, :], axis=1)
-                + tl.sum(weight_even_odd * state_odd[None, :], axis=1)
-                + bias_even
-            )
-            projected_odd = (
-                tl.sum(weight_odd_even * state_even[None, :], axis=1)
-                + tl.sum(weight_odd_odd * state_odd[None, :], axis=1)
-                + bias_odd
-            )
+            if IDENTITY_TRANSFORM:
+                projected_even = state_even
+                projected_odd = state_odd
+            else:
+                projected_even = (
+                    tl.sum(weight_even_even * state_even[None, :], axis=1)
+                    + tl.sum(weight_even_odd * state_odd[None, :], axis=1)
+                    + bias_even
+                )
+                projected_odd = (
+                    tl.sum(weight_odd_even * state_even[None, :], axis=1)
+                    + tl.sum(weight_odd_odd * state_odd[None, :], axis=1)
+                    + bias_odd
+                )
 
             pair_step_base = pair_batch_base + position * pair_seq_stride + block_index * pair_width
             cos = tl.load(angle_cos_ptr + pair_step_base + pair_offsets, mask=pair_mask, other=0.0).to(tl.float32)
@@ -1193,55 +1723,92 @@ if triton_runtime_available():  # pragma: no branch
             tl.store(grad_angle_cos_ptr + pair_step_base + pair_offsets, grad_cos, mask=pair_mask)
             tl.store(grad_angle_sin_ptr + pair_step_base + pair_offsets, grad_sin, mask=pair_mask)
 
-            grad_weight_even_even += grad_projected_even[:, None] * state_even[None, :]
-            grad_weight_even_odd += grad_projected_even[:, None] * state_odd[None, :]
-            grad_weight_odd_even += grad_projected_odd[:, None] * state_even[None, :]
-            grad_weight_odd_odd += grad_projected_odd[:, None] * state_odd[None, :]
-            grad_bias_even += grad_projected_even
-            grad_bias_odd += grad_projected_odd
+            if COMPUTE_TRANSFORM_GRAD:
+                grad_weight_even_even += grad_projected_even[:, None] * state_even[None, :]
+                grad_weight_even_odd += grad_projected_even[:, None] * state_odd[None, :]
+                grad_weight_odd_even += grad_projected_odd[:, None] * state_even[None, :]
+                grad_weight_odd_odd += grad_projected_odd[:, None] * state_odd[None, :]
+                grad_bias_even += grad_projected_even
+                grad_bias_odd += grad_projected_odd
 
-            grad_state_even = (
-                tl.sum(weight_even_even * grad_projected_even[:, None], axis=0)
-                + tl.sum(weight_odd_even * grad_projected_odd[:, None], axis=0)
-            )
-            grad_state_odd = (
-                tl.sum(weight_even_odd * grad_projected_even[:, None], axis=0)
-                + tl.sum(weight_odd_odd * grad_projected_odd[:, None], axis=0)
-            )
+            if IDENTITY_TRANSFORM:
+                grad_state_even = grad_projected_even
+                grad_state_odd = grad_projected_odd
+            else:
+                grad_state_even = (
+                    tl.sum(weight_even_even * grad_projected_even[:, None], axis=0)
+                    + tl.sum(weight_odd_even * grad_projected_odd[:, None], axis=0)
+                )
+                grad_state_odd = (
+                    tl.sum(weight_even_odd * grad_projected_even[:, None], axis=0)
+                    + tl.sum(weight_odd_odd * grad_projected_odd[:, None], axis=0)
+                )
 
         grad_initial_base = batch_index * state_batch_stride + block_base
         tl.store(grad_initial_state_ptr + grad_initial_base + even_offsets, grad_state_even, mask=pair_mask)
         tl.store(grad_initial_state_ptr + grad_initial_base + odd_offsets, grad_state_odd, mask=pair_mask)
 
-        grad_bias_base = batch_index * grad_bias_batch_stride + block_base
-        tl.store(grad_transform_bias_ptr + grad_bias_base + even_offsets, grad_bias_even, mask=pair_mask)
-        tl.store(grad_transform_bias_ptr + grad_bias_base + odd_offsets, grad_bias_odd, mask=pair_mask)
+        if COMPUTE_TRANSFORM_GRAD:
+            if ATOMIC_TRANSFORM_GRAD:
+                grad_bias_base = block_base
+                tl.atomic_add(grad_transform_bias_ptr + grad_bias_base + even_offsets, grad_bias_even, sem="relaxed", mask=pair_mask)
+                tl.atomic_add(grad_transform_bias_ptr + grad_bias_base + odd_offsets, grad_bias_odd, sem="relaxed", mask=pair_mask)
 
-        grad_weight_block_ptr = (
-            grad_transform_weight_ptr
-            + batch_index * grad_weight_batch_stride
-            + block_index * grad_weight_block_stride
-        )
-        tl.store(
-            grad_weight_block_ptr + row_even * grad_weight_row_stride + col_even * grad_weight_col_stride,
-            grad_weight_even_even,
-            mask=matrix_mask,
-        )
-        tl.store(
-            grad_weight_block_ptr + row_even * grad_weight_row_stride + col_odd * grad_weight_col_stride,
-            grad_weight_even_odd,
-            mask=matrix_mask,
-        )
-        tl.store(
-            grad_weight_block_ptr + row_odd * grad_weight_row_stride + col_even * grad_weight_col_stride,
-            grad_weight_odd_even,
-            mask=matrix_mask,
-        )
-        tl.store(
-            grad_weight_block_ptr + row_odd * grad_weight_row_stride + col_odd * grad_weight_col_stride,
-            grad_weight_odd_odd,
-            mask=matrix_mask,
-        )
+                grad_weight_block_ptr = grad_transform_weight_ptr + block_index * grad_weight_block_stride
+                tl.atomic_add(
+                    grad_weight_block_ptr + row_even * grad_weight_row_stride + col_even * grad_weight_col_stride,
+                    grad_weight_even_even,
+                    sem="relaxed",
+                    mask=matrix_mask,
+                )
+                tl.atomic_add(
+                    grad_weight_block_ptr + row_even * grad_weight_row_stride + col_odd * grad_weight_col_stride,
+                    grad_weight_even_odd,
+                    sem="relaxed",
+                    mask=matrix_mask,
+                )
+                tl.atomic_add(
+                    grad_weight_block_ptr + row_odd * grad_weight_row_stride + col_even * grad_weight_col_stride,
+                    grad_weight_odd_even,
+                    sem="relaxed",
+                    mask=matrix_mask,
+                )
+                tl.atomic_add(
+                    grad_weight_block_ptr + row_odd * grad_weight_row_stride + col_odd * grad_weight_col_stride,
+                    grad_weight_odd_odd,
+                    sem="relaxed",
+                    mask=matrix_mask,
+                )
+            else:
+                grad_bias_base = batch_index * grad_bias_batch_stride + block_base
+                tl.store(grad_transform_bias_ptr + grad_bias_base + even_offsets, grad_bias_even, mask=pair_mask)
+                tl.store(grad_transform_bias_ptr + grad_bias_base + odd_offsets, grad_bias_odd, mask=pair_mask)
+
+                grad_weight_block_ptr = (
+                    grad_transform_weight_ptr
+                    + batch_index * grad_weight_batch_stride
+                    + block_index * grad_weight_block_stride
+                )
+                tl.store(
+                    grad_weight_block_ptr + row_even * grad_weight_row_stride + col_even * grad_weight_col_stride,
+                    grad_weight_even_even,
+                    mask=matrix_mask,
+                )
+                tl.store(
+                    grad_weight_block_ptr + row_even * grad_weight_row_stride + col_odd * grad_weight_col_stride,
+                    grad_weight_even_odd,
+                    mask=matrix_mask,
+                )
+                tl.store(
+                    grad_weight_block_ptr + row_odd * grad_weight_row_stride + col_even * grad_weight_col_stride,
+                    grad_weight_odd_even,
+                    mask=matrix_mask,
+                )
+                tl.store(
+                    grad_weight_block_ptr + row_odd * grad_weight_row_stride + col_odd * grad_weight_col_stride,
+                    grad_weight_odd_odd,
+                    mask=matrix_mask,
+                )
 
 
 class _P20BlockDiagonalSequenceScan(torch.autograd.Function):
@@ -1257,6 +1824,7 @@ class _P20BlockDiagonalSequenceScan(torch.autograd.Function):
         initial_state: torch.Tensor,
         transform_weight: torch.Tensor,
         transform_bias: torch.Tensor,
+        identity_transform: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         ensure_triton_runtime_available()
         tensors = (
@@ -1344,12 +1912,14 @@ class _P20BlockDiagonalSequenceScan(torch.autograd.Function):
             pair_width,
             SEQ_LEN=seq_len,
             BLOCK_PAIR_WIDTH=block_pair_width,
+            IDENTITY_TRANSFORM=bool(identity_transform),
         )
 
         ctx.seq_len = seq_len
         ctx.block_pair_width = block_pair_width
         ctx.block_width = block_width
         ctx.pair_width = pair_width
+        ctx.identity_transform = bool(identity_transform)
         ctx.save_for_backward(
             update_gate,
             retain_gate,
@@ -1398,65 +1968,113 @@ class _P20BlockDiagonalSequenceScan(torch.autograd.Function):
         grad_candidate = torch.empty_like(candidate)
         grad_output_gate = torch.empty_like(output_gate)
         grad_initial_state = torch.empty_like(initial_state)
-        grad_transform_weight_contrib = torch.empty(
-            batch_size,
-            blocks,
-            block_width,
-            block_width,
-            device=transform_weight.device,
-            dtype=transform_weight.dtype,
+        compute_transform_grad = bool((ctx.needs_input_grad[7] or ctx.needs_input_grad[8]) and not ctx.identity_transform)
+        atomic_transform_grad = (
+            compute_transform_grad
+            and _p20_atomic_transform_grad_enabled(ctx.block_pair_width)
         )
-        grad_transform_bias_contrib = torch.empty(
-            batch_size,
-            width,
-            device=transform_bias.device,
-            dtype=transform_bias.dtype,
-        )
+        if compute_transform_grad:
+            if atomic_transform_grad:
+                grad_transform_weight_contrib = torch.zeros_like(transform_weight)
+                grad_transform_bias_contrib = torch.zeros_like(transform_bias)
+            else:
+                grad_transform_weight_contrib = torch.empty(
+                    batch_size,
+                    blocks,
+                    block_width,
+                    block_width,
+                    device=transform_weight.device,
+                    dtype=transform_weight.dtype,
+                )
+                grad_transform_bias_contrib = torch.empty(
+                    batch_size,
+                    width,
+                    device=transform_bias.device,
+                    dtype=transform_bias.dtype,
+                )
+            grad_weight_batch_stride = grad_transform_weight_contrib.stride(0)
+            grad_weight_block_stride = (
+                grad_transform_weight_contrib.stride(0)
+                if atomic_transform_grad
+                else grad_transform_weight_contrib.stride(1)
+            )
+            grad_weight_row_stride = (
+                grad_transform_weight_contrib.stride(1)
+                if atomic_transform_grad
+                else grad_transform_weight_contrib.stride(2)
+            )
+            grad_weight_col_stride = (
+                grad_transform_weight_contrib.stride(2)
+                if atomic_transform_grad
+                else grad_transform_weight_contrib.stride(3)
+            )
+            grad_bias_batch_stride = grad_transform_bias_contrib.stride(0)
+        else:
+            grad_transform_weight_contrib = transform_weight
+            grad_transform_bias_contrib = transform_bias
+            grad_weight_batch_stride = 0
+            grad_weight_block_stride = 0
+            grad_weight_row_stride = 0
+            grad_weight_col_stride = 0
+            grad_bias_batch_stride = 0
 
         grid = (batch_size, blocks)
-        _p20_block_diagonal_sequence_backward_kernel[grid](
-            grad_emitted_outputs,
-            grad_final_state,
-            update_gate,
-            retain_gate,
-            angle_cos,
-            angle_sin,
-            candidate,
-            output_gate,
-            state_history,
-            transform_weight,
-            transform_bias,
-            grad_update_gate,
-            grad_retain_gate,
-            grad_angle_cos,
-            grad_angle_sin,
-            grad_candidate,
-            grad_output_gate,
-            grad_initial_state,
-            grad_transform_weight_contrib,
-            grad_transform_bias_contrib,
-            update_gate.stride(0),
-            update_gate.stride(1),
-            angle_cos.stride(0),
-            angle_cos.stride(1),
-            initial_state.stride(0),
-            state_history.stride(0),
-            state_history.stride(1),
-            transform_weight.stride(0),
-            transform_weight.stride(1),
-            transform_weight.stride(2),
-            grad_transform_weight_contrib.stride(0),
-            grad_transform_weight_contrib.stride(1),
-            grad_transform_weight_contrib.stride(2),
-            grad_transform_weight_contrib.stride(3),
-            grad_transform_bias_contrib.stride(0),
-            block_width,
-            pair_width,
-            SEQ_LEN=ctx.seq_len,
-            BLOCK_PAIR_WIDTH=ctx.block_pair_width,
-        )
-        grad_transform_weight = grad_transform_weight_contrib.sum(dim=0)
-        grad_transform_bias = grad_transform_bias_contrib.sum(dim=0)
+        with timed_region("path1.primitive.runtime.triton_sequence_scan_backward_kernel"):
+            _p20_block_diagonal_sequence_backward_kernel[grid](
+                grad_emitted_outputs,
+                grad_final_state,
+                update_gate,
+                retain_gate,
+                angle_cos,
+                angle_sin,
+                candidate,
+                output_gate,
+                state_history,
+                transform_weight,
+                transform_bias,
+                grad_update_gate,
+                grad_retain_gate,
+                grad_angle_cos,
+                grad_angle_sin,
+                grad_candidate,
+                grad_output_gate,
+                grad_initial_state,
+                grad_transform_weight_contrib,
+                grad_transform_bias_contrib,
+                update_gate.stride(0),
+                update_gate.stride(1),
+                angle_cos.stride(0),
+                angle_cos.stride(1),
+                initial_state.stride(0),
+                state_history.stride(0),
+                state_history.stride(1),
+                transform_weight.stride(0),
+                transform_weight.stride(1),
+                transform_weight.stride(2),
+                grad_weight_batch_stride,
+                grad_weight_block_stride,
+                grad_weight_row_stride,
+                grad_weight_col_stride,
+                grad_bias_batch_stride,
+                block_width,
+                pair_width,
+                SEQ_LEN=ctx.seq_len,
+                BLOCK_PAIR_WIDTH=ctx.block_pair_width,
+                COMPUTE_TRANSFORM_GRAD=compute_transform_grad,
+                ATOMIC_TRANSFORM_GRAD=atomic_transform_grad,
+                IDENTITY_TRANSFORM=ctx.identity_transform,
+            )
+        if compute_transform_grad:
+            if atomic_transform_grad:
+                grad_transform_weight = grad_transform_weight_contrib
+                grad_transform_bias = grad_transform_bias_contrib
+            else:
+                with timed_region("path1.primitive.runtime.triton_sequence_scan_backward_reduce"):
+                    grad_transform_weight = grad_transform_weight_contrib.sum(dim=0)
+                    grad_transform_bias = grad_transform_bias_contrib.sum(dim=0)
+        else:
+            grad_transform_weight = None
+            grad_transform_bias = None
         return (
             grad_update_gate,
             grad_retain_gate,
@@ -1467,6 +2085,7 @@ class _P20BlockDiagonalSequenceScan(torch.autograd.Function):
             grad_initial_state,
             grad_transform_weight,
             grad_transform_bias,
+            None,
         )
 
 
@@ -1876,6 +2495,43 @@ class TritonPrimitiveBackend:
             output_gate,
         )
 
+    def parcae_state_mix(
+        self,
+        state: torch.Tensor,
+        decay: torch.Tensor,
+        injection: torch.Tensor,
+    ) -> torch.Tensor:
+        return _ParcaeTritonStateMix.apply(state, decay, injection)
+
+    def parcae_residual_mix(
+        self,
+        mixed: torch.Tensor,
+        block_out: torch.Tensor,
+        nonlinear: torch.Tensor,
+    ) -> torch.Tensor:
+        return _ParcaeTritonResidualMix.apply(mixed, block_out, nonlinear)
+
+    def parcae_loop_update(
+        self,
+        state: torch.Tensor,
+        decay: torch.Tensor,
+        injection: torch.Tensor,
+        block_out: torch.Tensor,
+        nonlinear: torch.Tensor,
+    ) -> torch.Tensor:
+        return _ParcaeTritonLoopUpdate.apply(state, decay, injection, block_out, nonlinear)
+
+    def parcae_output_mix(
+        self,
+        anchor: torch.Tensor,
+        delta: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> torch.Tensor:
+        return _ParcaeTritonOutputMix.apply(anchor, delta, gate)
+
+    def gelu(self, inputs: torch.Tensor) -> torch.Tensor:
+        return _TritonGelu.apply(inputs)
+
     def scan_p20_dense_sequence(
         self,
         *,
@@ -1913,6 +2569,7 @@ class TritonPrimitiveBackend:
         initial_state: torch.Tensor,
         transform_weight: torch.Tensor,
         transform_bias: torch.Tensor,
+        identity_transform: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return _P20BlockDiagonalSequenceScan.apply(
             update_gate,
@@ -1924,6 +2581,7 @@ class TritonPrimitiveBackend:
             initial_state,
             transform_weight,
             transform_bias,
+            identity_transform,
         )
 
     def scan_rotary_state_dense_sequence(

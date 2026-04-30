@@ -1954,6 +1954,124 @@ tokenizer, context, and batch if it fits. If `batch=64` does not fit, retry at
 The TPU VM was deleted after copying logs; `gcloud compute tpus tpu-vm list`
 reported no running TPU VMs.
 
+## Parcae Width-256 Replication Failure Diagnosis
+
+Diagnosed on 2026-04-21 after the non-spot `d_model=256` replication gate
+short-ended two second-seed Parcae lanes:
+
+- artifact root:
+  `experiments/jax_tpu/maxtext_quality/parcae_width256_rep_20260421T032904Z`
+- TPU VM: `fractal-parcae-w256rep-20260421t032904`
+- hardware: `v5litepod-1` non-spot in `us-west4-a`
+- shape: `d_model=256`, `layers=8`, `heads=8`, `head_dim=32`,
+  `mlp_dim=1024`, context `256`, batch `64`
+- lanes/seeds requested: `attention`, `parcae-bx`, `parcae-rgrp-control` for
+  seeds `7` and `123`
+- steps requested per lane: `16,384`
+
+Completed results:
+
+| Seed | Lane | Completed Steps | Final Eval Loss | PPL | Median Fast Tok/s | Status |
+|---:|---|---:|---:|---:|---:|---|
+| `7` | `attention` | `16,384` | `3.831` | `46.115` | `355,764` | complete |
+| `7` | `parcae-bx` | `16,384` | `3.782` | `43.896` | `288,050` | complete |
+| `7` | `parcae-rgrp-control` | `16,384` | `3.748` | `42.451` | `254,355` | complete |
+| `123` | `attention` | `16,384` | `3.827` | `45.931` | `355,586` | complete |
+| `123` | `parcae-bx` | `5,021` | `4.317 @ step 4,095` | `74.970` | `288,146` | invalid incomplete |
+| `123` | `parcae-rgrp-control` | `3,826` | `4.755 @ step 2,047` | `116.141` | `254,386` | invalid incomplete |
+
+Root cause:
+
+- MaxText logged `Training stopped: load_next_batch() failed` for both invalid
+  Parcae lanes.
+- The concrete exception was `FileNotFoundError` for a `/psm_*` shared-memory
+  segment inside the Hugging Face/Grain data path.
+- MaxText treats this `StopTraining` path as graceful job completion, so the
+  shell pipeline exited cleanly, the wrapper advanced to the next lane, and the
+  guard collected/deleted the TPU.
+- The scientific comparison was therefore partial, not failed by model quality.
+  Seed `7` reproduced `parcae-rgrp-control > parcae-bx > attention`, but the
+  two-seed `d_model=256` replication gate remains open.
+
+Control-plane fix:
+
+- `scripts/run_maxtext_parcae_proof_ladder_tpu.sh` now validates every lane log
+  after MaxText exits.
+- Validation fails the wrapper if MaxText logs `Training stopped`, if
+  `load_next_batch()` fails, if the last completed step is not `steps - 1`, or
+  if the final eval step is missing when the run contract expects it.
+- The runner defaults `grain_worker_count=0` and `grain_worker_count_eval=0`.
+- `scripts/patch_maxtext_rgrp.py` now patches MaxText's Hugging Face pipeline
+  to actually pass `config.grain_worker_count` and
+  `config.grain_worker_count_eval` through to the HF preprocessing DataLoader.
+
+Decision: do not relaunch until this runner/patch pair is applied to the TPU
+checkout. The next valid retry should run only the missing seed-`123` Parcae
+lanes after confirming the patched MaxText source contains the HF worker-count
+wiring.
+
+## Parcae Width-256 Two-Seed Result
+
+Completed on 2026-04-21 after rerunning only the invalid seed-`123` Parcae
+lanes with the patched data-loader control plane:
+
+- original artifact root:
+  `experiments/jax_tpu/maxtext_quality/parcae_width256_rep_20260421T032904Z`
+- retry artifact root:
+  `experiments/jax_tpu/maxtext_quality/parcae_width256_rep_retry_20260421T141730Z`
+- shape: `d_model=256`, `layers=8`, `heads=8`, `head_dim=32`,
+  `mlp_dim=1024`, context `256`, batch `64`
+- steps per lane: `16,384`
+- train token positions per lane: `268,435,456`
+- tokenizer: `openlm-research/open_llama_3b_v2`
+- data: FineWeb-EDU `CC-MAIN-2013-20` parquet files in GCS
+- discretization: `stable-exp`
+- Parcae loop band: physical layers `3..4`, fixed loop count `2`
+
+Per-seed results:
+
+| Seed | Lane | Final Eval Loss | PPL | Final Train Loss | Median Fast Tok/s |
+|---:|---|---:|---:|---:|---:|
+| `7` | `attention` | `3.831` | `46.115` | `3.723` | `355,818` |
+| `7` | `parcae-bx` | `3.782` | `43.896` | `3.674` | `288,080` |
+| `7` | `parcae-rgrp-control` | `3.748` | `42.451` | `3.640` | `254,378` |
+| `123` | `attention` | `3.827` | `45.931` | `3.683` | `355,617` |
+| `123` | `parcae-bx` | `3.790` | `44.247` | `3.637` | `288,111` |
+| `123` | `parcae-rgrp-control` | `3.757` | `42.838` | `3.603` | `254,359` |
+
+Two-seed aggregate:
+
+| Lane | Mean Final Eval Loss | Loss Std | Mean PPL | Mean Median Fast Tok/s |
+|---|---:|---:|---:|---:|
+| `attention` | `3.8290` | `0.0020` | `46.023` | `355,718` |
+| `parcae-bx` | `3.7860` | `0.0040` | `44.072` | `288,096` |
+| `parcae-rgrp-control` | `3.7525` | `0.0045` | `42.645` | `254,368` |
+
+Interpretation:
+
+- `parcae-rgrp-control` beat both controls on both `d_model=256` seeds.
+- Mean RGRP-control margin was `-0.0765` eval loss vs attention and `-0.0335`
+  eval loss vs B(x).
+- The RGRP-over-B(x) edge remains close to the `d_model=192` replicated edge
+  (`-0.035`) while the attention gap remains substantial.
+- RGRP-control still pays a meaningful throughput tax: about `71.5%` of
+  attention median throughput and about `88.3%` of B(x).
+
+Operational note:
+
+- The seed-`123` retry was accidentally launched as non-spot in `us-west4-a`.
+  It completed and deleted cleanly, but the TPU grant email lists free v5e spot
+  quota in `us-central1-a`; future `v5litepod-1` launches should use
+  `us-central1-a --spot` unless a run explicitly chooses another grant-covered
+  zone.
+
+Decision: the `d_model=256` proof-ladder rung is a real positive scale signal.
+The next rung is a single-seed `d_model=384` scout carrying all three lanes:
+`attention`, `parcae-bx`, and `parcae-rgrp-control`. Use the same data,
+context, tokenizer, layer count, Parcae loop band, and step budget. Start with
+batch `64`; if it does not fit, retry batch `32` and document the token-budget
+difference explicitly.
+
 ## Non-Goals
 
 - Do not use this lane to make CUDA speed claims.

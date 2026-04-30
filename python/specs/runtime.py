@@ -9,6 +9,7 @@ class PrimitiveStateTransformMode(StringEnum):
     DENSE = "dense"
     BLOCK_DIAGONAL_2 = "block-diagonal-2"
     BLOCK_DIAGONAL_4 = "block-diagonal-4"
+    BLOCK_DIAGONAL_8 = "block-diagonal-8"
 
 
 class RuntimeOptimizationScope(StringEnum):

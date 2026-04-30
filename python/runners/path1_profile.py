@@ -6,22 +6,25 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import torch
-import torch.nn.functional as F
 from torch.profiler import ProfilerActivity, profile
 
+from python.data import load_tokenized_corpus
 from python.data.byte_corpus import load_byte_corpus
 from python.models.path1 import build_path1_model
 from python.runtime import (
     apply_runtime_policy,
+    build_optimizer,
     configure_reproducibility,
+    language_model_cross_entropy,
     materialize_batch,
     resolve_autocast_dtype,
     resolve_torch_device,
+    use_named_timing_regions,
     warmup_model,
 )
 from python.runners.path1 import Path1RunnerRequest
 from python.runners.path1_cli import build_parser, build_request_from_args
-from python.specs.common import ValidationError, repo_relative
+from python.specs.common import JsonlCorpusSpec, TokenIdCorpusSpec, ValidationError, repo_relative
 from python.specs.path1 import BYTE_LEVEL_PAD_TOKEN
 
 
@@ -57,6 +60,7 @@ class Path1ProfileReport:
     env_kind: str | None
     compile_mode: str | None
     primitive_runtime_backend: str | None
+    optimizer_profile: str
     train_loss: float
     sort_by: str
     row_limit: int
@@ -78,6 +82,7 @@ class Path1ProfileReport:
             "env_kind": self.env_kind,
             "compile_mode": self.compile_mode,
             "primitive_runtime_backend": self.primitive_runtime_backend,
+            "optimizer_profile": self.optimizer_profile,
             "train_loss": self.train_loss,
             "sort_by": self.sort_by,
             "row_limit": self.row_limit,
@@ -190,18 +195,39 @@ def profile_path1_request(
     configure_reproducibility(request.manifest.seed_spec, request.manifest.runtime)
     device = resolve_torch_device(request.manifest.runtime)
     autocast_dtype = resolve_autocast_dtype(request.manifest.runtime)
-    corpus = load_byte_corpus(
-        request.manifest.corpus,
-        seq_len=request.manifest.budget.seq_len,
-        window_stride=request.manifest.budget.window_stride,
-        batch_size=request.manifest.budget.batch_size,
-        data_seed=request.manifest.seed_spec.data_seed,
-        shuffle_train=request.manifest.seed_spec.data_seed is not None,
-        pin_memory=request.manifest.runtime.backend == "cuda",
-    )
+    if isinstance(request.manifest.corpus, JsonlCorpusSpec):
+        corpus = load_byte_corpus(
+            request.manifest.corpus,
+            seq_len=request.manifest.budget.seq_len,
+            window_stride=request.manifest.budget.window_stride,
+            batch_size=request.manifest.budget.batch_size,
+            data_seed=request.manifest.seed_spec.data_seed,
+            shuffle_train=request.manifest.seed_spec.data_seed is not None,
+            pin_memory=request.manifest.runtime.backend == "cuda",
+        )
+        pad_token = BYTE_LEVEL_PAD_TOKEN
+    elif isinstance(request.manifest.corpus, TokenIdCorpusSpec):
+        corpus = load_tokenized_corpus(
+            request.manifest.corpus,
+            seq_len=request.manifest.budget.seq_len,
+            window_stride=request.manifest.budget.window_stride,
+            batch_size=request.manifest.budget.batch_size,
+            data_seed=request.manifest.seed_spec.data_seed,
+            shuffle_train=request.manifest.seed_spec.data_seed is not None,
+            pin_memory=request.manifest.runtime.backend == "cuda",
+        )
+        corpus_vocab_size = int(corpus.corpus_stats["vocab_size"])
+        if request.variant.shape.vocab_size != corpus_vocab_size:
+            raise ValidationError(
+                "token-id corpus vocab_size must match Path1ModelShape.vocab_size: "
+                f"corpus={corpus_vocab_size}, model={request.variant.shape.vocab_size}"
+            )
+        pad_token = int(corpus.corpus_stats.get("pad_token_id", -100))
+    else:
+        raise TypeError(f"unsupported corpus spec type: {type(request.manifest.corpus)!r}")
     model = build_path1_model(request.variant, dtype_mode=request.manifest.runtime.dtype).to(device)
     model = apply_runtime_policy(model, request.manifest.runtime)
-    optimizer = torch.optim.Adam(model.parameters(), lr=request.manifest.budget.learning_rate)
+    optimizer = build_optimizer(model, request.manifest.budget)
     warmup_model(
         model,
         optimizer,
@@ -210,7 +236,7 @@ def profile_path1_request(
         min(request.manifest.budget.warmup_eval_batches, len(corpus.eval_batches)),
         request.manifest.budget.warmup_train_steps,
         autocast_dtype,
-        pad_token=BYTE_LEVEL_PAD_TOKEN,
+        pad_token=pad_token,
         device=device,
         device_type=device.type,
     )
@@ -222,28 +248,30 @@ def profile_path1_request(
         activities.append(ProfilerActivity.CUDA)
 
     model.train()
-    with profile(
-        activities=activities,
-        record_shapes=True,
-        profile_memory=(device.type == "cuda"),
-        with_stack=False,
-    ) as prof:
-        optimizer.zero_grad(set_to_none=True)
-        with torch.autocast(
-            device_type=device.type,
-            dtype=autocast_dtype,
-            enabled=autocast_dtype is not None,
-        ):
-            logits = model.forward_logits(batch.input_ids)
-            loss = F.cross_entropy(
-                logits.reshape(-1, logits.shape[-1]),
-                batch.target_ids.reshape(-1),
-                ignore_index=BYTE_LEVEL_PAD_TOKEN,
-            )
-        loss.backward()
-        optimizer.step()
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
+    with use_named_timing_regions(True):
+        with profile(
+            activities=activities,
+            record_shapes=True,
+            profile_memory=(device.type == "cuda"),
+            with_stack=False,
+        ) as prof:
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(
+                device_type=device.type,
+                dtype=autocast_dtype,
+                enabled=autocast_dtype is not None,
+            ):
+                loss = language_model_cross_entropy(
+                    model,
+                    batch.input_ids,
+                    batch.target_ids,
+                    pad_token=pad_token,
+                    loss_region_name="path1.train.loss",
+                )
+            loss.backward()
+            optimizer.step()
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
 
     sort_by = "self_cuda_time_total" if device.type == "cuda" else "self_cpu_time_total"
     key_averages = list(prof.key_averages())
@@ -264,6 +292,7 @@ def profile_path1_request(
         env_kind=request.manifest.runtime.env_kind,
         compile_mode=request.manifest.runtime.compile_mode,
         primitive_runtime_backend=request.manifest.runtime.primitive_runtime_backend,
+        optimizer_profile=request.manifest.budget.optimizer_profile,
         train_loss=float(loss.detach().float().item()),
         sort_by=sort_by,
         row_limit=row_limit,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from python.reporting.render import render_path1_table
 from python.reporting.schema import BenchmarkReport, append_ledger_entry, write_report
 from python.runtime import (
     apply_runtime_policy,
+    build_optimizer,
     configure_reproducibility,
     resolve_autocast_dtype,
     resolve_torch_device,
@@ -20,6 +22,8 @@ from python.runtime import (
 )
 from python.specs.common import BenchmarkRunManifest, JsonlCorpusSpec, TokenIdCorpusSpec, ValidationError, repo_relative, to_jsonable
 from python.specs.path1 import BYTE_LEVEL_PAD_TOKEN, Path1VariantSpec
+
+_MAX_VARIANT_OUTPUT_NAME_LENGTH = 180
 
 
 @dataclass(frozen=True)
@@ -33,10 +37,17 @@ class Path1RunnerRequest:
     model_note: str = ""
 
 
+def _filesystem_safe_name(name: str, *, max_length: int = _MAX_VARIANT_OUTPUT_NAME_LENGTH) -> str:
+    if len(name) <= max_length:
+        return name
+    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:12]
+    prefix_length = max_length - len(digest) - 1
+    return f"{name[:prefix_length]}-{digest}"
+
+
 def _variant_output_name(request: Path1RunnerRequest) -> str:
-    if request.variant_output_name:
-        return request.variant_output_name
-    return request.variant.label
+    name = request.variant_output_name or request.variant.label
+    return _filesystem_safe_name(name)
 
 
 def _config_payload(request: Path1RunnerRequest, train_steps: int, eval_batches: int) -> dict[str, Any]:
@@ -55,10 +66,16 @@ def _config_payload(request: Path1RunnerRequest, train_steps: int, eval_batches:
         "train_steps": train_steps,
         "eval_batches": eval_batches,
         "learning_rate": request.manifest.budget.learning_rate,
+        "optimizer_profile": request.manifest.budget.optimizer_profile,
+        "muon_weight_decay": request.manifest.budget.muon_weight_decay,
+        "muon_momentum": request.manifest.budget.muon_momentum,
+        "muon_ns_steps": request.manifest.budget.muon_ns_steps,
+        "muon_adjust_lr_fn": request.manifest.budget.muon_adjust_lr_fn,
         "run_label": request.manifest.run_label,
         "dtype": request.manifest.runtime.dtype,
         "warmup_eval_batches": request.manifest.budget.warmup_eval_batches,
         "warmup_train_steps": request.manifest.budget.warmup_train_steps,
+        "train_loss_record_interval": request.manifest.budget.train_loss_record_interval,
         "schedule": [role.value for role in variant.layer_schedule],
         "variant": to_jsonable(variant),
     }
@@ -108,10 +125,7 @@ def run_path1_variant(request: Path1RunnerRequest) -> BenchmarkReport:
 
     model = build_path1_model(request.variant, dtype_mode=request.manifest.runtime.dtype).to(device)
     model = apply_runtime_policy(model, request.manifest.runtime)
-    optimizer = torch.optim.Adam(
-        model.optimizer_parameter_groups(request.manifest.budget.learning_rate),
-        lr=request.manifest.budget.learning_rate,
-    )
+    optimizer = build_optimizer(model, request.manifest.budget)
     warmup_model(
         model,
         optimizer,
@@ -142,6 +156,7 @@ def run_path1_variant(request: Path1RunnerRequest) -> BenchmarkReport:
         note=request.model_note or request.manifest.note,
         config_payload=_config_payload(request, train_steps, eval_batch_count),
         corpus_payload=corpus.corpus_stats,
+        train_loss_record_interval=request.manifest.budget.train_loss_record_interval,
     )
     diagnostic_payload = getattr(model, "diagnostic_payload", None)
     if callable(diagnostic_payload):

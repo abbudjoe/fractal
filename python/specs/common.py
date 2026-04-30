@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Any
 
 
+HEAD_LOSS_BACKENDS = frozenset({"dense", "compiled", "streaming-kernel"})
+FFN_BACKENDS = frozenset({"dense", "compiled", "manual-autograd", "triton-gelu", "recompute"})
+
+
 class ValidationError(ValueError):
     """Raised when a typed spec violates its explicit contract."""
 
@@ -88,6 +92,12 @@ class BenchmarkBudgetSpec:
     learning_rate: float = 1.0e-3
     warmup_eval_batches: int = 1
     warmup_train_steps: int = 1
+    train_loss_record_interval: int = 1
+    optimizer_profile: str = "adam"
+    muon_weight_decay: float = 0.0
+    muon_momentum: float = 0.95
+    muon_ns_steps: int = 5
+    muon_adjust_lr_fn: str | None = None
 
     def validate(self) -> None:
         ensure_positive(self.seq_len, "budget.seq_len")
@@ -97,9 +107,27 @@ class BenchmarkBudgetSpec:
         ensure_positive(self.eval_batches, "budget.eval_batches")
         ensure_non_negative(self.warmup_eval_batches, "budget.warmup_eval_batches")
         ensure_non_negative(self.warmup_train_steps, "budget.warmup_train_steps")
+        ensure_positive(self.train_loss_record_interval, "budget.train_loss_record_interval")
+        ensure_positive(self.muon_ns_steps, "budget.muon_ns_steps")
         if self.learning_rate <= 0:
             raise ValidationError(
                 f"budget.learning_rate must be greater than zero, got {self.learning_rate}"
+            )
+        if self.optimizer_profile not in {"adam", "adam-fused", "adam-triton-2d", "muon-reference"}:
+            raise ValidationError(
+                "budget.optimizer_profile must be one of adam|adam-fused|adam-triton-2d|muon-reference"
+            )
+        if self.muon_weight_decay < 0:
+            raise ValidationError(
+                f"budget.muon_weight_decay must be non-negative, got {self.muon_weight_decay}"
+            )
+        if self.muon_momentum < 0:
+            raise ValidationError(
+                f"budget.muon_momentum must be non-negative, got {self.muon_momentum}"
+            )
+        if self.muon_adjust_lr_fn not in {None, "original", "match_rms_adamw"}:
+            raise ValidationError(
+                "budget.muon_adjust_lr_fn must be original|match_rms_adamw or omitted"
             )
 
 
@@ -111,6 +139,8 @@ class DeviceRuntimeSpec:
     env_kind: str | None = None
     compile_mode: str | None = None
     primitive_runtime_backend: str | None = "torch"
+    head_loss_backend: str = "dense"
+    ffn_backend: str = "dense"
 
     def validate(self) -> None:
         if self.backend not in {"cpu", "cuda", "mps"}:
@@ -142,6 +172,20 @@ class DeviceRuntimeSpec:
             raise ValidationError(
                 "runtime.primitive_runtime_backend must be one of torch|triton or omitted"
             )
+        if self.head_loss_backend not in HEAD_LOSS_BACKENDS:
+            raise ValidationError(
+                "runtime.head_loss_backend must be one of dense|compiled|streaming-kernel"
+            )
+        if self.head_loss_backend == "streaming-kernel" and self.backend != "cuda":
+            raise ValidationError("runtime.head_loss_backend=streaming-kernel requires backend=cuda")
+        if self.ffn_backend not in FFN_BACKENDS:
+            raise ValidationError(
+                "runtime.ffn_backend must be one of dense|compiled|manual-autograd|triton-gelu|recompute"
+            )
+        if self.ffn_backend == "manual-autograd" and self.backend != "cuda":
+            raise ValidationError("runtime.ffn_backend=manual-autograd requires backend=cuda")
+        if self.ffn_backend == "triton-gelu" and self.backend != "cuda":
+            raise ValidationError("runtime.ffn_backend=triton-gelu requires backend=cuda")
         if self.env_kind == "primitive-triton" and self.compile_mode is not None:
             raise ValidationError(
                 "runtime.compile_mode is not supported with env_kind=primitive-triton"

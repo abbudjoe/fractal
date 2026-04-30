@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import random
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -63,13 +63,61 @@ def _load_split_tokens(manifest_path: Path, manifest: dict[str, Any], split: str
             raise ValidationError(f"token-id corpus shard {path} must contain a tensor or dict['tokens']")
         if tokens.ndim != 1:
             raise ValidationError(f"token-id corpus shard {path} must be a 1D token tensor")
-        tensors.append(tokens.to(dtype=torch.long, device="cpu"))
+        if not tokens.dtype.is_floating_point and tokens.dtype != torch.bool:
+            tensors.append(tokens.to(dtype=torch.int32, device="cpu"))
+        else:
+            raise ValidationError(f"token-id corpus shard {path} must contain integer token ids")
     if not tensors:
         raise ValidationError(f"token-id corpus split {split!r} did not yield any tensors")
     return torch.cat(tensors, dim=0) if len(tensors) > 1 else tensors[0]
 
 
-def _token_batches_from_stream(
+class LazyTokenBatchSequence(Sequence[TokenBatch]):
+    """Sequence-like token batches that materialize only the requested batch."""
+
+    def __init__(
+        self,
+        *,
+        tokens: torch.Tensor,
+        starts: torch.Tensor,
+        seq_len: int,
+        batch_size: int,
+        pin_memory: bool,
+    ) -> None:
+        self._tokens = tokens
+        self._starts = starts
+        self._seq_len = seq_len
+        self._batch_size = batch_size
+        self._pin_memory = pin_memory
+        self._offsets = torch.arange(seq_len, dtype=torch.long)
+
+    @property
+    def sequence_count(self) -> int:
+        return int(self._starts.numel())
+
+    def __len__(self) -> int:
+        return (self.sequence_count + self._batch_size - 1) // self._batch_size
+
+    def __getitem__(self, index: int | slice) -> TokenBatch | list[TokenBatch]:
+        if isinstance(index, slice):
+            return [self[batch_index] for batch_index in range(*index.indices(len(self)))]
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        start_index = index * self._batch_size
+        end_index = min(start_index + self._batch_size, self.sequence_count)
+        starts = self._starts[start_index:end_index].to(dtype=torch.long)
+        indices = starts[:, None] + self._offsets[None, :]
+        input_ids = self._tokens[indices].to(dtype=torch.long).contiguous()
+        target_ids = self._tokens[indices + 1].to(dtype=torch.long).contiguous()
+        if self._pin_memory:
+            input_ids = input_ids.pin_memory()
+            target_ids = target_ids.pin_memory()
+        return TokenBatch(input_ids=input_ids, target_ids=target_ids, token_count=input_ids.numel())
+
+
+def _batch_sequence_from_stream(
     tokens: torch.Tensor,
     seq_len: int,
     window_stride: int,
@@ -78,30 +126,29 @@ def _token_batches_from_stream(
     pin_memory: bool,
     data_seed: int | None,
     shuffle: bool,
-) -> list[TokenBatch]:
+) -> LazyTokenBatchSequence:
     required_len = seq_len + 1
     if tokens.numel() < required_len:
         raise ValidationError(
             f"token-id corpus split must contain at least {required_len} tokens, got {tokens.numel()}"
         )
-    starts = list(range(0, tokens.numel() - required_len + 1, window_stride))
-    if len(starts) < 2:
+    starts = torch.arange(0, tokens.numel() - required_len + 1, window_stride, dtype=torch.long)
+    if starts.numel() < 2:
         raise ValidationError(
-            f"token-id corpus split must yield at least 2 sequences of length {seq_len}, got {len(starts)}"
+            f"token-id corpus split must yield at least 2 sequences of length {seq_len}, got {starts.numel()}"
         )
     if shuffle and data_seed is not None:
-        random.Random(data_seed).shuffle(starts)
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(data_seed)
+        starts = starts[torch.randperm(starts.numel(), generator=generator)]
 
-    batches: list[TokenBatch] = []
-    for start_index in range(0, len(starts), batch_size):
-        chunk = starts[start_index : start_index + batch_size]
-        input_ids = torch.stack([tokens[start : start + seq_len] for start in chunk], dim=0).contiguous()
-        target_ids = torch.stack([tokens[start + 1 : start + required_len] for start in chunk], dim=0).contiguous()
-        if pin_memory:
-            input_ids = input_ids.pin_memory()
-            target_ids = target_ids.pin_memory()
-        batches.append(TokenBatch(input_ids=input_ids, target_ids=target_ids, token_count=input_ids.numel()))
-    return batches
+    return LazyTokenBatchSequence(
+        tokens=tokens,
+        starts=starts,
+        seq_len=seq_len,
+        batch_size=batch_size,
+        pin_memory=pin_memory,
+    )
 
 
 def _tokenizer_payload(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -132,7 +179,7 @@ def load_tokenized_corpus(
     tokenizer = _tokenizer_payload(manifest)
     train_tokens = _load_split_tokens(corpus_spec.manifest_path, manifest, "train")
     eval_tokens = _load_split_tokens(corpus_spec.manifest_path, manifest, "eval")
-    train_batches = _token_batches_from_stream(
+    train_batches = _batch_sequence_from_stream(
         train_tokens,
         seq_len,
         window_stride,
@@ -141,7 +188,7 @@ def load_tokenized_corpus(
         data_seed=data_seed,
         shuffle=shuffle_train,
     )
-    eval_batches = _token_batches_from_stream(
+    eval_batches = _batch_sequence_from_stream(
         eval_tokens,
         seq_len,
         window_stride,
@@ -161,10 +208,9 @@ def load_tokenized_corpus(
         "total_tokens": int(train_tokens.numel() + eval_tokens.numel()),
         "train_tokens": int(train_tokens.numel()),
         "eval_tokens": int(eval_tokens.numel()),
-        "total_sequences": sum(batch.input_ids.shape[0] for batch in train_batches)
-        + sum(batch.input_ids.shape[0] for batch in eval_batches),
-        "train_sequences": sum(batch.input_ids.shape[0] for batch in train_batches),
-        "eval_sequences": sum(batch.input_ids.shape[0] for batch in eval_batches),
+        "total_sequences": train_batches.sequence_count + eval_batches.sequence_count,
+        "train_sequences": train_batches.sequence_count,
+        "eval_sequences": eval_batches.sequence_count,
         "seq_len": seq_len,
         "window_stride": window_stride,
         "data_seed": data_seed,

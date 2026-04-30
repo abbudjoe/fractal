@@ -24,6 +24,9 @@ This folder contains the updated planning documents with **Causal Memory Auditor
 - [`mamba-golf-seed42-starter-scorecard.md`](./mamba-golf-seed42-starter-scorecard.md) — timestamped seed-42 starter result for the first Mamba Golf `A`/native Mamba/`P20` RunPod gauntlet
 - [`p20-gdn-role-candidate.md`](./p20-gdn-role-candidate.md) — first Fractal-native `P20` redesign for the Gated-DeltaNet recurrent-block role, including update/ramp/optimizer contracts and local smoke results
 - [`p20-gdn-head2head-scorecard.md`](./p20-gdn-head2head-scorecard.md) — H100 Path 1 head-to-head for `A`, native Mamba3, Fractal-native GDN, frozen `P20` Triton, and `P20-GDN-role`
+- [`parcae-rgrp-next-rungs.md`](./parcae-rgrp-next-rungs.md) — next-step sequencing note for the Parcae/RGRP lane: split position contract first, bounded recurrent depth second, cache-transfer/prefix-compression later
+- [`parcae-rgrp-native-kernel-superspec.md`](./parcae-rgrp-native-kernel-superspec.md) — dependency-aware native-kernel superspec for the Parcae/RGRP lane, mapping PyTorch-owned contracts to native CUDA/Triton/CUTLASS replacement gates
+- [`parcae-rgrp-pytorch-primitive-teardown.md`](./parcae-rgrp-pytorch-primitive-teardown.md) — source-pinned teardown of PyTorch primitive contracts that Parcae/RGRP native CUDA/Triton/CUTLASS replacements must preserve
 - [`math-proof-program.md`](./math-proof-program.md) — shared notation and theorem-outline program for standard decoder LLMs, modern hybrid variants, `A + P2`, and the proposed Graph-of-Experts line
 - [`math/README.md`](./math/README.md) — split proof notes, theorem audit, and LaTeX source for the repo’s current math-proof program
 - [`native-internal-search-sketch.md`](./native-internal-search-sketch.md) — sketch note for a native internal-search runtime direction

@@ -6,7 +6,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.profiler import record_function
+from python.runtime.cuda_timing import timed_region
 
 from python.models.common import (
     PositionWiseFeedForward,
@@ -804,7 +804,7 @@ class CausalDepthwiseConv1d(nn.Module):
             self.weight[:, 0, -1] = 1.0
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        with record_function("path1.primitive.runtime.short_causal_conv"):
+        with timed_region("path1.primitive.runtime.short_causal_conv"):
             conv_inputs = F.pad(inputs.transpose(1, 2), (self.kernel_size - 1, 0))
             mixed = F.conv1d(conv_inputs, self.weight, groups=self.width).transpose(1, 2)
         return F.silu(mixed) if self.activation else mixed
@@ -851,6 +851,7 @@ class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer
     ) -> None:
         super().__init__(d_model, state_transform_mode=state_transform_mode)
         self._compiled_scan_impl = None
+        self._triton_identity_state_transform = False
 
     def prepare_runtime_plan(self, inputs: torch.Tensor) -> P20RuntimePlan:
         update_gate_inputs, angle_inputs, candidate_inputs, output_gate_inputs = self.in_projection(inputs)
@@ -931,17 +932,17 @@ class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer
             sin = angle_sin[:, position, :]
             candidate = candidates[:, position, :]
             output_gate = output_gates[:, position, :]
-            with record_function("path1.primitive.runtime.state_transform_projection"):
+            with timed_region("path1.primitive.runtime.state_transform_projection"):
                 projected_state = self.state_transform_projection(state)
-            with record_function("path1.primitive.runtime.rotary_apply"):
+            with timed_region("path1.primitive.runtime.rotary_apply"):
                 transformed_state = _rotate_state_pairs_with_trig(
                     projected_state,
                     cos=cos,
                     sin=sin,
                 )
-            with record_function("path1.primitive.runtime.state_update"):
+            with timed_region("path1.primitive.runtime.state_update"):
                 state = update_gate * transformed_state + retain_gate * candidate
-            with record_function("path1.primitive.runtime.output_readout"):
+            with timed_region("path1.primitive.runtime.output_readout"):
                 outputs[:, position, :] = output_gate * state
         return outputs, state
 
@@ -962,7 +963,7 @@ class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer
             self.state_transform_mode is PrimitiveStateTransformMode.DENSE
             and isinstance(self.state_transform_projection, nn.Linear)
         ):
-            with record_function("path1.primitive.runtime.triton_sequence_scan"):
+            with timed_region("path1.primitive.runtime.triton_sequence_scan"):
                 return self._triton_backend.scan_p20_dense_sequence(
                     update_gate=update_gates,
                     retain_gate=retain_gates,
@@ -979,10 +980,11 @@ class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer
             in {
                 PrimitiveStateTransformMode.BLOCK_DIAGONAL_2,
                 PrimitiveStateTransformMode.BLOCK_DIAGONAL_4,
+                PrimitiveStateTransformMode.BLOCK_DIAGONAL_8,
             }
             and isinstance(self.state_transform_projection, BlockDiagonalLinear)
         ):
-            with record_function("path1.primitive.runtime.triton_sequence_scan"):
+            with timed_region("path1.primitive.runtime.triton_sequence_scan"):
                 return self._triton_backend.scan_p20_block_diagonal_sequence(
                     update_gate=update_gates,
                     retain_gate=retain_gates,
@@ -993,6 +995,7 @@ class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer
                     initial_state=state,
                     transform_weight=self.state_transform_projection.weight,
                     transform_bias=self.state_transform_projection.bias,
+                    identity_transform=self._triton_identity_state_transform,
                 )
         seq_len = update_gates.shape[1]
         for position in range(seq_len):
@@ -1002,15 +1005,15 @@ class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer
             sin = angle_sin[:, position, :]
             candidate = candidates[:, position, :]
             output_gate = output_gates[:, position, :]
-            with record_function("path1.primitive.runtime.state_transform_projection"):
+            with timed_region("path1.primitive.runtime.state_transform_projection"):
                 projected_state = self.state_transform_projection(state)
-            with record_function("path1.primitive.runtime.rotary_apply"):
+            with timed_region("path1.primitive.runtime.rotary_apply"):
                 transformed_state = _rotate_state_pairs_with_trig(
                     projected_state,
                     cos=cos,
                     sin=sin,
                 )
-            with record_function("path1.primitive.runtime.triton_state_update"):
+            with timed_region("path1.primitive.runtime.triton_state_update"):
                 state, emitted = self._triton_backend.fused_p20_update_readout(
                     update_gate=update_gate,
                     retain_gate=retain_gate,
@@ -1018,7 +1021,7 @@ class P20RotaryStateOutputRuntimeSequenceMixer(P20RotaryStateOutputSequenceMixer
                     candidate=candidate,
                     output_gate=output_gate,
                 )
-            with record_function("path1.primitive.runtime.output_readout"):
+            with timed_region("path1.primitive.runtime.output_readout"):
                 outputs[:, position, :] = emitted
         return outputs, state
 
@@ -1351,7 +1354,7 @@ class P2RotaryReadoutRuntimeSequenceMixer(P2RotaryReadoutSequenceMixer):
                 }
                 and isinstance(self.state_transform_projection, BlockDiagonalLinear)
             ):
-                with record_function("path1.primitive.runtime.triton_sequence_scan"):
+                with timed_region("path1.primitive.runtime.triton_sequence_scan"):
                     state_outputs, state = self._triton_backend.scan_rotary_state_block_diagonal_sequence(
                         update_gate=runtime_plan.update_gates,
                         retain_gate=runtime_plan.retain_gates,
@@ -1362,9 +1365,9 @@ class P2RotaryReadoutRuntimeSequenceMixer(P2RotaryReadoutSequenceMixer):
                         transform_weight=self.state_transform_projection.weight,
                         transform_bias=self.state_transform_projection.bias,
                     )
-                with record_function("path1.primitive.runtime.output_projection"):
+                with timed_region("path1.primitive.runtime.output_projection"):
                     projected_output = self.output_projection(state_outputs)
-                with record_function("path1.primitive.runtime.output_readout"):
+                with timed_region("path1.primitive.runtime.output_readout"):
                     outputs = runtime_plan.output_gates * projected_output
                 return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
             if (
@@ -1399,19 +1402,19 @@ class P2RotaryReadoutRuntimeSequenceMixer(P2RotaryReadoutSequenceMixer):
             candidate,
             output_gate,
         ) in enumerate(zip(update_gates, retain_gates, angle_cos, angle_sin, candidates, output_gates)):
-            with record_function("path1.primitive.runtime.state_transform_projection"):
+            with timed_region("path1.primitive.runtime.state_transform_projection"):
                 projected_state = self.state_transform_projection(state)
-            with record_function("path1.primitive.runtime.rotary_apply"):
+            with timed_region("path1.primitive.runtime.rotary_apply"):
                 transformed_state = _rotate_state_pairs_with_trig(
                     projected_state,
                     cos=cos,
                     sin=sin,
                 )
-            with record_function("path1.primitive.runtime.state_update"):
+            with timed_region("path1.primitive.runtime.state_update"):
                 state = update_gate * transformed_state + retain_gate * candidate
-            with record_function("path1.primitive.runtime.output_projection"):
+            with timed_region("path1.primitive.runtime.output_projection"):
                 projected_output = self.output_projection(state)
-            with record_function("path1.primitive.runtime.output_readout"):
+            with timed_region("path1.primitive.runtime.output_readout"):
                 outputs[:, position, :] = output_gate * projected_output
         return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
 
@@ -1624,7 +1627,7 @@ class P21WideLatentRuntimeSequenceMixer(P21WideLatentSequenceMixer):
                 }
                 and isinstance(self.state_transform_projection, BlockDiagonalLinear)
             ):
-                with record_function("path1.primitive.runtime.triton_sequence_scan"):
+                with timed_region("path1.primitive.runtime.triton_sequence_scan"):
                     state_outputs, state = self._triton_backend.scan_rotary_state_block_diagonal_sequence(
                         update_gate=runtime_plan.update_gates,
                         retain_gate=runtime_plan.retain_gates,
@@ -1635,7 +1638,7 @@ class P21WideLatentRuntimeSequenceMixer(P21WideLatentSequenceMixer):
                         transform_weight=self.state_transform_projection.weight,
                         transform_bias=self.state_transform_projection.bias,
                     )
-                with record_function("path1.primitive.runtime.output_readout"):
+                with timed_region("path1.primitive.runtime.output_readout"):
                     outputs = runtime_plan.output_gates * leading_state_slice(state_outputs, self.d_model)
                 return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
             if (
@@ -1757,7 +1760,7 @@ class P22WideLatentReadoutRuntimeSequenceMixer(P22WideLatentReadoutSequenceMixer
                 }
                 and isinstance(self.state_transform_projection, BlockDiagonalLinear)
             ):
-                with record_function("path1.primitive.runtime.triton_sequence_scan"):
+                with timed_region("path1.primitive.runtime.triton_sequence_scan"):
                     state_outputs, state = self._triton_backend.scan_rotary_state_block_diagonal_sequence(
                         update_gate=runtime_plan.update_gates,
                         retain_gate=runtime_plan.retain_gates,
@@ -1768,9 +1771,9 @@ class P22WideLatentReadoutRuntimeSequenceMixer(P22WideLatentReadoutSequenceMixer
                         transform_weight=self.state_transform_projection.weight,
                         transform_bias=self.state_transform_projection.bias,
                     )
-                with record_function("path1.primitive.runtime.output_projection"):
+                with timed_region("path1.primitive.runtime.output_projection"):
                     projected_output = self.output_projection(state_outputs)
-                with record_function("path1.primitive.runtime.output_readout"):
+                with timed_region("path1.primitive.runtime.output_readout"):
                     outputs = runtime_plan.output_gates * projected_output
                 return SequencePrimitiveScanResult(emitted_outputs=outputs, final_state=state)
             if (
@@ -2009,16 +2012,16 @@ class PrimitiveMixerBlock(nn.Module):
             )
 
     def forward(self, hidden: torch.Tensor, _attn_mask: torch.Tensor | None = None) -> torch.Tensor:
-        with record_function("path1.primitive.input_norm"):
+        with timed_region("path1.primitive.input_norm"):
             if self.wrapper_mode is PrimitiveWrapperMode.STANDARD:
                 normed = self.input_norm(hidden)
             else:
                 normed = self.input_rms_norm(hidden)
 
         if self.execution_profile is PrimitiveExecutionProfile.RUNTIME:
-            with record_function("path1.primitive.prepare_runtime_plan"):
+            with timed_region("path1.primitive.prepare_runtime_plan"):
                 runtime_plan = self.primitive.prepare_runtime_plan(normed)
-            with record_function("path1.primitive.scan_runtime"):
+            with timed_region("path1.primitive.scan_runtime"):
                 mixed = self.primitive.scan_with_runtime_plan(
                     runtime_plan,
                     batch_size=normed.shape[0],
@@ -2027,9 +2030,9 @@ class PrimitiveMixerBlock(nn.Module):
                     seq_len=normed.shape[1],
                 ).emitted_outputs
         else:
-            with record_function("path1.primitive.scan_reference"):
+            with timed_region("path1.primitive.scan_reference"):
                 mixed = self.primitive.scan(normed).emitted_outputs
-        with record_function("path1.primitive.readout"):
+        with timed_region("path1.primitive.readout"):
             if self.readout_mode is PrimitiveReadoutMode.DIRECT:
                 readout = mixed
             elif self.readout_mode is PrimitiveReadoutMode.PROJECTED:
@@ -2051,7 +2054,7 @@ class PrimitiveMixerBlock(nn.Module):
         if self.norm_mode is PrimitiveNormMode.RESIDUAL_RENORM:
             residual = self.wrapper_residual_renorm(residual)
 
-        with record_function("path1.primitive.feedforward"):
+        with timed_region("path1.primitive.feedforward"):
             if self.wrapper_mode is PrimitiveWrapperMode.STANDARD:
                 ff_input = self.output_norm(residual)
             else:

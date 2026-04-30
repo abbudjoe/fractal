@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+from contextlib import contextmanager
 import unittest
+from unittest import mock
 
 import torch
+import torch.nn.functional as F
 
 from python.models.mini_moe import (
     OneShotTopKRouter,
@@ -24,7 +27,10 @@ from python.models.primitives import build_sequence_primitive
 from python.models.path1 import build_path1_model
 from python.models.reference_ssm import GdnpFusedSequenceMixer, resolve_reference_ssm_config
 from python.models.transformer import LocalCausalSelfAttention, local_causal_attention_bias
+from python.models.transformer import LocalCausalTransformerBlock, Pr5LocalCausalTransformerBlock
+from python.runtime import apply_runtime_policy
 from python.runtime.recurrent import PackedLinearProjection
+from python.specs.common import DeviceRuntimeSpec
 from python.specs.mini_moe import (
     MiniMoeArchitectureSpec,
     MiniMoeBackboneSpec,
@@ -41,6 +47,7 @@ from python.specs.mini_moe import (
     OneShotRouterSpec,
 )
 from python.specs.path1 import (
+    AttentionKernelProfile,
     FeedForwardProfile,
     Path1ScaffoldProfile,
     PrimitiveExecutionProfile,
@@ -65,6 +72,247 @@ class Path1ModelTests(unittest.TestCase):
         input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
         logits = model.forward_logits(input_ids)
         self.assertEqual(tuple(logits.shape), (2, 8, 257))
+
+    def test_path1_forward_exposes_lm_head_timing_regions(self) -> None:
+        model = build_path1_model(phase1_attention_only_variant(), dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        region_names: list[str] = []
+
+        @contextmanager
+        def record_region(name: str):
+            region_names.append(name)
+            yield
+
+        with mock.patch("python.models.path1.timed_region", record_region):
+            logits = model.forward_logits(input_ids)
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertIn("path1.lm_head.total", region_names)
+        self.assertIn("path1.lm_head.final_norm", region_names)
+        self.assertIn("path1.lm_head.output_projection", region_names)
+
+    def test_path1_forward_loss_matches_forward_logits_cross_entropy(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=2, ffn_multiplier=2)
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        target_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        target_ids[0, 0] = 0
+
+        logits = model.forward_logits(input_ids)
+        expected = F.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]),
+            target_ids.reshape(-1),
+            ignore_index=0,
+        )
+        actual = model.forward_loss(input_ids, target_ids, pad_token=0)
+
+        self.assertTrue(torch.allclose(actual, expected, atol=1.0e-6, rtol=1.0e-6))
+
+    def test_path1_runtime_policy_configures_head_loss_backend_without_model_compile(self) -> None:
+        model = build_path1_model(phase1_attention_only_variant(), dtype_mode="fp32")
+
+        apply_runtime_policy(
+            model,
+            DeviceRuntimeSpec(
+                backend="cpu",
+                dtype="fp32",
+                primitive_runtime_backend="torch",
+                head_loss_backend="compiled",
+            ),
+        )
+
+        self.assertEqual(model.diagnostic_payload()["head_loss_backend"], "compiled")
+
+    def test_path1_streaming_head_loss_backend_fails_without_registered_kernel(self) -> None:
+        model = build_path1_model(phase1_attention_only_variant(), dtype_mode="fp32")
+        model.configure_runtime_policy(
+            compile_mode=None,
+            primitive_runtime_backend="torch",
+            head_loss_backend="streaming-kernel",
+        )
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        target_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        self.assertEqual(model.diagnostic_payload()["head_loss_backend"], "streaming-kernel")
+        with self.assertRaisesRegex(RuntimeError, "no streaming LM-head cross-entropy kernel"):
+            model.forward_loss(input_ids, target_ids, pad_token=0)
+
+    def test_path1_runtime_policy_configures_transformer_ffn_backend(self) -> None:
+        model = build_path1_model(phase1_attention_only_variant(), dtype_mode="fp32")
+
+        with mock.patch("python.models.transformer.torch.compile", side_effect=lambda fn, mode=None: fn):
+            apply_runtime_policy(
+                model,
+                DeviceRuntimeSpec(
+                    backend="cpu",
+                    dtype="fp32",
+                    primitive_runtime_backend="torch",
+                    ffn_backend="compiled",
+                ),
+            )
+
+        self.assertEqual(model.diagnostic_payload()["ffn_backend"], "compiled")
+        self.assertTrue(
+            all(
+                getattr(block, "_ffn_backend", None) == "compiled"
+                for block in model.blocks
+                if isinstance(block, LocalCausalTransformerBlock)
+            )
+        )
+
+    def test_manual_autograd_transformer_ffn_backend_matches_dense_forward_and_backward(self) -> None:
+        dense = LocalCausalTransformerBlock(16, 4, 32)
+        manual = LocalCausalTransformerBlock(16, 4, 32)
+        manual.load_state_dict(dense.state_dict())
+        hidden_dense = torch.randn(2, 5, 16, requires_grad=True)
+        hidden_manual = hidden_dense.detach().clone().requires_grad_(True)
+        manual.configure_runtime_policy(compile_mode=None, ffn_backend="manual-autograd")
+
+        dense_out = dense(hidden_dense)
+        manual_out = manual(hidden_manual)
+        self.assertTrue(torch.allclose(manual_out, dense_out, atol=1.0e-5, rtol=1.0e-5))
+
+        dense_loss = dense_out.square().mean()
+        manual_loss = manual_out.square().mean()
+        dense_loss.backward()
+        manual_loss.backward()
+
+        self.assertTrue(torch.allclose(hidden_manual.grad, hidden_dense.grad, atol=1.0e-5, rtol=1.0e-5))
+        for (dense_name, dense_parameter), (manual_name, manual_parameter) in zip(
+            dense.named_parameters(),
+            manual.named_parameters(),
+            strict=True,
+        ):
+            self.assertEqual(manual_name, dense_name)
+            self.assertIsNotNone(dense_parameter.grad, dense_name)
+            self.assertIsNotNone(manual_parameter.grad, manual_name)
+            self.assertTrue(
+                torch.allclose(manual_parameter.grad, dense_parameter.grad, atol=1.0e-5, rtol=1.0e-5),
+                f"gradient mismatch for {manual_name}",
+            )
+
+    def test_recompute_transformer_ffn_backend_matches_dense_forward_and_backward(self) -> None:
+        dense = LocalCausalTransformerBlock(16, 4, 32)
+        recompute = LocalCausalTransformerBlock(16, 4, 32)
+        recompute.load_state_dict(dense.state_dict())
+        hidden_dense = torch.randn(2, 5, 16, requires_grad=True)
+        hidden_recompute = hidden_dense.detach().clone().requires_grad_(True)
+        recompute.configure_runtime_policy(compile_mode=None, ffn_backend="recompute")
+
+        dense_out = dense(hidden_dense)
+        recompute_out = recompute(hidden_recompute)
+        self.assertTrue(torch.allclose(recompute_out, dense_out, atol=1.0e-5, rtol=1.0e-5))
+
+        dense_loss = dense_out.square().mean()
+        recompute_loss = recompute_out.square().mean()
+        dense_loss.backward()
+        recompute_loss.backward()
+
+        self.assertTrue(torch.allclose(hidden_recompute.grad, hidden_dense.grad, atol=1.0e-5, rtol=1.0e-5))
+        for (dense_name, dense_parameter), (recompute_name, recompute_parameter) in zip(
+            dense.named_parameters(),
+            recompute.named_parameters(),
+            strict=True,
+        ):
+            self.assertEqual(recompute_name, dense_name)
+            self.assertIsNotNone(dense_parameter.grad, dense_name)
+            self.assertIsNotNone(recompute_parameter.grad, recompute_name)
+            self.assertTrue(
+                torch.allclose(recompute_parameter.grad, dense_parameter.grad, atol=1.0e-5, rtol=1.0e-5),
+                f"gradient mismatch for {recompute_name}",
+            )
+
+    def test_recompute_transformer_ffn_backend_supports_bf16_autocast_backward(self) -> None:
+        block = LocalCausalTransformerBlock(16, 4, 32)
+        block.configure_runtime_policy(compile_mode=None, ffn_backend="recompute")
+        hidden = torch.randn(2, 5, 16, requires_grad=True)
+
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            output = block(hidden)
+            loss = output.square().mean()
+        loss.backward()
+
+        self.assertIsNotNone(hidden.grad)
+        self.assertTrue(torch.isfinite(hidden.grad).all())
+
+    def test_pr5_transformer_manual_autograd_ffn_backend_fails_without_registered_path(self) -> None:
+        block = Pr5LocalCausalTransformerBlock(d_model=32, head_count=4, d_ff=64)
+        block.configure_runtime_policy(compile_mode=None, ffn_backend="manual-autograd")
+        hidden = torch.randn(2, 8, 32)
+
+        with self.assertRaisesRegex(RuntimeError, "no manual-autograd FFN path"):
+            block(hidden)
+
+    def test_compiled_transformer_ffn_backend_matches_dense_path(self) -> None:
+        dense = LocalCausalTransformerBlock(16, 4, 32)
+        compiled = LocalCausalTransformerBlock(16, 4, 32)
+        compiled.load_state_dict(dense.state_dict())
+        hidden = torch.randn(2, 5, 16)
+
+        with mock.patch("python.models.transformer.torch.compile", side_effect=lambda fn, mode=None: fn):
+            compiled.configure_runtime_policy(compile_mode=None, ffn_backend="compiled")
+
+        self.assertTrue(torch.allclose(compiled(hidden), dense(hidden), atol=1.0e-6, rtol=1.0e-6))
+
+    def test_triton_gelu_transformer_ffn_backend_routes_activation(self) -> None:
+        block = LocalCausalTransformerBlock(16, 4, 32)
+
+        class FakeTritonBackend:
+            def __init__(self) -> None:
+                self.gelu_calls = 0
+
+            def gelu(self, inputs: torch.Tensor) -> torch.Tensor:
+                self.gelu_calls += 1
+                return F.gelu(inputs)
+
+        fake_backend = FakeTritonBackend()
+        with (
+            mock.patch("python.models.transformer.ensure_triton_runtime_available"),
+            mock.patch("python.models.transformer.build_triton_primitive_backend", return_value=fake_backend),
+        ):
+            block.configure_runtime_policy(compile_mode=None, ffn_backend="triton-gelu")
+
+        hidden = torch.randn(2, 5, 16)
+        output = block(hidden)
+
+        self.assertEqual(tuple(output.shape), tuple(hidden.shape))
+        self.assertEqual(fake_backend.gelu_calls, 1)
+
+    def test_compiled_transformer_full_block_backend_matches_dense_path(self) -> None:
+        dense = LocalCausalTransformerBlock(16, 4, 32)
+        compiled = LocalCausalTransformerBlock(16, 4, 32)
+        compiled.load_state_dict(dense.state_dict())
+        hidden = torch.randn(2, 5, 16)
+
+        with mock.patch("python.models.transformer.torch.compile", side_effect=lambda fn, mode=None: fn):
+            compiled.configure_full_block_compile(compile_mode="reduce-overhead")
+
+        self.assertIsNotNone(compiled._compiled_full_block_impl)
+        self.assertTrue(torch.allclose(compiled(hidden), dense(hidden), atol=1.0e-6, rtol=1.0e-6))
+
+        compiled.configure_full_block_compile(enabled=False)
+        self.assertIsNone(compiled._compiled_full_block_impl)
+
+    def test_attention_only_learned_position_embeddings_forward_cpu(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=2, ffn_multiplier=2),
+            position_encoding_kind="learned",
+            max_position_embeddings=16,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertEqual(diagnostics["position_encoding_kind"], "learned")
+        self.assertEqual(diagnostics["attention_position_contract"], "shared-input")
+        self.assertEqual(diagnostics["attention_position_embedding_widths"], [])
+        self.assertEqual(diagnostics["max_position_embeddings"], 16)
 
     def test_attention_only_parcae_looped_scaffold_forward_cpu(self) -> None:
         variant = phase1_attention_only_variant(
@@ -106,6 +354,56 @@ class Path1ModelTests(unittest.TestCase):
                 self.assertEqual(diagnostics["profile"], scaffold_profile.value)
                 self.assertIsNotNone(diagnostics["last_injection_gate_mean"])
                 self.assertIsNotNone(diagnostics["last_injection_norm"])
+                if scaffold_profile is Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION:
+                    self.assertIsNotNone(model.parcae_p20_control_projection)
+                    self.assertEqual(diagnostics["p20_control_projection"], "packed-value-gate")
+
+    def test_attention_only_parcae_cuda_parity_knobs_forward_cpu(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_backward_steps=1,
+            parcae_prelude_norm_kind="rmsnorm",
+            parcae_discretization="stable-exp",
+            parcae_control_stride=2,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()["parcae_looped_attention"]
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertEqual(diagnostics["backward_steps"], 1)
+        self.assertEqual(diagnostics["prelude_norm_kind"], "rmsnorm")
+        self.assertEqual(diagnostics["discretization"], "stable-exp")
+        self.assertEqual(diagnostics["control_stride"], 2)
+        self.assertEqual(diagnostics["last_p20_control_steps"], 4)
+
+    def test_attention_only_parcae_truncated_loop_steps_run_without_autograd(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_backward_steps=1,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        recurrent_block = model.blocks[model.parcae_loop_start]
+        original_forward = recurrent_block.forward
+        grad_modes: list[bool] = []
+
+        def wrapped_forward(*args, **kwargs):
+            grad_modes.append(torch.is_grad_enabled())
+            return original_forward(*args, **kwargs)
+
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        with mock.patch.object(recurrent_block, "forward", side_effect=wrapped_forward):
+            logits = model.forward_logits(input_ids)
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertEqual(grad_modes, [False, True])
 
     def test_attention_only_parcae_p20_control_receives_runtime_policy(self) -> None:
         variant = phase1_attention_only_variant(
@@ -117,6 +415,7 @@ class Path1ModelTests(unittest.TestCase):
 
         self.assertIsNotNone(model.parcae_p20_controller)
         self.assertIsNone(model.parcae_p20_controller._compiled_scan_impl)
+        self.assertIsNone(model._compiled_parcae_p20_post_scan_injection_impl)
 
         model.configure_runtime_policy(
             compile_mode="reduce-overhead",
@@ -124,6 +423,667 @@ class Path1ModelTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(model.parcae_p20_controller._compiled_scan_impl)
+        self.assertIsNotNone(model._compiled_parcae_p20_post_scan_injection_impl)
+
+    def test_attention_only_parcae_p20_control_keeps_state_and_residual_mix_eager_with_compiled_ffn_backend(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+
+        with (
+            mock.patch("python.models.path1.torch.compile", side_effect=lambda fn, mode=None: fn),
+            mock.patch("python.models.transformer.torch.compile", side_effect=lambda fn, mode=None: fn),
+        ):
+            model.configure_runtime_policy(
+                compile_mode=None,
+                primitive_runtime_backend="torch",
+                ffn_backend="compiled",
+            )
+
+        self.assertIsNotNone(model._compiled_parcae_p20_post_scan_injection_impl)
+        self.assertIsNotNone(model._compiled_parcae_loop_input_projection_impl)
+        self.assertIsNotNone(model._compiled_parcae_loop_output_projection_impl)
+        self.assertIsNone(model._compiled_parcae_state_mix_impl)
+        self.assertIsNone(model._compiled_parcae_residual_mix_impl)
+        self.assertIsNone(model._compiled_parcae_loop_iteration_impl)
+        self.assertFalse(model.parcae_runtime_diagnostics)
+        diagnostics = model.diagnostic_payload()["parcae_looped_attention"]
+        self.assertEqual(diagnostics["recurrent_block_backend"], "compiled-full-block")
+        self.assertEqual(diagnostics["loop_projection_backend"], "compiled")
+        self.assertEqual(diagnostics["recurrent_compile_mode"], "reduce-overhead")
+        self.assertEqual(diagnostics["loop_update_backend"], "eager")
+        self.assertFalse(diagnostics["runtime_diagnostics"])
+        for layer_index, block in enumerate(model.blocks):
+            if model.parcae_loop_start <= layer_index < model.parcae_loop_end:
+                self.assertIsNotNone(block._compiled_full_block_impl)
+            else:
+                self.assertIsNone(block._compiled_full_block_impl)
+
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()["parcae_looped_attention"]
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertIsNone(diagnostics["last_injection_gate_mean"])
+        self.assertIsNone(diagnostics["last_injection_norm"])
+        self.assertIsNone(diagnostics["last_p20_control_norm"])
+        self.assertEqual(diagnostics["last_recurrent_state_norms"], [])
+
+    def test_attention_only_parcae_p20_control_can_compile_loop_iteration_as_opt_in(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(
+                d_model=32,
+                head_count=4,
+                total_layers=6,
+                ffn_multiplier=2,
+                local_window=4,
+                attention_kernel=AttentionKernelProfile.FLEX_LOCAL,
+            ),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_backward_steps=1,
+            parcae_loop_update_backend="compiled",
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+
+        with (
+            mock.patch("python.models.path1.torch.compile", side_effect=lambda fn, mode=None: fn),
+            mock.patch("python.models.transformer.torch.compile", side_effect=lambda fn, mode=None: fn),
+        ):
+            model.configure_runtime_policy(
+                compile_mode=None,
+                primitive_runtime_backend="torch",
+                ffn_backend="compiled",
+            )
+
+        diagnostics = model.diagnostic_payload()["parcae_looped_attention"]
+        self.assertIsNotNone(model._compiled_parcae_loop_iteration_impl)
+        self.assertEqual(diagnostics["loop_update_backend"], "compiled")
+        self.assertEqual(diagnostics["recurrent_block_backend"], "standard")
+        for block in model.blocks[model.parcae_loop_start : model.parcae_loop_end]:
+            self.assertIsNone(block._compiled_full_block_impl)
+
+        recurrent_blocks = model.blocks[model.parcae_loop_start : model.parcae_loop_end]
+        flex_mask_mocks = []
+        full_block_mocks = []
+        for block in model.blocks:
+            if block not in recurrent_blocks:
+                block.forward = mock.Mock(side_effect=lambda hidden, *_args, **_kwargs: hidden)  # type: ignore[method-assign]
+                continue
+            flex_mask_mock = mock.Mock(return_value=object())
+            full_block_mock = mock.Mock(side_effect=lambda hidden, *_args: hidden + 0.01)
+            block._full_block_flex_block_mask = flex_mask_mock  # type: ignore[method-assign]
+            block._full_block_impl_no_timing = full_block_mock  # type: ignore[method-assign]
+            flex_mask_mocks.append(flex_mask_mock)
+            full_block_mocks.append(full_block_mock)
+
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        logits = model.forward_logits(input_ids)
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertEqual([mask_mock.call_count for mask_mock in flex_mask_mocks], [1, 1])
+        self.assertEqual([block_mock.call_count for block_mock in full_block_mocks], [2, 2])
+
+    def test_attention_only_parcae_p20_control_manual_autograd_loop_update_preserves_full_block_compile(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_backward_steps=1,
+            parcae_loop_update_backend="manual-autograd",
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+
+        with (
+            mock.patch("python.models.path1.torch.compile", side_effect=lambda fn, mode=None: fn),
+            mock.patch("python.models.transformer.torch.compile", side_effect=lambda fn, mode=None: fn),
+        ):
+            model.configure_runtime_policy(
+                compile_mode=None,
+                primitive_runtime_backend="torch",
+                ffn_backend="compiled",
+            )
+
+        diagnostics = model.diagnostic_payload()["parcae_looped_attention"]
+        self.assertEqual(diagnostics["loop_update_backend"], "manual-autograd")
+        self.assertEqual(diagnostics["recurrent_block_backend"], "compiled-full-block")
+        self.assertIsNone(model._compiled_parcae_loop_iteration_impl)
+        for block in model.blocks[model.parcae_loop_start : model.parcae_loop_end]:
+            self.assertIsNotNone(block._compiled_full_block_impl)
+
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        loss = model.forward_loss(input_ids, input_ids, pad_token=-100)
+        loss.backward()
+
+        self.assertTrue(torch.isfinite(loss))
+
+    def test_attention_only_parcae_p20_control_lean_eager_precomputes_loop_context(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(
+                d_model=32,
+                head_count=4,
+                total_layers=6,
+                ffn_multiplier=2,
+                local_window=4,
+                attention_kernel=AttentionKernelProfile.FLEX_LOCAL,
+            ),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_backward_steps=1,
+            parcae_loop_update_backend="lean-eager",
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+
+        with (
+            mock.patch("python.models.path1.torch.compile", side_effect=lambda fn, mode=None: fn),
+            mock.patch("python.models.transformer.torch.compile", side_effect=lambda fn, mode=None: fn),
+        ):
+            model.configure_runtime_policy(
+                compile_mode=None,
+                primitive_runtime_backend="torch",
+                ffn_backend="compiled",
+            )
+
+        diagnostics = model.diagnostic_payload()["parcae_looped_attention"]
+        self.assertEqual(diagnostics["loop_update_backend"], "lean-eager")
+        self.assertEqual(diagnostics["recurrent_block_backend"], "compiled-full-block")
+
+        recurrent_blocks = model.blocks[model.parcae_loop_start : model.parcae_loop_end]
+        flex_mask_mocks = []
+        compiled_block_mocks = []
+        for block in model.blocks:
+            if block not in recurrent_blocks:
+                block.forward = mock.Mock(side_effect=lambda hidden, *_args, **_kwargs: hidden)  # type: ignore[method-assign]
+                continue
+            flex_mask_mock = mock.Mock(return_value=object())
+            compiled_block_mock = mock.Mock(side_effect=lambda hidden, *_args: hidden + 0.01)
+            block._full_block_flex_block_mask = flex_mask_mock  # type: ignore[method-assign]
+            block._compiled_full_block_impl = compiled_block_mock
+            flex_mask_mocks.append(flex_mask_mock)
+            compiled_block_mocks.append(compiled_block_mock)
+
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        logits = model.forward_logits(input_ids)
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertEqual([mask_mock.call_count for mask_mock in flex_mask_mocks], [1, 1])
+        self.assertEqual([block_mock.call_count for block_mock in compiled_block_mocks], [2, 2])
+
+    def test_attention_only_parcae_p20_control_triton_glue_routes_loop_update_backend(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_backward_steps=1,
+            parcae_loop_update_backend="triton-glue",
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+
+        class FakeTritonBackend:
+            def __init__(self) -> None:
+                self.state_mix_calls = 0
+                self.residual_mix_calls = 0
+                self.output_mix_calls = 0
+
+            def parcae_state_mix(self, state, decay, injection):
+                self.state_mix_calls += 1
+                return decay * state + injection
+
+            def parcae_residual_mix(self, mixed, block_out, nonlinear):
+                self.residual_mix_calls += 1
+                return mixed + nonlinear * (block_out - mixed)
+
+            def parcae_output_mix(self, anchor, delta, gate):
+                self.output_mix_calls += 1
+                return anchor + gate * delta
+
+        fake_backend = FakeTritonBackend()
+
+        with (
+            mock.patch("python.models.path1.ensure_triton_runtime_available"),
+            mock.patch("python.models.path1.build_triton_primitive_backend", return_value=fake_backend),
+            mock.patch("python.models.path1.torch.compile", side_effect=lambda fn, mode=None: fn),
+            mock.patch("python.models.transformer.torch.compile", side_effect=lambda fn, mode=None: fn),
+        ):
+            model.configure_runtime_policy(
+                compile_mode=None,
+                primitive_runtime_backend="torch",
+                ffn_backend="compiled",
+            )
+
+        diagnostics = model.diagnostic_payload()["parcae_looped_attention"]
+        self.assertEqual(diagnostics["loop_update_backend"], "triton-glue")
+        self.assertTrue(diagnostics["loop_update_triton"])
+        self.assertEqual(diagnostics["recurrent_block_backend"], "compiled-full-block")
+
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        logits = model.forward_logits(input_ids)
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertEqual(fake_backend.state_mix_calls, 2)
+        self.assertEqual(fake_backend.residual_mix_calls, 4)
+        self.assertEqual(fake_backend.output_mix_calls, 0)
+
+    def test_attention_only_parcae_p20_control_triton_loop_forward_routes_first_block_update(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_backward_steps=1,
+            parcae_loop_update_backend="triton-loop-forward",
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+
+        class FakeTritonBackend:
+            def __init__(self) -> None:
+                self.state_mix_calls = 0
+                self.residual_mix_calls = 0
+                self.loop_update_calls = 0
+                self.output_mix_calls = 0
+
+            def parcae_state_mix(self, state, decay, injection):
+                self.state_mix_calls += 1
+                return decay * state + injection
+
+            def parcae_residual_mix(self, mixed, block_out, nonlinear):
+                self.residual_mix_calls += 1
+                return mixed + nonlinear * (block_out - mixed)
+
+            def parcae_loop_update(self, state, decay, injection, block_out, nonlinear):
+                self.loop_update_calls += 1
+                mixed = decay * state + injection
+                return mixed + nonlinear * (block_out - mixed)
+
+            def parcae_output_mix(self, anchor, delta, gate):
+                self.output_mix_calls += 1
+                return anchor + gate * delta
+
+        fake_backend = FakeTritonBackend()
+
+        with (
+            mock.patch("python.models.path1.ensure_triton_runtime_available"),
+            mock.patch("python.models.path1.build_triton_primitive_backend", return_value=fake_backend),
+            mock.patch("python.models.path1.torch.compile", side_effect=lambda fn, mode=None: fn),
+            mock.patch("python.models.transformer.torch.compile", side_effect=lambda fn, mode=None: fn),
+        ):
+            model.configure_runtime_policy(
+                compile_mode=None,
+                primitive_runtime_backend="torch",
+                ffn_backend="compiled",
+            )
+
+        diagnostics = model.diagnostic_payload()["parcae_looped_attention"]
+        self.assertEqual(diagnostics["loop_update_backend"], "triton-loop-forward")
+        self.assertTrue(diagnostics["loop_update_triton"])
+        self.assertEqual(diagnostics["recurrent_block_backend"], "compiled-full-block")
+
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        logits = model.forward_logits(input_ids)
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertEqual(fake_backend.state_mix_calls, 2)
+        self.assertEqual(fake_backend.loop_update_calls, 2)
+        self.assertEqual(fake_backend.residual_mix_calls, 2)
+        self.assertEqual(fake_backend.output_mix_calls, 0)
+
+    def test_parcae_loop_controls_normalize_to_loop_state_dtype(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_d_model=16,
+            parcae_loop_head_count=4,
+            parcae_loop_update_backend="triton-loop-forward",
+            parcae_band_prepare_backend="compiled",
+        )
+        model = build_path1_model(variant, dtype_mode="bf16")
+        loop_input = torch.randn(2, 8, 16, dtype=torch.bfloat16)
+        decay = torch.ones(1, 1, 16, dtype=torch.float32)
+        injection = torch.randn(2, 8, 16, dtype=torch.float32)
+        nonlinear = torch.zeros(1, 1, 16, dtype=torch.float32)
+
+        normalized = model._normalize_parcae_loop_controls(
+            loop_input,
+            decay,
+            injection,
+            nonlinear,
+        )
+
+        for tensor in normalized:
+            self.assertEqual(tensor.dtype, loop_input.dtype)
+            self.assertEqual(tensor.device, loop_input.device)
+            self.assertTrue(tensor.is_contiguous())
+
+    def test_attention_only_parcae_hourglass_triton_loop_forward_routes_output_mix(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=48, head_count=6, total_layers=3, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=1,
+            parcae_hourglass_band_schedule=(1, 1, 1),
+            parcae_loop_d_model=32,
+            parcae_loop_head_count=4,
+            parcae_loop_ffn_multiplier=2,
+            parcae_control_position_kind="learned",
+            parcae_loop_update_backend="triton-loop-forward",
+            parcae_band_block_contract="compiled-direct",
+            parcae_output_mix_backend="triton",
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+
+        class FakeTritonBackend:
+            def __init__(self) -> None:
+                self.state_mix_calls = 0
+                self.residual_mix_calls = 0
+                self.loop_update_calls = 0
+                self.output_mix_calls = 0
+
+            def parcae_state_mix(self, state, decay, injection):
+                self.state_mix_calls += 1
+                return decay * state + injection
+
+            def parcae_residual_mix(self, mixed, block_out, nonlinear):
+                self.residual_mix_calls += 1
+                return mixed + nonlinear * (block_out - mixed)
+
+            def parcae_loop_update(self, state, decay, injection, block_out, nonlinear):
+                self.loop_update_calls += 1
+                mixed = decay * state + injection
+                return mixed + nonlinear * (block_out - mixed)
+
+            def parcae_output_mix(self, anchor, delta, gate):
+                self.output_mix_calls += 1
+                return anchor + gate * delta
+
+        fake_backend = FakeTritonBackend()
+
+        with (
+            mock.patch("python.models.path1.ensure_triton_runtime_available"),
+            mock.patch("python.models.path1.build_triton_primitive_backend", return_value=fake_backend),
+            mock.patch("python.models.path1.torch.compile", side_effect=lambda fn, mode=None: fn),
+            mock.patch("python.models.transformer.torch.compile", side_effect=lambda fn, mode=None: fn),
+        ):
+            model.configure_runtime_policy(
+                compile_mode=None,
+                primitive_runtime_backend="torch",
+                ffn_backend="compiled",
+            )
+
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        logits = model.forward_logits(input_ids)
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertEqual(fake_backend.output_mix_calls, 1)
+
+    def test_attention_only_parcae_recurrent_compile_mode_reaches_full_block_compile(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_recurrent_compile_mode="max-autotune",
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        compile_modes: list[str] = []
+
+        def fake_configure(*, enabled=True, compile_mode="reduce-overhead"):
+            self.assertTrue(enabled)
+            compile_modes.append(compile_mode)
+
+        for block in model.blocks[model.parcae_loop_start : model.parcae_loop_end]:
+            block.configure_full_block_compile = fake_configure  # type: ignore[method-assign]
+
+        with mock.patch("python.models.path1.torch.compile", side_effect=lambda fn, mode=None: fn):
+            model.configure_runtime_policy(
+                compile_mode=None,
+                primitive_runtime_backend="torch",
+                ffn_backend="compiled",
+            )
+
+        self.assertEqual(compile_modes, ["max-autotune", "max-autotune"])
+        self.assertEqual(
+            model.diagnostic_payload()["parcae_looped_attention"]["recurrent_compile_mode"],
+            "max-autotune",
+        )
+
+    def test_attention_only_parcae_p20_control_can_freeze_identity_state_transform(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_control_state_transform="frozen-identity",
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        self.assertIsNotNone(model.parcae_p20_controller)
+        self.assertTrue(model.parcae_p20_controller._triton_identity_state_transform)
+        projection = model.parcae_p20_controller.state_transform_projection
+
+        for parameter in projection.parameters():
+            self.assertFalse(parameter.requires_grad)
+        if projection.weight.ndim == 3:
+            identity = torch.eye(projection.weight.shape[-1]).view(1, projection.weight.shape[-1], projection.weight.shape[-1])
+            self.assertTrue(torch.allclose(projection.weight, identity.expand_as(projection.weight)))
+        else:
+            self.assertTrue(torch.allclose(projection.weight, torch.eye(projection.weight.shape[0])))
+        self.assertTrue(torch.allclose(projection.bias, torch.zeros_like(projection.bias)))
+
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()["parcae_looped_attention"]
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertEqual(diagnostics["control_state_transform"], "frozen-identity")
+
+    def test_attention_only_parcae_p20_control_can_use_block_diagonal_8_state_transform(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_control_state_transform="trainable-block-diagonal-8",
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        self.assertIsNotNone(model.parcae_p20_controller)
+        projection = model.parcae_p20_controller.state_transform_projection
+
+        self.assertEqual(projection.blocks, 8)
+        self.assertEqual(projection.block_width, 4)
+        self.assertFalse(model.parcae_p20_controller._triton_identity_state_transform)
+        self.assertEqual(
+            model.diagnostic_payload()["parcae_looped_attention"]["control_state_transform"],
+            "trainable-block-diagonal-8",
+        )
+
+    def test_attention_only_parcae_hourglass_p20_control_forward_cpu(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=64, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_hourglass_pass_count=2,
+            parcae_backward_steps=1,
+            parcae_prelude_norm_kind="rmsnorm",
+            parcae_loop_d_model=32,
+            parcae_loop_head_count=4,
+            parcae_loop_ffn_multiplier=2,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()["parcae_looped_attention"]
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertTrue(diagnostics["hourglass"])
+        self.assertEqual(diagnostics["hourglass_pass_count"], 2)
+        self.assertEqual(diagnostics["wide_d_model"], 64)
+        self.assertEqual(diagnostics["loop_d_model"], 32)
+        self.assertEqual(diagnostics["prelude_layers"], 2)
+        self.assertEqual(diagnostics["recurrent_layers"], 2)
+        self.assertEqual(diagnostics["coda_layers"], 2)
+        self.assertIsNotNone(diagnostics["last_p20_control_norm"])
+
+    def test_attention_only_parcae_hourglass_band_schedule_forward_cpu(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=64, head_count=4, total_layers=12, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=1,
+            parcae_backward_steps=1,
+            parcae_prelude_norm_kind="rmsnorm",
+            parcae_loop_d_model=32,
+            parcae_loop_head_count=4,
+            parcae_loop_ffn_multiplier=2,
+            parcae_hourglass_band_schedule=(3, 2, 3, 2, 2),
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()["parcae_looped_attention"]
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertEqual(diagnostics["hourglass_band_schedule"], (3, 2, 3, 2, 2))
+        self.assertEqual(diagnostics["loop_ranges"], ((3, 5), (8, 10)))
+        self.assertEqual(diagnostics["recurrent_layers_total"], 4)
+        self.assertEqual(diagnostics["last_p20_control_steps"], 8)
+        self.assertEqual(model.blocks[3].input_norm.normalized_shape, (32,))
+        self.assertEqual(model.blocks[8].input_norm.normalized_shape, (32,))
+        self.assertEqual(model.blocks[5].input_norm.normalized_shape, (64,))
+
+    def test_attention_only_parcae_hourglass_loop_layer_count_forward_cpu(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=64, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_backward_steps=1,
+            parcae_loop_d_model=32,
+            parcae_loop_head_count=4,
+            parcae_loop_ffn_multiplier=2,
+            parcae_loop_layer_count=1,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()["parcae_looped_attention"]
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertEqual(diagnostics["configured_loop_layer_count"], 1)
+        self.assertEqual(diagnostics["prelude_layers"], 2)
+        self.assertEqual(diagnostics["recurrent_layers"], 1)
+        self.assertEqual(diagnostics["coda_layers"], 3)
+
+    def test_attention_only_parcae_p20_control_can_use_position_features(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=64, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_backward_steps=1,
+            parcae_prelude_norm_kind="rmsnorm",
+            parcae_loop_d_model=32,
+            parcae_loop_head_count=4,
+            parcae_loop_ffn_multiplier=2,
+            position_encoding_kind="learned",
+            max_position_embeddings=16,
+            parcae_control_position_kind="learned",
+            parcae_control_position_scale_init=0.02,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertIsNotNone(model.parcae_p20_position_embedding)
+        self.assertEqual(diagnostics["parcae_control_position_kind"], "learned")
+        self.assertAlmostEqual(diagnostics["parcae_control_position_scale"], 0.02, places=6)
+
+    def test_attention_only_parcae_p20_control_stride_uses_causal_left_anchors(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=64, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_backward_steps=1,
+            parcae_prelude_norm_kind="rmsnorm",
+            parcae_loop_d_model=32,
+            parcae_loop_head_count=4,
+            parcae_loop_ffn_multiplier=2,
+            max_position_embeddings=16,
+            parcae_control_position_kind="learned",
+            parcae_control_position_scale_init=0.02,
+            parcae_control_stride=4,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 10), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()
+        parcae_diagnostics = diagnostics["parcae_looped_attention"]
+
+        self.assertEqual(tuple(logits.shape), (2, 10, 257))
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertEqual(diagnostics["parcae_control_stride"], 4)
+        self.assertEqual(parcae_diagnostics["control_stride"], 4)
+        self.assertEqual(parcae_diagnostics["last_p20_control_steps"], 3)
+
+    def test_parcae_forward_defers_diagnostic_item_syncs(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=32, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        original_item = torch.Tensor.item
+
+        def forbid_item(tensor):
+            del tensor
+            raise AssertionError("Tensor.item() should not run inside Parcae forward")
+
+        with unittest.mock.patch.object(torch.Tensor, "item", forbid_item):
+            logits = model.forward_logits(input_ids)
+
+        diagnostics = model.diagnostic_payload()["parcae_looped_attention"]
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertIs(torch.Tensor.item, original_item)
+        self.assertIsNotNone(diagnostics["last_injection_gate_mean"])
+        self.assertEqual(len(diagnostics["last_recurrent_state_norms"]), 2)
+
+    def test_attention_only_contract_uses_attention_local_position_tables(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=64, head_count=4, total_layers=6, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_backward_steps=1,
+            parcae_prelude_norm_kind="rmsnorm",
+            parcae_loop_d_model=32,
+            parcae_loop_head_count=4,
+            parcae_loop_ffn_multiplier=2,
+            position_encoding_kind="learned",
+            attention_position_contract="attention-only",
+            max_position_embeddings=16,
+            parcae_control_position_kind="learned",
+            parcae_control_position_scale_init=0.02,
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()
+        parcae_diagnostics = diagnostics["parcae_looped_attention"]
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertIsNone(model.position_embedding)
+        self.assertEqual(sorted(int(key) for key in model.attention_position_embeddings.keys()), [32, 64])
+        self.assertEqual(diagnostics["attention_position_contract"], "attention-only")
+        self.assertEqual(diagnostics["attention_position_embedding_widths"], [32, 64])
+        self.assertEqual(parcae_diagnostics["attention_position_contract"], "attention-only")
 
     def test_attention_only_eml_tree_feed_forward_cpu(self) -> None:
         variant = phase1_attention_only_variant(
@@ -588,8 +1548,10 @@ class Path1ModelTests(unittest.TestCase):
                 initial_state: torch.Tensor,
                 transform_weight: torch.Tensor,
                 transform_bias: torch.Tensor,
+                identity_transform: bool = False,
             ) -> tuple[torch.Tensor, torch.Tensor]:
                 self.sequence_calls += 1
+                self.identity_transform = identity_transform
                 self.last_shapes = (
                     tuple(update_gate.shape),
                     tuple(retain_gate.shape),
@@ -705,6 +1667,44 @@ class Path1ModelTests(unittest.TestCase):
         explicit = attention(hidden, explicit_mask)
 
         self.assertTrue(torch.allclose(implicit, explicit, atol=1.0e-5, rtol=1.0e-5))
+
+    def test_flex_local_attention_contract_is_explicit_cuda_local_kernel(self) -> None:
+        attention = LocalCausalSelfAttention(
+            d_model=16,
+            head_count=4,
+            local_window=4,
+            attention_kernel=AttentionKernelProfile.FLEX_LOCAL,
+        )
+        hidden = torch.randn(2, 6, 16)
+        mask = local_causal_attention_bias(
+            seq_len=hidden.shape[1],
+            local_window=4,
+            device=hidden.device,
+            dtype=hidden.dtype,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "requires CUDA"):
+            attention(hidden, mask)
+
+    def test_flex_local_attention_rejects_non_power_of_two_head_dim(self) -> None:
+        with self.assertRaisesRegex(ValueError, "power-of-two head_dim"):
+            LocalCausalSelfAttention(
+                d_model=480,
+                head_count=10,
+                local_window=128,
+                attention_kernel=AttentionKernelProfile.FLEX_LOCAL,
+            )
+
+    def test_flash_local_attention_allows_head_dim_48_contract(self) -> None:
+        attention = LocalCausalSelfAttention(
+            d_model=480,
+            head_count=10,
+            local_window=128,
+            attention_kernel=AttentionKernelProfile.FLASH_LOCAL,
+        )
+
+        self.assertEqual(attention.head_dim, 48)
+        self.assertEqual(attention.attention_kernel, AttentionKernelProfile.FLASH_LOCAL)
 
     def test_mamba_composite_profiles_keep_explicit_dependency_boundary(self) -> None:
         has_official_mamba = importlib.util.find_spec("mamba_ssm") is not None
@@ -1044,8 +2044,10 @@ class Path1ModelTests(unittest.TestCase):
                 initial_state: torch.Tensor,
                 transform_weight: torch.Tensor,
                 transform_bias: torch.Tensor,
+                identity_transform: bool = False,
             ) -> tuple[torch.Tensor, torch.Tensor]:
                 self.sequence_calls += 1
+                self.identity_transform = identity_transform
                 self.last_shapes = (
                     tuple(update_gate.shape),
                     tuple(retain_gate.shape),
@@ -1080,6 +2082,7 @@ class Path1ModelTests(unittest.TestCase):
         )
 
         self.assertEqual(fake_backend.sequence_calls, 1)
+        self.assertFalse(fake_backend.identity_transform)
         self.assertEqual(
             fake_backend.last_shapes,
             (
@@ -1121,8 +2124,10 @@ class Path1ModelTests(unittest.TestCase):
                 initial_state: torch.Tensor,
                 transform_weight: torch.Tensor,
                 transform_bias: torch.Tensor,
+                identity_transform: bool = False,
             ) -> tuple[torch.Tensor, torch.Tensor]:
                 self.sequence_calls += 1
+                self.identity_transform = identity_transform
                 self.last_shapes = (
                     tuple(update_gate.shape),
                     tuple(retain_gate.shape),
@@ -1160,6 +2165,7 @@ class Path1ModelTests(unittest.TestCase):
         )
 
         self.assertEqual(fake_backend.sequence_calls, 1)
+        self.assertFalse(fake_backend.identity_transform)
         self.assertEqual(
             fake_backend.last_shapes,
             (
@@ -1176,6 +2182,89 @@ class Path1ModelTests(unittest.TestCase):
         )
         self.assertTrue(torch.allclose(result.emitted_outputs, torch.full_like(result.emitted_outputs, 7.0)))
         self.assertTrue(torch.allclose(result.final_state, torch.full_like(result.final_state, 8.0)))
+
+    def test_runtime_p20_block_diagonal_8_triton_routes_to_sequence_scan(self) -> None:
+        runtime = build_sequence_primitive(
+            PrimitiveProfile.P20,
+            16,
+            PrimitiveExecutionProfile.RUNTIME,
+            state_transform_mode=PrimitiveStateTransformMode.BLOCK_DIAGONAL_8,
+        )
+
+        class FakeBackend:
+            def __init__(self) -> None:
+                self.sequence_calls = 0
+
+            def scan_p20_block_diagonal_sequence(
+                self,
+                *,
+                update_gate: torch.Tensor,
+                retain_gate: torch.Tensor,
+                angle_cos: torch.Tensor,
+                angle_sin: torch.Tensor,
+                candidate: torch.Tensor,
+                output_gate: torch.Tensor,
+                initial_state: torch.Tensor,
+                transform_weight: torch.Tensor,
+                transform_bias: torch.Tensor,
+                identity_transform: bool = False,
+            ) -> tuple[torch.Tensor, torch.Tensor]:
+                self.sequence_calls += 1
+                self.identity_transform = identity_transform
+                self.last_shapes = (
+                    tuple(update_gate.shape),
+                    tuple(retain_gate.shape),
+                    tuple(angle_cos.shape),
+                    tuple(angle_sin.shape),
+                    tuple(candidate.shape),
+                    tuple(output_gate.shape),
+                    tuple(initial_state.shape),
+                    tuple(transform_weight.shape),
+                    tuple(transform_bias.shape),
+                )
+                return (
+                    torch.full_like(update_gate, 9.0),
+                    torch.full_like(initial_state, 10.0),
+                )
+
+            def scan_p20_dense_sequence(self, **_: object) -> tuple[torch.Tensor, torch.Tensor]:
+                raise AssertionError("block-diagonal Triton runtime should not route to the dense sequence kernel")
+
+            def fused_p20_update_readout(self, **_: object) -> tuple[torch.Tensor, torch.Tensor]:
+                raise AssertionError("block-diagonal Triton runtime should not fall back to the step kernel")
+
+        fake_backend = FakeBackend()
+        runtime._primitive_runtime_backend = "triton"
+        runtime._triton_backend = fake_backend
+
+        inputs = torch.randn(2, 5, 16)
+        runtime_plan = runtime.prepare_runtime_plan(inputs)
+        result = runtime.scan_with_runtime_plan(
+            runtime_plan,
+            batch_size=inputs.shape[0],
+            device=inputs.device,
+            dtype=inputs.dtype,
+            seq_len=inputs.shape[1],
+        )
+
+        self.assertEqual(fake_backend.sequence_calls, 1)
+        self.assertFalse(fake_backend.identity_transform)
+        self.assertEqual(
+            fake_backend.last_shapes,
+            (
+                (2, 5, 16),
+                (2, 5, 16),
+                (2, 5, 8),
+                (2, 5, 8),
+                (2, 5, 16),
+                (2, 5, 16),
+                (2, 16),
+                (8, 2, 2),
+                (16,),
+            ),
+        )
+        self.assertTrue(torch.allclose(result.emitted_outputs, torch.full_like(result.emitted_outputs, 9.0)))
+        self.assertTrue(torch.allclose(result.final_state, torch.full_like(result.final_state, 10.0)))
 
     def test_runtime_p20_dense_triton_routes_to_sequence_scan(self) -> None:
         runtime = build_sequence_primitive(

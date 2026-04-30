@@ -32,6 +32,7 @@ MAX_LOOP_COUNT="${MAX_LOOP_COUNT:-0}"
 PERSEQ_MAX_LOOP_COUNT="${PERSEQ_MAX_LOOP_COUNT:-4}"
 PARCAE_DISCRETIZATION="${PARCAE_DISCRETIZATION:-stable-exp}"
 PARCAE_CONTROL_DIAGNOSTICS="${PARCAE_CONTROL_DIAGNOSTICS:-false}"
+REQUIRE_FINAL_EVAL="${REQUIRE_FINAL_EVAL:-auto}"
 
 BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://fractal-maxtext-runs-81f2add4}"
 HF_PATH="${HF_PATH:-Salesforce/wikitext}"
@@ -52,6 +53,8 @@ HEADS="${HEADS:-4}"
 HEAD_DIM="${HEAD_DIM:-32}"
 DTYPE="${DTYPE:-bfloat16}"
 LR="${LR:-0.001}"
+GRAIN_WORKER_COUNT="${GRAIN_WORKER_COUNT:-0}"
+GRAIN_WORKER_COUNT_EVAL="${GRAIN_WORKER_COUNT_EVAL:-0}"
 
 mkdir -p "${OUTDIR}"
 
@@ -94,6 +97,8 @@ COMMON=(
   "learning_rate=${LR}"
   "dtype=${DTYPE}"
   enable_data_shuffling=true
+  "grain_worker_count=${GRAIN_WORKER_COUNT}"
+  "grain_worker_count_eval=${GRAIN_WORKER_COUNT_EVAL}"
 )
 
 steps_for_lane() {
@@ -104,18 +109,97 @@ steps_for_lane() {
   fi
 }
 
+require_final_eval_for_steps() {
+  local steps="$1"
+  case "${REQUIRE_FINAL_EVAL}" in
+    true|false)
+      echo "${REQUIRE_FINAL_EVAL}"
+      ;;
+    auto)
+      if (( EVAL_INTERVAL > 0 && steps >= EVAL_INTERVAL && steps % EVAL_INTERVAL == 0 )); then
+        echo true
+      else
+        echo false
+      fi
+      ;;
+    *)
+      echo "REQUIRE_FINAL_EVAL must be true, false, or auto; got ${REQUIRE_FINAL_EVAL}" >&2
+      exit 2
+      ;;
+  esac
+}
+
+validate_lane_log() {
+  local run_name="$1"
+  local steps="$2"
+  local log_path="$3"
+  local require_final_eval
+  require_final_eval="$(require_final_eval_for_steps "${steps}")"
+  "${PYTHON}" - "${run_name}" "${steps}" "${log_path}" "${require_final_eval}" <<'PY'
+from __future__ import annotations
+
+from pathlib import Path
+import re
+import sys
+
+run_name = sys.argv[1]
+expected_steps = int(sys.argv[2])
+log_path = Path(sys.argv[3])
+require_final_eval = sys.argv[4] == "true"
+
+text = log_path.read_text(errors="replace")
+errors: list[str] = []
+expected_last_step = expected_steps - 1
+
+if "Training stopped:" in text:
+  errors.append("MaxText reported Training stopped")
+if "`load_next_batch()` failed" in text or "load_next_batch() failed" in text:
+  errors.append("MaxText data loader reported load_next_batch() failure")
+
+completed_steps = [int(match) for match in re.findall(r"completed step: (\d+)", text)]
+if not completed_steps:
+  errors.append("no completed training steps were logged")
+else:
+  actual_last_step = completed_steps[-1]
+  if actual_last_step != expected_last_step:
+    errors.append(f"last completed step {actual_last_step} != expected {expected_last_step}")
+
+eval_steps = [int(match) for match in re.findall(r"eval metrics after step: (\d+)", text)]
+if require_final_eval:
+  if not eval_steps:
+    errors.append("no eval metrics were logged")
+  elif eval_steps[-1] != expected_last_step:
+    errors.append(f"last eval step {eval_steps[-1]} != expected {expected_last_step}")
+
+if errors:
+  print(f"[maxtext-runner] lane {run_name} failed completion contract:", file=sys.stderr)
+  for error in errors:
+    print(f"[maxtext-runner] - {error}", file=sys.stderr)
+  print(f"[maxtext-runner] log: {log_path}", file=sys.stderr)
+  raise SystemExit(1)
+
+eval_suffix = f", last_eval={eval_steps[-1]}" if eval_steps else ""
+print(
+    f"[maxtext-runner] lane {run_name} complete: "
+    f"last_step={completed_steps[-1]}, expected={expected_last_step}{eval_suffix}"
+)
+PY
+}
+
 run_attention() {
   local seed="$1"
   local steps
   steps="$(steps_for_lane)"
   local run_name="parcae8-attention-seed${seed}-${STAMP}"
+  local log_path="${OUTDIR}/${run_name}.log"
   "${PYTHON}" -m maxtext.trainers.pre_train.train \
     "${COMMON[@]}" \
     "steps=${steps}" \
     "run_name=${run_name}" \
     "data_shuffle_seed=${seed}" \
     "init_weights_seed=${seed}" \
-    2>&1 | tee "${OUTDIR}/${run_name}.log" | awk "${SUMMARY_FILTER}"
+    2>&1 | tee "${log_path}" | awk "${SUMMARY_FILTER}"
+  validate_lane_log "${run_name}" "${steps}" "${log_path}"
 }
 
 run_parcae() {
@@ -152,6 +236,7 @@ run_parcae() {
       ;;
   esac
   local run_name="parcae8-${lane}-seed${seed}-${STAMP}"
+  local log_path="${OUTDIR}/${run_name}.log"
   "${PYTHON}" -m maxtext.trainers.pre_train.train \
     "${COMMON[@]}" \
     "steps=${steps}" \
@@ -172,7 +257,8 @@ run_parcae() {
     fractal_rgrp_scan_unroll=3 \
     fractal_rgrp_projection_mode=sequence \
     fractal_rgrp_trig_mode=precompute \
-    2>&1 | tee "${OUTDIR}/${run_name}.log" | awk "${SUMMARY_FILTER}"
+    2>&1 | tee "${log_path}" | awk "${SUMMARY_FILTER}"
+  validate_lane_log "${run_name}" "${steps}" "${log_path}"
 }
 
 for seed in ${SEEDS}; do

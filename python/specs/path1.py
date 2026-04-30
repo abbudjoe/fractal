@@ -30,12 +30,25 @@ class FeedForwardProfile(StringEnum):
     GENERIC_TREE_GATED = "generic-tree-gated"
 
 
+class AttentionKernelProfile(StringEnum):
+    SDPA = "sdpa"
+    FLEX_LOCAL = "flex-local"
+    FLASH_LOCAL = "flash-local"
+
+
+def _is_power_of_two(value: int) -> bool:
+    return value > 0 and (value & (value - 1)) == 0
+
+
 class Path1ScaffoldProfile(StringEnum):
     STANDARD = "standard"
     PR5_HYBRID_GDN = "pr5-hybrid-gdn"
     PARCAE_LOOPED_ATTENTION = "parcae-looped-attention"
     PARCAE_BX_LOOPED_ATTENTION = "parcae-bx-looped-attention"
     PARCAE_P20_CONTROL_LOOPED_ATTENTION = "parcae-p20-control-looped-attention"
+    PARCAE_HOURGLASS_LOOPED_ATTENTION = "parcae-hourglass-looped-attention"
+    PARCAE_HOURGLASS_BX_LOOPED_ATTENTION = "parcae-hourglass-bx-looped-attention"
+    PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION = "parcae-hourglass-p20-control-looped-attention"
 
 
 class HybridAttentionLayerRole(StringEnum):
@@ -276,6 +289,7 @@ class Path1ModelShape:
     total_layers: int = DEFAULT_LAYERS
     local_window: int = DEFAULT_LOCAL_WINDOW
     ffn_multiplier: int = 4
+    attention_kernel: AttentionKernelProfile = AttentionKernelProfile.SDPA
 
     @property
     def d_ff(self) -> int:
@@ -288,9 +302,21 @@ class Path1ModelShape:
         ensure_positive(self.total_layers, "path1_shape.total_layers")
         ensure_positive(self.local_window, "path1_shape.local_window")
         ensure_positive(self.ffn_multiplier, "path1_shape.ffn_multiplier")
+        if not isinstance(self.attention_kernel, AttentionKernelProfile):
+            raise ValidationError(
+                "path1_shape.attention_kernel must be an AttentionKernelProfile, "
+                f"got {self.attention_kernel!r}"
+            )
         if self.d_model % self.head_count != 0:
             raise ValidationError(
                 f"path1_shape.d_model {self.d_model} must be divisible by head_count {self.head_count}"
+            )
+        head_dim = self.d_model // self.head_count
+        if self.attention_kernel is AttentionKernelProfile.FLEX_LOCAL and not _is_power_of_two(head_dim):
+            raise ValidationError(
+                "path1_shape.attention_kernel=flex-local currently requires a power-of-two head_dim "
+                f"for PyTorch FlexAttention, got d_model={self.d_model}, head_count={self.head_count}, "
+                f"head_dim={head_dim}"
             )
 
 
@@ -331,6 +357,30 @@ class Path1VariantSpec:
     eml_tree_depth: int = 3
     eml_route_fraction: float = 0.25
     parcae_loop_count: int = 2
+    parcae_hourglass_pass_count: int = 1
+    parcae_backward_steps: int | None = None
+    parcae_prelude_norm_kind: str = "layernorm"
+    parcae_discretization: str = "stable-exp"
+    parcae_dt_raw_init: float = 0.54132485
+    parcae_loop_d_model: int | None = None
+    parcae_loop_head_count: int | None = None
+    parcae_loop_ffn_multiplier: int | None = None
+    parcae_loop_layer_count: int | None = None
+    parcae_hourglass_band_schedule: tuple[int, ...] | None = None
+    parcae_control_position_kind: str = "none"
+    parcae_control_position_scale_init: float = 0.01
+    parcae_control_stride: int = 1
+    parcae_control_state_transform: str = "trainable"
+    parcae_recurrent_compile_mode: str = "reduce-overhead"
+    parcae_loop_update_backend: str = "eager"
+    parcae_scaffold_backend: str = "standard"
+    parcae_band_block_contract: str = "generic"
+    parcae_band_prepare_backend: str = "standard"
+    parcae_output_mix_backend: str = "standard"
+    parcae_fuse_first_state_mix: bool = False
+    attention_position_contract: str = "shared-input"
+    position_encoding_kind: str = "none"
+    max_position_embeddings: int = 1024
     final_norm_kind: str = "identity"
     scaffold_profile: Path1ScaffoldProfile = Path1ScaffoldProfile.STANDARD
 
@@ -339,6 +389,169 @@ class Path1VariantSpec:
         ensure_positive(self.eml_slot_count, "path1_variant.eml_slot_count")
         ensure_positive(self.eml_tree_depth, "path1_variant.eml_tree_depth")
         ensure_positive(self.parcae_loop_count, "path1_variant.parcae_loop_count")
+        ensure_positive(self.parcae_hourglass_pass_count, "path1_variant.parcae_hourglass_pass_count")
+        if self.parcae_backward_steps is not None:
+            ensure_positive(self.parcae_backward_steps, "path1_variant.parcae_backward_steps")
+        if self.parcae_loop_layer_count is not None:
+            ensure_positive(self.parcae_loop_layer_count, "path1_variant.parcae_loop_layer_count")
+            if self.parcae_loop_layer_count > self.shape.total_layers:
+                raise ValidationError(
+                    "path1_variant.parcae_loop_layer_count must not exceed shape.total_layers"
+                )
+        if self.parcae_hourglass_band_schedule is not None:
+            if len(self.parcae_hourglass_band_schedule) < 3 or len(self.parcae_hourglass_band_schedule) % 2 == 0:
+                raise ValidationError(
+                    "path1_variant.parcae_hourglass_band_schedule must contain odd-length "
+                    "wide/loop/.../wide segment lengths"
+                )
+            if sum(self.parcae_hourglass_band_schedule) != self.shape.total_layers:
+                raise ValidationError(
+                    "path1_variant.parcae_hourglass_band_schedule must sum to total_layers"
+                )
+            for index, segment_length in enumerate(self.parcae_hourglass_band_schedule):
+                ensure_positive(segment_length, f"path1_variant.parcae_hourglass_band_schedule[{index}]")
+        ensure_positive(self.max_position_embeddings, "path1_variant.max_position_embeddings")
+        if self.position_encoding_kind not in {"none", "learned"}:
+            raise ValidationError(
+                "path1_variant.position_encoding_kind must be none|learned, "
+                f"got {self.position_encoding_kind}"
+            )
+        if self.attention_position_contract not in {"shared-input", "attention-only"}:
+            raise ValidationError(
+                "path1_variant.attention_position_contract must be shared-input|attention-only, "
+                f"got {self.attention_position_contract}"
+            )
+        if self.parcae_prelude_norm_kind not in {"layernorm", "rmsnorm"}:
+            raise ValidationError(
+                "path1_variant.parcae_prelude_norm_kind must be layernorm|rmsnorm, "
+                f"got {self.parcae_prelude_norm_kind}"
+            )
+        if self.parcae_discretization not in {"stable-exp", "zoh"}:
+            raise ValidationError(
+                "path1_variant.parcae_discretization must be stable-exp|zoh, "
+                f"got {self.parcae_discretization}"
+            )
+        if self.parcae_control_position_kind not in {"none", "learned"}:
+            raise ValidationError(
+                "path1_variant.parcae_control_position_kind must be none|learned, "
+                f"got {self.parcae_control_position_kind}"
+            )
+        if self.parcae_control_position_scale_init < 0.0:
+            raise ValidationError(
+                "path1_variant.parcae_control_position_scale_init must be non-negative, "
+                f"got {self.parcae_control_position_scale_init}"
+            )
+        ensure_positive(self.parcae_control_stride, "path1_variant.parcae_control_stride")
+        if self.parcae_control_state_transform not in {
+            "trainable",
+            "trainable-block-diagonal-8",
+            "frozen-identity",
+        }:
+            raise ValidationError(
+                "path1_variant.parcae_control_state_transform must be "
+                "trainable|trainable-block-diagonal-8|frozen-identity, "
+                f"got {self.parcae_control_state_transform}"
+            )
+        if self.parcae_recurrent_compile_mode not in {"default", "reduce-overhead", "max-autotune"}:
+            raise ValidationError(
+                "path1_variant.parcae_recurrent_compile_mode must be "
+                "default|reduce-overhead|max-autotune, "
+                f"got {self.parcae_recurrent_compile_mode}"
+            )
+        if self.parcae_loop_update_backend not in {
+            "eager",
+            "lean-eager",
+            "compiled",
+            "manual-autograd",
+            "triton-glue",
+            "triton-loop-forward",
+        }:
+            raise ValidationError(
+                "path1_variant.parcae_loop_update_backend must be "
+                "eager|lean-eager|compiled|manual-autograd|triton-glue|triton-loop-forward, "
+                f"got {self.parcae_loop_update_backend}"
+            )
+        if self.parcae_scaffold_backend not in {"standard", "compiled"}:
+            raise ValidationError(
+                "path1_variant.parcae_scaffold_backend must be standard|compiled, "
+                f"got {self.parcae_scaffold_backend}"
+            )
+        if self.parcae_band_block_contract not in {"generic", "compiled-direct"}:
+            raise ValidationError(
+                "path1_variant.parcae_band_block_contract must be generic|compiled-direct, "
+                f"got {self.parcae_band_block_contract}"
+            )
+        if self.parcae_band_prepare_backend not in {"standard", "compiled"}:
+            raise ValidationError(
+                "path1_variant.parcae_band_prepare_backend must be standard|compiled, "
+                f"got {self.parcae_band_prepare_backend}"
+            )
+        if self.parcae_output_mix_backend not in {"standard", "triton"}:
+            raise ValidationError(
+                "path1_variant.parcae_output_mix_backend must be standard|triton, "
+                f"got {self.parcae_output_mix_backend}"
+            )
+        hourglass_scaffolds = {
+            Path1ScaffoldProfile.PARCAE_HOURGLASS_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_HOURGLASS_BX_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+        }
+        p20_control_scaffolds = {
+            Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+            Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+        }
+        if self.parcae_control_position_kind != "none" and self.scaffold_profile not in p20_control_scaffolds:
+            raise ValidationError(
+                "Parcae control position features require a P20/RGRP-control scaffold"
+            )
+        if self.parcae_control_stride != 1 and self.scaffold_profile not in p20_control_scaffolds:
+            raise ValidationError("Parcae control stride requires a P20/RGRP-control scaffold")
+        if self.parcae_control_state_transform != "trainable" and self.scaffold_profile not in p20_control_scaffolds:
+            raise ValidationError("Parcae control state transform overrides require a P20/RGRP-control scaffold")
+        if self.scaffold_profile in hourglass_scaffolds:
+            if self.feed_forward_profile is not FeedForwardProfile.STANDARD:
+                raise ValidationError("Parcae hourglass scaffolds currently require the standard feed-forward profile")
+            if self.parcae_loop_d_model is None:
+                raise ValidationError("Parcae hourglass scaffolds require parcae_loop_d_model")
+            ensure_positive(self.parcae_loop_d_model, "path1_variant.parcae_loop_d_model")
+            if self.parcae_loop_head_count is None:
+                raise ValidationError("Parcae hourglass scaffolds require parcae_loop_head_count")
+            ensure_positive(self.parcae_loop_head_count, "path1_variant.parcae_loop_head_count")
+            loop_ffn_multiplier = self.parcae_loop_ffn_multiplier or self.shape.ffn_multiplier
+            ensure_positive(loop_ffn_multiplier, "path1_variant.parcae_loop_ffn_multiplier")
+            if self.parcae_loop_d_model % self.parcae_loop_head_count != 0:
+                raise ValidationError(
+                    "path1_variant.parcae_loop_d_model must be divisible by "
+                    f"parcae_loop_head_count, got {self.parcae_loop_d_model} and {self.parcae_loop_head_count}"
+                )
+            if self.parcae_loop_d_model >= self.shape.d_model:
+                raise ValidationError(
+                    "Parcae hourglass scaffolds require parcae_loop_d_model smaller than shape.d_model"
+                )
+            if self.parcae_loop_layer_count is not None and self.parcae_loop_layer_count >= self.shape.total_layers:
+                raise ValidationError(
+                    "Parcae hourglass scaffolds require parcae_loop_layer_count smaller than shape.total_layers"
+                )
+            if self.parcae_hourglass_band_schedule is not None:
+                loop_layer_count = sum(self.parcae_hourglass_band_schedule[1::2])
+                if loop_layer_count >= self.shape.total_layers:
+                    raise ValidationError("Parcae hourglass band schedule must leave at least one wide layer")
+            if self.parcae_hourglass_pass_count != 1 and self.parcae_hourglass_band_schedule is not None:
+                raise ValidationError("Parcae hourglass pass count and band schedule are mutually exclusive")
+        elif self.parcae_hourglass_pass_count != 1:
+            raise ValidationError("Parcae hourglass pass count may only be used with hourglass scaffolds")
+        elif self.parcae_hourglass_band_schedule is not None:
+            raise ValidationError("Parcae hourglass band schedule may only be used with hourglass scaffolds")
+        elif any(
+            value is not None
+            for value in (
+                self.parcae_loop_d_model,
+                self.parcae_loop_head_count,
+                self.parcae_loop_ffn_multiplier,
+                self.parcae_loop_layer_count,
+            )
+        ):
+            raise ValidationError("Parcae loop width overrides may only be used with hourglass scaffolds")
         if not 0.0 < self.eml_route_fraction <= 1.0:
             raise ValidationError(
                 "path1_variant.eml_route_fraction must be in (0, 1], "
@@ -384,6 +597,9 @@ class Path1VariantSpec:
                 Path1ScaffoldProfile.PARCAE_LOOPED_ATTENTION,
                 Path1ScaffoldProfile.PARCAE_BX_LOOPED_ATTENTION,
                 Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+                Path1ScaffoldProfile.PARCAE_HOURGLASS_LOOPED_ATTENTION,
+                Path1ScaffoldProfile.PARCAE_HOURGLASS_BX_LOOPED_ATTENTION,
+                Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
             }:
                 raise ValidationError(
                     "attention-only variant may only use standard or Parcae-family looped-attention scaffold"
@@ -456,9 +672,10 @@ class Path1VariantSpec:
                 )
         else:
             raise ValidationError(f"unsupported path1 variant kind: {self.kind}")
-        if self.final_norm_kind not in {"identity", "rmsnorm"}:
+        if self.final_norm_kind not in {"identity", "layernorm", "rmsnorm"}:
             raise ValidationError(
-                f"path1_variant.final_norm_kind must be identity|rmsnorm, got {self.final_norm_kind}"
+                "path1_variant.final_norm_kind must be identity|layernorm|rmsnorm, "
+                f"got {self.final_norm_kind}"
             )
         if not (0.0 < self.reference_p20_ramp_init < 1.0):
             raise ValidationError(
@@ -557,6 +774,19 @@ def parse_layer_index_spec(indices: str) -> tuple[int, ...]:
     return tuple(sorted(parsed))
 
 
+def parse_int_tuple_spec(values: str, *, name: str) -> tuple[int, ...]:
+    tokens = tuple(token.strip() for token in values.replace(",", " ").split() if token.strip())
+    if not tokens:
+        raise ValidationError(f"{name} must not be empty")
+    try:
+        parsed = tuple(int(token) for token in tokens)
+    except ValueError as exc:
+        raise ValidationError(f"{name} must contain only integers") from exc
+    if any(value <= 0 for value in parsed):
+        raise ValidationError(f"{name} must contain only positive integers")
+    return parsed
+
+
 def layer_index_signature(indices: tuple[int, ...] | None) -> str:
     if indices is None:
         return "all"
@@ -624,7 +854,67 @@ def phase1_attention_only_variant(
     eml_route_fraction: float = 0.25,
     scaffold_profile: Path1ScaffoldProfile = Path1ScaffoldProfile.STANDARD,
     parcae_loop_count: int = 2,
+    parcae_hourglass_pass_count: int = 1,
+    parcae_backward_steps: int | None = None,
+    parcae_prelude_norm_kind: str = "layernorm",
+    parcae_discretization: str = "stable-exp",
+    parcae_dt_raw_init: float = 0.54132485,
+    parcae_loop_d_model: int | None = None,
+    parcae_loop_head_count: int | None = None,
+    parcae_loop_ffn_multiplier: int | None = None,
+    parcae_loop_layer_count: int | None = None,
+    parcae_hourglass_band_schedule: tuple[int, ...] | None = None,
+    parcae_control_position_kind: str = "none",
+    parcae_control_position_scale_init: float = 0.01,
+    parcae_control_stride: int = 1,
+    parcae_control_state_transform: str = "trainable",
+    parcae_recurrent_compile_mode: str = "reduce-overhead",
+    parcae_loop_update_backend: str = "eager",
+    parcae_scaffold_backend: str = "standard",
+    parcae_band_block_contract: str = "generic",
+    parcae_band_prepare_backend: str = "standard",
+    parcae_output_mix_backend: str = "standard",
+    parcae_fuse_first_state_mix: bool = False,
+    attention_position_contract: str = "shared-input",
+    position_encoding_kind: str = "none",
+    max_position_embeddings: int = 1024,
+    final_norm_kind: str = "identity",
 ) -> Path1VariantSpec:
+    parcae_scaffolds = {
+        Path1ScaffoldProfile.PARCAE_LOOPED_ATTENTION,
+        Path1ScaffoldProfile.PARCAE_BX_LOOPED_ATTENTION,
+        Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
+        Path1ScaffoldProfile.PARCAE_HOURGLASS_LOOPED_ATTENTION,
+        Path1ScaffoldProfile.PARCAE_HOURGLASS_BX_LOOPED_ATTENTION,
+        Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+    }
+    uses_parcae_scaffold = scaffold_profile in parcae_scaffolds
+    if not uses_parcae_scaffold:
+        # Pure attention is the control lane. Parcae knobs may be present in a
+        # shared runner process, but they must not change the attention spec,
+        # label, diagnostics, or runtime construction.
+        parcae_loop_count = 2
+        parcae_hourglass_pass_count = 1
+        parcae_backward_steps = None
+        parcae_prelude_norm_kind = "layernorm"
+        parcae_discretization = "stable-exp"
+        parcae_dt_raw_init = 0.54132485
+        parcae_loop_d_model = None
+        parcae_loop_head_count = None
+        parcae_loop_ffn_multiplier = None
+        parcae_loop_layer_count = None
+        parcae_hourglass_band_schedule = None
+        parcae_control_position_kind = "none"
+        parcae_control_position_scale_init = 0.01
+        parcae_control_stride = 1
+        parcae_control_state_transform = "trainable"
+        parcae_recurrent_compile_mode = "reduce-overhead"
+        parcae_loop_update_backend = "eager"
+        parcae_scaffold_backend = "standard"
+        parcae_band_block_contract = "generic"
+        parcae_band_prepare_backend = "standard"
+        parcae_output_mix_backend = "standard"
+        parcae_fuse_first_state_mix = False
     schedule = layer_schedule or _attention_schedule(shape.total_layers)
     default_schedule = _attention_schedule(shape.total_layers)
     schedule_suffix = (
@@ -654,18 +944,56 @@ def phase1_attention_only_variant(
         else ""
     )
     scaffold_suffix = (
-        _variant_label(scaffold_profile.value, f"loops{parcae_loop_count}")
-        if scaffold_profile
-        in {
-            Path1ScaffoldProfile.PARCAE_LOOPED_ATTENTION,
-            Path1ScaffoldProfile.PARCAE_BX_LOOPED_ATTENTION,
-            Path1ScaffoldProfile.PARCAE_P20_CONTROL_LOOPED_ATTENTION,
-        }
+        _variant_label(
+            scaffold_profile.value,
+            f"loops{parcae_loop_count}",
+            f"passes{parcae_hourglass_pass_count}" if parcae_hourglass_pass_count != 1 else "",
+            f"bwd{parcae_backward_steps}"
+            if parcae_backward_steps is not None and parcae_backward_steps != parcae_loop_count
+            else "",
+            f"prenorm-{parcae_prelude_norm_kind}" if parcae_prelude_norm_kind != "layernorm" else "",
+            parcae_discretization if parcae_discretization != "stable-exp" else "",
+        )
+        if uses_parcae_scaffold
+        else ""
+    )
+    if parcae_loop_d_model is not None:
+        scaffold_suffix = _variant_label(scaffold_suffix, f"loopd{parcae_loop_d_model}")
+    if parcae_loop_layer_count is not None:
+        scaffold_suffix = _variant_label(scaffold_suffix, f"looplayers{parcae_loop_layer_count}")
+    if parcae_hourglass_band_schedule is not None:
+        scaffold_suffix = _variant_label(
+            scaffold_suffix,
+            "bands" + "x".join(str(segment) for segment in parcae_hourglass_band_schedule),
+        )
+    if parcae_control_position_kind != "none":
+        scaffold_suffix = _variant_label(scaffold_suffix, f"ctrlpos-{parcae_control_position_kind}")
+    if parcae_control_stride != 1:
+        scaffold_suffix = _variant_label(scaffold_suffix, f"ctrlstride{parcae_control_stride}")
+    if parcae_control_state_transform != "trainable":
+        scaffold_suffix = _variant_label(scaffold_suffix, f"ctrlx-{parcae_control_state_transform}")
+    if parcae_recurrent_compile_mode != "reduce-overhead":
+        scaffold_suffix = _variant_label(scaffold_suffix, f"rcompile-{parcae_recurrent_compile_mode}")
+    if parcae_loop_update_backend != "eager":
+        scaffold_suffix = _variant_label(scaffold_suffix, f"loopupdate-{parcae_loop_update_backend}")
+    if parcae_scaffold_backend != "standard":
+        scaffold_suffix = _variant_label(scaffold_suffix, f"scaffold-{parcae_scaffold_backend}")
+    if parcae_band_block_contract != "generic":
+        scaffold_suffix = _variant_label(scaffold_suffix, f"bandblock-{parcae_band_block_contract}")
+    if parcae_band_prepare_backend != "standard":
+        scaffold_suffix = _variant_label(scaffold_suffix, f"bandprep-{parcae_band_prepare_backend}")
+    if parcae_output_mix_backend != "standard":
+        scaffold_suffix = _variant_label(scaffold_suffix, f"outmix-{parcae_output_mix_backend}")
+    if parcae_fuse_first_state_mix:
+        scaffold_suffix = _variant_label(scaffold_suffix, "firstmix-fused")
+    position_contract_suffix = (
+        f"attnpos-{attention_position_contract}"
+        if attention_position_contract != "shared-input"
         else ""
     )
     return Path1VariantSpec(
         kind=Path1VariantKind.ATTENTION_ONLY,
-        label=_variant_label("attention-only", scaffold_suffix, ffn_suffix, schedule_suffix),
+        label=_variant_label("attention-only", scaffold_suffix, ffn_suffix, position_contract_suffix, schedule_suffix),
         shape=shape,
         layer_schedule=schedule,
         feed_forward_profile=feed_forward_profile,
@@ -675,6 +1003,31 @@ def phase1_attention_only_variant(
         eml_route_fraction=eml_route_fraction,
         scaffold_profile=scaffold_profile,
         parcae_loop_count=parcae_loop_count,
+        parcae_hourglass_pass_count=parcae_hourglass_pass_count,
+        parcae_backward_steps=parcae_backward_steps,
+        parcae_prelude_norm_kind=parcae_prelude_norm_kind,
+        parcae_discretization=parcae_discretization,
+        parcae_dt_raw_init=parcae_dt_raw_init,
+        parcae_loop_d_model=parcae_loop_d_model,
+        parcae_loop_head_count=parcae_loop_head_count,
+        parcae_loop_ffn_multiplier=parcae_loop_ffn_multiplier,
+        parcae_loop_layer_count=parcae_loop_layer_count,
+        parcae_hourglass_band_schedule=parcae_hourglass_band_schedule,
+        parcae_control_position_kind=parcae_control_position_kind,
+        parcae_control_position_scale_init=parcae_control_position_scale_init,
+        parcae_control_stride=parcae_control_stride,
+        parcae_control_state_transform=parcae_control_state_transform,
+        parcae_recurrent_compile_mode=parcae_recurrent_compile_mode,
+        parcae_loop_update_backend=parcae_loop_update_backend,
+        parcae_scaffold_backend=parcae_scaffold_backend,
+        parcae_band_block_contract=parcae_band_block_contract,
+        parcae_band_prepare_backend=parcae_band_prepare_backend,
+        parcae_output_mix_backend=parcae_output_mix_backend,
+        parcae_fuse_first_state_mix=parcae_fuse_first_state_mix,
+        attention_position_contract=attention_position_contract,
+        position_encoding_kind=position_encoding_kind,
+        max_position_embeddings=max_position_embeddings,
+        final_norm_kind=final_norm_kind,
     )
 
 
@@ -690,6 +1043,7 @@ def phase1_reference_ssm_variant(
     eml_slot_count: int = 8,
     eml_tree_depth: int = 3,
     eml_route_fraction: float = 0.25,
+    attention_position_contract: str = "shared-input",
 ) -> Path1VariantSpec:
     profiles_for_norm = profile_schedule or (profile,)
     final_norm = (
@@ -721,6 +1075,11 @@ def phase1_reference_ssm_variant(
         else ""
     )
     scaffold_suffix = "" if scaffold_profile is Path1ScaffoldProfile.STANDARD else scaffold_profile.value
+    position_contract_suffix = (
+        f"attnpos-{attention_position_contract}"
+        if attention_position_contract != "shared-input"
+        else ""
+    )
     ffn_suffix = (
         _variant_label(
             feed_forward_profile.value,
@@ -739,6 +1098,7 @@ def phase1_reference_ssm_variant(
             profile_schedule_suffix,
             scaffold_suffix,
             ffn_suffix,
+            position_contract_suffix,
             schedule_suffix,
         ),
         shape=shape,
@@ -751,6 +1111,7 @@ def phase1_reference_ssm_variant(
         eml_slot_count=eml_slot_count,
         eml_tree_depth=eml_tree_depth,
         eml_route_fraction=eml_route_fraction,
+        attention_position_contract=attention_position_contract,
         final_norm_kind=final_norm,
         scaffold_profile=scaffold_profile,
     )
@@ -771,12 +1132,18 @@ def phase1_primitive_variant(
     eml_slot_count: int = 8,
     eml_tree_depth: int = 3,
     eml_route_fraction: float = 0.25,
+    attention_position_contract: str = "shared-input",
 ) -> Path1VariantSpec:
     default_schedule = _alternating_schedule(shape.total_layers, HybridAttentionLayerRole.PRIMITIVE)
     schedule = layer_schedule or default_schedule
     schedule_suffix = (
         f"schedule-{layer_schedule_signature(schedule)}"
         if schedule != default_schedule
+        else ""
+    )
+    position_contract_suffix = (
+        f"attnpos-{attention_position_contract}"
+        if attention_position_contract != "shared-input"
         else ""
     )
     ffn_suffix = (
@@ -801,6 +1168,7 @@ def phase1_primitive_variant(
             wrapper_mode.value,
             state_transform_mode.value,
             ffn_suffix,
+            position_contract_suffix,
             schedule_suffix,
         ),
         shape=shape,
@@ -817,6 +1185,7 @@ def phase1_primitive_variant(
         eml_slot_count=eml_slot_count,
         eml_tree_depth=eml_tree_depth,
         eml_route_fraction=eml_route_fraction,
+        attention_position_contract=attention_position_contract,
     )
 
 

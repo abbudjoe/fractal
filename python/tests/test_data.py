@@ -8,7 +8,7 @@ from pathlib import Path
 import torch
 
 from python.data.byte_corpus import load_byte_corpus
-from python.data.tokenized_corpus import load_tokenized_corpus
+from python.data.tokenized_corpus import LazyTokenBatchSequence, load_tokenized_corpus
 from python.specs.common import JsonlCorpusSpec, TokenIdCorpusSpec
 
 
@@ -106,8 +106,15 @@ class ByteCorpusTests(unittest.TestCase):
             self.assertEqual(corpus.corpus_stats["corpus_format"], "token-id-shards")
             self.assertEqual(corpus.corpus_stats["vocab_size"], 64)
             self.assertEqual(corpus.corpus_stats["pad_token_id"], -100)
+            self.assertIsInstance(corpus.train_batches, LazyTokenBatchSequence)
+            self.assertIsInstance(corpus.eval_batches, LazyTokenBatchSequence)
+            self.assertEqual(len(corpus.train_batches), 4)
+            self.assertEqual(corpus.corpus_stats["train_sequences"], 7)
+            self.assertEqual(corpus.corpus_stats["eval_sequences"], 3)
             self.assertEqual(corpus.train_batches[0].input_ids.shape, (2, 4))
             self.assertEqual(corpus.train_batches[0].target_ids.shape, (2, 4))
+            self.assertEqual(corpus.train_batches[-1].input_ids.shape, (1, 4))
+            self.assertEqual(len(corpus.train_batches[:2]), 2)
             self.assertEqual(corpus.eval_batches[0].input_ids.device.type, "cpu")
 
 
