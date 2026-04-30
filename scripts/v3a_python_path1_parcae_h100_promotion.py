@@ -14,6 +14,13 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ARTIFACT = "fineweb-cc-main-2024-10-openllama-tokens-250m-v1.tar.zst"
+LANE_ALIASES = {
+    "parcae-rgrp-control-looped-attention": "parcae-p20-control-looped-attention",
+    "parcae-rgrp-control": "parcae-p20-control-looped-attention",
+    "parcae-hourglass-rgrp-control-looped-attention": "parcae-hourglass-p20-control-looped-attention",
+    "parcae-hourglass-rgrp-control": "parcae-hourglass-p20-control-looped-attention",
+}
+MATRIX_META_KEYS = {"slug", "name", "description"}
 
 
 def _cache_dir_name_from_artifact(artifact: str) -> str:
@@ -111,6 +118,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--ledger-path", type=Path)
     parser.add_argument("--run-label", required=True)
+    parser.add_argument(
+        "--run-matrix-json",
+        help=(
+            "Optional JSON list of per-candidate override objects. Each object may contain "
+            "the same argument names as this runner, using either dash or underscore spelling, "
+            "plus a slug/name for output isolation."
+        ),
+    )
     parser.add_argument(
         "--lanes",
         default="attention-only,parcae-looped-attention,parcae-bx-looped-attention,parcae-p20-control-looped-attention",
@@ -251,6 +266,68 @@ def _nonoverlap_step_cap(train_tokens: int, *, seq_len: int, batch_size: int) ->
     required_len = seq_len + 1
     sequences = ((train_tokens - required_len) // stride) + 1
     return max(0, sequences // batch_size)
+
+
+def _canonical_lane(lane: str) -> str:
+    return LANE_ALIASES.get(lane, lane)
+
+
+def _lane_list(raw: str) -> list[str]:
+    return [_canonical_lane(lane.strip()) for lane in raw.split(",") if lane.strip()]
+
+
+def _safe_slug(value: object, *, index: int) -> str:
+    text = str(value).strip() if value is not None else ""
+    slug = "".join(char if char.isalnum() or char in "-_." else "-" for char in text).strip("-._")
+    return slug or f"run{index:02d}"
+
+
+def _load_run_matrix(raw: str) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"--run-matrix-json must be valid JSON: {exc}") from exc
+    if not isinstance(payload, list) or not payload:
+        raise SystemExit("--run-matrix-json must be a non-empty JSON list")
+    matrix: list[dict[str, Any]] = []
+    for index, item in enumerate(payload, start=1):
+        if not isinstance(item, dict):
+            raise SystemExit(f"run matrix item {index} must be an object")
+        matrix.append(item)
+    return matrix
+
+
+def _args_for_matrix_spec(args: argparse.Namespace, spec: dict[str, Any], *, index: int) -> tuple[str, argparse.Namespace]:
+    slug = _safe_slug(spec.get("slug", spec.get("name")), index=index)
+    run_args = argparse.Namespace(**vars(args))
+    run_args.run_matrix_json = None
+    for key, value in spec.items():
+        if key in MATRIX_META_KEYS:
+            continue
+        dest = key.removeprefix("--").replace("-", "_")
+        if dest == "lanes" and isinstance(value, list):
+            value = ",".join(str(lane) for lane in value)
+        if not hasattr(run_args, dest):
+            raise SystemExit(f"run matrix item {slug!r} contains unsupported override: {key}")
+        setattr(run_args, dest, value)
+    run_args.lanes = ",".join(_lane_list(run_args.lanes))
+    if "run_label" not in spec and "--run-label" not in spec:
+        run_args.run_label = f"{args.run_label}-{slug}"
+    return slug, run_args
+
+
+def _assert_no_repeat_steps(args: argparse.Namespace, stats: dict[str, Any]) -> int:
+    step_cap = _nonoverlap_step_cap(
+        stats["train_tokens"],
+        seq_len=args.seq_len,
+        batch_size=args.batch_size,
+    )
+    if args.steps > step_cap:
+        raise SystemExit(
+            f"requested steps={args.steps} would wrap the token cache; no-repeat cap is {step_cap} "
+            f"for seq_len={args.seq_len}, batch_size={args.batch_size}"
+        )
+    return step_cap
 
 
 def _lane_args(
@@ -631,6 +708,71 @@ def write_summary(args: argparse.Namespace, *, output_dir: Path, manifest_path: 
     (output_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_matrix_summary(
+    args: argparse.Namespace,
+    *,
+    output_dir: Path,
+    manifest_path: Path,
+    specs: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+) -> None:
+    summary = {
+        "run_label": args.run_label,
+        "manifest_path": str(manifest_path),
+        "matrix": specs,
+        "rows": rows,
+    }
+    (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    lines = [
+        "# Path 1 Parcae Matrix Promotion",
+        "",
+        f"- run_label: `{args.run_label}`",
+        f"- manifest: `{manifest_path}`",
+        f"- candidates: `{len(specs)}`",
+        "",
+        "| Candidate | Lane | Primitive Backend | Params | Initial Loss | Final Loss | tok/s | Peak CUDA MB | CUDA Device |",
+        "|---|---|---|---:|---:|---:|---:|---:|---|",
+    ]
+    for row in rows:
+        params = row["parameters"]
+        cuda_device = row.get("cuda_device") or ""
+        cuda_capability = row.get("cuda_compute_capability")
+        if cuda_capability:
+            cuda_device = f"{cuda_device} (cc {cuda_capability})" if cuda_device else f"cc {cuda_capability}"
+        lines.append(
+            f"| {row.get('candidate_slug') or ''} | {row['lane']} | "
+            f"{row.get('primitive_runtime_backend') or ''} | "
+            f"{params if params is not None else ''} | "
+            f"{row['initial_loss']:.4f} | {row['final_loss']:.4f} | "
+            f"{row['train_tokens_per_second']:.2f} | {row['peak_cuda_memory_mb']:.2f} | {cuda_device} |"
+        )
+    (output_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _run_config(
+    args: argparse.Namespace,
+    *,
+    manifest_path: Path,
+    stats: dict[str, Any],
+    output_dir: Path,
+    ledger_path: Path,
+) -> list[dict[str, Any]]:
+    step_cap = _assert_no_repeat_steps(args, stats)
+    print(
+        "token cache ready: "
+        f"train_tokens={stats['train_tokens']} eval_tokens={stats['eval_tokens']} "
+        f"max_no_repeat_steps={step_cap}",
+        flush=True,
+    )
+
+    lanes = _lane_list(args.lanes)
+    return [
+        run_lane(args, lane=lane, manifest_path=manifest_path, output_dir=output_dir, ledger_path=ledger_path)
+        for lane in lanes
+    ]
+
+
 def main() -> int:
     args = build_parser().parse_args()
     output_dir = args.output_dir
@@ -643,28 +785,38 @@ def main() -> int:
 
     manifest_path = hydrate_token_cache(args)
     stats = _load_manifest_stats(manifest_path)
-    step_cap = _nonoverlap_step_cap(
-        stats["train_tokens"],
-        seq_len=args.seq_len,
-        batch_size=args.batch_size,
-    )
-    if args.steps > step_cap:
-        raise SystemExit(
-            f"requested steps={args.steps} would wrap the token cache; no-repeat cap is {step_cap} "
-            f"for seq_len={args.seq_len}, batch_size={args.batch_size}"
-        )
-    print(
-        "token cache ready: "
-        f"train_tokens={stats['train_tokens']} eval_tokens={stats['eval_tokens']} "
-        f"max_no_repeat_steps={step_cap}",
-        flush=True,
-    )
 
-    lanes = [lane.strip() for lane in args.lanes.split(",") if lane.strip()]
-    rows = [
-        run_lane(args, lane=lane, manifest_path=manifest_path, output_dir=output_dir, ledger_path=ledger_path)
-        for lane in lanes
-    ]
+    if args.run_matrix_json:
+        specs = _load_run_matrix(args.run_matrix_json)
+        all_rows: list[dict[str, Any]] = []
+        for index, spec in enumerate(specs, start=1):
+            slug, run_args = _args_for_matrix_spec(args, spec, index=index)
+            candidate_dir = output_dir / slug
+            candidate_dir.mkdir(parents=True, exist_ok=True)
+            print(f"matrix candidate {index}/{len(specs)}: {slug}", flush=True)
+            rows = _run_config(
+                run_args,
+                manifest_path=manifest_path,
+                stats=stats,
+                output_dir=candidate_dir,
+                ledger_path=ledger_path,
+            )
+            for row in rows:
+                row["candidate_slug"] = slug
+                row["candidate_run_label"] = run_args.run_label
+                row["candidate_config"] = {
+                    key.removeprefix("--").replace("-", "_"): value
+                    for key, value in spec.items()
+                    if key not in MATRIX_META_KEYS
+                }
+            write_summary(run_args, output_dir=candidate_dir, manifest_path=manifest_path, rows=rows)
+            all_rows.extend(rows)
+        write_matrix_summary(args, output_dir=output_dir, manifest_path=manifest_path, specs=specs, rows=all_rows)
+        print(output_dir / "summary.md", flush=True)
+        return 0
+
+    args.lanes = ",".join(_lane_list(args.lanes))
+    rows = _run_config(args, manifest_path=manifest_path, stats=stats, output_dir=output_dir, ledger_path=ledger_path)
     write_summary(args, output_dir=output_dir, manifest_path=manifest_path, rows=rows)
     print(output_dir / "summary.md", flush=True)
     return 0

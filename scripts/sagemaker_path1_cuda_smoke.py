@@ -53,6 +53,7 @@ HF_ENV_CHANNEL_NAME = "hf_env"
 HF_ENV_FILENAME = "hf.env"
 MAMBA_WHEELHOUSE_CHANNEL_NAME = "mamba_wheelhouse"
 SENSITIVE_ENV_KEYS = {"HF_TOKEN"}
+MATRIX_META_KEYS = {"slug", "name", "description"}
 
 
 ENTRYPOINT = r'''#!/usr/bin/env python3
@@ -1292,6 +1293,9 @@ def main() -> int:
         command.extend(["--muon-adjust-lr-fn", muon_adjust_lr_fn])
     if _env("FRACTAL_SCOUT_PARCAE_FUSE_FIRST_STATE_MIX", "false").lower() in {"1", "true", "yes"}:
         command.append("--parcae-fuse-first-state-mix")
+    run_matrix_json = os.environ.get("FRACTAL_SCOUT_RUN_MATRIX_JSON", "").strip()
+    if run_matrix_json:
+        command.extend(["--run-matrix-json", run_matrix_json])
     if _env("FRACTAL_SCOUT_FORCE_DOWNLOAD", "false").lower() in {"1", "true", "yes"}:
         command.append("--force-download")
     print("+ " + " ".join(command), flush=True)
@@ -1580,6 +1584,38 @@ def _lane_list(raw: str) -> list[str]:
     return lanes
 
 
+def _load_run_matrix_arg(raw: str) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"--run-matrix-json must be valid JSON: {exc}") from exc
+    if not isinstance(payload, list) or not payload:
+        raise SystemExit("--run-matrix-json must be a non-empty JSON list")
+    matrix: list[dict[str, Any]] = []
+    for index, item in enumerate(payload, start=1):
+        if not isinstance(item, dict):
+            raise SystemExit(f"run matrix item {index} must be an object")
+        matrix.append(item)
+    return matrix
+
+
+def _args_for_run_matrix_spec(args: argparse.Namespace, spec: dict[str, Any], *, index: int) -> argparse.Namespace:
+    run_args = argparse.Namespace(**vars(args))
+    run_args.run_matrix_json = None
+    for key, value in spec.items():
+        if key in MATRIX_META_KEYS:
+            continue
+        dest = key.removeprefix("--").replace("-", "_")
+        if dest == "lanes" and isinstance(value, list):
+            value = ",".join(str(lane) for lane in value)
+        if not hasattr(run_args, dest):
+            label = spec.get("slug") or spec.get("name") or f"run{index:02d}"
+            raise SystemExit(f"run matrix item {label!r} contains unsupported override: {key}")
+        setattr(run_args, dest, value)
+    run_args.lanes = ",".join(_lane_list(run_args.lanes))
+    return run_args
+
+
 def _validate_attention_head_dim_contract(
     *,
     width: int,
@@ -1770,6 +1806,7 @@ def _training_request(
             "FRACTAL_SCOUT_FFN_BACKEND": args.ffn_backend,
             "FRACTAL_SCOUT_MTP_AUX_WEIGHT": str(args.mtp_aux_weight),
             "FRACTAL_SCOUT_MTP_MAX_HORIZON": str(args.mtp_max_horizon),
+            "FRACTAL_SCOUT_RUN_MATRIX_JSON": args.run_matrix_json or "",
             "FRACTAL_SCOUT_SEED": str(args.seed),
             "FRACTAL_SCOUT_DATA_SEED": str(args.data_seed),
             "FRACTAL_SCOUT_TOKEN_CACHE_REPO_ID": args.token_cache_repo_id,
@@ -2134,6 +2171,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ffn-backend", choices=["dense", "compiled", "manual-autograd", "triton-gelu", "recompute"], default="dense")
     parser.add_argument("--mtp-aux-weight", type=float, default=0.0)
     parser.add_argument("--mtp-max-horizon", type=int, default=1)
+    parser.add_argument(
+        "--run-matrix-json",
+        help=(
+            "Optional JSON list of per-candidate override objects for --runner token-cache. "
+            "Each candidate is run sequentially in one SageMaker job with isolated artifacts."
+        ),
+    )
     parser.add_argument("--compile-mode", choices=["default", "reduce-overhead", "max-autotune"])
     parser.add_argument("--profile-path1", action="store_true", help="Run the token-cache Path 1 profiler instead of training.")
     parser.add_argument("--profile-row-limit", type=int, default=40)
@@ -2228,8 +2272,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.runner != "mamba-wheelhouse":
-        _lane_list(args.lanes)
-        _validate_cuda_attention_shape_contract(args)
+        if args.run_matrix_json:
+            for index, spec in enumerate(_load_run_matrix_arg(args.run_matrix_json), start=1):
+                matrix_args = _args_for_run_matrix_spec(args, spec, index=index)
+                _validate_cuda_attention_shape_contract(matrix_args)
+        else:
+            _lane_list(args.lanes)
+            _validate_cuda_attention_shape_contract(args)
     if not args.job_name:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         if args.runner == "token-cache":

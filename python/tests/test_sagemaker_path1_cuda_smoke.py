@@ -331,6 +331,7 @@ def test_training_request_wires_token_cache_scout_contract(monkeypatch):
     assert request["Environment"]["FRACTAL_SCOUT_MUON_NS_STEPS"] == "2"
     assert request["Environment"]["FRACTAL_SCOUT_MTP_AUX_WEIGHT"] == "0.05"
     assert request["Environment"]["FRACTAL_SCOUT_MTP_MAX_HORIZON"] == "3"
+    assert request["Environment"]["FRACTAL_SCOUT_RUN_MATRIX_JSON"] == ""
     assert request["Environment"]["FRACTAL_SCOUT_INSTALL_FLASH_ATTN"] == "true"
     assert request["Environment"]["FRACTAL_SCOUT_FLASH_ATTN_VERSION"] == "2.8.3"
     assert request["Environment"]["FRACTAL_SCOUT_POSITION_ENCODING_KIND"] == "learned"
@@ -579,6 +580,47 @@ def test_token_cache_entrypoint_wires_mtp_training_knobs():
     assert '_env("FRACTAL_SCOUT_MTP_MAX_HORIZON", "1")' in module.TOKEN_CACHE_ENTRYPOINT
 
 
+def test_token_cache_entrypoint_wires_run_matrix_json():
+    module = _load_module()
+
+    assert "FRACTAL_SCOUT_RUN_MATRIX_JSON" in module.TOKEN_CACHE_ENTRYPOINT
+    assert '"--run-matrix-json"' in module.TOKEN_CACHE_ENTRYPOINT
+
+
+def test_training_request_wires_run_matrix_json(monkeypatch):
+    module = _load_module()
+    monkeypatch.setenv("FRACTAL_SAGEMAKER_ROLE_ARN", "arn:aws:iam::123456789012:role/test-sagemaker-role")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    matrix = (
+        '[{"slug":"loop384","lanes":"parcae-hourglass-rgrp-control-looped-attention",'
+        '"d_model":1024,"head_count":16,"parcae_loop_d_model":384,"parcae_loop_head_count":6}]'
+    )
+    args = module.build_parser().parse_args(
+        [
+            "--runner",
+            "token-cache",
+            "--bucket",
+            "example-bucket",
+            "--job-name",
+            "fractal-matrix-job",
+            "--region",
+            "us-east-1",
+            "--token-cache-s3-uri",
+            "s3://example-bucket/fractal/token-caches/fineweb-250m",
+            "--run-matrix-json",
+            matrix,
+        ]
+    )
+
+    request = module._training_request(
+        args,
+        source_s3_prefix="s3://example-bucket/fractal/test/source/",
+        output_s3_path="s3://example-bucket/fractal/test/output",
+    )
+
+    assert request["Environment"]["FRACTAL_SCOUT_RUN_MATRIX_JSON"] == matrix
+
+
 def test_token_cache_entrypoint_forces_attention_only_primitive_backend_to_torch():
     module = _load_module()
 
@@ -641,6 +683,39 @@ def test_promotion_runner_accepts_mtp_forwarding_args():
 
     assert args.mtp_aux_weight == 0.05
     assert args.mtp_max_horizon == 3
+
+
+def test_promotion_runner_run_matrix_overrides_shape_and_aliases():
+    module = _load_promotion_module()
+    raw_matrix = (
+        '[{"slug":"loop384","lanes":"parcae-hourglass-rgrp-control-looped-attention",'
+        '"d_model":1024,"head_count":16,"parcae_loop_d_model":384,"parcae_loop_head_count":6}]'
+    )
+    args = module.build_parser().parse_args(
+        [
+            "--run-label",
+            "matrix-test",
+            "--lanes",
+            "attention-only",
+            "--d-model",
+            "128",
+            "--head-count",
+            "4",
+            "--run-matrix-json",
+            raw_matrix,
+        ]
+    )
+
+    specs = module._load_run_matrix(args.run_matrix_json)
+    slug, run_args = module._args_for_matrix_spec(args, specs[0], index=1)
+
+    assert slug == "loop384"
+    assert run_args.run_label == "matrix-test-loop384"
+    assert run_args.lanes == "parcae-hourglass-p20-control-looped-attention"
+    assert run_args.d_model == 1024
+    assert run_args.head_count == 16
+    assert run_args.parcae_loop_d_model == 384
+    assert run_args.parcae_loop_head_count == 6
 
 
 def test_training_request_wires_token_cache_nsys_contract(monkeypatch):
