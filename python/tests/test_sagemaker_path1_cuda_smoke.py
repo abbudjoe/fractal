@@ -709,5 +709,9 @@ def test_stage_source_bundle_can_include_mamba_wheelhouse_runner(tmp_path):
     assert "pip" in source
     assert "wheel" in source
     assert "--no-build-isolation" in source
+    assert "--no-deps" in source
     assert "build-contract.json" in source
+    assert "forbidden_wheel_prefixes" in source
+    assert "wheelhouse dependency leak" in source
+    assert "native_package_specs" in source
     assert "official Mamba fast path unavailable" in source

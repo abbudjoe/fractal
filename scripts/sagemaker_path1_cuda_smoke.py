@@ -1309,19 +1309,30 @@ def main() -> None:
     env["TORCH_CUDA_ARCH_LIST"] = arch_list
     env.setdefault("MAX_JOBS", _env("FRACTAL_MAMBA_WHEELHOUSE_MAX_JOBS", "4"))
 
-    specs = [
+    native_specs = [
         f"kernels=={_env('FRACTAL_MAMBA_WHEELHOUSE_KERNELS_VERSION', '0.13.0')}",
         f"causal-conv1d=={_env('FRACTAL_MAMBA_WHEELHOUSE_CAUSAL_CONV1D_VERSION', '1.6.1')}",
         f"mamba-ssm=={_env('FRACTAL_MAMBA_WHEELHOUSE_MAMBA_SSM_VERSION', '2.3.1')}",
+    ]
+    runtime_specs = [
         f"transformers=={_env('FRACTAL_MAMBA_WHEELHOUSE_TRANSFORMERS_VERSION', '5.7.0')}",
         f"sentencepiece=={_env('FRACTAL_MAMBA_WHEELHOUSE_SENTENCEPIECE_VERSION', '0.2.1')}",
     ]
+    forbidden_wheel_prefixes = ("torch-", "triton-", "nvidia_", "cuda_")
 
     contract = _cuda_contract()
-    contract.update({"package_specs": specs})
+    contract.update(
+        {
+            "native_package_specs": native_specs,
+            "runtime_package_specs": runtime_specs,
+            "wheel_build_dependency_policy": "native wheels are built with --no-deps against the container torch/CUDA",
+            "forbidden_wheel_prefixes": forbidden_wheel_prefixes,
+        }
+    )
     (OUT_ROOT / "build-contract.json").write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n")
     print("mamba_wheelhouse_build_contract=" + json.dumps(contract, sort_keys=True), flush=True)
 
+    _run([sys.executable, "-m", "pip", "install", *runtime_specs], env=env)
     _run(
         [
             sys.executable,
@@ -1329,15 +1340,36 @@ def main() -> None:
             "pip",
             "wheel",
             "--no-build-isolation",
+            "--no-deps",
             "--wheel-dir",
             str(WHEEL_DIR),
-            *specs,
+            *native_specs,
         ],
         env=env,
     )
     wheel_names = sorted(path.name for path in WHEEL_DIR.glob("*.whl"))
+    forbidden_wheels = [
+        name
+        for name in wheel_names
+        if any(name.lower().startswith(prefix) for prefix in forbidden_wheel_prefixes)
+    ]
+    if forbidden_wheels:
+        raise SystemExit(
+            "wheelhouse dependency leak: native wheelhouse must not vendor torch/CUDA stack wheels: "
+            + ", ".join(forbidden_wheels)
+        )
     (OUT_ROOT / "manifest.json").write_text(
-        json.dumps({"wheels": wheel_names, "package_specs": specs}, indent=2, sort_keys=True) + "\n"
+        json.dumps(
+            {
+                "wheels": wheel_names,
+                "native_package_specs": native_specs,
+                "runtime_package_specs": runtime_specs,
+                "forbidden_wheel_prefixes": forbidden_wheel_prefixes,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
     )
 
     _run(
@@ -1347,9 +1379,10 @@ def main() -> None:
             "pip",
             "install",
             "--no-index",
+            "--no-deps",
             "--find-links",
             str(WHEEL_DIR),
-            *specs,
+            *native_specs,
         ],
         env=env,
     )
@@ -1359,7 +1392,9 @@ def main() -> None:
         "# Mamba wheelhouse\n\n"
         "Reusable SageMaker-built wheelhouse for official Mamba CUDA fast path.\n\n"
         f"- TORCH_CUDA_ARCH_LIST: `{arch_list}`\n"
-        f"- Package specs: `{', '.join(specs)}`\n"
+        f"- Native package specs: `{', '.join(native_specs)}`\n"
+        f"- Runtime package specs: `{', '.join(runtime_specs)}`\n"
+        "- Native wheels are built with `--no-deps` and must not vendor torch/CUDA stack wheels.\n"
         "- Preflight requires selective scan, mamba inner, and causal-conv1d fast paths.\n",
         encoding="utf-8",
     )
