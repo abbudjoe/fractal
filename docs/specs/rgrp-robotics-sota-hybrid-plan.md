@@ -2,19 +2,48 @@
 
 Date: 2026-04-30
 
-Status: draft research plan
+Status: draft research plan, revised after external review
 
 ## Purpose
 
-This plan defines a robotics architecture track that is parallel to, but not blocked by, validating the legal ACT input surface. The ACT force/torque fix is important, but the broader goal is more ambitious: build a state-of-the-art robot control stack around our recurrent ingredient, RGRP/Parcae, and hybridize it with the most useful ideas from modern world models, diffusion transformers, long-context LLM architecture, Hyperloop-style looped residual streams, and action chunking.
+This plan defines a robotics architecture track that is parallel to, but not allowed to outrun, validating the legal ACT input surface. The ACT force/torque fix is not a side quest. It is the first control gate. If corrected ACT plus wrist force/torque, normalization, causal history, and auxiliary physics heads solves most contact failures, then RGRP becomes a research add-on rather than the competition-critical center.
+
+The broader goal remains ambitious: build a state-of-the-art robot control stack around a compact recurrent physical belief-state bridge, then hybridize only the pieces that earn their place through matched controls.
 
 The core hypothesis is:
 
 > Contact-rich robot control needs a persistent physical belief state, not only more attention over observations. RGRP/Parcae may provide that missing recurrent latent state: compact, updateable, loop-refined, and efficient enough to sit between high-level world/future reasoning and low-level action execution.
 
+The first serious hypothesis is narrower:
+
+```text
+corrected ACT with wrist force/torque
++ causal action/proprio/contact history
++ auxiliary physics prediction
++ compact recurrent physical belief-state bridge
+```
+
+Do not start with:
+
+```text
+Cosmos + DreamZero + Hyperloop + DeepSeek + RGRP + ACT
+```
+
+That full hybrid is too many moving parts and would be nearly uninterpretable.
+
 ## Current Trigger
 
 The robot lane discovered that wrist force/torque was legally available but excluded from the ACT input projection. That likely explains many force/contact failures. However, this plan is not merely "add force/torque to ACT." That corrected baseline is a necessary control. The research track is to design a stronger hybrid controller that uses force/torque, proprioception, vision, and action history as inputs to a shared physical state.
+
+External review sharpened the immediate risk:
+
+```text
+If contact failures are primarily caused by omitted force/torque, then
+corrected ACT + force/torque + normalization + auxiliary heads may solve much
+of the problem without RGRP.
+```
+
+Therefore the plan must prove RGRP adds value beyond the corrected sensor stack and beyond matched standard recurrent bridges.
 
 ## Ingredients
 
@@ -187,48 +216,73 @@ CSA/HCA, MoE, and quantized cache infrastructure belong to later scale lanes.
 
 ## Architectural North Star
 
-The desired architecture is:
+The near-term architecture is a physical belief-state bridge, not a full VLA/DiT hybrid:
 
 ```text
-language/task
-vision/depth
-proprioception
-wrist force/torque
-tactile/contact if available
-previous action chunk
-sim privileged labels during training
-        |
-        v
-multimodal encoders
-        |
-        v
-shared physical belief-state latent
-        |
-        v
-RGRP/Parcae recurrent update + looped refinement
-        |
-        +--> optional Hyperloop-style parallel residual streams
-        |      - visual/object geometry stream
-        |      - force/contact stream
-        |      - action phase/intention stream
-        |      - uncertainty/error-correction stream
-        |
-        +--> auxiliary physics heads
-        |      - next force/torque
-        |      - contact/jam/slip
-        |      - next proprio state
-        |      - object motion
-        |      - action residual / correction
-        |      - success/failure phase
-        |
-        v
-ACT action chunk decoder
-        |
-        v
-robot action
+inputs at control rate:
+  RGB/depth or visual latent
+  proprioception
+  wrist force/torque
+  tactile/contact if available
+  previous action chunk
+  previous gripper/contact state
+
+        ↓
+
+sensor-specific encoders:
+  vision encoder
+  proprio encoder
+  force/torque encoder
+  tactile/contact encoder
+  action-history encoder
+
+        ↓
+
+shared physical latent z_t
+
+        ↓
+
+bridge candidate:
+  corrected ACT baseline: identity / MLP
+  recurrent controls: GRU/LSTM, Mamba/SSM, small Transformer
+  research candidate: RGRP/Parcae
+
+        ↓
+
+same ACT action chunk decoder
+
+        ↓
+
+robot action chunk
+
+auxiliary heads:
+  next force/torque
+  next proprio state
+  contact / slip / jam
+  object delta
+  phase / failure label
+  action residual
 ```
 
 This is "one shared physical state, many auxiliary heads," not many separate ACT policies fighting each other.
+
+Cosmos Reason2, DreamZero/WAM-DiT, DeepSeek-style residual machinery, and Hyperloop streams are later additions. They should not be placed in the inner control loop until the bridge candidate wins under corrected sensors.
+
+Slow/medium/fast timescale split:
+
+```text
+fast inner loop:
+  sensors -> encoders -> physical belief state -> ACT action chunk
+
+medium loop:
+  physical state -> phase/failure/contact predictor -> recovery adjustment
+
+slow planner loop:
+  Cosmos or 2-3B specialist -> phase/constraint/subgoal hints
+
+world-model loop:
+  DreamZero/WAM-DiT -> candidate futures or future-state teacher
+```
 
 ## Why Not Multiple ACT Heads First?
 
@@ -270,7 +324,20 @@ Variants:
 - force/torque history window;
 - force/torque derivatives or short-window max/mean if legal.
 
-This lane is mandatory, but it is not the SOTA hybrid lane.
+Audit requirements:
+
+- units;
+- sensor frame versus world frame;
+- gravity compensation;
+- bias/offset calibration;
+- force saturation and clipping;
+- torque scaling;
+- contact threshold labels;
+- temporal alignment with images, proprioception, and actions;
+- low-pass filtering and sensor delay;
+- normalization statistics per task versus global.
+
+This lane is mandatory. Do not promote RGRP, Hyperloop, Cosmos, or DreamZero until corrected ACT and corrected ACT plus auxiliary heads are measured.
 
 ### Lane B: Shared Physics Latent Control
 
@@ -527,6 +594,10 @@ Possible variants:
 - Normalize force/torque.
 - Add logging for force peaks, contact violations, slip/jam events, and action smoothness.
 - Preserve old no-force baseline as diagnostic-only.
+- Verify strict causal slicing:
+  - allowed: actions up to `t-1`, sensors up to `t`, instruction, current proprio/F/T/tactile;
+  - disallowed: target action chunk `t:t+k`, future proprio, future contact, future object state.
+- Verify auxiliary heads use deploy-time sensor latents as inputs and privileged sim quantities only as targets.
 
 ### Stage 1: Offline Trace Proxies
 
@@ -560,6 +631,20 @@ GRU/LSTM/Mamba controls
 ```
 
 Run this first on offline trace proxies and, if useful, a short sim rollout.
+
+The ladder must isolate axes one at a time:
+
+| Ingredient | Required Control | What It Tests |
+|---|---|---|
+| Recurrence | MLP vs GRU/LSTM vs Mamba/SSM vs RGRP | whether RGRP beats standard memory |
+| Looped depth | tied loop `K=1/2/4` vs untied extra layers | whether looping helps beyond more depth |
+| Loop position | no loop embedding vs learned loop embedding vs shuffled loop index | whether loop identity matters |
+| Rotary gated update | RGRP vs non-rotary gated recurrence vs dense transition | whether rotary gating matters |
+| Structured transition | diagonal/block-diagonal vs dense vs fixed transition | whether state transition structure matters |
+| Residual streams | single stream vs matched-parameter multi-stream | whether scratchpad streams help |
+| Hyper-connection mixing | unconstrained HC vs mHC-style constrained mixing | whether constrained mixing stabilizes streams |
+| Optimizer | AdamW vs Muon, architecture fixed | whether optimization is being mistaken for architecture |
+| Auxiliary heads | bridge with/without short-horizon heads | whether auxiliary supervision drives gains |
 
 ### Stage 3: Minimal Sim A/B
 
@@ -655,9 +740,20 @@ Model/system:
 
 ## Go / No-Go Gates
 
+### Gate 0: Sensor Repair
+
+Proceed only if:
+
+- corrected ACT with force/torque is reproducible;
+- normalization and timing are audited;
+- contact labels align with force events;
+- old missing-F/T ACT is treated as diagnostic-only.
+
+Pause broader architecture work if force/torque preprocessing, temporal alignment, or corrected ACT baselining is unresolved.
+
 ### RGRP Bridge Go
 
-Proceed if RGRP beats MLP/GRU/Mamba controls on at least two of:
+Proceed only if RGRP beats corrected ACT plus auxiliary heads and the best matched MLP/GRU/LSTM/Mamba/small-Transformer bridge on at least two of:
 
 - lower force/contact failures;
 - better recovery after jam;
@@ -665,6 +761,38 @@ Proceed if RGRP beats MLP/GRU/Mamba controls on at least two of:
 - smoother actions;
 - better offline physics prediction;
 - acceptable latency.
+
+Suggested first threshold:
+
+- at least a `5-10` percentage-point closed-loop success gain; or
+- at least `15%` reduction in contact/slip/jam failures;
+- no worse latency or action smoothness beyond the predefined budget.
+
+Do not promote RGRP if it only improves offline auxiliary prediction loss.
+
+### Causal State Go
+
+RGRP state interventions must matter:
+
+- zero state mid-episode;
+- swap states between two episodes;
+- delay state by `N` steps;
+- reset state at phase boundary;
+- freeze state after contact.
+
+If closed-loop behavior barely changes, the recurrent state is not doing useful causal work.
+
+### Robustness Go
+
+RGRP must improve under held-out perturbations:
+
+- object poses;
+- mass/friction/contact parameters;
+- force/torque sensor noise and bias;
+- visual occlusion;
+- perturbed initial states.
+
+If gains vanish outside the narrow training distribution, redesign or kill the bridge for the competition stack.
 
 ### Hyperloop/RGRP Bridge Go
 
@@ -683,6 +811,16 @@ Proceed if the base RGRP/ACT stack is stable and either:
 - semantic task errors dominate;
 - future-state prediction errors dominate;
 - high-level phase conditioning improves eval score.
+
+Before DreamZero/WAM-DiT:
+
+- oracle future latents must improve action performance.
+
+Before Cosmos or a 2-3B specialist planner:
+
+- ground-truth phase/constraint hints must improve action performance.
+
+If oracle futures or ground-truth hints do not help, skip the model that predicts them.
 
 ### 2-3B Specialist Go
 
