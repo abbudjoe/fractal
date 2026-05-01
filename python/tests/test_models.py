@@ -861,6 +861,34 @@ class Path1ModelTests(unittest.TestCase):
         self.assertEqual(tuple(logits.shape), (2, 8, 257))
         self.assertEqual(fake_backend.output_mix_calls, 1)
 
+    def test_parcae_hyperloop_style_streams_and_rope_swiglu_forward(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=64, head_count=4, total_layers=5, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=1,
+            parcae_hourglass_band_schedule=(1, 1, 1, 1, 1),
+            parcae_loop_d_model=32,
+            parcae_loop_head_count=4,
+            parcae_loop_ffn_multiplier=2,
+            parcae_control_position_kind="learned",
+            parcae_loop_position_kind="learned",
+            parcae_stream_count=2,
+            parcae_stream_merge_mode="dynamic-diagonal",
+            attention_position_profile="rope",
+            transformer_ffn_kind="swiglu",
+        )
+        model = build_path1_model(variant, dtype_mode="fp32")
+
+        input_ids = torch.randint(low=0, high=257, size=(2, 8), dtype=torch.long)
+        logits = model.forward_logits(input_ids)
+        diagnostics = model.diagnostic_payload()
+
+        self.assertEqual(tuple(logits.shape), (2, 8, 257))
+        self.assertEqual(diagnostics["attention_position_profile"], "rope")
+        self.assertEqual(diagnostics["transformer_ffn_kind"], "swiglu")
+        self.assertEqual(diagnostics["parcae_stream_count"], 2)
+        self.assertEqual(diagnostics["parcae_stream_merge_mode"], "dynamic-diagonal")
+
     def test_attention_only_parcae_recurrent_compile_mode_reaches_full_block_compile(self) -> None:
         variant = phase1_attention_only_variant(
             shape=Path1ModelShape(d_model=32, head_count=4, total_layers=6, ffn_multiplier=2),

@@ -218,6 +218,10 @@ def _lane_command(lane: str, *, output_dir: Path, ledger_path: Path) -> list[str
         _env("FRACTAL_SMOKE_POSITION_ENCODING_KIND", "none"),
         "--attention-position-contract",
         _env("FRACTAL_SMOKE_ATTENTION_POSITION_CONTRACT", "shared-input"),
+        "--attention-position-profile",
+        _env("FRACTAL_SMOKE_ATTENTION_POSITION_PROFILE", "additive"),
+        "--transformer-ffn-kind",
+        _env("FRACTAL_SMOKE_TRANSFORMER_FFN_KIND", "gelu"),
         "--max-position-embeddings",
         _env("FRACTAL_SMOKE_MAX_POSITION_EMBEDDINGS", "1024"),
         "--final-norm-kind",
@@ -269,6 +273,14 @@ def _lane_command(lane: str, *, output_dir: Path, ledger_path: Path) -> list[str
                 _env("FRACTAL_SMOKE_PARCAE_BAND_PREPARE_BACKEND", "standard"),
                 "--parcae-output-mix-backend",
                 _env("FRACTAL_SMOKE_PARCAE_OUTPUT_MIX_BACKEND", "standard"),
+                "--parcae-loop-position-kind",
+                _env("FRACTAL_SMOKE_PARCAE_LOOP_POSITION_KIND", "none"),
+                "--parcae-loop-position-scale-init",
+                _env("FRACTAL_SMOKE_PARCAE_LOOP_POSITION_SCALE_INIT", "0.01"),
+                "--parcae-stream-count",
+                _env("FRACTAL_SMOKE_PARCAE_STREAM_COUNT", "1"),
+                "--parcae-stream-merge-mode",
+                _env("FRACTAL_SMOKE_PARCAE_STREAM_MERGE_MODE", "none"),
             ]
         )
         if _env("FRACTAL_SMOKE_PARCAE_FUSE_FIRST_STATE_MIX", "false").lower() in {"1", "true", "yes"}:
@@ -793,6 +805,10 @@ def _profile_lane_command(lane: str, *, manifest: Path, data_root: Path) -> list
         _env("FRACTAL_SCOUT_POSITION_ENCODING_KIND", "none"),
         "--attention-position-contract",
         _env("FRACTAL_SCOUT_ATTENTION_POSITION_CONTRACT", "shared-input"),
+        "--attention-position-profile",
+        _env("FRACTAL_SCOUT_ATTENTION_POSITION_PROFILE", "additive"),
+        "--transformer-ffn-kind",
+        _env("FRACTAL_SCOUT_TRANSFORMER_FFN_KIND", "gelu"),
         "--max-position-embeddings",
         _env("FRACTAL_SCOUT_MAX_POSITION_EMBEDDINGS", "1024"),
         "--output",
@@ -836,6 +852,14 @@ def _profile_lane_command(lane: str, *, manifest: Path, data_root: Path) -> list
                 _env("FRACTAL_SCOUT_PARCAE_BAND_PREPARE_BACKEND", "standard"),
                 "--parcae-output-mix-backend",
                 _env("FRACTAL_SCOUT_PARCAE_OUTPUT_MIX_BACKEND", "standard"),
+                "--parcae-loop-position-kind",
+                _env("FRACTAL_SCOUT_PARCAE_LOOP_POSITION_KIND", "none"),
+                "--parcae-loop-position-scale-init",
+                _env("FRACTAL_SCOUT_PARCAE_LOOP_POSITION_SCALE_INIT", "0.01"),
+                "--parcae-stream-count",
+                _env("FRACTAL_SCOUT_PARCAE_STREAM_COUNT", "1"),
+                "--parcae-stream-merge-mode",
+                _env("FRACTAL_SCOUT_PARCAE_STREAM_MERGE_MODE", "none"),
             ]
         )
     compile_mode = os.environ.get("FRACTAL_SCOUT_COMPILE_MODE", "").strip()
@@ -943,6 +967,10 @@ def _timing_lane_command(lane: str, *, manifest: Path) -> list[str]:
         _env("FRACTAL_SCOUT_POSITION_ENCODING_KIND", "none"),
         "--attention-position-contract",
         _env("FRACTAL_SCOUT_ATTENTION_POSITION_CONTRACT", "shared-input"),
+        "--attention-position-profile",
+        _env("FRACTAL_SCOUT_ATTENTION_POSITION_PROFILE", "additive"),
+        "--transformer-ffn-kind",
+        _env("FRACTAL_SCOUT_TRANSFORMER_FFN_KIND", "gelu"),
         "--max-position-embeddings",
         _env("FRACTAL_SCOUT_MAX_POSITION_EMBEDDINGS", "1024"),
         "--output",
@@ -984,6 +1012,16 @@ def _timing_lane_command(lane: str, *, manifest: Path) -> list[str]:
                 _env("FRACTAL_SCOUT_PARCAE_BAND_BLOCK_CONTRACT", "generic"),
                 "--parcae-band-prepare-backend",
                 _env("FRACTAL_SCOUT_PARCAE_BAND_PREPARE_BACKEND", "standard"),
+                "--parcae-output-mix-backend",
+                _env("FRACTAL_SCOUT_PARCAE_OUTPUT_MIX_BACKEND", "standard"),
+                "--parcae-loop-position-kind",
+                _env("FRACTAL_SCOUT_PARCAE_LOOP_POSITION_KIND", "none"),
+                "--parcae-loop-position-scale-init",
+                _env("FRACTAL_SCOUT_PARCAE_LOOP_POSITION_SCALE_INIT", "0.01"),
+                "--parcae-stream-count",
+                _env("FRACTAL_SCOUT_PARCAE_STREAM_COUNT", "1"),
+                "--parcae-stream-merge-mode",
+                _env("FRACTAL_SCOUT_PARCAE_STREAM_MERGE_MODE", "none"),
             ]
         )
     compile_mode = os.environ.get("FRACTAL_SCOUT_COMPILE_MODE", "").strip()
@@ -1213,6 +1251,10 @@ def main() -> int:
         _env("FRACTAL_SCOUT_POSITION_ENCODING_KIND", "none"),
         "--attention-position-contract",
         _env("FRACTAL_SCOUT_ATTENTION_POSITION_CONTRACT", "shared-input"),
+        "--attention-position-profile",
+        _env("FRACTAL_SCOUT_ATTENTION_POSITION_PROFILE", "additive"),
+        "--transformer-ffn-kind",
+        _env("FRACTAL_SCOUT_TRANSFORMER_FFN_KIND", "gelu"),
         "--max-position-embeddings",
         _env("FRACTAL_SCOUT_MAX_POSITION_EMBEDDINGS", "1024"),
         "--final-norm-kind",
@@ -1277,6 +1319,14 @@ def main() -> int:
             _env("FRACTAL_SCOUT_PARCAE_BAND_PREPARE_BACKEND", "standard"),
             "--parcae-output-mix-backend",
             _env("FRACTAL_SCOUT_PARCAE_OUTPUT_MIX_BACKEND", "standard"),
+            "--parcae-loop-position-kind",
+            _env("FRACTAL_SCOUT_PARCAE_LOOP_POSITION_KIND", "none"),
+            "--parcae-loop-position-scale-init",
+            _env("FRACTAL_SCOUT_PARCAE_LOOP_POSITION_SCALE_INIT", "0.01"),
+            "--parcae-stream-count",
+            _env("FRACTAL_SCOUT_PARCAE_STREAM_COUNT", "1"),
+            "--parcae-stream-merge-mode",
+            _env("FRACTAL_SCOUT_PARCAE_STREAM_MERGE_MODE", "none"),
         ]
     )
     compile_mode = os.environ.get("FRACTAL_SCOUT_COMPILE_MODE", "").strip()
@@ -1803,8 +1853,14 @@ def _training_request(
             "FRACTAL_SCOUT_PARCAE_BAND_PREPARE_BACKEND": args.parcae_band_prepare_backend,
             "FRACTAL_SCOUT_PARCAE_OUTPUT_MIX_BACKEND": args.parcae_output_mix_backend,
             "FRACTAL_SCOUT_PARCAE_FUSE_FIRST_STATE_MIX": "true" if args.parcae_fuse_first_state_mix else "false",
+            "FRACTAL_SCOUT_PARCAE_LOOP_POSITION_KIND": args.parcae_loop_position_kind,
+            "FRACTAL_SCOUT_PARCAE_LOOP_POSITION_SCALE_INIT": str(args.parcae_loop_position_scale_init),
+            "FRACTAL_SCOUT_PARCAE_STREAM_COUNT": str(args.parcae_stream_count),
+            "FRACTAL_SCOUT_PARCAE_STREAM_MERGE_MODE": args.parcae_stream_merge_mode,
             "FRACTAL_SCOUT_POSITION_ENCODING_KIND": args.position_encoding_kind,
             "FRACTAL_SCOUT_ATTENTION_POSITION_CONTRACT": args.attention_position_contract,
+            "FRACTAL_SCOUT_ATTENTION_POSITION_PROFILE": args.attention_position_profile,
+            "FRACTAL_SCOUT_TRANSFORMER_FFN_KIND": args.transformer_ffn_kind,
             "FRACTAL_SCOUT_MAX_POSITION_EMBEDDINGS": str(args.max_position_embeddings),
             "FRACTAL_SCOUT_FINAL_NORM_KIND": args.final_norm_kind,
             "FRACTAL_SCOUT_LEARNING_RATE": str(args.learning_rate),
@@ -1904,8 +1960,14 @@ def _training_request(
                 "FRACTAL_SMOKE_PARCAE_BAND_PREPARE_BACKEND": args.parcae_band_prepare_backend,
                 "FRACTAL_SMOKE_PARCAE_OUTPUT_MIX_BACKEND": args.parcae_output_mix_backend,
                 "FRACTAL_SMOKE_PARCAE_FUSE_FIRST_STATE_MIX": "true" if args.parcae_fuse_first_state_mix else "false",
+                "FRACTAL_SMOKE_PARCAE_LOOP_POSITION_KIND": args.parcae_loop_position_kind,
+                "FRACTAL_SMOKE_PARCAE_LOOP_POSITION_SCALE_INIT": str(args.parcae_loop_position_scale_init),
+                "FRACTAL_SMOKE_PARCAE_STREAM_COUNT": str(args.parcae_stream_count),
+                "FRACTAL_SMOKE_PARCAE_STREAM_MERGE_MODE": args.parcae_stream_merge_mode,
                 "FRACTAL_SMOKE_POSITION_ENCODING_KIND": args.position_encoding_kind,
                 "FRACTAL_SMOKE_ATTENTION_POSITION_CONTRACT": args.attention_position_contract,
+                "FRACTAL_SMOKE_ATTENTION_POSITION_PROFILE": args.attention_position_profile,
+                "FRACTAL_SMOKE_TRANSFORMER_FFN_KIND": args.transformer_ffn_kind,
                 "FRACTAL_SMOKE_MAX_POSITION_EMBEDDINGS": str(args.max_position_embeddings),
                 "FRACTAL_SMOKE_FINAL_NORM_KIND": args.final_norm_kind,
                 "FRACTAL_SMOKE_LEARNING_RATE": str(args.learning_rate),
@@ -2171,8 +2233,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parcae-band-prepare-backend", choices=["standard", "compiled"], default="standard")
     parser.add_argument("--parcae-output-mix-backend", choices=["standard", "triton"], default="standard")
     parser.add_argument("--parcae-fuse-first-state-mix", action="store_true")
+    parser.add_argument("--parcae-loop-position-kind", choices=["none", "learned"], default="none")
+    parser.add_argument("--parcae-loop-position-scale-init", type=float, default=0.01)
+    parser.add_argument("--parcae-stream-count", type=int, default=1)
+    parser.add_argument(
+        "--parcae-stream-merge-mode",
+        choices=["none", "average", "static", "dynamic-diagonal"],
+        default="none",
+    )
     parser.add_argument("--position-encoding-kind", choices=["none", "learned"], default="none")
     parser.add_argument("--attention-position-contract", choices=["shared-input", "attention-only"], default="shared-input")
+    parser.add_argument("--attention-position-profile", choices=["additive", "rope"], default="additive")
+    parser.add_argument("--transformer-ffn-kind", choices=["gelu", "swiglu"], default="gelu")
     parser.add_argument("--max-position-embeddings", type=int, default=1024)
     parser.add_argument("--final-norm-kind", choices=["identity", "layernorm", "rmsnorm"], default="identity")
     parser.add_argument("--learning-rate", type=float, default=1.0e-3)

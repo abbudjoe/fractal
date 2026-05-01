@@ -51,6 +51,22 @@ class PositionWiseFeedForward(nn.Module):
         return self.fc2(F.gelu(self.fc1(hidden)))
 
 
+class SwiGLUFeedForward(nn.Module):
+    """Parameter-matched SwiGLU feed-forward block for attention-layer ablations."""
+
+    def __init__(self, d_model: int, d_ff: int) -> None:
+        super().__init__()
+        # SwiGLU uses two input projections, so use roughly 2/3 of the GELU
+        # hidden width to stay near the same parameter budget.
+        hidden_width = max(8, ((2 * d_ff // 3) // 8) * 8)
+        self.gate = nn.Linear(d_model, hidden_width)
+        self.value = nn.Linear(d_model, hidden_width)
+        self.output = nn.Linear(hidden_width, d_model)
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        return self.output(F.silu(self.gate(hidden)) * self.value(hidden))
+
+
 class ReluSquaredFeedForward(nn.Module):
     """PR5-style feed-forward block with a zero-start output projection."""
 

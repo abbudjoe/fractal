@@ -692,7 +692,9 @@ def test_promotion_runner_run_matrix_overrides_shape_and_aliases():
     module = _load_promotion_module()
     raw_matrix = (
         '[{"slug":"loop384","lanes":"parcae-hourglass-rgrp-control-looped-attention",'
-        '"d_model":1024,"head_count":16,"parcae_loop_d_model":384,"parcae_loop_head_count":6}]'
+        '"d_model":1024,"head_count":16,"parcae_loop_d_model":384,"parcae_loop_head_count":6,'
+        '"parcae_stream_count":2,"parcae_stream_merge_mode":"static",'
+        '"attention_position_profile":"rope","transformer_ffn_kind":"swiglu"}]'
     )
     args = module.build_parser().parse_args(
         [
@@ -719,6 +721,10 @@ def test_promotion_runner_run_matrix_overrides_shape_and_aliases():
     assert run_args.head_count == 16
     assert run_args.parcae_loop_d_model == 384
     assert run_args.parcae_loop_head_count == 6
+    assert run_args.parcae_stream_count == 2
+    assert run_args.parcae_stream_merge_mode == "static"
+    assert run_args.attention_position_profile == "rope"
+    assert run_args.transformer_ffn_kind == "swiglu"
 
 
 def test_stage_source_bundle_can_include_run_matrix_file(tmp_path):

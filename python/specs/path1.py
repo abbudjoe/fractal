@@ -36,6 +36,16 @@ class AttentionKernelProfile(StringEnum):
     FLASH_LOCAL = "flash-local"
 
 
+class AttentionPositionProfile(StringEnum):
+    ADDITIVE = "additive"
+    ROPE = "rope"
+
+
+class TransformerFeedForwardKind(StringEnum):
+    GELU = "gelu"
+    SWIGLU = "swiglu"
+
+
 def _is_power_of_two(value: int) -> bool:
     return value > 0 and (value & (value - 1)) == 0
 
@@ -378,8 +388,14 @@ class Path1VariantSpec:
     parcae_band_prepare_backend: str = "standard"
     parcae_output_mix_backend: str = "standard"
     parcae_fuse_first_state_mix: bool = False
+    parcae_loop_position_kind: str = "none"
+    parcae_loop_position_scale_init: float = 0.01
+    parcae_stream_count: int = 1
+    parcae_stream_merge_mode: str = "none"
     attention_position_contract: str = "shared-input"
     position_encoding_kind: str = "none"
+    attention_position_profile: AttentionPositionProfile = AttentionPositionProfile.ADDITIVE
+    transformer_ffn_kind: TransformerFeedForwardKind = TransformerFeedForwardKind.GELU
     max_position_embeddings: int = 1024
     final_norm_kind: str = "identity"
     scaffold_profile: Path1ScaffoldProfile = Path1ScaffoldProfile.STANDARD
@@ -421,6 +437,20 @@ class Path1VariantSpec:
                 "path1_variant.attention_position_contract must be shared-input|attention-only, "
                 f"got {self.attention_position_contract}"
             )
+        try:
+            AttentionPositionProfile(self.attention_position_profile)
+        except ValueError as exc:
+            raise ValidationError(
+                "path1_variant.attention_position_profile must be additive|rope, "
+                f"got {self.attention_position_profile}"
+            ) from exc
+        try:
+            TransformerFeedForwardKind(self.transformer_ffn_kind)
+        except ValueError as exc:
+            raise ValidationError(
+                "path1_variant.transformer_ffn_kind must be gelu|swiglu, "
+                f"got {self.transformer_ffn_kind}"
+            ) from exc
         if self.parcae_prelude_norm_kind not in {"layernorm", "rmsnorm"}:
             raise ValidationError(
                 "path1_variant.parcae_prelude_norm_kind must be layernorm|rmsnorm, "
@@ -491,6 +521,27 @@ class Path1VariantSpec:
                 "path1_variant.parcae_output_mix_backend must be standard|triton, "
                 f"got {self.parcae_output_mix_backend}"
             )
+        if self.parcae_loop_position_kind not in {"none", "learned"}:
+            raise ValidationError(
+                "path1_variant.parcae_loop_position_kind must be none|learned, "
+                f"got {self.parcae_loop_position_kind}"
+            )
+        if self.parcae_loop_position_scale_init < 0.0:
+            raise ValidationError(
+                "path1_variant.parcae_loop_position_scale_init must be non-negative, "
+                f"got {self.parcae_loop_position_scale_init}"
+            )
+        ensure_positive(self.parcae_stream_count, "path1_variant.parcae_stream_count")
+        if self.parcae_stream_merge_mode not in {"none", "average", "static", "dynamic-diagonal"}:
+            raise ValidationError(
+                "path1_variant.parcae_stream_merge_mode must be "
+                "none|average|static|dynamic-diagonal, "
+                f"got {self.parcae_stream_merge_mode}"
+            )
+        if self.parcae_stream_count == 1 and self.parcae_stream_merge_mode != "none":
+            raise ValidationError("parcae_stream_merge_mode requires parcae_stream_count > 1")
+        if self.parcae_stream_count > 1 and self.parcae_stream_merge_mode == "none":
+            raise ValidationError("parcae_stream_count > 1 requires an explicit stream merge mode")
         hourglass_scaffolds = {
             Path1ScaffoldProfile.PARCAE_HOURGLASS_LOOPED_ATTENTION,
             Path1ScaffoldProfile.PARCAE_HOURGLASS_BX_LOOPED_ATTENTION,
@@ -552,6 +603,14 @@ class Path1VariantSpec:
             )
         ):
             raise ValidationError("Parcae loop width overrides may only be used with hourglass scaffolds")
+        if (
+            self.parcae_loop_position_kind != "none"
+            or self.parcae_stream_count != 1
+            or self.parcae_stream_merge_mode != "none"
+        ) and self.scaffold_profile not in hourglass_scaffolds:
+            raise ValidationError("Hyperloop-style Parcae loop features require an hourglass scaffold")
+        if self.parcae_stream_count > 1 and self.parcae_hourglass_band_schedule is None:
+            raise ValidationError("Parcae residual streams currently require an explicit hourglass band schedule")
         if not 0.0 < self.eml_route_fraction <= 1.0:
             raise ValidationError(
                 "path1_variant.eml_route_fraction must be in (0, 1], "
@@ -875,11 +934,19 @@ def phase1_attention_only_variant(
     parcae_band_prepare_backend: str = "standard",
     parcae_output_mix_backend: str = "standard",
     parcae_fuse_first_state_mix: bool = False,
+    parcae_loop_position_kind: str = "none",
+    parcae_loop_position_scale_init: float = 0.01,
+    parcae_stream_count: int = 1,
+    parcae_stream_merge_mode: str = "none",
     attention_position_contract: str = "shared-input",
     position_encoding_kind: str = "none",
+    attention_position_profile: AttentionPositionProfile = AttentionPositionProfile.ADDITIVE,
+    transformer_ffn_kind: TransformerFeedForwardKind = TransformerFeedForwardKind.GELU,
     max_position_embeddings: int = 1024,
     final_norm_kind: str = "identity",
 ) -> Path1VariantSpec:
+    attention_position_profile = AttentionPositionProfile(attention_position_profile)
+    transformer_ffn_kind = TransformerFeedForwardKind(transformer_ffn_kind)
     parcae_scaffolds = {
         Path1ScaffoldProfile.PARCAE_LOOPED_ATTENTION,
         Path1ScaffoldProfile.PARCAE_BX_LOOPED_ATTENTION,
@@ -915,6 +982,10 @@ def phase1_attention_only_variant(
         parcae_band_prepare_backend = "standard"
         parcae_output_mix_backend = "standard"
         parcae_fuse_first_state_mix = False
+        parcae_loop_position_kind = "none"
+        parcae_loop_position_scale_init = 0.01
+        parcae_stream_count = 1
+        parcae_stream_merge_mode = "none"
     schedule = layer_schedule or _attention_schedule(shape.total_layers)
     default_schedule = _attention_schedule(shape.total_layers)
     schedule_suffix = (
@@ -986,6 +1057,14 @@ def phase1_attention_only_variant(
         scaffold_suffix = _variant_label(scaffold_suffix, f"outmix-{parcae_output_mix_backend}")
     if parcae_fuse_first_state_mix:
         scaffold_suffix = _variant_label(scaffold_suffix, "firstmix-fused")
+    if parcae_loop_position_kind != "none":
+        scaffold_suffix = _variant_label(scaffold_suffix, f"looppos-{parcae_loop_position_kind}")
+    if parcae_stream_count != 1:
+        scaffold_suffix = _variant_label(scaffold_suffix, f"streams{parcae_stream_count}-{parcae_stream_merge_mode}")
+    if attention_position_profile is not AttentionPositionProfile.ADDITIVE:
+        scaffold_suffix = _variant_label(scaffold_suffix, f"attnpos-{attention_position_profile.value}")
+    if transformer_ffn_kind is not TransformerFeedForwardKind.GELU:
+        scaffold_suffix = _variant_label(scaffold_suffix, f"ffn-{transformer_ffn_kind.value}")
     position_contract_suffix = (
         f"attnpos-{attention_position_contract}"
         if attention_position_contract != "shared-input"
@@ -1024,8 +1103,14 @@ def phase1_attention_only_variant(
         parcae_band_prepare_backend=parcae_band_prepare_backend,
         parcae_output_mix_backend=parcae_output_mix_backend,
         parcae_fuse_first_state_mix=parcae_fuse_first_state_mix,
+        parcae_loop_position_kind=parcae_loop_position_kind,
+        parcae_loop_position_scale_init=parcae_loop_position_scale_init,
+        parcae_stream_count=parcae_stream_count,
+        parcae_stream_merge_mode=parcae_stream_merge_mode,
         attention_position_contract=attention_position_contract,
         position_encoding_kind=position_encoding_kind,
+        attention_position_profile=attention_position_profile,
+        transformer_ffn_kind=transformer_ffn_kind,
         max_position_embeddings=max_position_embeddings,
         final_norm_kind=final_norm_kind,
     )

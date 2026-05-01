@@ -104,8 +104,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the first Parcae band state-mix op when the recurrent state is known-zero.",
     )
+    parser.add_argument("--parcae-loop-position-kind", choices=["none", "learned"], default="none")
+    parser.add_argument("--parcae-loop-position-scale-init", type=float, default=0.01)
+    parser.add_argument("--parcae-stream-count", type=int, default=1)
+    parser.add_argument(
+        "--parcae-stream-merge-mode",
+        choices=["none", "average", "static", "dynamic-diagonal"],
+        default="none",
+    )
     parser.add_argument("--position-encoding-kind", choices=["none", "learned"], default="none")
     parser.add_argument("--attention-position-contract", choices=["shared-input", "attention-only"], default="shared-input")
+    parser.add_argument("--attention-position-profile", choices=["additive", "rope"], default="additive")
+    parser.add_argument("--transformer-ffn-kind", choices=["gelu", "swiglu"], default="gelu")
     parser.add_argument("--max-position-embeddings", type=int, default=1024)
     parser.add_argument("--final-norm-kind", choices=["identity", "layernorm", "rmsnorm"], default="identity")
     parser.add_argument("--token-cache-repo-id", default="joebud/fractal-fineweb-openllama-tokens")
@@ -476,6 +486,10 @@ def run_lane(args: argparse.Namespace, *, lane: str, manifest_path: Path, output
         args.position_encoding_kind,
         "--attention-position-contract",
         args.attention_position_contract,
+        "--attention-position-profile",
+        args.attention_position_profile,
+        "--transformer-ffn-kind",
+        args.transformer_ffn_kind,
         "--max-position-embeddings",
         str(args.max_position_embeddings),
         "--final-norm-kind",
@@ -519,6 +533,18 @@ def run_lane(args: argparse.Namespace, *, lane: str, manifest_path: Path, output
         ):
             if value is not None:
                 command.extend([cli_name, str(value)])
+        command.extend(
+            [
+                "--parcae-loop-position-kind",
+                args.parcae_loop_position_kind,
+                "--parcae-loop-position-scale-init",
+                str(args.parcae_loop_position_scale_init),
+                "--parcae-stream-count",
+                str(args.parcae_stream_count),
+                "--parcae-stream-merge-mode",
+                args.parcae_stream_merge_mode,
+            ]
+        )
     elif any(
         value is not None
         for value in (
@@ -635,8 +661,14 @@ def write_summary(args: argparse.Namespace, *, output_dir: Path, manifest_path: 
         "parcae_band_prepare_backend": args.parcae_band_prepare_backend,
         "parcae_output_mix_backend": args.parcae_output_mix_backend,
         "parcae_fuse_first_state_mix": args.parcae_fuse_first_state_mix,
+        "parcae_loop_position_kind": args.parcae_loop_position_kind,
+        "parcae_loop_position_scale_init": args.parcae_loop_position_scale_init,
+        "parcae_stream_count": args.parcae_stream_count,
+        "parcae_stream_merge_mode": args.parcae_stream_merge_mode,
         "position_encoding_kind": args.position_encoding_kind,
         "attention_position_contract": args.attention_position_contract,
+        "attention_position_profile": args.attention_position_profile,
+        "transformer_ffn_kind": args.transformer_ffn_kind,
         "max_position_embeddings": args.max_position_embeddings,
         "final_norm_kind": args.final_norm_kind,
         "rows": rows,
@@ -687,8 +719,14 @@ def write_summary(args: argparse.Namespace, *, output_dir: Path, manifest_path: 
         f"- parcae_band_prepare_backend: `{args.parcae_band_prepare_backend}`",
         f"- parcae_output_mix_backend: `{args.parcae_output_mix_backend}`",
         f"- parcae_fuse_first_state_mix: `{args.parcae_fuse_first_state_mix}`",
+        f"- parcae_loop_position_kind: `{args.parcae_loop_position_kind}`",
+        f"- parcae_loop_position_scale_init: `{args.parcae_loop_position_scale_init}`",
+        f"- parcae_stream_count: `{args.parcae_stream_count}`",
+        f"- parcae_stream_merge_mode: `{args.parcae_stream_merge_mode}`",
         f"- position_encoding_kind: `{args.position_encoding_kind}`",
         f"- attention_position_contract: `{args.attention_position_contract}`",
+        f"- attention_position_profile: `{args.attention_position_profile}`",
+        f"- transformer_ffn_kind: `{args.transformer_ffn_kind}`",
         f"- max_position_embeddings: `{args.max_position_embeddings}`",
         f"- final_norm_kind: `{args.final_norm_kind}`",
         "",

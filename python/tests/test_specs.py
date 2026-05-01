@@ -323,6 +323,10 @@ class Path1SpecTests(unittest.TestCase):
             parcae_band_prepare_backend="compiled",
             parcae_output_mix_backend="triton",
             parcae_fuse_first_state_mix=True,
+            parcae_loop_position_kind="learned",
+            parcae_loop_position_scale_init=0.5,
+            parcae_stream_count=2,
+            parcae_stream_merge_mode="static",
             attention_position_contract="attention-only",
         )
 
@@ -334,6 +338,47 @@ class Path1SpecTests(unittest.TestCase):
         self.assertEqual(variant.parcae_band_prepare_backend, "standard")
         self.assertEqual(variant.parcae_loop_d_model, None)
         self.assertFalse(variant.parcae_fuse_first_state_mix)
+        self.assertEqual(variant.parcae_loop_position_kind, "none")
+        self.assertEqual(variant.parcae_stream_count, 1)
+        self.assertEqual(variant.parcae_stream_merge_mode, "none")
+
+    def test_hyperloop_style_parcae_knobs_validate_and_label(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=64, head_count=4, total_layers=5, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_hourglass_band_schedule=(1, 1, 1, 1, 1),
+            parcae_loop_d_model=32,
+            parcae_loop_head_count=4,
+            parcae_loop_ffn_multiplier=2,
+            parcae_loop_position_kind="learned",
+            parcae_stream_count=2,
+            parcae_stream_merge_mode="dynamic-diagonal",
+            attention_position_profile="rope",
+            transformer_ffn_kind="swiglu",
+        )
+
+        variant.validate()
+
+        self.assertIn("looppos-learned", variant.label)
+        self.assertIn("streams2-dynamic-diagonal", variant.label)
+        self.assertIn("attnpos-rope", variant.label)
+        self.assertIn("ffn-swiglu", variant.label)
+
+    def test_parcae_streams_require_band_schedule(self) -> None:
+        variant = phase1_attention_only_variant(
+            shape=Path1ModelShape(d_model=64, head_count=4, total_layers=5, ffn_multiplier=2),
+            scaffold_profile=Path1ScaffoldProfile.PARCAE_HOURGLASS_P20_CONTROL_LOOPED_ATTENTION,
+            parcae_loop_count=2,
+            parcae_loop_d_model=32,
+            parcae_loop_head_count=4,
+            parcae_loop_ffn_multiplier=2,
+            parcae_stream_count=2,
+            parcae_stream_merge_mode="average",
+        )
+
+        with self.assertRaisesRegex(ValidationError, "explicit hourglass band schedule"):
+            variant.validate()
 
     def test_attention_only_parcae_rejects_retired_tiny_native_backward_backends(self) -> None:
         for backend in (

@@ -18,6 +18,7 @@ from python.specs.common import (
 )
 from python.specs.path1 import (
     AttentionKernelProfile,
+    AttentionPositionProfile,
     DEFAULT_PATH1_MODEL_SHAPE,
     FeedForwardProfile,
     HybridAttentionLayerRole,
@@ -32,6 +33,7 @@ from python.specs.path1 import (
     PrimitiveStateTransformMode,
     PrimitiveWrapperMode,
     ReferenceSsmProfile,
+    TransformerFeedForwardKind,
     parse_int_tuple_spec,
     parse_layer_schedule_spec,
     parse_layer_index_spec,
@@ -175,10 +177,46 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--parcae-loop-position-kind",
+        choices=["none", "learned"],
+        default="none",
+        help="Optional learned position features added at the Parcae loop input seam.",
+    )
+    parser.add_argument(
+        "--parcae-loop-position-scale-init",
+        type=float,
+        default=0.01,
+        help="Initial scalar scale for Parcae loop-position features.",
+    )
+    parser.add_argument(
+        "--parcae-stream-count",
+        type=int,
+        default=1,
+        help="Number of Hyperloop-style residual streams to run through each Parcae loop band.",
+    )
+    parser.add_argument(
+        "--parcae-stream-merge-mode",
+        choices=["none", "average", "static", "dynamic-diagonal"],
+        default="none",
+        help="How multi-stream Parcae states are merged before the wide coda seam.",
+    )
+    parser.add_argument(
         "--position-encoding-kind",
         choices=["none", "learned"],
         default="none",
         help="Token position encoding added after the token embedding.",
+    )
+    parser.add_argument(
+        "--attention-position-profile",
+        choices=[profile.value for profile in AttentionPositionProfile],
+        default=AttentionPositionProfile.ADDITIVE.value,
+        help="Attention-local position mechanism: additive features or RoPE on q/k.",
+    )
+    parser.add_argument(
+        "--transformer-ffn-kind",
+        choices=[kind.value for kind in TransformerFeedForwardKind],
+        default=TransformerFeedForwardKind.GELU.value,
+        help="Transformer FFN family used by standard attention blocks.",
     )
     parser.add_argument(
         "--attention-position-contract",
@@ -625,8 +663,14 @@ def _build_variant(args: argparse.Namespace, *, parser: argparse.ArgumentParser)
             parcae_band_prepare_backend=args.parcae_band_prepare_backend,
             parcae_output_mix_backend=args.parcae_output_mix_backend,
             parcae_fuse_first_state_mix=args.parcae_fuse_first_state_mix,
+            parcae_loop_position_kind=args.parcae_loop_position_kind,
+            parcae_loop_position_scale_init=args.parcae_loop_position_scale_init,
+            parcae_stream_count=args.parcae_stream_count,
+            parcae_stream_merge_mode=args.parcae_stream_merge_mode,
             attention_position_contract=args.attention_position_contract,
             position_encoding_kind=args.position_encoding_kind,
+            attention_position_profile=AttentionPositionProfile(args.attention_position_profile),
+            transformer_ffn_kind=TransformerFeedForwardKind(args.transformer_ffn_kind),
             max_position_embeddings=args.max_position_embeddings,
             final_norm_kind=args.final_norm_kind,
         )

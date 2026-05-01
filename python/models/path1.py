@@ -42,11 +42,13 @@ from python.runtime.triton_primitives import (
 )
 from python.specs.common import FFN_BACKENDS, HEAD_LOSS_BACKENDS
 from python.specs.path1 import (
+    AttentionPositionProfile,
     FeedForwardProfile,
     HybridAttentionLayerRole,
     Path1ScaffoldProfile,
     Path1VariantSpec,
     PrimitiveProfile,
+    TransformerFeedForwardKind,
 )
 from python.specs.runtime import PrimitiveStateTransformMode
 
@@ -344,6 +346,7 @@ class Path1HybridLanguageModel(nn.Module):
                     layer_head_count,
                     local_window=variant.shape.local_window,
                     attention_kernel=variant.shape.attention_kernel,
+                    position_profile=AttentionPositionProfile(variant.attention_position_profile),
                 )
                 shared_attention_by_width.setdefault(layer_d_model, attention)
                 attention_block = (
@@ -359,6 +362,7 @@ class Path1HybridLanguageModel(nn.Module):
                         layer_head_count,
                         layer_d_ff,
                         attention_module=attention,
+                        ffn_kind=TransformerFeedForwardKind(variant.transformer_ffn_kind),
                         ffn_module=(
                             None
                             if layer_d_model != variant.shape.d_model
@@ -374,6 +378,7 @@ class Path1HybridLanguageModel(nn.Module):
                         layer_head_count,
                         local_window=variant.shape.local_window,
                         attention_kernel=variant.shape.attention_kernel,
+                        position_profile=AttentionPositionProfile(variant.attention_position_profile),
                     )
                 attention_block = (
                     Pr5LocalCausalTransformerBlock(
@@ -388,6 +393,7 @@ class Path1HybridLanguageModel(nn.Module):
                         layer_head_count,
                         layer_d_ff,
                         attention_module=shared_attention_by_width[layer_d_model],
+                        ffn_kind=TransformerFeedForwardKind(variant.transformer_ffn_kind),
                         ffn_module=(
                             None
                             if layer_d_model != variant.shape.d_model
@@ -456,6 +462,35 @@ class Path1HybridLanguageModel(nn.Module):
                 if self.uses_parcae_hourglass_scaffold
                 else None
             )
+            self.parcae_loop_position_embedding = (
+                nn.Embedding(variant.max_position_embeddings, loop_d_model)
+                if self.uses_parcae_hourglass_scaffold and variant.parcae_loop_position_kind == "learned"
+                else None
+            )
+            self.parcae_loop_position_scale = (
+                nn.Parameter(torch.tensor(variant.parcae_loop_position_scale_init, dtype=torch.float32))
+                if self.parcae_loop_position_embedding is not None
+                else None
+            )
+            self.parcae_stream_input_offsets = (
+                nn.Parameter(torch.zeros(variant.parcae_stream_count, loop_d_model, dtype=torch.float32))
+                if self.uses_parcae_hourglass_scaffold and variant.parcae_stream_count > 1
+                else None
+            )
+            self.parcae_stream_merge_logits = (
+                nn.Parameter(torch.zeros(variant.parcae_stream_count, dtype=torch.float32))
+                if self.uses_parcae_hourglass_scaffold
+                and variant.parcae_stream_count > 1
+                and variant.parcae_stream_merge_mode == "static"
+                else None
+            )
+            self.parcae_stream_dynamic_merge = (
+                nn.Linear(loop_d_model, variant.parcae_stream_count)
+                if self.uses_parcae_hourglass_scaffold
+                and variant.parcae_stream_count > 1
+                and variant.parcae_stream_merge_mode == "dynamic-diagonal"
+                else None
+            )
             self.parcae_decay_raw = nn.Parameter(torch.full((loop_d_model,), -2.0, dtype=torch.float32))
             self.parcae_dt_raw = (
                 nn.Parameter(torch.full((loop_d_model,), variant.parcae_dt_raw_init, dtype=torch.float32))
@@ -512,6 +547,14 @@ class Path1HybridLanguageModel(nn.Module):
                     self.parcae_p20_control_projection.bias[loop_d_model:].fill_(-2.1972246)
             if self.parcae_p20_position_embedding is not None:
                 nn.init.normal_(self.parcae_p20_position_embedding.weight, mean=0.0, std=0.02)
+            if self.parcae_loop_position_embedding is not None:
+                nn.init.normal_(self.parcae_loop_position_embedding.weight, mean=0.0, std=0.02)
+            if self.parcae_stream_input_offsets is not None:
+                with torch.no_grad():
+                    self.parcae_stream_input_offsets[1:].normal_(mean=0.0, std=1.0e-3)
+            if self.parcae_stream_dynamic_merge is not None:
+                nn.init.zeros_(self.parcae_stream_dynamic_merge.weight)
+                nn.init.zeros_(self.parcae_stream_dynamic_merge.bias)
             if self.parcae_p20_controller is not None:
                 _configure_p20_control_state_transform(
                     self.parcae_p20_controller,
@@ -532,6 +575,11 @@ class Path1HybridLanguageModel(nn.Module):
             self.parcae_hourglass_down_projection = None
             self.parcae_hourglass_up_projection = None
             self.parcae_hourglass_residual_logit = None
+            self.parcae_loop_position_embedding = None
+            self.parcae_loop_position_scale = None
+            self.parcae_stream_input_offsets = None
+            self.parcae_stream_merge_logits = None
+            self.parcae_stream_dynamic_merge = None
             self.parcae_decay_raw = None
             self.parcae_dt_raw = None
             self.parcae_injection_logit = None
@@ -1150,6 +1198,50 @@ class Path1HybridLanguageModel(nn.Module):
                     )
             return residual_mix_impl(mixed, block_out, loop_controls.nonlinear)
 
+        if self.variant.parcae_stream_count > 1:
+            if self.parcae_stream_input_offsets is None:
+                raise RuntimeError("Parcae stream offsets are not initialized")
+            stream_states: list[torch.Tensor] = []
+            stream_norms: list[torch.Tensor] = []
+            for stream_index in range(self.variant.parcae_stream_count):
+                stream_offset = self.parcae_stream_input_offsets[stream_index].to(
+                    device=injection.device,
+                    dtype=injection.dtype,
+                ).view(1, 1, -1)
+                stream_controls = ParcaeLoopRegionControls(
+                    decay=decay,
+                    injection=(injection + stream_offset).contiguous(),
+                    nonlinear=nonlinear,
+                )
+                stream_result = run_parcae_loop_region(
+                    initial_state=state,
+                    controls=stream_controls,
+                    config=ParcaeLoopRegionConfig(
+                        loop_count=self.variant.parcae_loop_count,
+                        gradient_start_step=gradient_start_step,
+                        recurrent_block_count=len(recurrent_blocks),
+                        timing_prefix=f"path1.parcae.band{band_index}.stream{stream_index}",
+                        fuse_first_state_mix=self.variant.parcae_fuse_first_state_mix,
+                        diagnostics_enabled=self.parcae_runtime_diagnostics,
+                    ),
+                    kernels=ParcaeLoopRegionKernels(
+                        state_mix=state_mix_impl,
+                        forward_recurrent_block=forward_recurrent_block,
+                        apply_recurrent_residual=apply_recurrent_residual,
+                    ),
+                )
+                stream_states.append(stream_result.final_state)
+                stream_norms.extend(stream_result.norm_history)
+            with timed_region(f"path1.parcae.band{band_index}.stream_merge"):
+                state = self._merge_parcae_stream_states(stream_states, loop_input)
+            loop_output_projection_impl = (
+                self._compiled_parcae_loop_output_projection_impl
+                or self._parcae_loop_output_projection_impl
+            )
+            with timed_region(f"path1.parcae.band{band_index}.loop_output_projection"):
+                hidden = loop_output_projection_impl(state, loop_anchor)
+            return hidden, stream_norms
+
         loop_result = run_parcae_loop_region(
             initial_state=state,
             controls=controls,
@@ -1177,6 +1269,32 @@ class Path1HybridLanguageModel(nn.Module):
         with timed_region(f"path1.parcae.band{band_index}.loop_output_projection"):
             hidden = loop_output_projection_impl(state, loop_anchor)
         return hidden, norm_history
+
+    def _merge_parcae_stream_states(
+        self,
+        stream_states: Sequence[torch.Tensor],
+        loop_input: torch.Tensor,
+    ) -> torch.Tensor:
+        if not stream_states:
+            raise ValueError("Parcae stream merge requires at least one stream")
+        stacked = torch.stack(tuple(stream_states), dim=0)
+        merge_mode = self.variant.parcae_stream_merge_mode
+        if merge_mode == "average":
+            return stacked.mean(dim=0)
+        if merge_mode == "static":
+            if self.parcae_stream_merge_logits is None:
+                raise RuntimeError("Parcae static stream merge logits are not initialized")
+            weights = torch.softmax(
+                self.parcae_stream_merge_logits.to(device=stacked.device, dtype=stacked.dtype),
+                dim=0,
+            ).view(-1, 1, 1, 1)
+            return (weights * stacked).sum(dim=0)
+        if merge_mode == "dynamic-diagonal":
+            if self.parcae_stream_dynamic_merge is None:
+                raise RuntimeError("Parcae dynamic stream merge projection is not initialized")
+            weights = torch.softmax(self.parcae_stream_dynamic_merge(loop_input), dim=-1)
+            return (stacked.permute(1, 2, 0, 3) * weights.unsqueeze(-1)).sum(dim=2)
+        raise RuntimeError(f"unsupported Parcae stream merge mode: {merge_mode}")
 
     def _parcae_band_prepare_impl(
         self,
@@ -1233,6 +1351,13 @@ class Path1HybridLanguageModel(nn.Module):
             if self.parcae_hourglass_down_projection is None:
                 raise RuntimeError("parcae hourglass scaffold is not initialized")
             loop_input = self.parcae_hourglass_down_projection(loop_input)
+            if self.parcae_loop_position_embedding is not None:
+                if self.parcae_loop_position_scale is None:
+                    raise RuntimeError("Parcae loop position scale is not initialized")
+                seq_len = loop_input.shape[1]
+                positions = self._position_indices(seq_len, loop_input.device)
+                position_features = self.parcae_loop_position_embedding(positions).view(1, seq_len, -1)
+                loop_input = loop_input + self.parcae_loop_position_scale.to(dtype=loop_input.dtype) * position_features
         return loop_input
 
     def _parcae_loop_output_projection_impl(
@@ -1420,6 +1545,10 @@ class Path1HybridLanguageModel(nn.Module):
         diagnostics["attention_kernel"] = self.variant.shape.attention_kernel.value
         diagnostics["position_encoding_kind"] = self.variant.position_encoding_kind
         diagnostics["attention_position_contract"] = self.variant.attention_position_contract
+        diagnostics["attention_position_profile"] = AttentionPositionProfile(
+            self.variant.attention_position_profile
+        ).value
+        diagnostics["transformer_ffn_kind"] = TransformerFeedForwardKind(self.variant.transformer_ffn_kind).value
         diagnostics["max_position_embeddings"] = self.variant.max_position_embeddings
         diagnostics["head_loss_backend"] = self._head_loss_backend
         diagnostics["ffn_backend"] = self.variant_runtime_ffn_backend
@@ -1428,6 +1557,10 @@ class Path1HybridLanguageModel(nn.Module):
         diagnostics["parcae_control_position_kind"] = self.variant.parcae_control_position_kind
         diagnostics["parcae_control_position_scale_init"] = self.variant.parcae_control_position_scale_init
         diagnostics["parcae_control_stride"] = self.variant.parcae_control_stride
+        diagnostics["parcae_loop_position_kind"] = self.variant.parcae_loop_position_kind
+        diagnostics["parcae_loop_position_scale_init"] = self.variant.parcae_loop_position_scale_init
+        diagnostics["parcae_stream_count"] = self.variant.parcae_stream_count
+        diagnostics["parcae_stream_merge_mode"] = self.variant.parcae_stream_merge_mode
         diagnostics["attention_position_embedding_widths"] = sorted(
             int(width_key) for width_key in self.attention_position_embeddings.keys()
         )
@@ -1532,6 +1665,14 @@ class Path1HybridLanguageModel(nn.Module):
                 "attention_position_contract": self.variant.attention_position_contract,
                 "control_position_kind": self.variant.parcae_control_position_kind,
                 "control_stride": self.variant.parcae_control_stride,
+                "loop_position_kind": self.variant.parcae_loop_position_kind,
+                "loop_position_scale": (
+                    float(self.parcae_loop_position_scale.detach().float().item())
+                    if self.parcae_loop_position_scale is not None
+                    else None
+                ),
+                "stream_count": self.variant.parcae_stream_count,
+                "stream_merge_mode": self.variant.parcae_stream_merge_mode,
                 "control_state_transform": self.variant.parcae_control_state_transform,
                 "recurrent_compile_mode": self.variant.parcae_recurrent_compile_mode,
                 "scaffold_backend": (

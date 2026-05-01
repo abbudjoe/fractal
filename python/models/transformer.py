@@ -4,7 +4,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from python.models.common import PositionWiseFeedForward, ReluSquaredFeedForward, SimpleRmsNorm, build_linear
+from python.models.common import (
+    PositionWiseFeedForward,
+    ReluSquaredFeedForward,
+    SimpleRmsNorm,
+    SwiGLUFeedForward,
+    build_linear,
+)
 from python.runtime.cuda_timing import timed_region
 from python.runtime.manual_autograd_ffn import (
     manual_autograd_layernorm_gelu_ffn_residual,
@@ -16,7 +22,7 @@ from python.runtime.triton_primitives import (
     ensure_triton_runtime_available,
 )
 from python.specs.common import FFN_BACKENDS
-from python.specs.path1 import AttentionKernelProfile
+from python.specs.path1 import AttentionKernelProfile, AttentionPositionProfile, TransformerFeedForwardKind
 
 try:  # pragma: no cover - availability depends on PyTorch version.
     from torch.nn.attention.flex_attention import create_block_mask, flex_attention
@@ -46,6 +52,34 @@ def _compiled_flex_attention():
     return _COMPILED_FLEX_ATTENTION
 
 
+def _apply_rope_to_heads(heads: torch.Tensor) -> torch.Tensor:
+    """Apply standard rotary position features to [batch, heads, seq, dim]."""
+
+    head_dim = heads.shape[-1]
+    rotary_dim = head_dim - (head_dim % 2)
+    if rotary_dim == 0:
+        return heads
+    seq_len = heads.shape[-2]
+    device = heads.device
+    dtype = heads.dtype
+    positions = torch.arange(seq_len, device=device, dtype=torch.float32)
+    frequencies = torch.arange(0, rotary_dim, 2, device=device, dtype=torch.float32)
+    inv_freq = torch.pow(10000.0, -frequencies / float(rotary_dim))
+    angles = positions[:, None] * inv_freq[None, :]
+    cos = torch.cos(angles).to(dtype=dtype).view(1, 1, seq_len, rotary_dim // 2)
+    sin = torch.sin(angles).to(dtype=dtype).view(1, 1, seq_len, rotary_dim // 2)
+    rotary = heads[..., :rotary_dim].reshape(*heads.shape[:-1], rotary_dim // 2, 2)
+    first = rotary[..., 0]
+    second = rotary[..., 1]
+    rotated = torch.stack(
+        (first * cos - second * sin, first * sin + second * cos),
+        dim=-1,
+    ).reshape(*heads.shape[:-1], rotary_dim)
+    if rotary_dim == head_dim:
+        return rotated
+    return torch.cat((rotated, heads[..., rotary_dim:]), dim=-1)
+
+
 def local_causal_attention_bias(
     seq_len: int,
     local_window: int,
@@ -73,6 +107,7 @@ class LocalCausalSelfAttention(nn.Module):
         *,
         local_window: int | None = None,
         attention_kernel: AttentionKernelProfile = AttentionKernelProfile.SDPA,
+        position_profile: AttentionPositionProfile = AttentionPositionProfile.ADDITIVE,
     ) -> None:
         super().__init__()
         if d_model % head_count != 0:
@@ -88,6 +123,7 @@ class LocalCausalSelfAttention(nn.Module):
             )
         self.local_window = local_window
         self.attention_kernel = attention_kernel
+        self.position_profile = AttentionPositionProfile(position_profile)
         self._flex_block_masks: dict[tuple[str, int, int, int], object] = {}
         self.qkv_projection = build_linear(d_model, d_model * 3)
         self.output_projection = build_linear(d_model, d_model)
@@ -267,6 +303,9 @@ class LocalCausalSelfAttention(nn.Module):
         q_heads = self._reshape_heads(q)
         k_heads = self._reshape_heads(k)
         v_heads = self._reshape_heads(v)
+        if self.position_profile is AttentionPositionProfile.ROPE:
+            q_heads = _apply_rope_to_heads(q_heads)
+            k_heads = _apply_rope_to_heads(k_heads)
 
         is_causal = attn_mask is None
         if attn_mask is None:
@@ -312,6 +351,9 @@ class LocalCausalSelfAttention(nn.Module):
         q_heads = self._reshape_heads(q)
         k_heads = self._reshape_heads(k)
         v_heads = self._reshape_heads(v)
+        if self.position_profile is AttentionPositionProfile.ROPE:
+            q_heads = _apply_rope_to_heads(q_heads)
+            k_heads = _apply_rope_to_heads(k_heads)
 
         is_causal = attn_mask is None
         if attn_mask is None:
@@ -336,12 +378,18 @@ class LocalCausalTransformerBlock(nn.Module):
         *,
         attention_module: LocalCausalSelfAttention | None = None,
         ffn_module: nn.Module | None = None,
+        ffn_kind: TransformerFeedForwardKind = TransformerFeedForwardKind.GELU,
     ) -> None:
         super().__init__()
         self.input_norm = nn.LayerNorm(d_model)
         self.attention = attention_module if attention_module is not None else LocalCausalSelfAttention(d_model, head_count)
         self.output_norm = nn.LayerNorm(d_model)
-        self.ffn = ffn_module if ffn_module is not None else PositionWiseFeedForward(d_model, d_ff)
+        resolved_ffn_kind = TransformerFeedForwardKind(ffn_kind)
+        self.ffn = ffn_module if ffn_module is not None else (
+            SwiGLUFeedForward(d_model, d_ff)
+            if resolved_ffn_kind is TransformerFeedForwardKind.SWIGLU
+            else PositionWiseFeedForward(d_model, d_ff)
+        )
         self._ffn_backend = "dense"
         self._compiled_ffn_residual_impl = None
         self._compiled_full_block_impl = None
